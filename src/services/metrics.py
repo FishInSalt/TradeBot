@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 from src.storage.models import TradeRecord
 
 
@@ -21,31 +23,38 @@ class MetricsService:
         self._initial_balance = initial_balance
 
     def compute_from_trades(self, trades: list[TradeRecord]) -> PerformanceMetrics:
-        closed = [t for t in trades if t.status == "closed" and t.pnl is not None]
-        if not closed:
+        # Extract closed trades with known PnL as float list
+        pnls: list[float] = [
+            t.pnl for t in trades if t.status == "closed" and t.pnl is not None
+        ]
+        if not pnls:
             return PerformanceMetrics()
-        total_pnl = sum(t.pnl for t in closed)
-        winners = [t for t in closed if t.pnl > 0]
-        losers = [t for t in closed if t.pnl <= 0]
-        gross_profit = sum(t.pnl for t in winners) if winners else 0.0
-        gross_loss = abs(sum(t.pnl for t in losers)) if losers else 0.0
+
+        total_pnl = sum(pnls)
+        winning_pnls = [p for p in pnls if p > 0]
+        losing_pnls = [p for p in pnls if p <= 0]
+        gross_profit = sum(winning_pnls) if winning_pnls else 0.0
+        gross_loss = abs(sum(losing_pnls)) if losing_pnls else 0.0
+
+        # Max drawdown
         cumulative = 0.0
         peak = 0.0
         max_dd = 0.0
-        for t in closed:
-            cumulative += t.pnl
+        for p in pnls:
+            cumulative += p
             if cumulative > peak:
                 peak = cumulative
             dd = peak - cumulative
             if dd > max_dd:
                 max_dd = dd
+
         return PerformanceMetrics(
             total_return_pct=(total_pnl / self._initial_balance) * 100,
             total_pnl=total_pnl,
-            win_rate=len(winners) / len(closed),
+            win_rate=len(winning_pnls) / len(pnls),
             max_drawdown_pct=(max_dd / self._initial_balance) * 100,
             profit_factor=gross_profit / gross_loss if gross_loss > 0 else float("inf"),
-            total_trades=len(closed),
-            winning_trades=len(winners),
-            losing_trades=len(losers),
+            total_trades=len(pnls),
+            winning_trades=len(winning_pnls),
+            losing_trades=len(losing_pnls),
         )

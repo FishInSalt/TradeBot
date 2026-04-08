@@ -1,16 +1,16 @@
 from __future__ import annotations
 import pandas as pd
-import pandas_ta as ta
+import pandas_ta as ta  # type: ignore[import-untyped]
 
 
 class TechnicalAnalysisService:
     def compute_indicators(self, df: pd.DataFrame) -> dict[str, float | None]:
         close = df["close"]
-        rsi = ta.rsi(close, length=14)
-        ma_20 = ta.sma(close, length=20)
-        ma_50 = ta.sma(close, length=50)
-        macd_df = ta.macd(close)
-        bb_df = ta.bbands(close, length=20)
+        rsi = ta.rsi(close, length=14)  # type: ignore[attr-defined]
+        ma_20 = ta.sma(close, length=20)  # type: ignore[attr-defined]
+        ma_50 = ta.sma(close, length=50)  # type: ignore[attr-defined]
+        macd_df = ta.macd(close)  # type: ignore[attr-defined]
+        bb_df = ta.bbands(close, length=20)  # type: ignore[attr-defined]
 
         def _last(series: pd.Series | None) -> float | None:
             if series is None or series.empty or pd.isna(series.iloc[-1]):
