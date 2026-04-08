@@ -29,7 +29,9 @@ async def _record_trade_open(deps: TradingDeps, **kwargs) -> int | None:
         return None
 
 
-async def _update_trade_closed(deps: TradingDeps, symbol: str, side: str, pnl: float) -> None:
+async def _update_trade_closed(
+    deps: TradingDeps, symbol: str, side: str, pnl: float, exit_price: float | None = None
+) -> None:
     """Find the matching open TradeRecord and update it to closed."""
     if deps.db_engine is None:
         return
@@ -53,6 +55,7 @@ async def _update_trade_closed(deps: TradingDeps, symbol: str, side: str, pnl: f
             if record:
                 record.status = "closed"
                 record.pnl = pnl
+                record.exit_price = exit_price
                 record.closed_at = datetime.now(timezone.utc)
                 await session.commit()
             else:
@@ -86,7 +89,10 @@ async def open_position(
     balance = await deps.exchange.fetch_balance()
     ticker = await deps.market_data.get_ticker(deps.symbol)
     usdt_amount = balance.free_usdt * (position_pct / 100.0)
-    quantity = (usdt_amount * leverage) / ticker.last
+    raw_quantity = (usdt_amount * leverage) / ticker.last
+    quantity = deps.exchange.amount_to_precision(deps.symbol, raw_quantity)
+    if quantity <= 0:
+        return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
 
     # Human approval gate
     reasoning = f"Open {side} {position_pct}% at ~{ticker.last:.2f}, {leverage}x leverage"
@@ -160,6 +166,9 @@ async def close_position(deps: TradingDeps) -> str:
     if not approved:
         return "Close rejected by human approval."
 
+    # Get current price for exit_price recording
+    ticker = await deps.market_data.get_ticker(deps.symbol)
+
     results = []
     for p in positions:
         order_side = "sell" if p.side == "long" else "buy"
@@ -168,7 +177,9 @@ async def close_position(deps: TradingDeps) -> str:
         )
 
         # Update the matching open record to closed
-        await _update_trade_closed(deps, deps.symbol, p.side, p.unrealized_pnl)
+        await _update_trade_closed(
+            deps, deps.symbol, p.side, p.unrealized_pnl, exit_price=ticker.last
+        )
 
         results.append(
             f"Closed {p.side} {p.contracts} @ PnL: {p.unrealized_pnl:.2f} | Order: {order.id}"

@@ -22,13 +22,15 @@ class MetricsService:
     def __init__(self, initial_balance: float = 10000.0):
         self._initial_balance = initial_balance
 
-    def compute_from_trades(self, trades: list[TradeRecord]) -> PerformanceMetrics:
+    def compute_from_trades(
+        self, trades: list[TradeRecord], current_position: str = "none"
+    ) -> PerformanceMetrics:
         # Extract closed trades with known PnL as float list
         pnls: list[float] = [
             t.pnl for t in trades if t.status == "closed" and t.pnl is not None
         ]
         if not pnls:
-            return PerformanceMetrics()
+            return PerformanceMetrics(current_position=current_position)
 
         total_pnl = sum(pnls)
         winning_pnls = [p for p in pnls if p > 0]
@@ -57,4 +59,5 @@ class MetricsService:
             total_trades=len(pnls),
             winning_trades=len(winning_pnls),
             losing_trades=len(losing_pnls),
+            current_position=current_position,
         )

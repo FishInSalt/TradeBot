@@ -5,7 +5,8 @@ from src.storage.models import TradeRecord
 
 def _trade(pnl: float) -> TradeRecord:
     return TradeRecord(
-        id=0, symbol="BTC/USDT:USDT", side="long", entry_price=65000.0,
+        id=0, session_id="test-session",
+        symbol="BTC/USDT:USDT", side="long", entry_price=65000.0,
         exit_price=65000.0 + pnl * 100, quantity=0.01, leverage=3,
         status="closed", pnl=pnl,
         created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),

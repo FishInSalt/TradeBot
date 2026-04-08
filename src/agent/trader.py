@@ -110,4 +110,15 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, leverage)
 
+    # === Memory Tools ===
+
+    @agent.tool
+    async def save_memory(
+        ctx: RunContext[TradingDeps], category: str, content: str, importance: float = 0.5
+    ) -> str:
+        """Save a learning or observation to long-term memory. category: trade_review/market_pattern/lesson. importance: 0-1."""
+        from src.agent.tools_memory import save_memory as _impl
+
+        return await _impl(ctx.deps, category, content, importance)
+
     return agent

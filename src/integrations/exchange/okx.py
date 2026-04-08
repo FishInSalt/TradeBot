@@ -152,5 +152,8 @@ class OKXExchange(BaseExchange):
     async def set_leverage(self, symbol: str, leverage: int) -> None:  # type: ignore[override]
         await self._client.set_leverage(leverage, symbol)
 
+    def amount_to_precision(self, symbol: str, amount: float) -> float:
+        return float(self._client.amount_to_precision(symbol, amount))  # type: ignore[arg-type]
+
     async def close(self) -> None:
         await self._client.close()

@@ -53,6 +53,13 @@ For each trading decision, provide:
 5. **Stop Loss**: Stop loss level or percentage (if applicable)
 6. **Take Profit**: Take profit level or percentage (if applicable)
 
-Always prioritize capital preservation over aggressive profits. Make decisions based on technical analysis, market structure, and risk/reward ratios."""
+Always prioritize capital preservation over aggressive profits. Make decisions based on technical analysis, market structure, and risk/reward ratios.
+
+## Memory
+After each analysis, use the save_memory tool to record important observations:
+- **trade_review**: lessons from completed trades (what worked, what didn't)
+- **market_pattern**: recurring patterns you notice (e.g. "BTC tends to dump on weekends")
+- **lesson**: general trading insights worth remembering
+Set importance 0.7-1.0 for critical lessons, 0.3-0.6 for general observations."""
 
     return prompt

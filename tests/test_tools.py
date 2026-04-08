@@ -53,6 +53,7 @@ def deps():
         "o1", "BTC/USDT:USDT", "buy", "market", 0.01, 65000.0, "closed"
     )
     d.exchange.set_leverage = AsyncMock()
+    d.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, amt: round(amt, 3))
     d.memory.format_for_prompt.return_value = "No memories."
     return d
 

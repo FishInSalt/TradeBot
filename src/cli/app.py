@@ -144,8 +144,17 @@ async def run(
         f"Persona: {trader_config.persona.risk_tolerance} / {trader_config.persona.trading_style}\n"
     )
 
-    Path("data").mkdir(exist_ok=True)
-    engine = await init_db(settings.database.url)
+    # Resolve database path relative to project root (where config lives)
+    project_root = settings_path.resolve().parent.parent
+    data_dir = project_root / "data"
+    data_dir.mkdir(exist_ok=True)
+    db_url = settings.database.url
+    if db_url.startswith("sqlite") and ":///" in db_url and not db_url.startswith("sqlite+aiosqlite:////"):
+        # Convert relative sqlite path to absolute based on project root
+        relative_path = db_url.split(":///", 1)[1]
+        absolute_path = project_root / relative_path
+        db_url = f"sqlite+aiosqlite:///{absolute_path}"
+    engine = await init_db(db_url)
 
     # Get or create default session
     async with get_session(engine) as db_sess:
@@ -201,7 +210,7 @@ async def run(
         approval_enabled=settings.approval.enabled,
     )
 
-    # Show initial metrics
+    # Show initial metrics with current position
     async with get_session(engine) as session:
         result = await session.execute(
             select(TradeRecord)
@@ -209,7 +218,12 @@ async def run(
             .where(TradeRecord.status == "closed")
         )
         trades = list(result.scalars().all())
-    display_metrics(metrics_service.compute_from_trades(trades))
+    positions = await exchange.fetch_positions(settings.trading.symbol)
+    if positions:
+        pos_str = f"{positions[0].side} {positions[0].contracts}"
+    else:
+        pos_str = "none"
+    display_metrics(metrics_service.compute_from_trades(trades, current_position=pos_str))
 
     # Graceful shutdown
     shutdown_event = asyncio.Event()

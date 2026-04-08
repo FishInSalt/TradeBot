@@ -27,6 +27,7 @@ def test_trader_agent_has_all_tools():
     assert "set_stop_loss" in tool_names
     assert "set_take_profit" in tool_names
     assert "adjust_leverage" in tool_names
+    assert "save_memory" in tool_names
 
 
 def test_trading_deps_creation():
