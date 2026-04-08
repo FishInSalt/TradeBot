@@ -1,0 +1,79 @@
+import pytest
+from unittest.mock import AsyncMock
+
+
+def test_base_exchange_is_abstract():
+    from src.integrations.exchange.base import BaseExchange
+    with pytest.raises(TypeError):
+        BaseExchange()
+
+
+async def test_okx_fetch_ticker():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.fetch_ticker.return_value = {
+        "symbol": "BTC/USDT:USDT", "last": 65000.0, "bid": 64999.0, "ask": 65001.0,
+        "high": 66000.0, "low": 64000.0, "baseVolume": 12345.6, "timestamp": 1712534400000,
+    }
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    ticker = await exchange.fetch_ticker("BTC/USDT:USDT")
+    assert ticker.last == 65000.0
+    assert ticker.bid == 64999.0
+
+
+async def test_okx_fetch_ohlcv():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.fetch_ohlcv.return_value = [
+        [1712534400000, 64000.0, 65500.0, 63800.0, 65000.0, 1000.0],
+        [1712535300000, 65000.0, 65800.0, 64900.0, 65500.0, 800.0],
+    ]
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    candles = await exchange.fetch_ohlcv("BTC/USDT:USDT", "15m", limit=2)
+    assert len(candles) == 2
+    assert candles[0].close == 65000.0
+
+
+async def test_okx_create_order():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.create_order.return_value = {
+        "id": "order_123", "symbol": "BTC/USDT:USDT",
+        "side": "buy", "type": "market", "amount": 0.01,
+        "price": 65000.0, "status": "closed",
+    }
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    order = await exchange.create_order(symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01)
+    assert order.id == "order_123"
+    assert order.status == "closed"
+
+
+async def test_okx_fetch_balance():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.fetch_balance.return_value = {
+        "total": {"USDT": 10000.0}, "free": {"USDT": 8000.0}, "used": {"USDT": 2000.0},
+    }
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    balance = await exchange.fetch_balance()
+    assert balance.total_usdt == 10000.0
+    assert balance.free_usdt == 8000.0
+
+
+async def test_okx_fetch_positions():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.fetch_positions.return_value = [
+        {"symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.01,
+         "entryPrice": 65000.0, "unrealizedPnl": 50.0, "leverage": 3, "liquidationPrice": 55000.0}
+    ]
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    positions = await exchange.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    assert positions[0].side == "long"
+    assert positions[0].entry_price == 65000.0
