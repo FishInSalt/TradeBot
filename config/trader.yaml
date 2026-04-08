@@ -1,0 +1,8 @@
+persona:
+  risk_tolerance: moderate
+  trading_style: trend_following
+  position_sizing: percentage
+  max_position_pct: 30
+  preferred_leverage: 3
+  stop_loss_pct: 3.0
+  take_profit_pct: 6.0

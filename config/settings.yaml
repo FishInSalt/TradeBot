@@ -1,0 +1,31 @@
+exchange:
+  name: okx
+
+trading:
+  symbol: BTC/USDT:USDT
+  timeframe: 15m
+  initial_balance_usdt: 100.0
+
+models:
+  default: anthropic:claude-sonnet-4-20250514
+  strong: anthropic:claude-opus-4-6
+  weak: anthropic:claude-haiku-4-5-20251001
+  routing:
+    market_analysis: strong
+    trade_decision: strong
+    news_summary: weak
+    review: weak
+
+scheduler:
+  interval_minutes: 15
+  cooldown_seconds: 60
+
+llm_budget:
+  daily_max_tokens: 500000
+
+database:
+  url: "sqlite+aiosqlite:///data/tradebot.db"
+
+approval:
+  enabled: true
+  timeout_seconds: 300
