@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+import uuid
+from pathlib import Path
+
+from rich.console import Console
+from rich.logging import RichHandler
+from sqlalchemy import select
+
+from src.agent.memory import MemoryService
+from src.agent.trader import TradingDeps, create_trader_agent
+from src.cli.display import display_metrics
+from src.config import load_settings, load_trader_config
+from src.integrations.exchange.okx import OKXExchange
+from src.integrations.market_data import MarketDataService
+from src.scheduler.scheduler import Scheduler
+from src.services.llm_router import LLMRouter
+from src.services.metrics import MetricsService
+from src.services.technical import TechnicalAnalysisService
+from src.storage.database import get_session, init_db
+from src.storage.models import DecisionLog, TradeRecord
+
+console = Console()
+logger = logging.getLogger(__name__)
+
+
+class TokenBudget:
+    def __init__(self, daily_max: int):
+        self._daily_max = daily_max
+        self._used = 0
+
+    def record(self, tokens: int) -> None:
+        self._used += tokens
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self._daily_max - self._used)
+
+    @property
+    def exhausted(self) -> bool:
+        return self._used >= self._daily_max
+
+
+async def run_agent_cycle(
+    agent,
+    deps: TradingDeps,
+    trigger_type: str,
+    budget: TokenBudget,
+    engine,
+):
+    if budget.exhausted:
+        logger.warning("Daily LLM token budget exhausted, skipping cycle")
+        return None
+
+    cycle_id = str(uuid.uuid4())[:8]
+    prompt = (
+        f"You have been woken up by a {trigger_type} trigger.\n"
+        f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"
+        "Analyze the current market, check your positions, and decide what to do.\n"
+        "Use your tools to gather data before making a decision."
+    )
+
+    memory_context = await deps.memory.format_for_prompt()
+    if memory_context != "No relevant memories.":
+        prompt += f"\n\nYour memories:\n{memory_context}"
+
+    result = await agent.run(prompt, deps=deps)
+
+    tokens = result.usage().total_tokens if result.usage() else 0
+    budget.record(tokens)
+
+    async with get_session(engine) as session:
+        session.add(
+            DecisionLog(
+                cycle_id=cycle_id,
+                trigger_type=trigger_type,
+                decision="completed",
+                reasoning=result.output[:500],
+                model_used=str(agent.model),
+                tokens_used=tokens,
+            )
+        )
+        await session.commit()
+
+    logger.info(f"Cycle {cycle_id}: {tokens} tokens ({budget.remaining} remaining)")
+    console.print(f"\n[bold cyan]Agent:[/]\n{result.output}\n")
+    return result
+
+
+async def run(
+    settings_path: Path = Path("config/settings.yaml"),
+    trader_path: Path = Path("config/trader.yaml"),
+):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[RichHandler(console=console, rich_tracebacks=True)],
+    )
+
+    console.print("[bold green]TradeBot Phase 1a — Starting...[/]\n")
+
+    settings = load_settings(settings_path)
+    trader_config = load_trader_config(trader_path)
+
+    console.print(f"Exchange: {settings.exchange.name} (REAL account)")
+    console.print(f"Symbol: {settings.trading.symbol} | Timeframe: {settings.trading.timeframe}")
+    console.print(f"Approval: {'ON' if settings.approval.enabled else 'OFF'}")
+    console.print(
+        f"Persona: {trader_config.persona.risk_tolerance} / {trader_config.persona.trading_style}\n"
+    )
+
+    Path("data").mkdir(exist_ok=True)
+    engine = await init_db(settings.database.url)
+
+    exchange = OKXExchange(
+        api_key=settings.exchange.api_key,
+        secret=settings.exchange.secret,
+        password=settings.exchange.password,
+    )
+    market_data = MarketDataService(exchange)
+    technical = TechnicalAnalysisService()
+    llm_router = LLMRouter(settings.models)
+    memory = MemoryService(engine)
+    metrics_service = MetricsService(initial_balance=settings.trading.initial_balance_usdt)
+    budget = TokenBudget(daily_max=settings.llm_budget.daily_max_tokens)
+
+    model = llm_router.resolve("trade_decision")
+    agent = create_trader_agent(model=model, persona_config=trader_config.persona)
+
+    deps = TradingDeps(
+        symbol=settings.trading.symbol,
+        timeframe=settings.trading.timeframe,
+        market_data=market_data,
+        exchange=exchange,
+        technical=technical,
+        memory=memory,
+        approval_enabled=settings.approval.enabled,
+    )
+
+    # Show initial metrics
+    async with get_session(engine) as session:
+        result = await session.execute(
+            select(TradeRecord).where(TradeRecord.status == "closed")
+        )
+        trades = list(result.scalars().all())
+    display_metrics(metrics_service.compute_from_trades(trades))
+
+    # Graceful shutdown
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler():
+        console.print("\n[yellow]Shutting down gracefully...[/]")
+        shutdown_event.set()
+
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _signal_handler)
+
+    async def on_tick():
+        if shutdown_event.is_set():
+            return
+        try:
+            await run_agent_cycle(agent, deps, "scheduled", budget, engine)
+        except Exception:
+            logger.exception("Agent cycle failed")
+
+    interval = settings.scheduler.interval_minutes * 60
+    scheduler = Scheduler(
+        interval_seconds=interval,
+        cooldown_seconds=settings.scheduler.cooldown_seconds,
+        callback=on_tick,
+    )
+
+    console.print(
+        f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min "
+        f"(cooldown {settings.scheduler.cooldown_seconds}s)[/]"
+    )
+    console.print(f"[bold]LLM Budget: {settings.llm_budget.daily_max_tokens:,} tokens/day[/]")
+    console.print("[dim]Press Ctrl+C to stop[/]\n")
+
+    scheduler_task = asyncio.create_task(scheduler.start())
+    await shutdown_event.wait()
+
+    scheduler.stop()
+    await scheduler_task
+    await exchange.close()
+    console.print("[green]TradeBot stopped.[/]")
