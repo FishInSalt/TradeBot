@@ -1,4 +1,6 @@
 .superpowers/
+.claude/
+.vscode/
 .env
 data/
 __pycache__/
