@@ -22,7 +22,7 @@ from src.services.llm_router import LLMRouter
 from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
-from src.storage.models import DecisionLog, TradeRecord
+from src.storage.models import DecisionLog, Session, TradeRecord
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -105,6 +105,7 @@ async def run_agent_cycle(
     async with get_session(engine) as session:
         session.add(
             DecisionLog(
+                session_id=deps.session_id,
                 cycle_id=cycle_id,
                 trigger_type=trigger_type,
                 decision="completed",
@@ -145,6 +146,28 @@ async def run(
     Path("data").mkdir(exist_ok=True)
     engine = await init_db(settings.database.url)
 
+    # Get or create default session
+    import json
+    async with get_session(engine) as session:
+        stmt = select(Session).where(Session.name == "default").limit(1)
+        result = await session.execute(stmt)
+        trading_session = result.scalar_one_or_none()
+        if trading_session is None:
+            trading_session = Session(
+                name="default",
+                symbol=settings.trading.symbol,
+                persona_config=json.dumps(trader_config.persona.model_dump()),
+                initial_balance=settings.trading.initial_balance_usdt,
+                status="active",
+            )
+            session.add(trading_session)
+            await session.commit()
+            await session.refresh(trading_session)
+            logger.info(f"Created session: {trading_session.id}")
+        else:
+            logger.info(f"Resumed session: {trading_session.id}")
+    session_id = trading_session.id
+
     exchange = OKXExchange(
         api_key=settings.exchange.api_key,
         secret=settings.exchange.secret,
@@ -153,7 +176,7 @@ async def run(
     market_data = MarketDataService(exchange)
     technical = TechnicalAnalysisService()
     llm_router = LLMRouter(settings.models)
-    memory = MemoryService(engine)
+    memory = MemoryService(engine, session_id=session_id)
     metrics_service = MetricsService(initial_balance=settings.trading.initial_balance_usdt)
     budget = TokenBudget(daily_max=settings.llm_budget.daily_max_tokens)
     approval_gate = ApprovalGate(
@@ -171,6 +194,7 @@ async def run(
         exchange=exchange,
         technical=technical,
         memory=memory,
+        session_id=session_id,
         db_engine=engine,
         approval_gate=approval_gate,
         approval_enabled=settings.approval.enabled,
@@ -179,7 +203,9 @@ async def run(
     # Show initial metrics
     async with get_session(engine) as session:
         result = await session.execute(
-            select(TradeRecord).where(TradeRecord.status == "closed")
+            select(TradeRecord)
+            .where(TradeRecord.session_id == session_id)
+            .where(TradeRecord.status == "closed")
         )
         trades = list(result.scalars().all())
     display_metrics(metrics_service.compute_from_trades(trades))

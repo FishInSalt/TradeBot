@@ -8,14 +8,16 @@ from src.storage.models import MemoryEntry
 
 
 class MemoryService:
-    def __init__(self, engine: AsyncEngine):
+    def __init__(self, engine: AsyncEngine, session_id: str = "default"):
         self.engine = engine
+        self.session_id = session_id
 
     async def save_long_term(
         self, category: str, content: str, relevance_score: float = 0.5
     ) -> None:
         """Save a long-term memory entry."""
         memory_entry = MemoryEntry(
+            session_id=self.session_id,
             memory_type="long_term",
             category=category,
             content=content,
@@ -28,6 +30,7 @@ class MemoryService:
     async def save_short_term(self, content: str) -> None:
         """Save a short-term memory entry."""
         memory_entry = MemoryEntry(
+            session_id=self.session_id,
             memory_type="short_term",
             category="context",
             content=content,
@@ -43,7 +46,8 @@ class MemoryService:
         """Get long-term memories ordered by relevance score, optionally filtered by category."""
         async with get_session(self.engine) as session:
             query = select(MemoryEntry).where(
-                MemoryEntry.memory_type == "long_term"
+                MemoryEntry.session_id == self.session_id,
+                MemoryEntry.memory_type == "long_term",
             )
             if category is not None:
                 query = query.where(MemoryEntry.category == category)
@@ -56,6 +60,7 @@ class MemoryService:
         async with get_session(self.engine) as session:
             query = (
                 select(MemoryEntry)
+                .where(MemoryEntry.session_id == self.session_id)
                 .where(MemoryEntry.memory_type == "short_term")
                 .order_by(desc(MemoryEntry.created_at))
             )
@@ -65,7 +70,10 @@ class MemoryService:
     async def clear_short_term(self) -> None:
         """Delete all short-term memory entries."""
         async with get_session(self.engine) as session:
-            query = delete(MemoryEntry).where(MemoryEntry.memory_type == "short_term")
+            query = delete(MemoryEntry).where(
+                MemoryEntry.session_id == self.session_id,
+                MemoryEntry.memory_type == "short_term",
+            )
             await session.execute(query)
             await session.commit()
 

@@ -14,6 +14,7 @@ class MockDeps:
     exchange: AsyncMock
     technical: MagicMock
     memory: AsyncMock
+    session_id: str = "test-session"
     db_engine: object = None
     approval_gate: object = None
     approval_enabled: bool = False

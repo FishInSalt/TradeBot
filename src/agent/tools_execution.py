@@ -19,7 +19,7 @@ async def _record_trade_open(deps: TradingDeps, **kwargs) -> int | None:
 
     try:
         async with get_session(deps.db_engine) as session:
-            record = TradeRecord(**kwargs)
+            record = TradeRecord(session_id=deps.session_id, **kwargs)
             session.add(record)
             await session.commit()
             await session.refresh(record)
@@ -41,6 +41,7 @@ async def _update_trade_closed(deps: TradingDeps, symbol: str, side: str, pnl: f
         async with get_session(deps.db_engine) as session:
             stmt = (
                 select(TradeRecord)
+                .where(TradeRecord.session_id == deps.session_id)
                 .where(TradeRecord.symbol == symbol)
                 .where(TradeRecord.side == side)
                 .where(TradeRecord.status == "open")
