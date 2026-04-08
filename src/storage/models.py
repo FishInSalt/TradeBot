@@ -23,7 +23,7 @@ class Session(Base):
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(String(100), default="default")
+    name: Mapped[str] = mapped_column(String(100), unique=True)
     symbol: Mapped[str] = mapped_column(String(50), default="BTC/USDT:USDT")
     persona_config: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_config: Mapped[str | None] = mapped_column(Text, nullable=True)

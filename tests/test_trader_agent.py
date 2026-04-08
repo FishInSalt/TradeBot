@@ -40,6 +40,7 @@ def test_trading_deps_creation():
         exchange=AsyncMock(),
         technical=MagicMock(),
         memory=AsyncMock(),
+        session_id="test-session-uuid",
         approval_enabled=True,
     )
     assert deps.symbol == "BTC/USDT:USDT"

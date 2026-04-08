@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 import uuid
@@ -147,22 +148,22 @@ async def run(
     engine = await init_db(settings.database.url)
 
     # Get or create default session
-    import json
-    async with get_session(engine) as session:
-        stmt = select(Session).where(Session.name == "default").limit(1)
-        result = await session.execute(stmt)
+    async with get_session(engine) as db_sess:
+        stmt = select(Session).where(Session.name == "default")
+        result = await db_sess.execute(stmt)
         trading_session = result.scalar_one_or_none()
         if trading_session is None:
             trading_session = Session(
                 name="default",
                 symbol=settings.trading.symbol,
                 persona_config=json.dumps(trader_config.persona.model_dump()),
+                model_config=json.dumps(settings.models.model_dump()),
                 initial_balance=settings.trading.initial_balance_usdt,
                 status="active",
             )
-            session.add(trading_session)
-            await session.commit()
-            await session.refresh(trading_session)
+            db_sess.add(trading_session)
+            await db_sess.commit()
+            await db_sess.refresh(trading_session)
             logger.info(f"Created session: {trading_session.id}")
         else:
             logger.info(f"Resumed session: {trading_session.id}")
@@ -177,7 +178,7 @@ async def run(
     technical = TechnicalAnalysisService()
     llm_router = LLMRouter(settings.models)
     memory = MemoryService(engine, session_id=session_id)
-    metrics_service = MetricsService(initial_balance=settings.trading.initial_balance_usdt)
+    metrics_service = MetricsService(initial_balance=trading_session.initial_balance)
     budget = TokenBudget(daily_max=settings.llm_budget.daily_max_tokens)
     approval_gate = ApprovalGate(
         enabled=settings.approval.enabled,
