@@ -24,9 +24,9 @@ def format_decision_for_approval(
         f"Action: {action.upper()}",
         f"Position: {position_pct}% of balance | Leverage: {leverage}x",
     ]
-    if stop_loss:
+    if stop_loss is not None:
         lines.append(f"Stop Loss: {stop_loss:.2f}")
-    if take_profit:
+    if take_profit is not None:
         lines.append(f"Take Profit: {take_profit:.2f}")
     lines.append(f"\nReasoning: {reasoning}")
     return "\n".join(lines)
@@ -68,7 +68,7 @@ class ApprovalGate:
     ) -> bool:
         if not self._enabled:
             return True
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(

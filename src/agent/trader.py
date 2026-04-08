@@ -20,6 +20,8 @@ class TradingDeps:
     exchange: BaseExchange
     technical: TechnicalAnalysisService
     memory: MemoryService
+    db_engine: object | None = None  # AsyncEngine, typed as object to avoid circular import
+    approval_gate: object | None = None  # ApprovalGate instance
     approval_enabled: bool = True
 
 

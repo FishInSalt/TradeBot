@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
+from src.cli.approval import ApprovalGate
 from src.cli.display import display_metrics
 from src.config import load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
@@ -31,16 +32,32 @@ class TokenBudget:
     def __init__(self, daily_max: int):
         self._daily_max = daily_max
         self._used = 0
+        self._reset_date = self._today()
+
+    @staticmethod
+    def _today() -> str:
+        from datetime import date
+        return date.today().isoformat()
+
+    def _check_reset(self) -> None:
+        today = self._today()
+        if today != self._reset_date:
+            logger.info(f"New day ({today}), resetting token budget")
+            self._used = 0
+            self._reset_date = today
 
     def record(self, tokens: int) -> None:
+        self._check_reset()
         self._used += tokens
 
     @property
     def remaining(self) -> int:
+        self._check_reset()
         return max(0, self._daily_max - self._used)
 
     @property
     def exhausted(self) -> bool:
+        self._check_reset()
         return self._used >= self._daily_max
 
 
@@ -67,7 +84,20 @@ async def run_agent_cycle(
     if memory_context != "No relevant memories.":
         prompt += f"\n\nYour memories:\n{memory_context}"
 
-    result = await agent.run(prompt, deps=deps)
+    # LLM call with exponential backoff retry
+    result = None
+    for attempt in range(3):
+        try:
+            result = await agent.run(prompt, deps=deps)
+            break
+        except Exception as e:
+            if attempt < 2:
+                delay = 2 ** attempt
+                logger.warning(f"LLM call attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"LLM call failed after 3 attempts: {e}")
+                return None
 
     tokens = result.usage().total_tokens if result.usage() else 0
     budget.record(tokens)
@@ -126,6 +156,10 @@ async def run(
     memory = MemoryService(engine)
     metrics_service = MetricsService(initial_balance=settings.trading.initial_balance_usdt)
     budget = TokenBudget(daily_max=settings.llm_budget.daily_max_tokens)
+    approval_gate = ApprovalGate(
+        enabled=settings.approval.enabled,
+        timeout_seconds=settings.approval.timeout_seconds,
+    )
 
     model = llm_router.resolve("trade_decision")
     agent = create_trader_agent(model=model, persona_config=trader_config.persona)
@@ -137,6 +171,8 @@ async def run(
         exchange=exchange,
         technical=technical,
         memory=memory,
+        db_engine=engine,
+        approval_gate=approval_gate,
         approval_enabled=settings.approval.enabled,
     )
 
@@ -155,7 +191,7 @@ async def run(
         console.print("\n[yellow]Shutting down gracefully...[/]")
         shutdown_event.set()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 

@@ -14,6 +14,9 @@ class MockDeps:
     exchange: AsyncMock
     technical: MagicMock
     memory: AsyncMock
+    db_engine: object = None
+    approval_gate: object = None
+    approval_enabled: bool = False
 
 
 @pytest.fixture
