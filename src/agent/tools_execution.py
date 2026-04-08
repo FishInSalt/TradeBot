@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -9,16 +10,54 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _record_trade(deps: TradingDeps, **kwargs) -> None:
-    """Persist a TradeRecord to the database if db_engine is available."""
+async def _record_trade_open(deps: TradingDeps, **kwargs) -> int | None:
+    """Persist a new TradeRecord and return its id. Returns None on failure."""
     if deps.db_engine is None:
-        return
+        return None
     from src.storage.database import get_session
     from src.storage.models import TradeRecord
 
-    async with get_session(deps.db_engine) as session:
-        session.add(TradeRecord(**kwargs))
-        await session.commit()
+    try:
+        async with get_session(deps.db_engine) as session:
+            record = TradeRecord(**kwargs)
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record.id
+    except Exception:
+        logger.warning("Failed to persist trade record to database", exc_info=True)
+        return None
+
+
+async def _update_trade_closed(deps: TradingDeps, symbol: str, side: str, pnl: float) -> None:
+    """Find the matching open TradeRecord and update it to closed."""
+    if deps.db_engine is None:
+        return
+    from sqlalchemy import select
+    from src.storage.database import get_session
+    from src.storage.models import TradeRecord
+
+    try:
+        async with get_session(deps.db_engine) as session:
+            stmt = (
+                select(TradeRecord)
+                .where(TradeRecord.symbol == symbol)
+                .where(TradeRecord.side == side)
+                .where(TradeRecord.status == "open")
+                .order_by(TradeRecord.created_at.desc())
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
+            if record:
+                record.status = "closed"
+                record.pnl = pnl
+                record.closed_at = datetime.now(timezone.utc)
+                await session.commit()
+            else:
+                logger.warning(f"No open trade record found for {symbol} {side} to close")
+    except Exception:
+        logger.warning("Failed to update trade record in database", exc_info=True)
 
 
 async def _check_approval(deps: TradingDeps, action: str, reasoning: str,
@@ -90,8 +129,8 @@ async def open_position(
             logger.warning(f"Failed to set take profit at {take_profit_price}")
             tp_msg = f"\n  Take Profit: FAILED to set at {take_profit_price:.2f}"
 
-    # Record trade in database
-    await _record_trade(
+    # Record trade in database (non-fatal if fails)
+    await _record_trade_open(
         deps,
         symbol=deps.symbol, side=side, entry_price=ticker.last,
         quantity=quantity, leverage=leverage, status="open",
@@ -112,6 +151,14 @@ async def close_position(deps: TradingDeps) -> str:
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if not positions:
         return "No positions to close."
+
+    # Human approval gate for closing
+    total_pnl = sum(p.unrealized_pnl for p in positions)
+    reasoning = f"Close {len(positions)} position(s), total PnL: {total_pnl:.2f} USDT"
+    approved = await _check_approval(deps, "close", reasoning, 0, 0)
+    if not approved:
+        return "Close rejected by human approval."
+
     results = []
     for p in positions:
         order_side = "sell" if p.side == "long" else "buy"
@@ -119,14 +166,8 @@ async def close_position(deps: TradingDeps) -> str:
             symbol=deps.symbol, side=order_side, order_type="market", amount=p.contracts
         )
 
-        # Record closed trade
-        await _record_trade(
-            deps,
-            symbol=deps.symbol, side=p.side, entry_price=p.entry_price,
-            quantity=p.contracts, leverage=p.leverage, status="closed",
-            pnl=p.unrealized_pnl,
-            decision_reason=f"Position closed via close_position tool",
-        )
+        # Update the matching open record to closed
+        await _update_trade_closed(deps, deps.symbol, p.side, p.unrealized_pnl)
 
         results.append(
             f"Closed {p.side} {p.contracts} @ PnL: {p.unrealized_pnl:.2f} | Order: {order.id}"

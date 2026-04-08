@@ -20,7 +20,10 @@ async def init_db(url: str) -> AsyncEngine:
     engine = create_async_engine(url, echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # WAL pragma must run outside a transaction
+    async with engine.connect() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
+        await conn.commit()
     _session_factories[id(engine)] = async_sessionmaker(engine, expire_on_commit=False)
     return engine
 
