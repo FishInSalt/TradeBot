@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Float, Integer, Text, DateTime, ForeignKey
+from sqlalchemy import String, Float, Integer, Text, DateTime, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -87,3 +87,53 @@ class MemoryEntry(Base):
     relevance_score: Mapped[float] = mapped_column(Float, default=0.5)             # 0-1, higher = more important, used for top-N retrieval
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # Optional TTL for short-term memories
+
+
+class SimBalance(Base):
+    """Simulated exchange balance — one row per session (PK enforces single balance)."""
+
+    __tablename__ = "sim_balances"
+
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), primary_key=True)
+    free_usdt: Mapped[float] = mapped_column(Float)
+    used_usdt: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class SimPosition(Base):
+    """Simulated open position — unique per (session, symbol) pair."""
+
+    __tablename__ = "sim_positions"
+    __table_args__ = (UniqueConstraint("session_id", "symbol"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
+    symbol: Mapped[str] = mapped_column(String(50))
+    side: Mapped[str] = mapped_column(String(10))
+    contracts: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    leverage: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class SimOrder(Base):
+    """Simulated order — one row per submitted order in the simulated exchange."""
+
+    __tablename__ = "sim_orders"
+    __table_args__ = (Index("ix_sim_orders_session_status", "session_id", "status"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"))
+    order_id: Mapped[str] = mapped_column(String(36), unique=True)
+    symbol: Mapped[str] = mapped_column(String(50))
+    side: Mapped[str] = mapped_column(String(10))
+    position_side: Mapped[str] = mapped_column(String(10))
+    order_type: Mapped[str] = mapped_column(String(20))
+    amount: Mapped[float] = mapped_column(Float)
+    trigger_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(20))
+    filled_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fee: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

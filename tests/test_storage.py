@@ -1,4 +1,5 @@
 import pytest
+import sqlalchemy
 
 
 @pytest.fixture
@@ -65,3 +66,84 @@ async def test_create_session(db_session):
     s = result.scalar_one()
     assert s.id == "test-session"
     assert s.status == "active"
+
+
+async def test_sim_tables_exist():
+    """Verify sim_balances, sim_positions, sim_orders tables are created."""
+    from sqlalchemy import inspect
+    from src.storage.database import init_db
+    from src.storage.models import SimBalance, SimPosition, SimOrder
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with engine.connect() as conn:
+        table_names = await conn.run_sync(lambda c: inspect(c).get_table_names())
+    assert "sim_balances" in table_names
+    assert "sim_positions" in table_names
+    assert "sim_orders" in table_names
+    await engine.dispose()
+
+
+async def test_sim_balance_session_id_is_pk():
+    from src.storage.models import SimBalance
+    from src.storage.database import init_db, get_session
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    # Create session FK target
+    from src.storage.models import Session
+    async with get_session(engine) as session:
+        session.add(Session(id="s1", name="s1-test", initial_balance=100.0))
+        await session.commit()
+
+    async with get_session(engine) as session:
+        session.add(SimBalance(session_id="s1", free_usdt=100.0, used_usdt=0.0))
+        await session.commit()
+
+        session.add(SimBalance(session_id="s1", free_usdt=200.0, used_usdt=0.0))
+        with pytest.raises(sqlalchemy.exc.IntegrityError):
+            await session.commit()
+    await engine.dispose()
+
+
+async def test_sim_position_unique_constraint():
+    from src.storage.models import SimPosition, Session
+    from src.storage.database import init_db, get_session
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with get_session(engine) as session:
+        session.add(Session(id="s1", name="s1-test", initial_balance=100.0))
+        await session.commit()
+
+    async with get_session(engine) as session:
+        session.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="long",
+                                contracts=0.001, entry_price=95000.0, leverage=3))
+        await session.commit()
+
+        session.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="long",
+                                contracts=0.002, entry_price=96000.0, leverage=3))
+        with pytest.raises(sqlalchemy.exc.IntegrityError):
+            await session.commit()
+    await engine.dispose()
+
+
+async def test_sim_order_fields():
+    from src.storage.models import SimOrder, Session
+    from src.storage.database import init_db, get_session
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with get_session(engine) as session:
+        session.add(Session(id="s1", name="s1-test", initial_balance=100.0))
+        await session.commit()
+
+    async with get_session(engine) as session:
+        order = SimOrder(
+            session_id="s1", order_id="uuid-1", symbol="BTC/USDT:USDT",
+            side="buy", position_side="long", order_type="market",
+            amount=0.001, status="closed", filled_price=95010.0, fee=0.0475,
+        )
+        session.add(order)
+        await session.commit()
+        await session.refresh(order)
+        assert order.filled_price == 95010.0
+        assert order.fee == 0.0475
+        assert order.trigger_price is None
+    await engine.dispose()
