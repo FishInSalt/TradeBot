@@ -34,6 +34,7 @@ class Order:
     amount: float
     price: float | None
     status: str
+    fee: float | None = None
 
 
 @dataclass
@@ -71,3 +72,9 @@ class BaseExchange(ABC):
     def amount_to_precision(self, symbol: str, amount: float) -> float: ...
     @abstractmethod
     async def close(self) -> None: ...
+    @abstractmethod
+    async def fetch_order(self, order_id: str, symbol: str | None = None) -> Order: ...
+    @abstractmethod
+    async def fetch_open_orders(self, symbol: str) -> list[Order]: ...
+    @abstractmethod
+    async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]: ...

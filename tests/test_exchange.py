@@ -2,6 +2,42 @@ import pytest
 from unittest.mock import AsyncMock
 
 
+def test_order_has_fee_field():
+    from src.integrations.exchange.base import Order
+    order = Order(
+        id="o1", symbol="BTC/USDT:USDT", side="buy", order_type="market",
+        amount=0.01, price=65000.0, status="closed", fee=1.5,
+    )
+    assert order.fee == 1.5
+
+
+def test_order_fee_defaults_to_none():
+    from src.integrations.exchange.base import Order
+    order = Order(
+        id="o1", symbol="BTC/USDT:USDT", side="buy", order_type="market",
+        amount=0.01, price=65000.0, status="closed",
+    )
+    assert order.fee is None
+
+
+def test_base_exchange_requires_new_methods():
+    from src.integrations.exchange.base import BaseExchange, Order, Balance, Position, Ticker, Candle
+
+    class IncompleteExchange(BaseExchange):
+        async def fetch_ticker(self, symbol: str) -> Ticker: ...
+        async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]: ...
+        async def create_order(self, symbol: str, side: str, order_type: str, amount: float, price: float | None = None) -> Order: ...
+        async def fetch_balance(self) -> Balance: ...
+        async def fetch_positions(self, symbol: str) -> list[Position]: ...
+        async def set_leverage(self, symbol: str, leverage: int) -> None: ...
+        def amount_to_precision(self, symbol: str, amount: float) -> float: ...
+        async def close(self) -> None: ...
+        # fetch_order, fetch_open_orders, fetch_closed_orders intentionally omitted
+
+    with pytest.raises(TypeError):
+        IncompleteExchange()
+
+
 def test_base_exchange_is_abstract():
     from src.integrations.exchange.base import BaseExchange
     with pytest.raises(TypeError):
