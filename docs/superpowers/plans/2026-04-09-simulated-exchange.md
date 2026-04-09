@@ -279,6 +279,9 @@ async def fetch_open_orders(self, symbol: str) -> list[Order]:  # type: ignore[o
 @_retry()
 async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]:  # type: ignore[override]
     # OKX ccxt adapter: use fetch_orders with state filter
+    # Known limitation: OKX API doesn't easily return cancelled orders.
+    # SimulatedExchange returns both closed+cancelled. This is a cross-implementation
+    # difference — agent should not rely on cancelled orders being present in OKX mode.
     data = await self._client.fetch_orders(symbol, limit=limit, params={"state": "filled"})
     return [
         Order(
@@ -1101,7 +1104,8 @@ class SimulatedExchange(BaseExchange):
 
     def _open_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str]:
         ticker = self._latest_ticker
-        assert ticker is not None
+        if ticker is None:
+            raise RuntimeError("No ticker data available")
         fill_price = ticker.ask if side == "buy" else ticker.bid
         leverage = self._leverage.get(symbol, 1)
         margin = (fill_price * amount) / leverage
@@ -1152,7 +1156,8 @@ class SimulatedExchange(BaseExchange):
 
     def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> tuple[Order, str]:
         ticker = self._latest_ticker
-        assert ticker is not None
+        if ticker is None:
+            raise RuntimeError("No ticker data available")
         # Clamp amount
         actual_amount = min(amount, pos.contracts)
         position_side = pos.side  # record BEFORE close (pos may be deleted)
@@ -1614,6 +1619,51 @@ async def test_liquidation_triggers_before_stop():
     assert balance.free_usdt >= 0.0
 
 
+async def test_should_trigger_stop_short():
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)  # open short
+    await ex.create_order("BTC/USDT:USDT", "buy", "stop", 0.001, price=97000.0)
+
+    fill_events = []
+    async def on_fill(event: FillEvent):
+        fill_events.append(event)
+    ex.on_fill(on_fill)
+
+    tick = Ticker(
+        symbol="BTC/USDT:USDT", last=97200.0, bid=97190.0, ask=97210.0,
+        high=98000.0, low=94000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(tick)
+
+    assert len(fill_events) == 1
+    assert fill_events[0].trigger_reason == "stop"
+    assert fill_events[0].fill_price == 97210.0  # ask for short close
+    assert fill_events[0].position_side == "short"
+
+
+async def test_should_trigger_take_profit_short():
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)  # open short
+    await ex.create_order("BTC/USDT:USDT", "buy", "take_profit", 0.001, price=93000.0)
+
+    fill_events = []
+    async def on_fill(event: FillEvent):
+        fill_events.append(event)
+    ex.on_fill(on_fill)
+
+    tick = Ticker(
+        symbol="BTC/USDT:USDT", last=92800.0, bid=92790.0, ask=92810.0,
+        high=96000.0, low=92000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(tick)
+
+    assert len(fill_events) == 1
+    assert fill_events[0].trigger_reason == "take_profit"
+    assert fill_events[0].position_side == "short"
+
+
 async def test_no_trigger_when_price_above_stop():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
@@ -1735,7 +1785,7 @@ async def _process_tick(self, ticker: Ticker) -> None:
                 await self._persist_state(
                     new_orders=new_orders,
                     filled_order_ids=filled_order_ids,
-                    filled_fills=triggered,
+                    fill_events=triggered,
                 )
 
     # Notify outside lock
@@ -1971,14 +2021,14 @@ async def _persist_state(
     self,
     new_orders: list[tuple[Order, str]] | None = None,
     filled_order_ids: list[str] | None = None,
-    filled_fills: list[FillEvent] | None = None,
+    fill_events: list[FillEvent] | None = None,
 ) -> None:
     """Persist all internal state to sim_* tables in a single transaction.
 
     Args:
         new_orders: list of (Order, position_side) tuples for INSERT (market/liquidation)
         filled_order_ids: order_ids of conditional orders that were filled this tick
-        filled_fills: FillEvent data for updating filled conditional orders
+        fill_events: FillEvent data for updating filled conditional orders
     """
     from sqlalchemy import delete, update
     from src.storage.database import get_session
@@ -1988,6 +2038,8 @@ async def _persist_state(
 
     async with get_session(self._db_engine) as session:
         # 1. Upsert balance (explicitly set updated_at — onupdate won't fire for upsert)
+        # NOTE: Uses SQLite-specific INSERT...ON CONFLICT. If migrating to PostgreSQL,
+        # replace with postgresql insert or use merge/upsert abstraction.
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
         stmt = sqlite_insert(SimBalance).values(
             session_id=self._session_id,
@@ -2018,8 +2070,8 @@ async def _persist_state(
             ))
 
         # 3a. Orders: UPDATE filled conditional orders BEFORE reconciliation
-        if filled_order_ids and filled_fills:
-            fill_map = {f.order_id: f for f in filled_fills}
+        if filled_order_ids and fill_events:
+            fill_map = {f.order_id: f for f in fill_events}
             for oid in filled_order_ids:
                 fill = fill_map.get(oid)
                 if fill:
@@ -2176,7 +2228,7 @@ async def close(self) -> None:
     logger.info("SimulatedExchange closed")
 ```
 
-Note: `_process_tick` already includes `_persist_state()` calls with correct parameters (new_orders, filled_order_ids, filled_fills) from Task 7. No changes needed here.
+Note: `_process_tick` already includes `_persist_state()` calls with correct parameters (new_orders, filled_order_ids, fill_events) from Task 7. No changes needed here.
 
 Update `fetch_ohlcv`:
 

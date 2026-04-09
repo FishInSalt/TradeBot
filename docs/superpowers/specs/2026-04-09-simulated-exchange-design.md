@@ -142,7 +142,7 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
 | `set_leverage(symbol, leverage)` | 校验：leverage 为 int 类型（非整数抛 TypeError），范围 1-125（对齐 OKX 上限）`[安全护栏]`；如果该 symbol 已有持仓且 leverage != position.leverage，抛异常 `[安全护栏]`（OKX 允许持仓期间改杠杆并自动调保证金，此处简化为 fail fast，避免多杠杆保证金账不平） |
 | `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额）。symbol 不在 precision 配置中时抛 KeyError（fail fast） |
-| `fetch_order(order_id)` | 查询单个订单的当前状态，返回 Order（含 status: open/closed/cancelled） |
+| `fetch_order(order_id, symbol=None)` | 查询单个订单的当前状态，返回 Order（含 status: open/closed/cancelled）。symbol 参数为 OKX ccxt 适配层所需，SimulatedExchange 可忽略 |
 | `fetch_open_orders(symbol)` | 返回该 symbol 所有未成交的条件单 |
 | `fetch_closed_orders(symbol, limit)` | 返回该 symbol 最近的已成交/已取消订单（ORDER BY COALESCE(filled_at, created_at) DESC，按实际成交/取消时间排序，limit 默认 20） |
 | `close()` | 停止撮合循环，断开 WebSocket |
@@ -667,7 +667,7 @@ class BaseExchange(ABC):
     # ... 现有方法 ...
 
     @abstractmethod
-    async def fetch_order(self, order_id: str) -> Order: ...
+    async def fetch_order(self, order_id: str, symbol: str | None = None) -> Order: ...
 
     @abstractmethod
     async def fetch_open_orders(self, symbol: str) -> list[Order]: ...
