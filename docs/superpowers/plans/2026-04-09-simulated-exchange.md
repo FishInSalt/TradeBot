@@ -121,7 +121,7 @@ In `src/integrations/exchange/base.py`, add to BaseExchange class:
 
 ```python
 @abstractmethod
-async def fetch_order(self, order_id: str) -> Order: ...
+async def fetch_order(self, order_id: str, symbol: str | None = None) -> Order: ...
 @abstractmethod
 async def fetch_open_orders(self, symbol: str) -> list[Order]: ...
 @abstractmethod
@@ -246,8 +246,8 @@ def _parse_fee(self, data: dict) -> float | None:
     return None
 
 @_retry()
-async def fetch_order(self, order_id: str) -> Order:  # type: ignore[override]
-    data = await self._client.fetch_order(order_id)
+async def fetch_order(self, order_id: str, symbol: str | None = None) -> Order:  # type: ignore[override]
+    data = await self._client.fetch_order(order_id, symbol)
     return Order(
         id=data["id"],  # type: ignore[arg-type]
         symbol=data["symbol"],  # type: ignore[arg-type]
@@ -532,9 +532,10 @@ class SimOrder(Base):
     """Simulated exchange order record — full lifecycle."""
 
     __tablename__ = "sim_orders"
+    __table_args__ = (Index("ix_sim_orders_session_status", "session_id", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"))
     order_id: Mapped[str] = mapped_column(String(36), unique=True)
     symbol: Mapped[str] = mapped_column(String(50))
     side: Mapped[str] = mapped_column(String(10))
@@ -549,7 +550,7 @@ class SimOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 ```
 
-Note: `UniqueConstraint` needs to be imported. Add `from sqlalchemy import UniqueConstraint` at the top (or add to existing import line).
+Note: `UniqueConstraint` and `Index` need to be imported. Add `from sqlalchemy import UniqueConstraint, Index` at the top (or add to existing import line).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -647,9 +648,15 @@ async def test_scheduler_trigger_merges_multiple_events():
 
     scheduler.stop()
     await task
-    # Second trigger should have context=None (merged)
-    conditional_contexts = [ctx for t, ctx in fired if t == "conditional"]
-    assert len(conditional_contexts) >= 1
+    # At least one conditional cycle should have been triggered
+    conditional_fired = [(t, ctx) for t, ctx in fired if t == "conditional"]
+    assert len(conditional_fired) >= 1
+    # If merge happened, at least one context should be None
+    # (multiple events → context set to None per spec)
+    if len(conditional_fired) >= 1:
+        contexts = [ctx for _, ctx in conditional_fired]
+        # Either single event with original context, or merged with None
+        assert "event1" in contexts or None in contexts
 
 
 async def test_scheduler_stop():
@@ -783,16 +790,35 @@ class Scheduler:
 Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_scheduler.py -v`
 Expected: ALL PASS
 
-- [ ] **Step 5: Remove cooldown_seconds from Scheduler usage in app.py**
+- [ ] **Step 5: Update app.py to match new Scheduler signature**
 
-In `src/cli/app.py`, the Scheduler construction currently passes `cooldown_seconds`. Update it to use the new signature (just `interval_seconds` and `callback`). The cooldown parameter is no longer needed — interval handles the spacing, and event triggers bypass it.
+In `src/cli/app.py`, update on_tick and Scheduler construction to prevent TypeError between Task 5 and Task 9:
 
-Note: `SchedulerConfig.cooldown_seconds` in config.py and settings.yaml can remain as-is (unused but harmless). Removing it would break existing YAML files.
+```python
+# Replace existing on_tick and Scheduler construction:
+async def on_tick(trigger_type: str, context=None):
+    if shutdown_event.is_set():
+        return
+    try:
+        await run_agent_cycle(agent, deps, trigger_type, budget, engine)
+    except Exception:
+        logger.exception("Agent cycle failed")
 
-- [ ] **Step 6: Commit**
+interval = settings.scheduler.interval_minutes * 60
+scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
+```
+
+Note: `context` is accepted but not yet forwarded to `run_agent_cycle` (Task 9 will add that). `SchedulerConfig.cooldown_seconds` in config.py/settings.yaml can remain (unused but harmless).
+
+- [ ] **Step 6: Run all tests**
+
+Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/ -v`
+Expected: ALL PASS
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/scheduler/scheduler.py tests/test_scheduler.py
+git add src/scheduler/scheduler.py tests/test_scheduler.py src/cli/app.py
 git commit -m "feat: scheduler — event-based trigger, interruptible sleep, new callback signature"
 ```
 
@@ -958,7 +984,6 @@ class SimulatedExchange(BaseExchange):
         self._lock = asyncio.Lock()
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._error_count = 0
-        self._last_order_position_side: str = ""
 
     def _validate_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
@@ -1048,11 +1073,9 @@ class SimulatedExchange(BaseExchange):
 
         async with self._lock:
             if order_type == "market":
-                order = self._execute_market_order(symbol, side, amount)
+                order, position_side = self._execute_market_order(symbol, side, amount)
                 if self._db_engine:
-                    await self._persist_state(new_orders=[
-                        (order, self._last_order_position_side)
-                    ])
+                    await self._persist_state(new_orders=[(order, position_side)])
                 return order
             else:
                 order = self._create_conditional_order(symbol, side, order_type, amount, price)  # type: ignore[arg-type]
@@ -1060,7 +1083,8 @@ class SimulatedExchange(BaseExchange):
                     await self._persist_state()  # persist new pending order
                 return order
 
-    def _execute_market_order(self, symbol: str, side: str, amount: float) -> Order:
+    def _execute_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str]:
+        """Returns (Order, position_side) tuple."""
         if self._latest_ticker is None:
             raise RuntimeError("No ticker data available")
 
@@ -1075,7 +1099,7 @@ class SimulatedExchange(BaseExchange):
         else:
             return self._open_market_order(symbol, side, amount)
 
-    def _open_market_order(self, symbol: str, side: str, amount: float) -> Order:
+    def _open_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str]:
         ticker = self._latest_ticker
         assert ticker is not None
         fill_price = ticker.ask if side == "buy" else ticker.bid
@@ -1123,12 +1147,10 @@ class SimulatedExchange(BaseExchange):
             id=order_id, symbol=symbol, side=side, order_type="market",
             amount=amount, price=fill_price, status="closed", fee=fee,
         )
-        # Track position_side for persistence
-        self._last_order_position_side = position_side
         logger.info(f"Market order filled: {side} {amount} {symbol} @ {fill_price:.2f}, fee={fee:.4f}")
-        return order
+        return order, position_side
 
-    def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> Order:
+    def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> tuple[Order, str]:
         ticker = self._latest_ticker
         assert ticker is not None
         # Clamp amount
@@ -1148,13 +1170,11 @@ class SimulatedExchange(BaseExchange):
             id=order_id, symbol=symbol, side=side, order_type="market",
             amount=actual_amount, price=fill_price, status="closed", fee=fee,
         )
-        # Track position_side for persistence
-        self._last_order_position_side = position_side
         logger.info(
             f"Market close filled: {side} {actual_amount} {symbol} @ {fill_price:.2f}, "
             f"pnl={pnl:.4f}, fee={fee:.4f}"
         )
-        return order
+        return order, position_side
 
     def _close_position_core(
         self, symbol: str, position_side: str, amount: float, fill_price: float,
@@ -1233,7 +1253,7 @@ class SimulatedExchange(BaseExchange):
 
     # --- Order query methods ---
 
-    async def fetch_order(self, order_id: str) -> Order:
+    async def fetch_order(self, order_id: str, symbol: str | None = None) -> Order:
         # Check in-memory pending orders first
         for o in self._pending_orders:
             if o.id == order_id:
@@ -1838,11 +1858,52 @@ async def test_persist_and_restore():
     assert positions[0].side == "long"
 
     await engine.dispose()
+
+
+async def test_fetch_closed_orders_from_db():
+    """Market orders should be queryable via fetch_closed_orders."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session
+    from src.integrations.exchange.simulated import SimulatedExchange
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with get_session(engine) as sess:
+        sess.add(Session(id="test-s2", name="test2", initial_balance=100.0))
+        await sess.commit()
+
+    config = MagicMock()
+    config.fee_rate = 0.0005
+    config.precision = {"BTC/USDT:USDT": 3}
+
+    ex = SimulatedExchange(config, engine, "test-s2", "BTC/USDT:USDT")
+    await ex._init_state(initial_balance=100.0)
+    ex._latest_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
+    )
+    ex._leverage["BTC/USDT:USDT"] = 3
+
+    # Open position
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # Query closed orders
+    closed = await ex.fetch_closed_orders("BTC/USDT:USDT")
+    assert len(closed) == 1
+    assert closed[0].id == order.id
+    assert closed[0].status == "closed"
+    assert closed[0].fee is not None
+
+    # Query specific order
+    fetched = await ex.fetch_order(order.id)
+    assert fetched.id == order.id
+    assert fetched.price == order.price
+
+    await engine.dispose()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_simulated_exchange.py::test_persist_and_restore -v`
+Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_simulated_exchange.py::test_persist_and_restore tests/test_simulated_exchange.py::test_fetch_closed_orders_from_db -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement _init_state, _persist_state, _restore_state**
@@ -2151,12 +2212,34 @@ git commit -m "feat: SimulatedExchange — persistence, state recovery, lifecycl
 **Files:**
 - Modify: `src/cli/app.py`
 
-- [ ] **Step 1: Update app.py exchange creation and scheduler wiring**
+- [ ] **Step 1: Update app.py — correct initialization order**
 
-In `src/cli/app.py`, modify the `run()` function:
+The correct order is: create exchange → create scheduler → register fill handler → start exchange → start scheduler.
+
+In `src/cli/app.py`, modify the `run()` function. First, update `run_agent_cycle` to accept `context`:
 
 ```python
-# Replace the exchange creation block with:
+async def run_agent_cycle(agent, deps, trigger_type, budget, engine, context=None):
+    # ... existing code up to prompt construction ...
+    prompt = (
+        f"You have been woken up by a {trigger_type} trigger.\n"
+        f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"
+        "Analyze the current market, check your positions, and decide what to do.\n"
+        "Use your tools to gather data before making a decision."
+    )
+    # Append event context if present
+    if context is not None and hasattr(context, 'trigger_reason'):
+        prompt += (
+            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
+            f"— {context.symbol} {context.amount} @ {context.fill_price}"
+        )
+    # ... rest of existing code ...
+```
+
+Then update exchange creation and wiring in `run()`:
+
+```python
+# 1. Create exchange
 if settings.exchange.name == "simulated":
     from src.integrations.exchange.simulated import SimulatedExchange
     exchange = SimulatedExchange(
@@ -2173,24 +2256,22 @@ else:
         password=settings.exchange.password,
     )
     console.print(f"Exchange: {settings.exchange.name} (REAL account)")
-```
 
-Update `on_tick` to accept new parameters:
+# ... market_data, technical, agent setup (unchanged) ...
 
-```python
-async def on_tick(trigger_type: str, context: Any | None):
+# 2. Create scheduler with new callback signature
+async def on_tick(trigger_type: str, context=None):
     if shutdown_event.is_set():
         return
     try:
-        await run_agent_cycle(agent, deps, trigger_type, budget, engine)
+        await run_agent_cycle(agent, deps, trigger_type, budget, engine, context)
     except Exception:
         logger.exception("Agent cycle failed")
-```
 
-Register fill handler and start exchange:
+interval = settings.scheduler.interval_minutes * 60
+scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
-```python
-# After creating exchange, before scheduler:
+# 3. Register fill handler (needs scheduler reference)
 if settings.exchange.name == "simulated":
     from src.integrations.exchange.simulated import FillEvent
 
@@ -2202,22 +2283,18 @@ if settings.exchange.name == "simulated":
                 await sched.trigger("conditional", context=event)
         return handle_fill
 
-    # Register fill handler before start
     exchange.on_fill(_create_fill_handler(scheduler))
+
+# 4. Start exchange (after fill handler registered)
+if settings.exchange.name == "simulated":
     await exchange.start()
-```
 
-Update `run_agent_cycle` signature to accept `context`:
-
-```python
-async def run_agent_cycle(agent, deps, trigger_type, budget, engine, context=None):
-    # ... existing code ...
-    # Update prompt to include context info
-    if context is not None and hasattr(context, 'trigger_reason'):
-        prompt += (
-            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
-            f"— {context.symbol} {context.amount} @ {context.fill_price}"
-        )
+# 5. Start scheduler
+scheduler_task = asyncio.create_task(scheduler.start())
+await shutdown_event.wait()
+scheduler.stop()
+await scheduler_task
+await exchange.close()
 ```
 
 - [ ] **Step 2: Run full test suite**
