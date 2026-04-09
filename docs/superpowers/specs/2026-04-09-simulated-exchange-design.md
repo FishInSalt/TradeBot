@@ -90,7 +90,7 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `create_order(symbol, side, order_type, amount, price)` | 见下方「订单处理」。symbol 必须匹配 Session 配置的交易对，否则抛异常 |
 | `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)`，含未实现盈亏（见下方公式） |
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
-| `set_leverage(symbol, leverage)` | 校验范围（1-125，对齐 OKX 上限 `[安全护栏]`），记录到内部状态 |
+| `set_leverage(symbol, leverage)` | 校验范围 1-125（对齐 OKX 上限）`[安全护栏]`；如果该 symbol 已有持仓且 leverage != position.leverage，抛异常（fail fast，避免后续加仓时才报错造成困惑） |
 | `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额） |
 | `close()` | 停止撮合循环，断开 WebSocket |
 
@@ -212,6 +212,9 @@ async def _matching_loop(self):
         triggered = []
         async with self._lock:
             # 1. 清算检查：价格穿越 liquidation_price 时强制平仓
+            # 清算必须在条件单之前检查：若价格跳空穿越清算价，条件单的
+            # _close_position_core（无 PnL cap）在清算价之下成交会导致 free_usdt 为负。
+            # 清算使用 PnL cap 保证余额归零，条件单只在清算未触发时才执行。
             # _force_liquidate 复用 _close_position_core（计算 PnL、释放保证金、移除持仓），不含订单取消
             # [安全护栏] PnL cap: pnl = max(pnl, -(released_margin - fee))，确保清算后余额精确归零
             # 计算: free_usdt += margin + (-(margin - fee)) - fee = 0
@@ -234,8 +237,8 @@ async def _matching_loop(self):
 
             if triggered:
                 for fill in triggered:
-                    self._remove_order_by_id(fill.order_id)
-                self._cancel_orphaned_orders()
+                    self._remove_order_by_id(fill.order_id)  # 清算 fill 的 order_id 无匹配挂单，空跑无害
+                self._cancel_orphaned_orders()  # 遍历 _pending_orders，移除 symbol 不在 _positions 中的挂单
                 await self._persist_state()  # 单个事务包裹三表写入
         # lock 已释放 —— _notify_fill 必须在 lock 外执行
         # 否则 fill → agent → create_order() → acquire lock → 死锁
@@ -285,7 +288,14 @@ class FillEvent:
     timestamp: int
     # 注：不含 pnl 字段。PnL 由 TradeRecord 的 entry_price/exit_price/quantity/side/fee 推导，
     # 不作为冗余值传递。交易所内部仍计算 PnL 用于余额更新，但不对外暴露。
+    # 清算触发的 FillEvent：order_id 为新生成的 UUID（纯标识用），不关联任何挂单。
 ```
+
+**内部方法关系**：
+
+- `_execute_fill(order, ticker)` — 条件单触发时调用，内部调用 `_close_position_core` 完成平仓，返回 FillEvent
+- `_force_liquidate(pos, price)` — 清算触发时调用，内部调用 `_close_position_core`（带 PnL cap），返回 FillEvent
+- `_close_position_core(symbol, side, amount, fill_price)` — 共享核心逻辑：PnL 计算、余额更新、持仓移除。不含订单取消。实现中应 `assert free_usdt >= 0` 作防御性检查
 
 ### fill_handler (app.py)
 
@@ -504,8 +514,8 @@ class Order:
 | 新增 `fee` 字段 (float, nullable) | 该笔交易累计手续费（开仓 + 平仓） |
 
 手续费累加规则：
-- `_record_trade_open()`：`record.fee = order.fee`（写入开仓手续费）
-- `_update_trade_closed()`：`record.fee = (record.fee or 0) + order.fee`（追加平仓手续费）
+- `_record_trade_open()`：`record.fee = order.fee`（写入开仓手续费；OKX 模式下可能为 None）
+- `_update_trade_closed()`：`record.fee = (record.fee or 0) + (fee or 0)`（追加平仓手续费，双侧 None 安全）
 
 `_update_trade_closed()` 签名变更：移除 `pnl` 参数，新增 `fee` 参数：
 
@@ -524,8 +534,10 @@ async def _update_trade_closed(deps, symbol, side, exit_price, fee=None)
 
 | 字段 | 现有（不准确） | 修正为 |
 |---|---|---|
-| entry_price | `ticker.last` (tools_execution.py:144) | `order.price`（create_order 返回的实际成交价） |
-| exit_price | `ticker.last` (tools_execution.py:181) | `order.price` |
+| entry_price | `ticker.last`（open_position 中） | `order.price`（create_order 返回的实际成交价） |
+| exit_price | `ticker.last`（close_position 中） | `order.price` |
+
+三处修改统一保证价格准确性：(1) open_position 用 order.price 作 entry_price，(2) close_position 用 order.price 作 exit_price，(3) fill_handler 用 event.fill_price 作 exit_price。
 
 PnL 不再存储，由 `MetricsService` 从 entry_price/exit_price/quantity/side/fee 推导。
 
@@ -783,5 +795,23 @@ main.py                  SimulatedExchange              DB (sim_*)
 - 精确清算价计算（含维持保证金率）
 - amount_to_precision 从 REST API market info 自动获取（当前手动配置）
 - WebSocket 长时间无 tick 的超时处理（BTC/USDT 主流交易对下极不可能发生）
-- 部分平仓的 TradeRecord 管理（当前工具层总是全额平仓，TradeRecord 一开一闭匹配）
+- 部分平仓的 TradeRecord 拆分管理（SimulatedExchange 支持部分平仓——减少 contracts，但当前 TradeRecord 管理假设一开一闭完整匹配。工具层总是全额平仓，条件单触发时 clamp 到持仓量）
 - sim_orders 历史记录清理机制（长期运行会增长，当前规模下不构成问题）
+
+## Test Strategy
+
+SimulatedExchange 关键测试场景：
+
+| 场景 | 验证点 |
+|---|---|
+| 市价开仓 | 余额扣减（margin + fee）、持仓创建、Order 返回值 |
+| 市价平仓 | 余额释放（margin + pnl - fee）、持仓移除、条件单自动取消 |
+| 加仓 | 加权均价计算、leverage 一致性校验 |
+| 条件单创建 | 无持仓时抛异常、挂单列表更新 |
+| 条件单触发（止损/止盈） | 触发条件判断（bid/ask）、FillEvent 回调、clamp 到持仓量 |
+| 强制清算 | 清算价触发、PnL cap（余额归零不为负）、清算优先于条件单 |
+| 余额不足拒单 | 抛异常，状态不变 |
+| fetch_balance | unrealized_pnl 包含、free_usdt clamp 到 0、total != free + used 场景 |
+| 崩溃恢复 | start() 从 sim_* 表恢复余额/持仓/挂单/leverage |
+| 并发安全 | asyncio.Lock 保护状态修改、_notify_fill 在 lock 外 |
+| MetricsService | PnL 从 entry/exit/quantity/side/fee 推导正确 |
