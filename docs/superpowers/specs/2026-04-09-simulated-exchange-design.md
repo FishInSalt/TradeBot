@@ -660,8 +660,13 @@ OKX WebSocket        SimulatedExchange         fill_handler         Scheduler   
 main.py                  SimulatedExchange              DB (sim_*)
   │                            │                           │
   │  create SimulatedExchange  │                           │
-  │───────────────────────────▶│                           │
-  │                            │  query sim_balances       │
+  │───────────────────────────▶│  (sync, no I/O)           │
+  │◀───────────────────────────│                           │
+  │                            │                           │
+  │  register on_fill callback │  ← 在 start() 之前注册
+  │                            │                           │
+  │  await exchange.start()    │                           │
+  │───────────────────────────▶│  query sim_balances       │
   │                            │──────────────────────────▶│
   │                            │  exists? ─ Yes ─▶ restore balance
   │                            │           └ No  ─▶ init from Session.initial_balance
@@ -676,13 +681,8 @@ main.py                  SimulatedExchange              DB (sim_*)
   │                            │  restore pending orders   │
   │                            │◀──────────────────────────│
   │                            │                           │
-  │                            │  ready for start()        │
-  │◀───────────────────────────│                           │
-  │                            │                           │
-  │  register on_fill callback │  ← 在 start() 之前注册
-  │                            │                           │
-  │  await exchange.start()    │                           │
-  │───────────────────────────▶│  connect OKX WebSocket    │
+  │                            │  REST fetch seed ticker   │
+  │                            │  connect OKX WebSocket    │
   │                            │  start matching loop      │
   │◀───────────────────────────│  ready                    │
   │                            │                           │
