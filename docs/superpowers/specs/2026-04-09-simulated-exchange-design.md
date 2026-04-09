@@ -122,7 +122,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 
 | 方法 | 说明 |
 |---|---|
-| `on_fill(callback)` | 注册 FillEvent 回调 |
+| `on_fill(callback)` | 注册 FillEvent 回调（单回调，后注册覆盖前注册） |
 
 ## Order Processing
 
@@ -172,8 +172,8 @@ liquidation_price (simplified, ignores maintenance margin rate):
 
 `create_order(symbol, side="sell", order_type="stop", amount=0.001, price=95000)` 时：
 
-1. 校验订单参数
-2. 加入内部挂单列表
+1. 校验订单参数；如果当前无持仓，抛异常（对齐真实交易所——无持仓时条件单无意义）
+2. 从当前持仓推导 position_side，加入内部挂单列表
 3. 持久化到 sim_orders 表
 4. 返回 `Order(id, symbol, side, "stop", amount, price, "open")`
 
@@ -206,6 +206,8 @@ async def _matching_loop(self):
         triggered = []
         async with self._lock:
             # 1. 清算检查：价格穿越 liquidation_price 时强制平仓
+            # _force_liquidate 复用 Close Position 逻辑（计算 PnL、释放保证金、移除持仓、取消条件单）
+            # 清算后保证金几乎全部亏完：free_usdt += released_margin + pnl(≈-margin) - fee ≈ 0
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
                 if pos.side == "long" and ticker.bid <= liq:
@@ -303,7 +305,7 @@ Scheduler 新增 `trigger(trigger_type, context=None)` 方法：
 | 行为 | 说明 |
 |---|---|
 | 绕过 cooldown | 条件单触发是时间敏感的，不等待 cooldown 倒计时 |
-| 防重入 | 如果 agent cycle 正在运行，设置一个 pending flag（不是队列）。当前 cycle 结束后检查 flag，如有则触发一次新 cycle（`context=None`，agent 自行查询最新状态）。多个事件只设一个 flag，合并为一次触发，避免连续 cycle 风暴 |
+| 防重入 | 如果 agent cycle 正在运行，设置一个 pending flag（不是队列）。当前 cycle 结束后检查 flag，如有则触发一次新 cycle（`context=None`）。多个事件只设一个 flag，合并为一次触发，避免连续 cycle 风暴。context=None 的设计理由：多个事件合并后没有单一"正确"的 context，agent 应基于最新全局状态（通过 fetch_positions/fetch_balance 查询）做决策，而非依赖某个特定事件 |
 | 与定时触发的关系 | 事件触发独立于定时调度。事件触发后重置定时计时器（避免刚处理完 fill 又立即触发定时 cycle） |
 
 callback 签名变更：
@@ -343,7 +345,7 @@ used_usdt: float   # 冻结保证金
 unrealized = sum(calc_unrealized_pnl(pos, ticker) for pos in positions)
 Balance(
     total_usdt = free_usdt + used_usdt + unrealized,   # equity
-    free_usdt  = free_usdt + unrealized,                # 可用于开仓
+    free_usdt  = max(0, free_usdt + unrealized),        # 可用于开仓，不低于 0
     used_usdt  = used_usdt,                             # 冻结保证金不变
 )
 ```
@@ -411,9 +413,8 @@ new_contracts = old_contracts + new_contracts
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| id | int | PK |
-| session_id | str FK | 关联 Session |
-| free_usdt | float | 可用余额 |
+| session_id | str FK | PK，关联 Session（每个 session 只有一行） |
+| free_usdt | float | 可用余额（不含 unrealized_pnl） |
 | used_usdt | float | 冻结保证金 |
 | updated_at | datetime | 最后更新时间 |
 
@@ -423,7 +424,7 @@ new_contracts = old_contracts + new_contracts
 |---|---|---|
 | id | int | PK |
 | session_id | str FK | 关联 Session |
-| symbol | str | 交易对 |
+| symbol | str | 交易对，UNIQUE(session_id, symbol) |
 | side | str | long / short |
 | contracts | float | 持仓数量 |
 | entry_price | float | 入场价 |
@@ -467,7 +468,7 @@ class Order:
 ```
 
 - `SimulatedExchange`：在 `create_order()` 中计算并填入 fee
-- `OKXExchange`：从 ccxt 响应中解析 fee（如有），或返回 None
+- `OKXExchange`：从 ccxt 响应中解析 fee（如有），或返回 None。已知限制：OKX 的 market order REST 响应中 fee 可能为空（需 fetch_order 才能拿到完整 fee），因此 OKX 模式下 TradeRecord.fee 可能不完整
 - `tools_execution.py`：统一从 `Order.fee` 读取并写入 TradeRecord
 
 这样 fee 信息通过接口层传递，上层不需要区分模拟/真实模式。
@@ -528,6 +529,8 @@ exchange:
 
 SimulatedExchange 使用 `watch_ticker()`（WebSocket），这是 ccxt Pro API。需要在 `pyproject.toml` 中将 `ccxt` 依赖改为 `ccxt[pro]`（ccxt Pro 包含标准版全部功能，向后兼容）。
 
+SimulatedExchange 内部使用一个无认证的 `ccxt.pro.okx` 实例，同时用于 REST API（K 线查询、种子 ticker）和 WebSocket（实时行情）。无需交易权限密钥——公开行情接口不需要认证。
+
 ### Session.initial_balance
 
 模拟交易所的初始资金来自 `Session.initial_balance`。首次启动时用此值初始化 sim_balances，后续启动从 sim_balances 恢复。
@@ -543,6 +546,7 @@ await exchange.start()                                       # 异步初始化
 │
 ├── 1. 从 sim_* 表查询该 session_id 的记录
 │      ├── 有 → 恢复余额、持仓、挂单（仅 sim_orders.status='open'）
+│      │        从 sim_positions.leverage 初始化 leverage 字典（持仓的杠杆即当前杠杆）
 │      └── 无 → 用 Session.initial_balance 初始化，写入 sim_balances
 ├── 2. 通过 REST API 拉取一次 ticker 写入 _latest_ticker（种子值，避免首次 tick 前竞态）
 ├── 3. 连接 OKX 公开 WebSocket（ticker 频道）
@@ -562,7 +566,15 @@ SimulatedExchange.close()
 
 ### Crash Recovery
 
-崩溃后重新启动走正常 Startup 流程，从 sim_* 表恢复状态。`_persist_state()` 使用单个 SQLAlchemy 事务（`async with session.begin()`）包裹 sim_balances、sim_positions、sim_orders 三张表的写入，保证原子性——要么全部成功，要么全部回滚，不会出现部分写入。
+崩溃后重新启动走正常 Startup 流程，从 sim_* 表恢复状态。
+
+`_persist_state()` 使用单个 SQLAlchemy 事务（`async with session.begin()`）包裹三张表的写入，保证原子性。各表写入策略：
+
+| 表 | 策略 | 说明 |
+|---|---|---|
+| sim_balances | upsert by session_id | 只有一行，直接覆盖 |
+| sim_positions | delete where session_id → insert current | 全量替换，平仓后该行被删除 |
+| sim_orders | 仅持久化 status='open' 的挂单 | filled/cancelled 的记录在状态变更时更新后保留（含 filled_price/filled_at，用于历史审计） |
 
 ## Interaction Flows
 
