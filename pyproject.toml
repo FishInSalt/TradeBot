@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pydantic-ai>=1.0",
     "pydantic>=2.0",
-    "ccxt[pro]>=4.0",
+    "ccxt>=4.0",
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
     "pandas>=2.0",
