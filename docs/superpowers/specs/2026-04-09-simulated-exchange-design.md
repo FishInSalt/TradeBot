@@ -87,11 +87,29 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `fetch_ticker(symbol)` | 返回 WebSocket 缓存的最新 ticker（含 bid/ask） |
 | `fetch_ohlcv(symbol, timeframe, limit)` | 通过 OKX REST 公开 API 获取 K 线（无需认证） |
 | `create_order(symbol, side, order_type, amount, price)` | 见下方「订单处理」 |
-| `fetch_balance()` | 从内部状态返回 Balance(total, free, used) |
-| `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl |
+| `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)` |
+| `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
 | `set_leverage(symbol, leverage)` | 记录到内部状态 |
 | `amount_to_precision(symbol, amount)` | 固定精度规则（BTC: 3 位小数） |
 | `close()` | 停止撮合循环，断开 WebSocket |
+
+构造函数 `__init__(config, db_engine, session_id)` 不属于 `BaseExchange` 接口。不同实现有不同的构造参数（`OKXExchange` 需要 API 密钥，`SimulatedExchange` 需要 db_engine 和 session_id）。实例化由 `app.py` 中的工厂逻辑根据 `exchange.name` 配置决定。
+
+### fetch_positions() 计算公式
+
+```python
+unrealized_pnl:
+  long:  (ticker.bid - entry_price) * contracts
+  short: (entry_price - ticker.ask) * contracts
+
+liquidation_price:
+  long:  entry_price * (1 - 1 / leverage)
+  short: entry_price * (1 + 1 / leverage)
+```
+
+### set_leverage() 与 create_order() 的隐式依赖
+
+`set_leverage(symbol, leverage)` 将杠杆值存入内部状态。后续 `create_order()` 从内部状态读取当前杠杆来计算保证金。这对齐真实交易所的行为——OKX 也是先设置杠杆，后续下单按已设杠杆执行。
 
 额外的公开方法：
 
@@ -105,12 +123,19 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 
 `create_order(symbol, side="buy", order_type="market", amount=0.001)` 时同步处理：
 
-1. 校验余额是否足够 → 不够则抛异常（对齐真实交易所的拒单行为）
-2. 确定成交价：买入用 `ticker.ask`，卖出用 `ticker.bid`
-3. 计算手续费：`fill_price * amount * fee_rate`
-4. 更新内部状态：扣保证金 + 手续费，创建/更新持仓
+1. 确定成交价：买入用 `ticker.ask`，卖出用 `ticker.bid`
+2. 计算保证金和手续费：
+   ```
+   margin = (price * amount) / leverage
+   fee = price * amount * fee_rate
+   required = margin + fee
+   ```
+3. 校验余额：`free_usdt >= required`，不够则抛异常（对齐真实交易所的拒单行为）
+4. 更新内部状态：
+   - 余额：`free_usdt -= required`，`used_usdt += margin`
+   - 持仓：如果同 symbol 同方向已有持仓，合并并计算加权均价（对齐 OKX 行为）；否则创建新持仓
 5. 持久化到 sim_* 表
-6. 返回 `Order(id, symbol, side, "market", amount, fill_price, "closed")`
+6. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
 
 ### Conditional Order (stop / take_profit)
 
@@ -123,6 +148,14 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 
 挂单不立即成交，由撮合引擎在后续 tick 中触发。
 
+### Position Close and Order Cancellation
+
+当持仓被平仓时（无论是市价平仓还是条件单触发），该 symbol 的所有残留条件单自动取消。对齐真实交易所行为——无持仓时条件单无意义。
+
+### Duplicate Conditional Orders
+
+同一持仓可以设置多个条件单（对齐 OKX 行为）。例如 agent 先设止损 95000，再设止损 94000，两个条件单共存，先触发的执行后，另一个随持仓平仓自动取消（见上条）。
+
 ## Matching Engine
 
 撮合引擎是 SimulatedExchange 内部的一个 async task，由 WebSocket 行情驱动：
@@ -133,17 +166,25 @@ async def _matching_loop(self):
         ticker = await self._watch_ticker()   # 阻塞等待下一个 WebSocket tick
         self._latest_ticker = ticker          # 缓存供 fetch_ticker() 使用
 
+        # 使用同一个 ticker 快照进行触发判断和成交，避免中间价格变化
         triggered = []
         for order in self._pending_orders:
             if self._should_trigger(order, ticker):
                 fill = self._execute_fill(order, ticker)
                 triggered.append(fill)
 
-        for fill in triggered:
-            self._pending_orders.remove(fill.order)
+        if triggered:
+            # 同一 tick 触发的多个条件单，批量更新后统一持久化
+            for fill in triggered:
+                self._pending_orders.remove(fill.order)
+            # 平仓后自动取消该 symbol 的残留条件单
+            self._cancel_orphaned_orders()
             await self._persist_state()
-            await self._notify_fill(fill)     # 触发回调 → Scheduler
+            for fill in triggered:
+                await self._notify_fill(fill)   # 触发回调 → Scheduler
 ```
+
+**WebSocket 断连处理**：ccxt 的 `watch_ticker` 内置自动重连机制。断连期间撮合循环阻塞在 `_watch_ticker()` 上，不会产生错误触发。重连后自动恢复，挂单继续按最新行情检查。
 
 ### Trigger Conditions
 
@@ -189,6 +230,15 @@ used_usdt: float   # 冻结保证金
 # total_usdt = free_usdt + used_usdt
 ```
 
+### Leverage
+
+```python
+# symbol → int
+{ "BTC/USDT:USDT": 3 }
+```
+
+由 `set_leverage()` 写入，`create_order()` 读取来计算保证金。
+
 ### Positions
 
 ```python
@@ -201,6 +251,18 @@ used_usdt: float   # 冻结保证金
         leverage: 3
     }
 }
+```
+
+`fetch_positions()` 返回时，`unrealized_pnl` 和 `liquidation_price` 根据上方公式实时计算，不存储。
+
+### Adding to Position (加仓)
+
+同 symbol 同方向再次开仓时，合并持仓并计算加权均价（对齐 OKX 行为）：
+
+```
+new_entry_price = (old_entry * old_contracts + fill_price * new_contracts)
+                  / (old_contracts + new_contracts)
+new_contracts = old_contracts + new_contracts
 ```
 
 ### Pending Orders
@@ -258,7 +320,32 @@ used_usdt: float   # 冻结保证金
 | amount | float | 数量 |
 | trigger_price | float | 触发价格 |
 | status | str | open / filled / cancelled |
+| filled_price | float, nullable | 实际成交价（filled 时写入） |
+| filled_at | datetime, nullable | 成交时间（filled 时写入） |
 | created_at | datetime | 创建时间 |
+
+## BaseExchange Interface Changes
+
+### Order dataclass 新增 fee 字段
+
+```python
+@dataclass
+class Order:
+    id: str
+    symbol: str
+    side: str
+    order_type: str
+    amount: float
+    price: float | None
+    status: str
+    fee: float | None = None   # 新增：成交手续费
+```
+
+- `SimulatedExchange`：在 `create_order()` 中计算并填入 fee
+- `OKXExchange`：从 ccxt 响应中解析 fee（如有），或返回 None
+- `tools_execution.py`：统一从 `Order.fee` 读取并写入 TradeRecord
+
+这样 fee 信息通过接口层传递，上层不需要区分模拟/真实模式。
 
 ## TradeRecord Changes
 
@@ -267,6 +354,8 @@ used_usdt: float   # 冻结保证金
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | fee | float, nullable | 该笔交易累计手续费（开仓时写入开仓手续费，平仓时追加平仓手续费） |
+
+`tools_execution.py` 中 `_record_trade_open()` 和 `_update_trade_closed()` 从 `Order.fee` 读取手续费并写入此字段。
 
 ## Configuration
 
@@ -423,7 +512,10 @@ main.py                  SimulatedExchange              DB (sim_*)
 
 | File | Change |
 |---|---|
+| `src/integrations/exchange/base.py` | `Order` dataclass 新增 `fee: float \| None = None` 字段 |
+| `src/integrations/exchange/okx.py` | `create_order()` 从 ccxt 响应解析 fee 并填入 Order |
 | `src/storage/models.py` | Add `SimBalance`, `SimPosition`, `SimOrder` tables; add `fee` field to `TradeRecord` |
+| `src/agent/tools_execution.py` | `_record_trade_open()` / `_update_trade_closed()` 从 Order.fee 读取手续费写入 TradeRecord |
 | `src/config.py` | Add `fee_rate` to `ExchangeConfig` |
 | `config/settings.yaml` | Add `fee_rate` config |
 | `src/cli/app.py` | Route exchange creation by `exchange.name`; register fill callback |
@@ -439,11 +531,8 @@ main.py                  SimulatedExchange              DB (sim_*)
 
 | File | Reason |
 |---|---|
-| `src/agent/tools_execution.py` | Operates through BaseExchange interface |
-| `src/agent/tools_perception.py` | Same |
+| `src/agent/tools_perception.py` | Operates through BaseExchange interface |
 | `src/agent/trader.py` | Same |
-| `src/integrations/exchange/base.py` | Interface unchanged |
-| `src/integrations/exchange/okx.py` | No changes needed |
 
 ## Scope Boundaries
 
