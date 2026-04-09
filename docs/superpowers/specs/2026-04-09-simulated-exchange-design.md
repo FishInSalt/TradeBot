@@ -9,6 +9,7 @@
 1. **对齐真实交易所行为** — SimulatedExchange 的行为边界和真实交易所一致。遇到设计决策时，以真实交易所的行为为准。
 2. **上层无感知** — Agent tools 通过 `BaseExchange` 接口操作，不区分真实/模拟环境。
 3. **自治** — SimulatedExchange 自己管理行情接收、订单撮合、内部状态和持久化，不依赖上层的数据。
+4. **安全护栏优先** — 当对齐真实交易所行为可能导致 agent 错误操作引发意外后果时（如意外反向开仓、穿仓负余额），选择更安全的行为。此类偏离在文档中标注 `[安全护栏]`。
 
 ## Architecture
 
@@ -163,7 +164,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
    ```
 3. 更新内部状态：
    - 释放保证金：`used_usdt -= (entry_price * amount) / leverage`，`free_usdt += released_margin + pnl - fee`。注：entry_price 是加权均价，`weighted_avg * total_amount == Σ(price_i * amount_i)`，所以即使经过加仓，按均价释放保证金总额是正确的
-   - 如果 amount >= position.contracts，全部平仓并移除持仓；如果 amount < position.contracts，减少 contracts（部分平仓）。如果 amount > position.contracts，clamp 到 position.contracts（防止 agent 错误输入意外反向开仓）
+   - 如果 amount >= position.contracts，全部平仓并移除持仓；如果 amount < position.contracts，减少 contracts（部分平仓）。`[安全护栏]` 如果 amount > position.contracts，clamp 到 position.contracts（OKX 净仓模式下超额 sell 会反向开空仓，但这里选择更安全的行为防止 agent 错误输入意外反向开仓）
    - 取消该 symbol 的所有残留条件单（全部平仓时）
 4. 持久化到 sim_* 表
 5. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
@@ -172,7 +173,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 
 `create_order(symbol, side="sell", order_type="stop", amount=0.001, price=95000)` 时：
 
-1. 校验订单参数；如果当前无持仓，抛异常（对齐真实交易所——无持仓时条件单无意义）
+1. 校验订单参数；如果当前无持仓，抛异常（对齐真实交易所——无持仓时条件单无意义）。注：创建时不校验 amount <= position.contracts，因为持仓量可能在创建后变化（加仓/部分平仓）。触发时以 `min(order.amount, position.contracts)` 实际执行
 2. 从当前持仓推导 position_side，加入内部挂单列表
 3. 持久化到 sim_orders 表
 4. 返回 `Order(id, symbol, side, "stop", amount, price, "open")`
@@ -207,7 +208,8 @@ async def _matching_loop(self):
         async with self._lock:
             # 1. 清算检查：价格穿越 liquidation_price 时强制平仓
             # _force_liquidate 复用 Close Position 逻辑（计算 PnL、释放保证金、移除持仓、取消条件单）
-            # 清算后保证金几乎全部亏完：free_usdt += released_margin + pnl(≈-margin) - fee ≈ 0
+            # [安全护栏] PnL cap: pnl = max(pnl, -released_margin)，防止价格缺口导致负余额
+            # 简化公式下 pnl 精确等于 -margin，free_usdt += margin + (-margin) - fee = -fee
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
                 if pos.side == "long" and ticker.bid <= liq:
@@ -269,6 +271,7 @@ class FillEvent:
     symbol: str
     side: str              # "buy" / "sell"（订单方向）
     position_side: str     # "long" / "short"（被平仓的持仓方向，用于匹配 TradeRecord）
+    trigger_reason: str    # "stop" / "take_profit" / "liquidation"（触发原因，agent 可据此调整反思策略）
     fill_price: float
     amount: float
     fee: float
@@ -350,7 +353,7 @@ Balance(
 )
 ```
 
-注：内部存储的 `free_usdt` 不含 unrealized_pnl，仅在 `fetch_balance()` 返回时动态加上。这避免了每次 tick 都更新存储。
+注：内部存储的 `free_usdt` 不含 unrealized_pnl，仅在 `fetch_balance()` 返回时动态加上。这避免了每次 tick 都更新存储。unrealized_pnl 基于 `_latest_ticker` 计算，与 `fetch_ticker()` 语义一致——WebSocket 断连或启动初期使用最后可用 ticker，是 best-effort 估算值。
 
 ### Leverage
 
@@ -574,7 +577,7 @@ SimulatedExchange.close()
 |---|---|---|
 | sim_balances | upsert by session_id | 只有一行，直接覆盖 |
 | sim_positions | delete where session_id → insert current | 全量替换，平仓后该行被删除 |
-| sim_orders | 仅持久化 status='open' 的挂单 | filled/cancelled 的记录在状态变更时更新后保留（含 filled_price/filled_at，用于历史审计） |
+| sim_orders | UPDATE + upsert，不删除历史 | 本轮 filled/cancelled 的 order 执行 UPDATE（写入 status、filled_price、filled_at）；open orders 执行 upsert。历史记录保留用于审计 |
 
 ## Interaction Flows
 
@@ -732,3 +735,4 @@ main.py                  SimulatedExchange              DB (sim_*)
 - 多市场支持（现货、股票）
 - 精确清算价计算（含维持保证金率）
 - amount_to_precision 从 REST API market info 自动获取（当前手动配置）
+- WebSocket 长时间无 tick 的超时处理（BTC/USDT 主流交易对下极不可能发生）
