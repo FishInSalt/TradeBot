@@ -68,6 +68,7 @@ async def run_agent_cycle(
     trigger_type: str,
     budget: TokenBudget,
     engine,
+    context=None,
 ):
     if budget.exhausted:
         logger.warning("Daily LLM token budget exhausted, skipping cycle")
@@ -80,6 +81,11 @@ async def run_agent_cycle(
         "Analyze the current market, check your positions, and decide what to do.\n"
         "Use your tools to gather data before making a decision."
     )
+    if context is not None and hasattr(context, "trigger_reason"):
+        prompt += (
+            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
+            f"— {context.symbol} {context.amount} @ {context.fill_price}"
+        )
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":
@@ -137,7 +143,6 @@ async def run(
     settings = load_settings(settings_path)
     trader_config = load_trader_config(trader_path)
 
-    console.print(f"Exchange: {settings.exchange.name} (REAL account)")
     console.print(f"Symbol: {settings.trading.symbol} | Timeframe: {settings.trading.timeframe}")
     console.print(f"Approval: {'ON' if settings.approval.enabled else 'OFF'}")
     console.print(
@@ -178,11 +183,22 @@ async def run(
             logger.info(f"Resumed session: {trading_session.id}")
     session_id = trading_session.id
 
-    exchange = OKXExchange(
-        api_key=settings.exchange.api_key,
-        secret=settings.exchange.secret,
-        password=settings.exchange.password,
-    )
+    if settings.exchange.name == "simulated":
+        from src.integrations.exchange.simulated import SimulatedExchange
+        exchange = SimulatedExchange(
+            config=settings.exchange,
+            db_engine=engine,
+            session_id=session_id,
+            symbol=settings.trading.symbol,
+        )
+        console.print("Exchange: simulated (local matching)")
+    else:
+        exchange = OKXExchange(
+            api_key=settings.exchange.api_key,
+            secret=settings.exchange.secret,
+            password=settings.exchange.password,
+        )
+        console.print(f"Exchange: {settings.exchange.name} (REAL account)")
     market_data = MarketDataService(exchange)
     technical = TechnicalAnalysisService()
     llm_router = LLMRouter(settings.models)
@@ -240,12 +256,30 @@ async def run(
         if shutdown_event.is_set():
             return
         try:
-            await run_agent_cycle(agent, deps, trigger_type, budget, engine)
+            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context)
         except Exception:
             logger.exception("Agent cycle failed")
 
     interval = settings.scheduler.interval_minutes * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
+
+    # Register fill handler for simulated exchange
+    if settings.exchange.name == "simulated":
+        from src.integrations.exchange.simulated import FillEvent
+
+        def _create_fill_handler(sched):
+            async def handle_fill(event: FillEvent):
+                try:
+                    pass  # Agent layer recording — out of scope for this phase
+                finally:
+                    await sched.trigger("conditional", context=event)
+            return handle_fill
+
+        exchange.on_fill(_create_fill_handler(scheduler))
+
+    # Start exchange (simulated needs async start for WebSocket + state restore)
+    if settings.exchange.name == "simulated":
+        await exchange.start()
 
     console.print(
         f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min[/]"
