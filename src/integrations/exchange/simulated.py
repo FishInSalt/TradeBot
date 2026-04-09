@@ -62,8 +62,8 @@ class SimulatedExchange(BaseExchange):
         self._db_engine = db_engine
         self._session_id = session_id
         self._symbol = symbol
-        self._fee_rate: float = config.fee_rate or 0.0005
-        self._precision: dict[str, int] = config.precision or {}
+        self._fee_rate: float = config.fee_rate if config.fee_rate is not None else 0.0005
+        self._precision: dict[str, int] = config.precision if config.precision is not None else {}
 
         # Internal state (initialized in start() or directly for tests)
         self._free_usdt: float = 0.0
