@@ -238,11 +238,12 @@ async def _matching_loop(self):
 class FillEvent:
     order_id: str
     symbol: str
-    side: str          # "buy" / "sell"
+    side: str              # "buy" / "sell"（订单方向）
+    position_side: str     # "long" / "short"（被平仓的持仓方向，用于匹配 TradeRecord）
     fill_price: float
     amount: float
     fee: float
-    pnl: float         # 平仓盈亏（仅平仓时有值）
+    pnl: float             # 平仓盈亏
     timestamp: int
 ```
 
@@ -251,11 +252,11 @@ class FillEvent:
 fill_handler 是连接 SimulatedExchange 和上层系统的胶水层，定义在 `app.py` 中：
 
 ```python
-def _create_fill_handler(db_engine, session_id, scheduler):
+def _create_fill_handler(deps: TradingDeps, scheduler):
     async def handle_fill(event: FillEvent):
-        # 1. 更新 TradeRecord
+        # 1. 更新 TradeRecord（用 position_side 匹配 "long"/"short"）
         await _update_trade_closed(
-            deps, event.symbol, event.side,
+            deps, event.symbol, event.position_side,
             pnl=event.pnl, exit_price=event.fill_price, fee=event.fee
         )
         # 2. 唤醒 agent
@@ -263,10 +264,10 @@ def _create_fill_handler(db_engine, session_id, scheduler):
     return handle_fill
 
 # 注册回调
-exchange.on_fill(_create_fill_handler(db_engine, session_id, scheduler))
+exchange.on_fill(_create_fill_handler(deps, scheduler))
 ```
 
-通过闭包捕获 db_engine、session_id、scheduler 引用，调用现有的 `_update_trade_closed()` 写 TradeRecord。
+通过闭包捕获 `deps`（含 db_engine、session_id 等）和 `scheduler` 引用，调用现有的 `_update_trade_closed()` 写 TradeRecord。
 
 ### Scheduler.trigger() 语义
 
