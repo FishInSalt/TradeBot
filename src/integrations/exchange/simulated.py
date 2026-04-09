@@ -345,6 +345,108 @@ class SimulatedExchange(BaseExchange):
     def _has_position(self, symbol: str) -> bool:
         return symbol in self._positions
 
+    # --- Matching engine ---
+
+    def _should_trigger(self, order: _PendingOrder, ticker: Ticker) -> bool:
+        if order.order_type == "stop":
+            if order.position_side == "long":
+                return ticker.bid <= order.trigger_price
+            else:
+                return ticker.ask >= order.trigger_price
+        elif order.order_type == "take_profit":
+            if order.position_side == "long":
+                return ticker.bid >= order.trigger_price
+            else:
+                return ticker.ask <= order.trigger_price
+        return False
+
+    def _execute_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent:
+        pos = self._positions[order.symbol]
+        actual_amount = min(order.amount, pos.contracts)
+        fill_price = ticker.bid if pos.side == "long" else ticker.ask
+        pnl, fee, _ = self._close_position_core(
+            order.symbol, pos.side, actual_amount, fill_price,
+        )
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        return FillEvent(
+            order_id=order.id, symbol=order.symbol, side=order.side,
+            position_side=order.position_side, trigger_reason=order.order_type,
+            fill_price=fill_price, amount=actual_amount, fee=fee,
+            timestamp=now_ms,
+        )
+
+    def _force_liquidate(self, pos: _Position, symbol: str, price: float) -> FillEvent:
+        contracts = pos.contracts  # capture before close deletes pos
+        pnl, fee, _ = self._close_position_core(
+            symbol, pos.side, contracts, price, pnl_cap=True,
+        )
+        order_id = str(uuid.uuid4())
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        logger.warning(f"LIQUIDATION: {pos.side} {contracts} {symbol} @ {price:.2f}")
+        return FillEvent(
+            order_id=order_id, symbol=symbol,
+            side="sell" if pos.side == "long" else "buy",
+            position_side=pos.side, trigger_reason="liquidation",
+            fill_price=price, amount=contracts, fee=fee,
+            timestamp=now_ms,
+        )
+
+    async def _process_tick(self, ticker: Ticker) -> None:
+        """Process a single tick -- check liquidations and conditional orders."""
+        self._latest_ticker = ticker
+
+        triggered: list[FillEvent] = []
+        filled_order_ids: list[str] = []
+        new_orders: list[tuple[Order, str]] = []
+
+        async with self._lock:
+            # 1. Liquidation check (must be before conditional orders)
+            for symbol, pos in list(self._positions.items()):
+                liq = self._calc_liquidation_price(pos)
+                if pos.side == "long" and ticker.bid <= liq:
+                    fill = self._force_liquidate(pos, symbol, ticker.bid)
+                    triggered.append(fill)
+                    new_orders.append((Order(
+                        id=fill.order_id, symbol=symbol,
+                        side="sell", order_type="liquidation",
+                        amount=fill.amount, price=fill.fill_price,
+                        status="closed", fee=fill.fee,
+                    ), fill.position_side))
+                elif pos.side == "short" and ticker.ask >= liq:
+                    fill = self._force_liquidate(pos, symbol, ticker.ask)
+                    triggered.append(fill)
+                    new_orders.append((Order(
+                        id=fill.order_id, symbol=symbol,
+                        side="buy", order_type="liquidation",
+                        amount=fill.amount, price=fill.fill_price,
+                        status="closed", fee=fill.fee,
+                    ), fill.position_side))
+
+            # 2. Conditional order check
+            for order in list(self._pending_orders):
+                if self._should_trigger(order, ticker):
+                    if not self._has_position(order.symbol):
+                        continue
+                    fill = self._execute_fill(order, ticker)
+                    triggered.append(fill)
+                    filled_order_ids.append(order.id)
+
+            if triggered:
+                for fill in triggered:
+                    self._remove_order_by_id(fill.order_id)
+                self._cancel_orphaned_orders()
+                if self._db_engine:
+                    await self._persist_state(
+                        new_orders=new_orders,
+                        filled_order_ids=filled_order_ids,
+                        fill_events=triggered,
+                    )
+
+        # Notify outside lock
+        for fill in triggered:
+            if self._fill_callback:
+                await self._fill_callback(fill)
+
     # --- Order query methods ---
 
     async def fetch_order(self, order_id: str, symbol: str | None = None) -> Order:
