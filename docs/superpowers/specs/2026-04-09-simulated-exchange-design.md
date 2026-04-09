@@ -161,12 +161,12 @@ unrealized_pnl:
   long:  (ticker.bid - entry_price) * contracts
   short: (entry_price - ticker.ask) * contracts
 
-liquidation_price (simplified, ignores maintenance margin rate):
-  long:  entry_price * (1 - 1 / leverage)
-  short: entry_price * (1 + 1 / leverage)
+liquidation_price (simplified, includes fee_rate but ignores maintenance margin rate):
+  long:  entry_price * (1 - 1 / leverage) / (1 - fee_rate)
+  short: entry_price * (1 + 1 / leverage) / (1 + fee_rate)
 ```
 
-注：清算价公式是简化版本，真实 OKX 还考虑维持保证金率。当前规模下差异极小，精确清算价模拟列为 out of scope。
+注：清算价公式包含 fee_rate 以确保清算一定先于条件单在负余额价位触发（不计入 fee 会产生约 $45-55 的窗口，导致条件单成交后 free_usdt 为负并触发防御性异常）。真实 OKX 还考虑维持保证金率，精确模拟列为 out of scope。
 
 ### set_leverage() 与 create_order() 的隐式依赖
 
@@ -203,7 +203,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 4. 更新内部状态：
    - 余额：`free_usdt -= required`，`used_usdt += margin`
    - 持仓：如果同 symbol 同方向已有持仓，校验 leverage 一致（不一致则抛异常 `[安全护栏]`——要求 agent 先平仓再用新杠杆开仓，避免多杠杆保证金账不平），然后合并并计算加权均价；否则创建新持仓
-5. 持久化到 sim_* 表（余额和持仓通过 _persist_state()，市价单订单记录直接 INSERT 到 sim_orders，status='closed'，独立于 _persist_state() 事务——市价单同步完成无中间状态）
+5. 持久化到 sim_* 表：将市价单订单记录（status='closed'）一并纳入 _persist_state() 事务，与余额/持仓原子写入（传入 optional 的 order 记录列表）
 6. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
 
 #### Close Position (平仓)
@@ -253,6 +253,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 ```python
 async def _matching_loop(self):
     while self._running:
+      try:
         ticker = await self._watch_ticker()   # 阻塞等待下一个 WebSocket tick
 
         # _latest_ticker 在 lock 外更新，是 best-effort 缓存值
@@ -300,6 +301,10 @@ async def _matching_loop(self):
         # （asyncio.Lock 不可重入，同一 task 再次 acquire 会永久阻塞）
         for fill in triggered:
             await self._notify_fill(fill)
+      except Exception:
+        logger.error("Matching loop error", exc_info=True)
+        # log + continue：单次 tick 处理失败不应导致整个撮合循环崩溃
+        # 下一个 tick 会重新检查所有条件
 ```
 
 **并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。使用 `asyncio.Lock` 保护所有内部状态修改操作（balance/positions/pending_orders）。关键约束：`_notify_fill()` 必须在 lock 释放后执行，因为通知链路（fill → fill_handler → scheduler.trigger → agent_cycle → create_order）会重新请求 lock。
@@ -350,7 +355,7 @@ class FillEvent:
 
 - `_execute_fill(order, ticker)` — 条件单触发时调用，内部调用 `_close_position_core(pnl_cap=False)` 完成平仓，返回 FillEvent
 - `_force_liquidate(pos, price)` — 清算触发时调用，内部调用 `_close_position_core(pnl_cap=True)`，返回 FillEvent
-- `_close_position_core(symbol, side, amount, fill_price, *, pnl_cap: bool = False)` — 共享核心逻辑，执行顺序：
+- `_close_position_core(symbol, side, amount, fill_price, *, pnl_cap: bool = False)` — 共享核心逻辑。`side` 为 position side（"long"/"short"），用于 PnL 方向计算。执行顺序：
   1. 计算 PnL
   2. 如果 `pnl_cap=True`：`pnl = max(pnl, -(released_margin - fee))`
   3. 更新余额（free_usdt, used_usdt）
@@ -364,16 +369,19 @@ fill_handler 是连接 SimulatedExchange 和上层系统的胶水层，定义在
 ```python
 def _create_fill_handler(scheduler):
     async def handle_fill(event: FillEvent):
-        # 1. agent 层自行处理成交事件（记录交易日志等，具体方案在 agent 层设计中定义）
-        # 2. 唤醒 agent
-        await scheduler.trigger("conditional", context=event)
+        try:
+            # agent 层自行处理成交事件（非关键路径，具体方案在 agent 层设计中定义）
+            ...
+        finally:
+            # 关键保证：无论 agent 层处理是否成功，必须唤醒 agent
+            await scheduler.trigger("conditional", context=event)
     return handle_fill
 
 # 注册回调（在 start() 之前）
 exchange.on_fill(_create_fill_handler(scheduler))
 ```
 
-fill_handler 的核心职责是**唤醒 agent**。Agent 层如何记录成交事件（交易日志、决策结果等）由 agent 层设计决定，不在本 spec 范围内。关键保证：即使 agent 层的记录逻辑失败，scheduler.trigger 仍必须执行，确保 agent 被唤醒能感知最新状态。
+fill_handler 的核心职责是**唤醒 agent**。Agent 层如何记录成交事件由 agent 层设计决定，不在本 spec 范围内。try/finally 保证即使记录逻辑失败，scheduler.trigger 仍执行。
 
 ### Scheduler.trigger() 语义
 
@@ -393,12 +401,15 @@ async def trigger(self, trigger_type: str, context: Any | None = None):
     # trigger() 不直接运行 cycle——避免两个问题：
     # 1. 与 _scheduler_loop 并发执行 agent cycle
     # 2. 阻塞 matching loop task（整个 agent cycle 期间无法处理 tick）
-    self._pending_trigger = True
-    self._pending_context = context
+    if self._pending_trigger:
+        self._pending_context = None  # 多个事件合并，置 None 让 agent 自行查询
+    else:
+        self._pending_trigger = True
+        self._pending_context = context
     self._wake_event.set()  # 唤醒 scheduler 从 sleep 中返回
 
 async def _scheduler_loop(self):
-    while not self._stopped:
+    while self._running:
         # 可中断的 sleep（复用现有 _stop_event.wait 模式）
         # trigger() 的 _wake_event.set() 或 stop() 都能打断
         await self._interruptible_sleep(self._interval)
@@ -430,6 +441,8 @@ async def _run_cycle(self, trigger_type, context):
 ```
 
 关键设计：**scheduler loop 是唯一运行 agent cycle 的地方**。trigger() 只设 flag + 唤醒，不直接执行。这保证了：(a) 任何时刻最多一个 cycle 在运行，(b) matching loop 不被阻塞。pending flag 合并策略假设单 symbol（与 Scope Boundaries 对齐）。
+
+**cooldown 处理**：现有 scheduler.py 有 cooldown_seconds 参数。在新设计中，cooldown 被 `_interruptible_sleep(interval)` 替代——interval 本身保证了定时 cycle 间的间隔，event trigger 明确绕过间隔（时间敏感）。实现时可移除独立的 cooldown 参数，或将其保留为 interval 的别名。
 
 callback 签名变更：
 
@@ -606,6 +619,7 @@ class Order:
 |---|---|---|
 | `"open"` | 触发价格 | trigger_price |
 | `"closed"` | 实际成交价 | filled_price |
+| `"cancelled"` | 触发价格 | trigger_price |
 
 ### 新增三个查询方法
 
@@ -627,6 +641,8 @@ class BaseExchange(ABC):
 - `SimulatedExchange`：从 sim_orders 查询实现
 
 sim_orders 需要同时记录市价单和条件单（order_type 扩展为 market/stop/take_profit/liquidation），市价单在成交时直接写入 status='closed'。这样 agent 可以像查真实交易所一样获取完整的订单历史。
+
+**市价单 position_side 规则**：开仓时为新仓方向（buy→long, sell→short），平仓时为被平仓方向（sell long→long, buy short→short）。由 create_order 内部的持仓推断逻辑决定。
 
 ## Configuration
 
