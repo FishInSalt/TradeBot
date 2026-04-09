@@ -90,7 +90,7 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `create_order(symbol, side, order_type, amount, price)` | 见下方「订单处理」。symbol 必须匹配 Session 配置的交易对，否则抛异常 |
 | `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)`，含未实现盈亏（见下方公式） |
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
-| `set_leverage(symbol, leverage)` | 记录到内部状态 |
+| `set_leverage(symbol, leverage)` | 校验范围（1-125，对齐 OKX 上限 `[安全护栏]`），记录到内部状态 |
 | `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额） |
 | `close()` | 停止撮合循环，断开 WebSocket |
 
@@ -165,7 +165,12 @@ liquidation_price (simplified, ignores maintenance margin rate):
 3. 更新内部状态：
    - 释放保证金：`used_usdt -= (entry_price * amount) / leverage`，`free_usdt += released_margin + pnl - fee`。注：entry_price 是加权均价，`weighted_avg * total_amount == Σ(price_i * amount_i)`，所以即使经过加仓，按均价释放保证金总额是正确的
    - 如果 amount >= position.contracts，全部平仓并移除持仓；如果 amount < position.contracts，减少 contracts（部分平仓）。`[安全护栏]` 如果 amount > position.contracts，clamp 到 position.contracts（OKX 净仓模式下超额 sell 会反向开空仓，但这里选择更安全的行为防止 agent 错误输入意外反向开仓）。返回的 Order.amount 为实际成交量（clamp 后的值），上层据此记录准确的交易量
-   - 取消该 symbol 的所有残留条件单（全部平仓时）
+
+以上步骤 1-3 为**核心平仓逻辑**（`_close_position_core`），由 agent 市价平仓、撮合引擎条件单触发、强制清算三个场景共享。订单取消**不包含在核心逻辑中**，由调用方负责：
+
+- **Agent 市价平仓**（`create_order`）：调用核心逻辑 + 取消该 symbol 所有条件单
+- **撮合引擎条件单/清算触发**：调用核心逻辑，由外层 `_remove_order_by_id` + `_cancel_orphaned_orders` 统一处理
+
 4. 持久化到 sim_* 表
 5. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
 
@@ -277,8 +282,9 @@ class FillEvent:
     fill_price: float
     amount: float
     fee: float
-    pnl: float             # 平仓盈亏
     timestamp: int
+    # 注：不含 pnl 字段。PnL 由 TradeRecord 的 entry_price/exit_price/quantity/side/fee 推导，
+    # 不作为冗余值传递。交易所内部仍计算 PnL 用于余额更新，但不对外暴露。
 ```
 
 ### fill_handler (app.py)
@@ -289,10 +295,15 @@ fill_handler 是连接 SimulatedExchange 和上层系统的胶水层，定义在
 def _create_fill_handler(deps: TradingDeps, scheduler):
     async def handle_fill(event: FillEvent):
         # 1. 更新 TradeRecord（用 position_side 匹配 "long"/"short"）
-        await _update_trade_closed(
-            deps, event.symbol, event.position_side,
-            pnl=event.pnl, exit_price=event.fill_price, fee=event.fee
-        )
+        # 注：side 参数语义为 position side（"long"/"short"），不是 order side（"buy"/"sell"）
+        try:
+            await _update_trade_closed(
+                deps, event.symbol, event.position_side,
+                exit_price=event.fill_price, fee=event.fee
+            )
+        except Exception:
+            logger.error("Failed to update TradeRecord for fill %s", event.order_id, exc_info=True)
+            # 不 return —— 交易所状态已更新，必须唤醒 agent 让其感知最新状态
         # 2. 唤醒 agent
         await scheduler.trigger("conditional", context=event)
     return handle_fill
@@ -332,7 +343,7 @@ async def on_tick(trigger_type: str, context: Any | None):
 
 - 定时触发时 Scheduler 调用 `callback("scheduled", None)`
 - 事件触发时 Scheduler 调用 `callback("conditional", fill_event)`
-- `run_agent_cycle` 新增 `context` 参数。当 context 非 None 时，在 agent prompt 中追加事件摘要：`"Event: {trigger_reason} triggered at {fill_price}, PnL: {pnl} USDT"`，让 agent 知道发生了什么并据此决策
+- `run_agent_cycle` 新增 `context` 参数。当 context 非 None 时，在 agent prompt 中追加事件摘要：`"Event: {trigger_reason} triggered at {fill_price}"`，让 agent 知道发生了什么并据此决策（agent 通过 fetch_balance/fetch_positions 查询最新状态获取完整信息）
 
 ## Internal State
 
@@ -357,6 +368,8 @@ Balance(
 ```
 
 注：内部存储的 `free_usdt` 不含 unrealized_pnl，仅在 `fetch_balance()` 返回时动态加上。这避免了每次 tick 都更新存储。unrealized_pnl 基于 `_latest_ticker` 计算，与 `fetch_ticker()` 语义一致——WebSocket 断连或启动初期使用最后可用 ticker，是 best-effort 估算值。
+
+注意：当 unrealized 亏损较大时，`total_usdt != free_usdt(returned) + used_usdt`。这是正确的——total 是 equity（含浮亏），free 被 clamp 到 0（不允许用浮亏资金开仓），两者是独立概念。Agent 的 perception tools 应使用 `free_usdt` 判断可用资金，使用 `total_usdt` 判断总权益。
 
 ### Leverage
 
@@ -485,27 +498,27 @@ class Order:
 
 ## TradeRecord Changes
 
-在现有 `TradeRecord` 表新增一个字段：
-
-| 字段 | 类型 | 说明 |
-|---|---|---|
-| fee | float, nullable | 该笔交易累计手续费（开仓 + 平仓） |
+| 变更 | 说明 |
+|---|---|
+| 移除 `pnl` 字段 | PnL 从 entry_price/exit_price/quantity/side/fee 推导，不再存储 |
+| 新增 `fee` 字段 (float, nullable) | 该笔交易累计手续费（开仓 + 平仓） |
 
 手续费累加规则：
 - `_record_trade_open()`：`record.fee = order.fee`（写入开仓手续费）
 - `_update_trade_closed()`：`record.fee = (record.fee or 0) + order.fee`（追加平仓手续费）
 
-`_update_trade_closed()` 签名变更：新增 `fee: float | None = None` 参数：
+`_update_trade_closed()` 签名变更：移除 `pnl` 参数，新增 `fee` 参数：
 
 ```python
 # 现有
 async def _update_trade_closed(deps, symbol, side, pnl, exit_price=None)
 
 # 变更为
-async def _update_trade_closed(deps, symbol, side, pnl, exit_price=None, fee=None)
+async def _update_trade_closed(deps, symbol, side, exit_price, fee=None)
+# 不再写入 pnl —— PnL 从 entry_price/exit_price/quantity/side/fee 推导
 ```
 
-### tools_execution.py 价格/PnL 准确性修复
+### tools_execution.py 价格准确性修复
 
 现有代码使用 `ticker.last` 近似 entry_price 和 exit_price，实际成交价（特别是模拟模式下）是 ask/bid。趁此次修改一并修复：
 
@@ -513,9 +526,29 @@ async def _update_trade_closed(deps, symbol, side, pnl, exit_price=None, fee=Non
 |---|---|---|
 | entry_price | `ticker.last` (tools_execution.py:144) | `order.price`（create_order 返回的实际成交价） |
 | exit_price | `ticker.last` (tools_execution.py:181) | `order.price` |
-| pnl | `p.unrealized_pnl`（平仓前估算值） | 从 `order.price` 和已知 `entry_price` 计算：`(order.price - entry_price) * contracts`（long）或反向（short） |
 
-这样 TradeRecord 中的价格和 PnL 都是基于实际成交价，两种 exchange 模式下行为一致。
+PnL 不再存储，由 `MetricsService` 从 entry_price/exit_price/quantity/side/fee 推导。
+
+### TradeRecord.pnl 字段移除
+
+移除现有 `TradeRecord.pnl` 字段。PnL 是 entry_price、exit_price、quantity、side、fee 的推导值，存储冗余字段会引入不一致风险（特别是加仓后部分平仓场景）。
+
+**MetricsService 改动**：从直接读 `t.pnl` 改为推导计算：
+
+```python
+def _calc_pnl(t: TradeRecord) -> float | None:
+    if t.exit_price is None:
+        return None
+    if t.side == "long":
+        gross = (t.exit_price - t.entry_price) * t.quantity
+    else:
+        gross = (t.entry_price - t.exit_price) * t.quantity
+    return gross - (t.fee or 0)
+```
+
+下游不变——total_pnl、win_rate、profit_factor、max_drawdown 仍基于 pnls 列表计算。
+
+**受影响的测试**：`tests/test_metrics.py` 需要重写（构造 TradeRecord 时用 entry/exit/quantity/side/fee 替代直接设 pnl）。
 
 ## Configuration
 
@@ -577,7 +610,7 @@ SimulatedExchange.close()
 
 ### Crash Recovery
 
-崩溃后重新启动走正常 Startup 流程，从 sim_* 表恢复状态。
+崩溃后重新启动走正常 Startup 流程，从 sim_* 表恢复状态。恢复语义为 **at-least-once**：如果 crash 发生在 `_persist_state()` 的 DB commit 之前，状态回退到上次成功持久化的点，条件单可能被重新触发。这在模拟环境下可接受。
 
 `_persist_state()` 使用单个 SQLAlchemy 事务（`async with session.begin()`）包裹三张表的写入，保证原子性。各表写入策略：
 
@@ -700,12 +733,14 @@ main.py                  SimulatedExchange              DB (sim_*)
 |---|---|
 | `src/integrations/exchange/base.py` | `Order` dataclass 新增 `fee: float \| None = None` 字段 |
 | `src/integrations/exchange/okx.py` | `create_order()` 从 ccxt 响应解析 fee 并填入 Order |
-| `src/storage/models.py` | Add `SimBalance`, `SimPosition`, `SimOrder` tables; add `fee` field to `TradeRecord` |
-| `src/agent/tools_execution.py` | `_update_trade_closed()` 新增 `fee` 参数（累加：`record.fee = (record.fee or 0) + fee`）；`_record_trade_open()` 写入 `order.fee`；entry_price/exit_price/pnl 改用 Order.price 计算 |
+| `src/storage/models.py` | Add `SimBalance`, `SimPosition`, `SimOrder` tables; TradeRecord: 移除 `pnl` 字段, 新增 `fee` 字段 |
+| `src/agent/tools_execution.py` | `_update_trade_closed()` 移除 `pnl` 参数, 新增 `fee` 参数；`_record_trade_open()` 写入 `order.fee`；entry_price/exit_price 改用 Order.price |
+| `src/services/metrics.py` | PnL 从直接读 `t.pnl` 改为从 entry_price/exit_price/quantity/side/fee 推导计算 |
+| `tests/test_metrics.py` | 重写：TradeRecord 构造改用 entry/exit/quantity/side/fee |
 | `src/config.py` | Add `fee_rate`, `precision` to `ExchangeConfig` |
 | `pyproject.toml` | `ccxt` → `ccxt[pro]`（WebSocket 支持） |
 | `config/settings.yaml` | Add `fee_rate` config |
-| `src/cli/app.py` | Route exchange creation by `exchange.name`; register fill callback |
+| `src/cli/app.py` | Route exchange creation by `exchange.name`; register fill callback; `run_agent_cycle` 新增 `context` 参数 |
 | `src/scheduler/scheduler.py` | Add event-based trigger support (`trigger("conditional")`) |
 
 ### New Files
