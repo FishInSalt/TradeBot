@@ -958,6 +958,7 @@ class SimulatedExchange(BaseExchange):
         self._lock = asyncio.Lock()
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._error_count = 0
+        self._last_order_position_side: str = ""
 
     def _validate_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
@@ -2114,19 +2115,9 @@ async def close(self) -> None:
     logger.info("SimulatedExchange closed")
 ```
 
-Also update `_process_tick` to call `_persist_state` when there are triggers:
+Note: `_process_tick` already includes `_persist_state()` calls with correct parameters (new_orders, filled_order_ids, filled_fills) from Task 7. No changes needed here.
 
-```python
-# In _process_tick, after the lock block, before notify:
-        if triggered:
-            for fill in triggered:
-                self._remove_order_by_id(fill.order_id)
-            self._cancel_orphaned_orders()
-            if self._db_engine:
-                await self._persist_state()
-```
-
-And update `fetch_ohlcv`:
+Update `fetch_ohlcv`:
 
 ```python
 async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]:
