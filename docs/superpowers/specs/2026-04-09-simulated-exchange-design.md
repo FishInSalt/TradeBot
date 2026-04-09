@@ -144,7 +144,7 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额） |
 | `fetch_order(order_id)` | 查询单个订单的当前状态，返回 Order（含 status: open/closed/cancelled） |
 | `fetch_open_orders(symbol)` | 返回该 symbol 所有未成交的条件单 |
-| `fetch_closed_orders(symbol, limit)` | 返回该 symbol 最近的已成交/已取消订单（limit 默认 20） |
+| `fetch_closed_orders(symbol, limit)` | 返回该 symbol 最近的已成交/已取消订单（ORDER BY created_at DESC，limit 默认 20） |
 | `close()` | 停止撮合循环，断开 WebSocket |
 
 构造函数和初始化拆分为两步（Python `__init__` 必须是同步方法）：
@@ -182,7 +182,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 
 ### Market Order
 
-`create_order(symbol, side, order_type="market", amount)` 时同步处理。根据当前持仓状态推断意图（对齐 OKX 净仓模式）：
+`create_order(symbol, side, order_type="market", amount)` 时同步处理。入口校验：symbol 匹配配置交易对、`amount > 0`，否则抛异常。根据当前持仓状态推断意图（对齐 OKX 净仓模式）：
 
 | 当前持仓 | side="buy" | side="sell" |
 |---|---|---|
@@ -203,7 +203,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 4. 更新内部状态：
    - 余额：`free_usdt -= required`，`used_usdt += margin`
    - 持仓：如果同 symbol 同方向已有持仓，校验 leverage 一致（不一致则抛异常 `[安全护栏]`——要求 agent 先平仓再用新杠杆开仓，避免多杠杆保证金账不平），然后合并并计算加权均价；否则创建新持仓
-5. 持久化到 sim_* 表
+5. 持久化到 sim_* 表（余额和持仓通过 _persist_state()，市价单订单记录直接 INSERT 到 sim_orders，status='closed'，独立于 _persist_state() 事务——市价单同步完成无中间状态）
 6. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
 
 #### Close Position (平仓)
@@ -221,7 +221,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 
 以上步骤 1-3 为**核心平仓逻辑**（`_close_position_core`），由 agent 市价平仓、撮合引擎条件单触发、强制清算三个场景共享。订单取消**不包含在核心逻辑中**，由调用方负责：
 
-- **Agent 市价平仓**（`create_order`）：调用核心逻辑 + 取消该 symbol 所有条件单
+- **Agent 市价平仓**（`create_order`）：调用核心逻辑 + `_cancel_orphaned_orders`（仅在持仓完全移除后取消条件单，部分平仓不影响挂单，对齐真实交易所行为）
 - **撮合引擎条件单/清算触发**：调用核心逻辑，由外层 `_remove_order_by_id` + `_cancel_orphaned_orders` 统一处理
 
 4. 持久化到 sim_* 表
@@ -340,7 +340,7 @@ class FillEvent:
     fill_price: float
     amount: float
     fee: float
-    timestamp: int
+    timestamp: int         # Unix milliseconds（对齐 OKX）
     # 注：不含 pnl 字段。交易所内部计算 PnL 用于余额更新，但不对外暴露。
     # 上层（agent 层）可从 fill_price + 自身持有的入场信息推导 PnL。
     # 清算触发的 FillEvent：order_id 为新生成的 UUID（纯标识用），不关联任何挂单。
@@ -348,9 +348,14 @@ class FillEvent:
 
 **内部方法关系**：
 
-- `_execute_fill(order, ticker)` — 条件单触发时调用，内部调用 `_close_position_core` 完成平仓，返回 FillEvent
-- `_force_liquidate(pos, price)` — 清算触发时调用，内部调用 `_close_position_core`（带 PnL cap），返回 FillEvent
-- `_close_position_core(symbol, side, amount, fill_price)` — 共享核心逻辑：PnL 计算、余额更新、持仓移除。不含订单取消。实现中应 `if free_usdt < 0: raise` 作防御性检查（不用 assert，Python `-O` 会跳过）
+- `_execute_fill(order, ticker)` — 条件单触发时调用，内部调用 `_close_position_core(pnl_cap=False)` 完成平仓，返回 FillEvent
+- `_force_liquidate(pos, price)` — 清算触发时调用，内部调用 `_close_position_core(pnl_cap=True)`，返回 FillEvent
+- `_close_position_core(symbol, side, amount, fill_price, *, pnl_cap: bool = False)` — 共享核心逻辑，执行顺序：
+  1. 计算 PnL
+  2. 如果 `pnl_cap=True`：`pnl = max(pnl, -(released_margin - fee))`
+  3. 更新余额（free_usdt, used_usdt）
+  4. 防御性检查：`if free_usdt < 0: raise`（不用 assert，Python `-O` 会跳过）
+  5. 更新/移除持仓
 
 ### fill_handler (app.py)
 
@@ -385,20 +390,31 @@ Scheduler 新增 `trigger(trigger_type, context=None)` 方法：
 
 ```python
 async def trigger(self, trigger_type: str, context: Any | None = None):
-    if self._cycle_running:
-        self._pending_trigger = True   # 合并多个事件为一个 flag
-        return
-    # 无 cycle 运行时直接启动
-    await self._run_cycle(trigger_type, context)
+    # trigger() 不直接运行 cycle——避免两个问题：
+    # 1. 与 _scheduler_loop 并发执行 agent cycle
+    # 2. 阻塞 matching loop task（整个 agent cycle 期间无法处理 tick）
+    self._pending_trigger = True
+    self._pending_context = context
+    self._wake_event.set()  # 唤醒 scheduler 从 sleep 中返回
 
 async def _scheduler_loop(self):
     while not self._stopped:
-        await self._run_cycle("scheduled", None)
-        # cycle 结束后检查 pending flag
+        # 可中断的 sleep（复用现有 _stop_event.wait 模式）
+        # trigger() 的 _wake_event.set() 或 stop() 都能打断
+        await self._interruptible_sleep(self._interval)
+
         if self._pending_trigger:
             self._pending_trigger = False
-            await self._run_cycle("conditional", None)  # context=None，agent 自行查询
-        await asyncio.sleep(self._interval)
+            ctx = self._pending_context
+            self._pending_context = None
+            await self._run_cycle("conditional", ctx)
+        else:
+            await self._run_cycle("scheduled", None)
+
+        # cycle 结束后再次检查（cycle 执行期间可能又有 fill 触发）
+        if self._pending_trigger:
+            self._pending_trigger = False
+            await self._run_cycle("conditional", None)  # 合并：context=None
 
 async def _run_cycle(self, trigger_type, context):
     self._cycle_running = True
@@ -408,9 +424,10 @@ async def _run_cycle(self, trigger_type, context):
         logger.error("Agent cycle failed", exc_info=True)
     finally:
         self._cycle_running = False
+        self._pending_trigger = False  # 异常时也清除
 ```
 
-注：pending flag 合并策略假设单 symbol——同一 tick 内最多一个 position 被平仓，不会有多个独立事件需要分别处理。此假设与 Scope Boundaries 中的单 symbol 约束对齐。
+关键设计：**scheduler loop 是唯一运行 agent cycle 的地方**。trigger() 只设 flag + 唤醒，不直接执行。这保证了：(a) 任何时刻最多一个 cycle 在运行，(b) matching loop 不被阻塞。pending flag 合并策略假设单 symbol（与 Scope Boundaries 对齐）。
 
 callback 签名变更：
 
@@ -580,6 +597,13 @@ class Order:
 
 - `SimulatedExchange`：在 `create_order()` 中计算并填入 fee
 - `OKXExchange`：从 ccxt 响应中解析 fee（如有），或返回 None。已知限制：OKX 的 market order REST 响应中 fee 可能为空（需 fetch_order 才能拿到完整 fee）
+
+**Order.price 语义映射**（对齐 ccxt 行为）：
+
+| Order.status | price 含义 | 对应 sim_orders 字段 |
+|---|---|---|
+| `"open"` | 触发价格 | trigger_price |
+| `"closed"` | 实际成交价 | filled_price |
 
 ### 新增三个查询方法
 
