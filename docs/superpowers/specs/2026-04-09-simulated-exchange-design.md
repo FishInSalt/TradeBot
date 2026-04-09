@@ -164,7 +164,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
    ```
 3. 更新内部状态：
    - 释放保证金：`used_usdt -= (entry_price * amount) / leverage`，`free_usdt += released_margin + pnl - fee`。注：entry_price 是加权均价，`weighted_avg * total_amount == Σ(price_i * amount_i)`，所以即使经过加仓，按均价释放保证金总额是正确的
-   - 如果 amount >= position.contracts，全部平仓并移除持仓；如果 amount < position.contracts，减少 contracts（部分平仓）。`[安全护栏]` 如果 amount > position.contracts，clamp 到 position.contracts（OKX 净仓模式下超额 sell 会反向开空仓，但这里选择更安全的行为防止 agent 错误输入意外反向开仓）
+   - 如果 amount >= position.contracts，全部平仓并移除持仓；如果 amount < position.contracts，减少 contracts（部分平仓）。`[安全护栏]` 如果 amount > position.contracts，clamp 到 position.contracts（OKX 净仓模式下超额 sell 会反向开空仓，但这里选择更安全的行为防止 agent 错误输入意外反向开仓）。返回的 Order.amount 为实际成交量（clamp 后的值），上层据此记录准确的交易量
    - 取消该 symbol 的所有残留条件单（全部平仓时）
 4. 持久化到 sim_* 表
 5. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
@@ -208,8 +208,8 @@ async def _matching_loop(self):
         async with self._lock:
             # 1. 清算检查：价格穿越 liquidation_price 时强制平仓
             # _force_liquidate 复用 Close Position 逻辑（计算 PnL、释放保证金、移除持仓、取消条件单）
-            # [安全护栏] PnL cap: pnl = max(pnl, -released_margin)，防止价格缺口导致负余额
-            # 简化公式下 pnl 精确等于 -margin，free_usdt += margin + (-margin) - fee = -fee
+            # [安全护栏] PnL cap: pnl = max(pnl, -(released_margin - fee))，确保清算后余额精确归零
+            # 计算: free_usdt += margin + (-(margin - fee)) - fee = 0
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
                 if pos.side == "long" and ticker.bid <= liq:
@@ -241,13 +241,15 @@ async def _matching_loop(self):
 
 **并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。使用 `asyncio.Lock` 保护所有内部状态修改操作（balance/positions/pending_orders）。关键约束：`_notify_fill()` 必须在 lock 释放后执行，因为通知链路（fill → fill_handler → scheduler.trigger → agent_cycle → create_order）会重新请求 lock。
 
-**启动失败处理**：`start()` 中 WebSocket 连接失败（网络问题、OKX 服务不可用）时直接抛异常，由上层 `app.py` 处理（打日志 + 退出）。不在 `start()` 内重试——启动阶段的失败应快速暴露。
+**启动失败处理**：`start()` 中任何 I/O 步骤失败（DB 查询、REST ticker 拉取、WebSocket 连接）都直接抛异常，由上层 `app.py` 处理（打日志 + 退出）。不在 `start()` 内重试——启动阶段的失败应快速暴露。
 
 **WebSocket 首次 tick 竞态**：在 WebSocket 连接建立后、收到第一个 tick 之前，`fetch_ticker()` 可能被调用。启动时先通过 REST API 拉取一次 ticker 作为种子值写入 `_latest_ticker`，再启动 WebSocket 和撮合循环。
 
 **WebSocket 断连处理**：ccxt 的 `watch_ticker` 内置自动重连机制。断连期间撮合循环阻塞在 `_watch_ticker()` 上，不会产生错误触发。重连后自动恢复，挂单继续按最新行情检查。
 
 **Order ID 生成**：使用 UUID（`str(uuid.uuid4())`），避免计数器状态管理。
+
+**日志策略**：使用项目现有的 `logging` 模块，对关键事件记录结构化日志：订单创建/成交（含价格、数量、fee）、清算触发、条件单触发、状态恢复（启动时从 DB 恢复的持仓/挂单数量）、WebSocket 连接/断连。日志级别：成交和清算用 INFO，状态变更用 DEBUG。
 
 ### Trigger Conditions
 
@@ -299,7 +301,7 @@ def _create_fill_handler(deps: TradingDeps, scheduler):
 exchange.on_fill(_create_fill_handler(deps, scheduler))
 ```
 
-通过闭包捕获 `deps`（含 db_engine、session_id 等）和 `scheduler` 引用，调用现有的 `_update_trade_closed()` 写 TradeRecord。
+通过闭包捕获 `deps`（含 db_engine、session_id 等）和 `scheduler` 引用，调用现有的 `_update_trade_closed()` 写 TradeRecord。注：`_update_trade_closed()` 按 session_id + symbol + side + status='open' 四重条件查询（已确认现有代码 tools_execution.py:42-50），确保精确匹配目标记录。
 
 ### Scheduler.trigger() 语义
 
@@ -329,7 +331,7 @@ async def on_tick(trigger_type: str, context: Any | None):
 
 - 定时触发时 Scheduler 调用 `callback("scheduled", None)`
 - 事件触发时 Scheduler 调用 `callback("conditional", fill_event)`
-- `run_agent_cycle` 新增 `context` 参数，将触发原因传递给 agent
+- `run_agent_cycle` 新增 `context` 参数。当 context 非 None 时，在 agent prompt 中追加事件摘要：`"Event: {trigger_reason} triggered at {fill_price}, PnL: {pnl} USDT"`，让 agent 知道发生了什么并据此决策
 
 ## Internal State
 
@@ -362,7 +364,7 @@ Balance(
 { "BTC/USDT:USDT": 3 }
 ```
 
-由 `set_leverage()` 写入，`create_order()` 读取来计算保证金。
+由 `set_leverage()` 写入，`create_order()` 通过 `_leverage.get(symbol, 1)` 读取（默认 1x 无杠杆，最安全的缺省值）。
 
 ### Positions
 
@@ -373,7 +375,9 @@ Balance(
         side: "long",
         contracts: 0.001,
         entry_price: 95200.0,
-        leverage: 3
+        leverage: 3,
+        created_at: datetime,     # 开仓时间，持久化时写入 DB
+        updated_at: datetime,     # 最后修改时间（加仓/部分平仓时更新）
     }
 }
 ```
@@ -441,7 +445,7 @@ new_contracts = old_contracts + new_contracts
 |---|---|---|
 | id | int | PK |
 | session_id | str FK | 关联 Session |
-| order_id | str | 模拟订单 ID（UUID） |
+| order_id | str, UNIQUE | 模拟订单 ID（UUID） |
 | symbol | str | 交易对 |
 | side | str | buy / sell |
 | position_side | str | long / short（关联的持仓方向） |
@@ -519,7 +523,7 @@ exchange:
   name: simulated       # "okx" → real trading, "simulated" → mock exchange
   fee_rate: 0.0005      # simulated mode: taker fee rate (0.05%)
   precision:            # simulated mode: symbol → decimal places for amount_to_precision()
-    BTC/USDT:USDT: 3
+    BTC/USDT:USDT: 3   # 全局配置，运行时只使用 Session 配置的 symbol 对应的精度
     ETH/USDT:USDT: 2
 ```
 
@@ -550,6 +554,7 @@ await exchange.start()                                       # 异步初始化
 ├── 1. 从 sim_* 表查询该 session_id 的记录
 │      ├── 有 → 恢复余额、持仓、挂单（仅 sim_orders.status='open'）
 │      │        从 sim_positions.leverage 初始化 leverage 字典（持仓的杠杆即当前杠杆）
+│      │        已知限制：无持仓时 leverage 恢复为默认值 1x（agent 开仓前总会调 set_leverage，影响极小）
 │      └── 无 → 用 Session.initial_balance 初始化，写入 sim_balances
 ├── 2. 通过 REST API 拉取一次 ticker 写入 _latest_ticker（种子值，避免首次 tick 前竞态）
 ├── 3. 连接 OKX 公开 WebSocket（ticker 频道）
@@ -671,12 +676,16 @@ main.py                  SimulatedExchange              DB (sim_*)
   │                            │  restore pending orders   │
   │                            │◀──────────────────────────│
   │                            │                           │
-  │                            │  connect OKX WebSocket    │
-  │                            │  start matching loop      │
-  │                            │  ready                    │
+  │                            │  ready for start()        │
   │◀───────────────────────────│                           │
   │                            │                           │
-  │  register on_fill callback │                           │
+  │  register on_fill callback │  ← 在 start() 之前注册
+  │                            │                           │
+  │  await exchange.start()    │                           │
+  │───────────────────────────▶│  connect OKX WebSocket    │
+  │                            │  start matching loop      │
+  │◀───────────────────────────│  ready                    │
+  │                            │                           │
   │  start scheduler           │                           │
 ```
 
