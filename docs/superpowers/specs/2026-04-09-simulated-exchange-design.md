@@ -422,9 +422,11 @@ async def _run_cycle(self, trigger_type, context):
         await self._callback(trigger_type, context)
     except Exception:
         logger.error("Agent cycle failed", exc_info=True)
+        self._pending_trigger = False  # 仅异常时清除，防止失败后连续重试
     finally:
         self._cycle_running = False
-        self._pending_trigger = False  # 异常时也清除
+        # 注：正常完成时不清除 _pending_trigger——cycle 执行期间
+        # matching loop 可能触发了新事件，需要保留给 post-cycle 检查
 ```
 
 关键设计：**scheduler loop 是唯一运行 agent cycle 的地方**。trigger() 只设 flag + 唤醒，不直接执行。这保证了：(a) 任何时刻最多一个 cycle 在运行，(b) matching loop 不被阻塞。pending flag 合并策略假设单 symbol（与 Scope Boundaries 对齐）。
