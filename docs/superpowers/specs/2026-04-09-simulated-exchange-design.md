@@ -140,7 +140,7 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `create_order(symbol, side, order_type, amount, price)` | 见下方「订单处理」。symbol 必须匹配 Session 配置的交易对，否则抛异常 |
 | `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)`，含未实现盈亏（见下方公式） |
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
-| `set_leverage(symbol, leverage)` | 校验范围 1-125（对齐 OKX 上限）`[安全护栏]`；如果该 symbol 已有持仓且 leverage != position.leverage，抛异常 `[安全护栏]`（OKX 允许持仓期间改杠杆并自动调保证金，此处简化为 fail fast，避免多杠杆保证金账不平） |
+| `set_leverage(symbol, leverage)` | 校验：leverage 为 int 类型（非整数抛 TypeError），范围 1-125（对齐 OKX 上限）`[安全护栏]`；如果该 symbol 已有持仓且 leverage != position.leverage，抛异常 `[安全护栏]`（OKX 允许持仓期间改杠杆并自动调保证金，此处简化为 fail fast，避免多杠杆保证金账不平） |
 | `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额）。symbol 不在 precision 配置中时抛 KeyError（fail fast） |
 | `fetch_order(order_id)` | 查询单个订单的当前状态，返回 Order（含 status: open/closed/cancelled） |
 | `fetch_open_orders(symbol)` | 返回该 symbol 所有未成交的条件单 |
@@ -182,7 +182,7 @@ liquidation_price (simplified, includes fee_rate but ignores maintenance margin 
 
 ### Market Order
 
-`create_order(symbol, side, order_type="market", amount)` 时在 `async with self._lock` 内同步处理（与 _matching_loop 共用锁，防止余额校验和扣减之间被撮合引擎修改状态）。入口校验：symbol 匹配配置交易对、`amount > 0`，否则抛异常。根据当前持仓状态推断意图（对齐 OKX 净仓模式）：
+`create_order(symbol, side, order_type="market", amount)` 时在 `async with self._lock` 内同步处理（与 _matching_loop 共用锁，防止余额校验和扣减之间被撮合引擎修改状态）。入口校验：symbol 匹配配置交易对、`amount > 0`、`order_type in ("market", "stop", "take_profit")`（未知类型抛异常），否则抛异常。条件单（stop/take_profit）必须提供 price 参数，否则抛异常。根据当前持仓状态推断意图（对齐 OKX 净仓模式）：
 
 | 当前持仓 | side="buy" | side="sell" |
 |---|---|---|
@@ -305,14 +305,17 @@ async def _matching_loop(self):
         for fill in triggered:
             await self._notify_fill(fill)
       except Exception:
-        logger.error("Matching loop error", exc_info=True)
+        self._error_count += 1
+        logger.error("Matching loop error (count=%d)", self._error_count, exc_info=True)
+        if self._error_count >= 3:
+            await asyncio.sleep(min(5 * self._error_count, 60))  # 指数退避，防止高频日志
         # log + continue：单次 tick 处理失败不应导致整个撮合循环崩溃
-        # 下一个 tick 会重新检查所有条件
+        # 成功处理时重置：self._error_count = 0
 ```
 
 **并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。使用 `asyncio.Lock` 保护所有内部状态修改操作（balance/positions/pending_orders）。关键约束：`_notify_fill()` 必须在 lock 释放后执行，因为通知链路（fill → fill_handler → scheduler.trigger → agent_cycle → create_order）会重新请求 lock。
 
-**启动失败处理**：`start()` 中任何 I/O 步骤失败（DB 查询、REST ticker 拉取、WebSocket 连接）都直接抛异常，由上层 `app.py` 处理（打日志 + 退出）。不在 `start()` 内重试——启动阶段的失败应快速暴露。
+**启动失败处理**：`start()` 中任何 I/O 步骤失败（DB 查询、REST ticker 拉取、WebSocket 连接）都直接抛异常，由上层 `app.py` 处理（打日志 + 退出）。不在 `start()` 内重试——启动阶段的失败应快速暴露。WebSocket 连接超时依赖 ccxt 内部超时（默认 30s）。
 
 **WebSocket 首次 tick 竞态**：在 WebSocket 连接建立后、收到第一个 tick 之前，`fetch_ticker()` 可能被调用。启动时先通过 REST API 拉取一次 ticker 作为种子值写入 `_latest_ticker`，再启动 WebSocket 和撮合循环。
 
@@ -435,6 +438,7 @@ async def _scheduler_loop(self):
         # cycle 结束后再次检查（cycle 执行期间可能又有 fill 触发）
         if self._pending_trigger:
             self._pending_trigger = False
+            self._pending_context = None  # 清除陈旧引用
             await self._run_cycle("conditional", None)  # 合并：context=None
 
 async def _run_cycle(self, trigger_type, context):
@@ -516,6 +520,8 @@ Balance(
 注：内部存储的 `free_usdt` 不含 unrealized_pnl，仅在 `fetch_balance()` 返回时动态加上。这避免了每次 tick 都更新存储。unrealized_pnl 基于 `_latest_ticker` 计算，与 `fetch_ticker()` 语义一致——WebSocket 断连或启动初期使用最后可用 ticker，是 best-effort 估算值。
 
 注意：当 unrealized 亏损较大时，`total_usdt != free_usdt(returned) + used_usdt`。这是正确的——total 是 equity（含浮亏），free 被 clamp 到 0（不允许用浮亏资金开仓），两者是独立概念。Agent 的 perception tools 应使用 `free_usdt` 判断可用资金，使用 `total_usdt` 判断总权益。
+
+已知行为：在价格跳空穿越清算价的两个 tick 之间，total_usdt 可能瞬间显示负值（下一个 tick 清算触发后恢复）。不对 total_usdt 做 clamp——负值反映了真实的 equity 状态，clamping 会掩盖风险。
 
 ### Leverage
 
@@ -664,8 +670,8 @@ class BaseExchange(ABC):
     async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]: ...
 ```
 
-- `OKXExchange`：通过 ccxt 对应方法实现（`fetch_order`、`fetch_open_orders`、`fetch_orders`）
-- `SimulatedExchange`：从 sim_orders 查询实现
+- `OKXExchange`：通过 ccxt 对应方法实现。注意 ccxt OKX 适配层的版本差异：`fetch_closed_orders` 可能需要用 `fetch_orders(params={'state': 'filled'})` 替代，实现时需验证
+- `SimulatedExchange`：从 sim_orders 查询实现。建议在 (session_id, status) 上建联合索引，优化 reconciliation 和 fetch_open_orders 查询
 
 sim_orders 需要同时记录市价单和条件单（order_type 扩展为 market/stop/take_profit/liquidation），市价单在成交时直接写入 status='closed'。这样 agent 可以像查真实交易所一样获取完整的订单历史。
 
@@ -739,7 +745,7 @@ SimulatedExchange.close()
 | 表 | 策略 | 说明 |
 |---|---|---|
 | sim_balances | upsert by session_id | 只有一行，直接覆盖 |
-| sim_positions | delete where session_id → insert current | 全量替换，平仓后该行被删除。依赖事务原子性——非事务场景下 delete 后 crash 会丢失数据 |
+| sim_positions | delete where session_id → insert current | 全量替换，平仓后该行被删除。insert 时从内存 Position 对象携带原始 created_at（不重写为当前时间）。依赖事务原子性——非事务场景下 delete 后 crash 会丢失数据 |
 | sim_orders | reconciliation + INSERT，不删除历史 | (1) 本轮 filled 的条件单 UPDATE（写入 status='closed'、filled_price、fee、filled_at）；(2) cancelled 订单通过 reconciliation 识别：`UPDATE sim_orders SET status='cancelled' WHERE session_id=? AND status='open' AND order_id NOT IN (当前 pending order IDs)`；(3) 市价单/清算产生的新 Order 记录 INSERT（status='closed'） |
 
 ## Interaction Flows
