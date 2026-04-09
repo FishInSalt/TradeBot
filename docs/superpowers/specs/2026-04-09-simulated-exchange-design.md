@@ -212,7 +212,7 @@ async def _matching_loop(self):
         triggered = []
         async with self._lock:
             # 1. 清算检查：价格穿越 liquidation_price 时强制平仓
-            # _force_liquidate 复用 Close Position 逻辑（计算 PnL、释放保证金、移除持仓、取消条件单）
+            # _force_liquidate 复用 _close_position_core（计算 PnL、释放保证金、移除持仓），不含订单取消
             # [安全护栏] PnL cap: pnl = max(pnl, -(released_margin - fee))，确保清算后余额精确归零
             # 计算: free_usdt += margin + (-(margin - fee)) - fee = 0
             for symbol, pos in list(self._positions.items()):
@@ -677,7 +677,7 @@ OKX WebSocket        SimulatedExchange         fill_handler         Scheduler   
      │               │ persist sim_*                │                   │                 │
      │               └──────┤                       │                   │                 │
      │                      │                       │                   │                 │
-     │                      │  FillEvent(pnl, fee)  │                   │                 │
+     │                      │  FillEvent(fill_price, │                   │                 │
      │                      │──────────────────────▶│                   │                 │
      │                      │                       │                   │                 │
      │                      │                       │ write TradeRecord │                 │
