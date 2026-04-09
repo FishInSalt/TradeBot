@@ -436,3 +436,48 @@ async def test_fetch_closed_orders_from_db():
     assert fetched.price == order.price
 
     await engine.dispose()
+
+
+async def test_partial_close_position():
+    """Partial close should release proportional margin and keep remaining position."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.002)
+
+    # Close half
+    order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+    assert order.amount == 0.001
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    assert positions[0].contracts == pytest.approx(0.001)
+
+    # Conditional orders should NOT be cancelled (position still open)
+    await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=93000.0)
+    open_orders = await ex.fetch_open_orders("BTC/USDT:USDT")
+    assert len(open_orders) == 1
+
+
+async def test_liquidation_short():
+    """Short position should be liquidated when ask rises above liquidation price."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+
+    fill_events = []
+    async def on_fill(event: FillEvent):
+        fill_events.append(event)
+    ex.on_fill(on_fill)
+
+    # Price surges above liquidation
+    tick = Ticker(
+        symbol="BTC/USDT:USDT", last=120000.0, bid=119990.0, ask=120010.0,
+        high=121000.0, low=94000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(tick)
+
+    assert len(fill_events) == 1
+    assert fill_events[0].trigger_reason == "liquidation"
+    assert fill_events[0].position_side == "short"
+    balance = await ex.fetch_balance()
+    assert balance.free_usdt >= 0.0
