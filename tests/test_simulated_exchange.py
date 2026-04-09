@@ -358,3 +358,81 @@ async def test_no_trigger_when_price_above_stop():
     assert len(fill_events) == 0
     open_orders = await ex.fetch_open_orders("BTC/USDT:USDT")
     assert len(open_orders) == 1
+
+
+async def test_persist_and_restore():
+    """State should survive persist -> new instance -> restore."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session
+    from src.integrations.exchange.simulated import SimulatedExchange
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+
+    async with get_session(engine) as sess:
+        sess.add(Session(id="test-s", name="test", initial_balance=100.0))
+        await sess.commit()
+
+    config = MagicMock()
+    config.fee_rate = 0.0005
+    config.precision = {"BTC/USDT:USDT": 3}
+
+    ex1 = SimulatedExchange(config, engine, "test-s", "BTC/USDT:USDT")
+    await ex1._init_state(initial_balance=100.0)
+    ex1._latest_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
+    )
+    ex1._leverage["BTC/USDT:USDT"] = 3
+    await ex1.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex1._persist_state()
+
+    ex2 = SimulatedExchange(config, engine, "test-s", "BTC/USDT:USDT")
+    await ex2._restore_state()
+    ex2._latest_ticker = ex1._latest_ticker
+
+    balance = await ex2.fetch_balance()
+    assert balance.used_usdt > 0
+
+    positions = await ex2.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    assert positions[0].side == "long"
+
+    await engine.dispose()
+
+
+async def test_fetch_closed_orders_from_db():
+    """Market orders should be queryable via fetch_closed_orders."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session
+    from src.integrations.exchange.simulated import SimulatedExchange
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with get_session(engine) as sess:
+        sess.add(Session(id="test-s2", name="test2", initial_balance=100.0))
+        await sess.commit()
+
+    config = MagicMock()
+    config.fee_rate = 0.0005
+    config.precision = {"BTC/USDT:USDT": 3}
+
+    ex = SimulatedExchange(config, engine, "test-s2", "BTC/USDT:USDT")
+    await ex._init_state(initial_balance=100.0)
+    ex._latest_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
+    )
+    ex._leverage["BTC/USDT:USDT"] = 3
+
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    closed = await ex.fetch_closed_orders("BTC/USDT:USDT")
+    assert len(closed) == 1
+    assert closed[0].id == order.id
+    assert closed[0].status == "closed"
+    assert closed[0].fee is not None
+
+    fetched = await ex.fetch_order(order.id)
+    assert fetched.id == order.id
+    assert fetched.price == order.price
+
+    await engine.dispose()

@@ -105,7 +105,14 @@ class SimulatedExchange(BaseExchange):
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]:
         self._validate_symbol(symbol)
-        raise NotImplementedError("fetch_ohlcv requires ccxt instance — implemented in start()")
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        data = await self._ccxt.fetch_ohlcv(symbol, timeframe, limit=limit)
+        return [
+            Candle(timestamp=int(r[0]), open=float(r[1]), high=float(r[2]),
+                   low=float(r[3]), close=float(r[4]), volume=float(r[5]))
+            for r in data
+        ]
 
     async def fetch_balance(self) -> Balance:
         unrealized = sum(
@@ -516,10 +523,240 @@ class SimulatedExchange(BaseExchange):
     def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
         self._fill_callback = callback
 
+    # --- Persistence ---
+
+    async def _init_state(self, initial_balance: float) -> None:
+        self._free_usdt = initial_balance
+        self._used_usdt = 0.0
+        self._positions = {}
+        self._pending_orders = []
+        self._leverage = {}
+
+    async def _restore_state(self) -> None:
+        from sqlalchemy import select
+        from src.storage.database import get_session
+        from src.storage.models import SimBalance, SimPosition, SimOrder
+
+        async with get_session(self._db_engine) as session:
+            result = await session.execute(
+                select(SimBalance).where(SimBalance.session_id == self._session_id)
+            )
+            bal = result.scalar_one_or_none()
+            if bal:
+                self._free_usdt = bal.free_usdt
+                self._used_usdt = bal.used_usdt
+            else:
+                return
+
+            result = await session.execute(
+                select(SimPosition).where(SimPosition.session_id == self._session_id)
+            )
+            for pos in result.scalars().all():
+                self._positions[pos.symbol] = _Position(
+                    side=pos.side, contracts=pos.contracts,
+                    entry_price=pos.entry_price, leverage=pos.leverage,
+                    created_at=pos.created_at, updated_at=pos.updated_at,
+                )
+                self._leverage[pos.symbol] = pos.leverage
+
+            result = await session.execute(
+                select(SimOrder)
+                .where(SimOrder.session_id == self._session_id)
+                .where(SimOrder.status == "open")
+            )
+            for o in result.scalars().all():
+                self._pending_orders.append(_PendingOrder(
+                    id=o.order_id, symbol=o.symbol, side=o.side,
+                    position_side=o.position_side, order_type=o.order_type,
+                    amount=o.amount, trigger_price=o.trigger_price,
+                ))
+
+        logger.info(
+            f"Restored state: balance={self._free_usdt:.2f}/{self._used_usdt:.2f}, "
+            f"positions={len(self._positions)}, pending_orders={len(self._pending_orders)}"
+        )
+
+    async def _persist_state(
+        self,
+        new_orders: list[tuple[Order, str]] | None = None,
+        filled_order_ids: list[str] | None = None,
+        fill_events: list[FillEvent] | None = None,
+    ) -> None:
+        from sqlalchemy import delete, update
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        from src.storage.database import get_session
+        from src.storage.models import SimBalance, SimPosition, SimOrder
+
+        now = datetime.now(timezone.utc)
+
+        async with get_session(self._db_engine) as session:
+            # 1. Upsert balance
+            stmt = sqlite_insert(SimBalance).values(
+                session_id=self._session_id,
+                free_usdt=self._free_usdt,
+                used_usdt=self._used_usdt,
+                updated_at=now,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["session_id"],
+                set_={
+                    "free_usdt": stmt.excluded.free_usdt,
+                    "used_usdt": stmt.excluded.used_usdt,
+                    "updated_at": now,
+                },
+            )
+            await session.execute(stmt)
+
+            # 2. Positions: delete + insert (preserve created_at)
+            await session.execute(
+                delete(SimPosition).where(SimPosition.session_id == self._session_id)
+            )
+            for symbol, pos in self._positions.items():
+                session.add(SimPosition(
+                    session_id=self._session_id, symbol=symbol,
+                    side=pos.side, contracts=pos.contracts,
+                    entry_price=pos.entry_price, leverage=pos.leverage,
+                    created_at=pos.created_at, updated_at=pos.updated_at,
+                ))
+
+            # 3a. Update filled conditional orders
+            if filled_order_ids and fill_events:
+                fill_map = {f.order_id: f for f in fill_events}
+                for oid in filled_order_ids:
+                    fill = fill_map.get(oid)
+                    if fill:
+                        await session.execute(
+                            update(SimOrder)
+                            .where(SimOrder.order_id == oid)
+                            .values(
+                                status="closed",
+                                filled_price=fill.fill_price,
+                                fee=fill.fee,
+                                filled_at=now,
+                            )
+                        )
+
+            # 3b. Cancel orphaned pending orders in DB
+            pending_ids = [o.id for o in self._pending_orders]
+            filled_ids = filled_order_ids or []
+            exclude_ids = pending_ids + filled_ids
+            if exclude_ids:
+                await session.execute(
+                    update(SimOrder)
+                    .where(SimOrder.session_id == self._session_id)
+                    .where(SimOrder.status == "open")
+                    .where(SimOrder.order_id.notin_(exclude_ids))
+                    .values(status="cancelled")
+                )
+            else:
+                await session.execute(
+                    update(SimOrder)
+                    .where(SimOrder.session_id == self._session_id)
+                    .where(SimOrder.status == "open")
+                    .values(status="cancelled")
+                )
+
+            # 3c. INSERT new orders (market, liquidation)
+            if new_orders:
+                for order, position_side in new_orders:
+                    session.add(SimOrder(
+                        session_id=self._session_id, order_id=order.id,
+                        symbol=order.symbol, side=order.side,
+                        position_side=position_side,
+                        order_type=order.order_type, amount=order.amount,
+                        trigger_price=order.price if order.status == "open" else None,
+                        status=order.status,
+                        filled_price=order.price if order.status == "closed" else None,
+                        fee=order.fee,
+                        filled_at=now if order.status == "closed" else None,
+                    ))
+
+            # 3d. Upsert pending conditional orders
+            for pending in self._pending_orders:
+                stmt = sqlite_insert(SimOrder).values(
+                    session_id=self._session_id, order_id=pending.id,
+                    symbol=pending.symbol, side=pending.side,
+                    position_side=pending.position_side,
+                    order_type=pending.order_type, amount=pending.amount,
+                    trigger_price=pending.trigger_price,
+                    status="open", created_at=now,
+                )
+                stmt = stmt.on_conflict_do_nothing(index_elements=["order_id"])
+                await session.execute(stmt)
+
+            await session.commit()
+
     # --- Lifecycle ---
 
     async def start(self) -> None:
-        raise NotImplementedError("start() implemented in Task 8")
+        import ccxt.pro as ccxtpro
+        from sqlalchemy import select
+        from src.storage.database import get_session
+        from src.storage.models import SimBalance, Session as SessionModel
+
+        async with get_session(self._db_engine) as session:
+            result = await session.execute(
+                select(SimBalance).where(SimBalance.session_id == self._session_id)
+            )
+            has_state = result.scalar_one_or_none() is not None
+
+        if has_state:
+            await self._restore_state()
+        else:
+            async with get_session(self._db_engine) as session:
+                result = await session.execute(
+                    select(SessionModel).where(SessionModel.id == self._session_id)
+                )
+                trading_session = result.scalar_one()
+            await self._init_state(trading_session.initial_balance)
+            await self._persist_state()
+
+        self._ccxt = ccxtpro.okx()
+        seed_ticker = await self._ccxt.fetch_ticker(self._symbol)
+        self._latest_ticker = Ticker(
+            symbol=seed_ticker["symbol"],
+            last=float(seed_ticker["last"]),
+            bid=float(seed_ticker["bid"]),
+            ask=float(seed_ticker["ask"]),
+            high=float(seed_ticker["high"]),
+            low=float(seed_ticker["low"]),
+            base_volume=float(seed_ticker["baseVolume"]),
+            timestamp=seed_ticker["timestamp"],
+        )
+
+        self._running = True
+        self._matching_task = asyncio.create_task(self._matching_loop())
+        logger.info(f"SimulatedExchange started: {self._symbol}, seed ticker @ {self._latest_ticker.last}")
+
+    async def _matching_loop(self) -> None:
+        while self._running:
+            try:
+                raw = await self._ccxt.watch_ticker(self._symbol)
+                ticker = Ticker(
+                    symbol=raw["symbol"], last=float(raw["last"]),
+                    bid=float(raw["bid"]), ask=float(raw["ask"]),
+                    high=float(raw["high"]), low=float(raw["low"]),
+                    base_volume=float(raw["baseVolume"]), timestamp=raw["timestamp"],
+                )
+                await self._process_tick(ticker)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                self._error_count += 1
+                logger.error("Matching loop error (count=%d)", self._error_count, exc_info=True)
+                if self._error_count >= 3:
+                    await asyncio.sleep(min(5 * self._error_count, 60))
+            else:
+                self._error_count = 0
 
     async def close(self) -> None:
-        raise NotImplementedError("close() implemented in Task 8")
+        self._running = False
+        if hasattr(self, "_matching_task"):
+            self._matching_task.cancel()
+            try:
+                await self._matching_task
+            except asyncio.CancelledError:
+                pass
+        if hasattr(self, "_ccxt"):
+            await self._ccxt.close()
+        logger.info("SimulatedExchange closed")
