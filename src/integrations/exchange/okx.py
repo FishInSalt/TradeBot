@@ -96,6 +96,24 @@ class OKXExchange(BaseExchange):
             for r in data
         ]
 
+    def _parse_fee(self, data: dict) -> float | None:
+        fee_info = data.get("fee")
+        if fee_info and fee_info.get("cost") is not None:
+            return float(fee_info["cost"])
+        return None
+
+    def _parse_order(self, data: dict) -> Order:
+        return Order(
+            id=data["id"],  # type: ignore[arg-type]
+            symbol=data["symbol"],  # type: ignore[arg-type]
+            side=data["side"],  # type: ignore[arg-type]
+            order_type=data["type"],  # type: ignore[arg-type]
+            amount=float(data["amount"]),  # type: ignore[arg-type]
+            price=float(data["price"]) if data.get("price") else None,  # type: ignore[arg-type]
+            status=data["status"],  # type: ignore[arg-type]
+            fee=self._parse_fee(data),
+        )
+
     @_retry()
     async def create_order(  # type: ignore[override]
         self,
@@ -108,15 +126,28 @@ class OKXExchange(BaseExchange):
         data = await self._client.create_order(
             symbol, order_type, side, amount, price  # type: ignore[arg-type]
         )
-        return Order(
-            id=data["id"],  # type: ignore[arg-type]
-            symbol=data["symbol"],  # type: ignore[arg-type]
-            side=data["side"],  # type: ignore[arg-type]
-            order_type=data["type"],  # type: ignore[arg-type]
-            amount=float(data["amount"]),  # type: ignore[arg-type]
-            price=float(data["price"]) if data.get("price") else None,  # type: ignore[arg-type]
-            status=data["status"],  # type: ignore[arg-type]
+        return self._parse_order(data)
+
+    @_retry()
+    async def fetch_order(  # type: ignore[override]
+        self, order_id: str, symbol: str | None = None
+    ) -> Order:
+        data = await self._client.fetch_order(order_id, symbol)
+        return self._parse_order(data)
+
+    @_retry()
+    async def fetch_open_orders(self, symbol: str) -> list[Order]:  # type: ignore[override]
+        raw = await self._client.fetch_open_orders(symbol)
+        return [self._parse_order(d) for d in raw]
+
+    @_retry()
+    async def fetch_closed_orders(  # type: ignore[override]
+        self, symbol: str, limit: int = 20
+    ) -> list[Order]:
+        raw = await self._client.fetch_orders(
+            symbol, limit=limit, params={"state": "filled"}
         )
+        return [self._parse_order(d) for d in raw]
 
     @_retry()
     async def fetch_balance(self) -> Balance:  # type: ignore[override]

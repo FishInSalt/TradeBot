@@ -113,3 +113,74 @@ async def test_okx_fetch_positions():
     assert len(positions) == 1
     assert positions[0].side == "long"
     assert positions[0].entry_price == 65000.0
+
+
+async def test_okx_fetch_order():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.fetch_order.return_value = {
+        "id": "order_123", "symbol": "BTC/USDT:USDT",
+        "side": "buy", "type": "market", "amount": 0.01,
+        "price": 65000.0, "status": "closed", "fee": {"cost": 0.325},
+    }
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    order = await exchange.fetch_order("order_123")
+    assert order.id == "order_123"
+    assert order.fee == 0.325
+
+
+async def test_okx_fetch_open_orders():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.fetch_open_orders.return_value = [
+        {"id": "o1", "symbol": "BTC/USDT:USDT", "side": "sell", "type": "stop",
+         "amount": 0.01, "price": 93000.0, "status": "open"},
+    ]
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    orders = await exchange.fetch_open_orders("BTC/USDT:USDT")
+    assert len(orders) == 1
+    assert orders[0].status == "open"
+
+
+async def test_okx_fetch_closed_orders():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.fetch_orders.return_value = [
+        {"id": "o1", "symbol": "BTC/USDT:USDT", "side": "buy", "type": "market",
+         "amount": 0.01, "price": 95000.0, "status": "closed", "fee": {"cost": 0.475}},
+    ]
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    orders = await exchange.fetch_closed_orders("BTC/USDT:USDT", limit=10)
+    assert len(orders) == 1
+    assert orders[0].fee == 0.475
+
+
+async def test_okx_create_order_parses_fee():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.create_order.return_value = {
+        "id": "order_456", "symbol": "BTC/USDT:USDT",
+        "side": "buy", "type": "market", "amount": 0.01,
+        "price": 65000.0, "status": "closed", "fee": {"cost": 0.325},
+    }
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    order = await exchange.create_order(symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01)
+    assert order.fee == 0.325
+
+
+async def test_okx_create_order_fee_none_when_missing():
+    from src.integrations.exchange.okx import OKXExchange
+    mock_ccxt = AsyncMock()
+    mock_ccxt.create_order.return_value = {
+        "id": "order_789", "symbol": "BTC/USDT:USDT",
+        "side": "buy", "type": "market", "amount": 0.01,
+        "price": 65000.0, "status": "closed",
+    }
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_ccxt
+    order = await exchange.create_order(symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01)
+    assert order.fee is None
