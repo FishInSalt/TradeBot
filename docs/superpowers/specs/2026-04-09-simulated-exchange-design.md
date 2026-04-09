@@ -140,11 +140,11 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `create_order(symbol, side, order_type, amount, price)` | 见下方「订单处理」。symbol 必须匹配 Session 配置的交易对，否则抛异常 |
 | `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)`，含未实现盈亏（见下方公式） |
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
-| `set_leverage(symbol, leverage)` | 校验范围 1-125（对齐 OKX 上限）`[安全护栏]`；如果该 symbol 已有持仓且 leverage != position.leverage，抛异常（fail fast，避免后续加仓时才报错造成困惑） |
+| `set_leverage(symbol, leverage)` | 校验范围 1-125（对齐 OKX 上限）`[安全护栏]`；如果该 symbol 已有持仓且 leverage != position.leverage，抛异常 `[安全护栏]`（OKX 允许持仓期间改杠杆并自动调保证金，此处简化为 fail fast，避免多杠杆保证金账不平） |
 | `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额） |
 | `fetch_order(order_id)` | 查询单个订单的当前状态，返回 Order（含 status: open/closed/cancelled） |
 | `fetch_open_orders(symbol)` | 返回该 symbol 所有未成交的条件单 |
-| `fetch_closed_orders(symbol, limit)` | 返回该 symbol 最近的已成交/已取消订单（ORDER BY created_at DESC，limit 默认 20） |
+| `fetch_closed_orders(symbol, limit)` | 返回该 symbol 最近的已成交/已取消订单（ORDER BY COALESCE(filled_at, created_at) DESC，按实际成交/取消时间排序，limit 默认 20） |
 | `close()` | 停止撮合循环，断开 WebSocket |
 
 构造函数和初始化拆分为两步（Python `__init__` 必须是同步方法）：
@@ -246,6 +246,8 @@ liquidation_price (simplified, includes fee_rate but ignores maintenance margin 
 
 同一持仓可以设置多个条件单（对齐 OKX 行为）。例如 agent 先设止损 95000，再设止损 94000，两个条件单共存，先触发的执行后，另一个随持仓平仓自动取消（见上条）。
 
+注意：条件单创建时 amount = position.contracts（当时的持仓量）。如果 agent 之后加仓，已有条件单只覆盖部分仓位。**Agent 加仓后应重新设置止损/止盈以覆盖全部持仓。**这与真实交易所行为一致（条件单不自动更新）。
+
 ## Matching Engine
 
 撮合引擎是 SimulatedExchange 内部的一个 async task，由 WebSocket 行情驱动：
@@ -272,8 +274,9 @@ async def _matching_loop(self):
             # [安全护栏] 高杠杆+价格跳空场景下，此行为比真实交易所更严格
             # （全额清算而非止损成交），这是有意为之——优先保证余额非负。
             # _force_liquidate 复用 _close_position_core（计算 PnL、释放保证金、移除持仓），不含订单取消
-            # [安全护栏] PnL cap: pnl = max(pnl, -(released_margin - fee))，确保清算后余额精确归零
-            # 计算: free_usdt += margin + (-(margin - fee)) - fee = 0
+            # [安全护栏] PnL cap: pnl = max(pnl, -(released_margin - fee))
+            # 确保清算时该仓位对 free_usdt 的净贡献为零（释放的保证金恰好被亏损和手续费抵消）
+            # 计算: free_usdt += margin + (-(margin - fee)) - fee = 0（delta = 0，不因清算变为负数）
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
                 if pos.side == "long" and ticker.bid <= liq:
@@ -359,7 +362,8 @@ class FillEvent:
   1. 计算 PnL
   2. 如果 `pnl_cap=True`：`pnl = max(pnl, -(released_margin - fee))`
   3. 更新余额（free_usdt, used_usdt）
-  4. 防御性检查：`if free_usdt < 0: raise`（不用 assert，Python `-O` 会跳过）
+  4. 浮点精度对齐：`free_usdt = round(free_usdt, 8)`，`used_usdt = round(used_usdt, 8)`（消除部分平仓累积的浮点误差）
+  5. 防御性检查：`if free_usdt < -0.01: raise`（使用容差阈值，不用 assert——Python `-O` 会跳过）
   5. 更新/移除持仓
 
 ### fill_handler (app.py)
@@ -433,16 +437,20 @@ async def _run_cycle(self, trigger_type, context):
         await self._callback(trigger_type, context)
     except Exception:
         logger.error("Agent cycle failed", exc_info=True)
-        self._pending_trigger = False  # 仅异常时清除，防止失败后连续重试
+        # 注：不清除 _pending_trigger。主循环在调用 _run_cycle 前已经清除过，
+        # cycle 执行期间新到的 trigger 是真正的新事件，不是重试。
+        # 不存在重试风暴——每轮循环前 _pending_trigger 都会被消费。
     finally:
         self._cycle_running = False
-        # 注：正常完成时不清除 _pending_trigger——cycle 执行期间
-        # matching loop 可能触发了新事件，需要保留给 post-cycle 检查
 ```
 
 关键设计：**scheduler loop 是唯一运行 agent cycle 的地方**。trigger() 只设 flag + 唤醒，不直接执行。这保证了：(a) 任何时刻最多一个 cycle 在运行，(b) matching loop 不被阻塞。pending flag 合并策略假设单 symbol（与 Scope Boundaries 对齐）。
 
 **cooldown 处理**：现有 scheduler.py 有 cooldown_seconds 参数。在新设计中，cooldown 被 `_interruptible_sleep(interval)` 替代——interval 本身保证了定时 cycle 间的间隔，event trigger 明确绕过间隔（时间敏感）。实现时可移除独立的 cooldown 参数，或将其保留为 interval 的别名。
+
+**_wake_event 生命周期**：`_interruptible_sleep` 在进入等待前调用 `_wake_event.clear()`，然后 `await asyncio.wait_for(_wake_event.wait(), timeout=interval)`。trigger() 的 `_wake_event.set()` 立即唤醒。唤醒后主循环会再次进入 sleep 时 clear，不存在 event 残留。
+
+**定时/事件优先级**：当 interval 自然到期同时 _pending_trigger=True 时，优先执行 conditional cycle，定时 cycle 合并跳过（伪代码中 if _pending_trigger 分支先于 else）。
 
 callback 签名变更：
 
@@ -712,7 +720,7 @@ SimulatedExchange.close()
 |---|---|---|
 | sim_balances | upsert by session_id | 只有一行，直接覆盖 |
 | sim_positions | delete where session_id → insert current | 全量替换，平仓后该行被删除。依赖事务原子性——非事务场景下 delete 后 crash 会丢失数据 |
-| sim_orders | UPDATE + upsert，不删除历史 | 本轮 filled/cancelled 的 order 执行 UPDATE（写入 status、filled_price、filled_at）；open orders 执行 upsert。历史记录保留用于审计 |
+| sim_orders | UPDATE + upsert + INSERT，不删除历史 | 本轮 filled/cancelled 的条件单执行 UPDATE（写入 status、filled_price、fee、filled_at）；open orders 执行 upsert；市价单和清算产生的新订单（status='closed'）INSERT。_execute_fill 和 _force_liquidate 产生的 Order 记录也通过此路径写入 |
 
 ## Interaction Flows
 
