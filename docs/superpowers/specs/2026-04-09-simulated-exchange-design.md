@@ -85,8 +85,8 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 
 | 方法 | 行为 |
 |---|---|
-| `fetch_ticker(symbol)` | 返回 WebSocket 缓存的最新 ticker（含 bid/ask）。WebSocket 断连期间返回最后可用 ticker（可能过时，是基于最后可用数据的估算值） |
-| `fetch_ohlcv(symbol, timeframe, limit)` | 通过 OKX REST 公开 API 获取 K 线（无需认证） |
+| `fetch_ticker(symbol)` | 校验 symbol 匹配配置交易对，返回 WebSocket 缓存的最新 ticker（含 bid/ask）。WebSocket 断连期间返回最后可用 ticker（可能过时，是基于最后可用数据的估算值） |
+| `fetch_ohlcv(symbol, timeframe, limit)` | 校验 symbol 匹配配置交易对，通过 OKX REST 公开 API 获取 K 线（无需认证） |
 | `create_order(symbol, side, order_type, amount, price)` | 见下方「订单处理」。symbol 必须匹配 Session 配置的交易对，否则抛异常 |
 | `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)`，含未实现盈亏（见下方公式） |
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
@@ -178,7 +178,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
 
 `create_order(symbol, side="sell", order_type="stop", amount=0.001, price=95000)` 时：
 
-1. 校验订单参数；如果当前无持仓，抛异常（对齐真实交易所——无持仓时条件单无意义）。注：创建时不校验 amount <= position.contracts，因为持仓量可能在创建后变化（加仓/部分平仓）。触发时以 `min(order.amount, position.contracts)` 实际执行
+1. 校验订单参数；如果当前无持仓，抛异常（对齐真实交易所——无持仓时条件单无意义）。创建时强制 `amount = position.contracts`（全仓止损/止盈），与现有工具 `set_stop_loss`/`set_take_profit` 行为对齐（均使用 `p.contracts`）。触发时仍以 `min(order.amount, position.contracts)` 执行，处理加仓后持仓量变化的情况
 2. 从当前持仓推导 position_side，加入内部挂单列表
 3. 持久化到 sim_orders 表
 4. 返回 `Order(id, symbol, side, "stop", amount, price, "open")`
@@ -215,6 +215,8 @@ async def _matching_loop(self):
             # 清算必须在条件单之前检查：若价格跳空穿越清算价，条件单的
             # _close_position_core（无 PnL cap）在清算价之下成交会导致 free_usdt 为负。
             # 清算使用 PnL cap 保证余额归零，条件单只在清算未触发时才执行。
+            # [安全护栏] 高杠杆+价格跳空场景下，此行为比真实交易所更严格
+            # （全额清算而非止损成交），这是有意为之——优先保证余额非负。
             # _force_liquidate 复用 _close_position_core（计算 PnL、释放保证金、移除持仓），不含订单取消
             # [安全护栏] PnL cap: pnl = max(pnl, -(released_margin - fee))，确保清算后余额精确归零
             # 计算: free_usdt += margin + (-(margin - fee)) - fee = 0
@@ -295,7 +297,7 @@ class FillEvent:
 
 - `_execute_fill(order, ticker)` — 条件单触发时调用，内部调用 `_close_position_core` 完成平仓，返回 FillEvent
 - `_force_liquidate(pos, price)` — 清算触发时调用，内部调用 `_close_position_core`（带 PnL cap），返回 FillEvent
-- `_close_position_core(symbol, side, amount, fill_price)` — 共享核心逻辑：PnL 计算、余额更新、持仓移除。不含订单取消。实现中应 `assert free_usdt >= 0` 作防御性检查
+- `_close_position_core(symbol, side, amount, fill_price)` — 共享核心逻辑：PnL 计算、余额更新、持仓移除。不含订单取消。实现中应 `if free_usdt < 0: raise` 作防御性检查（不用 assert，Python `-O` 会跳过）
 
 ### fill_handler (app.py)
 
@@ -322,7 +324,7 @@ def _create_fill_handler(deps: TradingDeps, scheduler):
 exchange.on_fill(_create_fill_handler(deps, scheduler))
 ```
 
-通过闭包捕获 `deps`（含 db_engine、session_id 等）和 `scheduler` 引用，调用现有的 `_update_trade_closed()` 写 TradeRecord。注：`_update_trade_closed()` 按 session_id + symbol + side + status='open' 四重条件查询（已确认现有代码 tools_execution.py:42-50），确保精确匹配目标记录。
+通过闭包捕获 `deps`（含 db_engine、session_id 等）和 `scheduler` 引用，调用现有的 `_update_trade_closed()` 写 TradeRecord。注：`_update_trade_closed()` 按 session_id + symbol + side + status='open' 四重条件查询，确保精确匹配目标记录。
 
 ### Scheduler.trigger() 语义
 
@@ -334,6 +336,37 @@ Scheduler 新增 `trigger(trigger_type, context=None)` 方法：
 | 防重入 | 如果 agent cycle 正在运行，设置一个 pending flag（不是队列）。当前 cycle 结束后检查 flag，如有则触发一次新 cycle（`context=None`）。多个事件只设一个 flag，合并为一次触发，避免连续 cycle 风暴。context=None 的设计理由：多个事件合并后没有单一"正确"的 context，agent 应基于最新全局状态（通过 fetch_positions/fetch_balance 查询）做决策，而非依赖某个特定事件 |
 | 与定时触发的关系 | 事件触发独立于定时调度。事件触发后重置定时计时器（避免刚处理完 fill 又立即触发定时 cycle） |
 | 异常处理 | 如果 fill 触发的 agent cycle 执行失败（抛异常），清除 pending flag，与现有 scheduler 的 except 后继续循环行为一致 |
+
+`trigger()` 伪代码：
+
+```python
+async def trigger(self, trigger_type: str, context: Any | None = None):
+    if self._cycle_running:
+        self._pending_trigger = True   # 合并多个事件为一个 flag
+        return
+    # 无 cycle 运行时直接启动
+    await self._run_cycle(trigger_type, context)
+
+async def _scheduler_loop(self):
+    while not self._stopped:
+        await self._run_cycle("scheduled", None)
+        # cycle 结束后检查 pending flag
+        if self._pending_trigger:
+            self._pending_trigger = False
+            await self._run_cycle("conditional", None)  # context=None，agent 自行查询
+        await asyncio.sleep(self._interval)
+
+async def _run_cycle(self, trigger_type, context):
+    self._cycle_running = True
+    try:
+        await self._callback(trigger_type, context)
+    except Exception:
+        logger.error("Agent cycle failed", exc_info=True)
+    finally:
+        self._cycle_running = False
+```
+
+注：pending flag 合并策略假设单 symbol——同一 tick 内最多一个 position 被平仓，不会有多个独立事件需要分别处理。此假设与 Scope Boundaries 中的单 symbol 约束对齐。
 
 callback 签名变更：
 
@@ -353,7 +386,7 @@ async def on_tick(trigger_type: str, context: Any | None):
 
 - 定时触发时 Scheduler 调用 `callback("scheduled", None)`
 - 事件触发时 Scheduler 调用 `callback("conditional", fill_event)`
-- `run_agent_cycle` 新增 `context` 参数。当 context 非 None 时，在 agent prompt 中追加事件摘要：`"Event: {trigger_reason} triggered at {fill_price}"`，让 agent 知道发生了什么并据此决策（agent 通过 fetch_balance/fetch_positions 查询最新状态获取完整信息）
+- `run_agent_cycle` 新增 `context` 参数。当 context 非 None 时，在 agent prompt 中追加事件摘要：`"Event: {trigger_reason} triggered — {symbol} {amount} @ {fill_price}"`，让 agent 知道发生了什么并据此决策（agent 通过 fetch_balance/fetch_positions 查询最新状态获取完整信息）
 
 ## Internal State
 
@@ -501,7 +534,7 @@ class Order:
 ```
 
 - `SimulatedExchange`：在 `create_order()` 中计算并填入 fee
-- `OKXExchange`：从 ccxt 响应中解析 fee（如有），或返回 None。已知限制：OKX 的 market order REST 响应中 fee 可能为空（需 fetch_order 才能拿到完整 fee），因此 OKX 模式下 TradeRecord.fee 可能不完整
+- `OKXExchange`：从 ccxt 响应中解析 fee（如有），或返回 None。已知限制：OKX 的 market order REST 响应中 fee 可能为空（需 fetch_order 才能拿到完整 fee），因此 OKX 模式下 TradeRecord.fee 可能不完整，MetricsService 推导的 PnL 可能不含手续费（已知精度损失，可接受）
 - `tools_execution.py`：统一从 `Order.fee` 读取并写入 TradeRecord
 
 这样 fee 信息通过接口层传递，上层不需要区分模拟/真实模式。
@@ -536,6 +569,7 @@ async def _update_trade_closed(deps, symbol, side, exit_price, fee=None)
 |---|---|---|
 | entry_price | `ticker.last`（open_position 中） | `order.price`（create_order 返回的实际成交价） |
 | exit_price | `ticker.last`（close_position 中） | `order.price` |
+| pnl | `p.unrealized_pnl`（交易所返回的浮动盈亏） | 移除存储，由 MetricsService 从 entry/exit/quantity/side/fee 推导 |
 
 三处修改统一保证价格准确性：(1) open_position 用 order.price 作 entry_price，(2) close_position 用 order.price 作 exit_price，(3) fill_handler 用 event.fill_price 作 exit_price。
 
@@ -629,7 +663,7 @@ SimulatedExchange.close()
 | 表 | 策略 | 说明 |
 |---|---|---|
 | sim_balances | upsert by session_id | 只有一行，直接覆盖 |
-| sim_positions | delete where session_id → insert current | 全量替换，平仓后该行被删除 |
+| sim_positions | delete where session_id → insert current | 全量替换，平仓后该行被删除。依赖事务原子性——非事务场景下 delete 后 crash 会丢失数据 |
 | sim_orders | UPDATE + upsert，不删除历史 | 本轮 filled/cancelled 的 order 执行 UPDATE（写入 status、filled_price、filled_at）；open orders 执行 upsert。历史记录保留用于审计 |
 
 ## Interaction Flows
@@ -795,6 +829,7 @@ main.py                  SimulatedExchange              DB (sim_*)
 - 精确清算价计算（含维持保证金率）
 - amount_to_precision 从 REST API market info 自动获取（当前手动配置）
 - WebSocket 长时间无 tick 的超时处理（BTC/USDT 主流交易对下极不可能发生）
+- 长时间断连后首个 tick 的极端成交价保护（与真实交易所行为一致，断连期间的价格跳空是固有风险）
 - 部分平仓的 TradeRecord 拆分管理（SimulatedExchange 支持部分平仓——减少 contracts，但当前 TradeRecord 管理假设一开一闭完整匹配。工具层总是全额平仓，条件单触发时 clamp 到持仓量）
 - sim_orders 历史记录清理机制（长期运行会增长，当前规模下不构成问题）
 
