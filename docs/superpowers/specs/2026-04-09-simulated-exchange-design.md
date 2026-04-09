@@ -121,7 +121,15 @@ liquidation_price:
 
 ### Market Order
 
-`create_order(symbol, side="buy", order_type="market", amount=0.001)` 时同步处理：
+`create_order(symbol, side, order_type="market", amount)` 时同步处理。根据当前持仓状态推断意图（对齐 OKX 净仓模式）：
+
+| 当前持仓 | side="buy" | side="sell" |
+|---|---|---|
+| 无持仓 | 开多仓 | 开空仓 |
+| 持有 long | 加仓（合并均价） | 平多仓 |
+| 持有 short | 平空仓 | 加仓（合并均价） |
+
+#### Open Position (开仓 / 加仓)
 
 1. 确定成交价：买入用 `ticker.ask`，卖出用 `ticker.bid`
 2. 计算保证金和手续费：
@@ -133,9 +141,25 @@ liquidation_price:
 3. 校验余额：`free_usdt >= required`，不够则抛异常（对齐真实交易所的拒单行为）
 4. 更新内部状态：
    - 余额：`free_usdt -= required`，`used_usdt += margin`
-   - 持仓：如果同 symbol 同方向已有持仓，合并并计算加权均价（对齐 OKX 行为）；否则创建新持仓
+   - 持仓：如果同 symbol 同方向已有持仓，合并并计算加权均价；否则创建新持仓
 5. 持久化到 sim_* 表
 6. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
+
+#### Close Position (平仓)
+
+1. 确定成交价：平多用 `ticker.bid`，平空用 `ticker.ask`
+2. 计算已实现 PnL 和手续费：
+   ```
+   long PnL:  (fill_price - entry_price) * amount
+   short PnL: (entry_price - fill_price) * amount
+   fee = fill_price * amount * fee_rate
+   ```
+3. 更新内部状态：
+   - 释放保证金：`used_usdt -= (entry_price * amount) / leverage`，`free_usdt += released_margin + pnl - fee`
+   - 移除持仓（全部平仓）或减少 contracts（部分平仓）
+   - 取消该 symbol 的所有残留条件单
+4. 持久化到 sim_* 表
+5. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
 
 ### Conditional Order (stop / take_profit)
 
