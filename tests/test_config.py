@@ -27,7 +27,6 @@ models:
     review: weak
 scheduler:
   interval_minutes: 15
-  cooldown_seconds: 60
 llm_budget:
   daily_max_tokens: 500000
 database:
@@ -43,7 +42,6 @@ approval:
     assert settings.exchange.secret == "test_secret"
     assert settings.trading.symbol == "BTC/USDT:USDT"
     assert settings.trading.initial_balance_usdt == 100.0
-    assert settings.scheduler.cooldown_seconds == 60
     assert settings.llm_budget.daily_max_tokens == 500000
     assert settings.approval.timeout_seconds == 300
 

@@ -226,21 +226,6 @@ async def run(
         approval_enabled=settings.approval.enabled,
     )
 
-    # Show initial metrics with current position
-    async with get_session(engine) as session:
-        result = await session.execute(
-            select(TradeRecord)
-            .where(TradeRecord.session_id == session_id)
-            .where(TradeRecord.status == "closed")
-        )
-        trades = list(result.scalars().all())
-    positions = await exchange.fetch_positions(settings.trading.symbol)
-    if positions:
-        pos_str = f"{positions[0].side} {positions[0].contracts}"
-    else:
-        pos_str = "none"
-    display_metrics(metrics_service.compute_from_trades(trades, current_position=pos_str))
-
     # Graceful shutdown
     shutdown_event = asyncio.Event()
 
@@ -280,6 +265,21 @@ async def run(
     # Start exchange (simulated needs async start for WebSocket + state restore)
     if settings.exchange.name == "simulated":
         await exchange.start()
+
+    # Show initial metrics (after start so simulated mode has restored state)
+    async with get_session(engine) as session:
+        result = await session.execute(
+            select(TradeRecord)
+            .where(TradeRecord.session_id == session_id)
+            .where(TradeRecord.status == "closed")
+        )
+        trades = list(result.scalars().all())
+    positions = await exchange.fetch_positions(settings.trading.symbol)
+    if positions:
+        pos_str = f"{positions[0].side} {positions[0].contracts}"
+    else:
+        pos_str = "none"
+    display_metrics(metrics_service.compute_from_trades(trades, current_position=pos_str))
 
     console.print(
         f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min[/]"

@@ -26,7 +26,6 @@ models:
 # === Scheduler Configuration ===
 scheduler:
   interval_minutes: 15         # How often the agent wakes up to analyze the market
-  cooldown_seconds: 60         # Minimum seconds between two consecutive wake cycles
 
 # === LLM Cost Control ===
 llm_budget:

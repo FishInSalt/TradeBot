@@ -40,7 +40,6 @@ class ModelsConfig(BaseModel):
 
 class SchedulerConfig(BaseModel):
     interval_minutes: int = 15
-    cooldown_seconds: int = 60
 
 
 class LLMBudgetConfig(BaseModel):
