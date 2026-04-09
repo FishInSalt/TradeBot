@@ -236,24 +236,19 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    async def on_tick():
+    async def on_tick(trigger_type: str, context=None):
         if shutdown_event.is_set():
             return
         try:
-            await run_agent_cycle(agent, deps, "scheduled", budget, engine)
+            await run_agent_cycle(agent, deps, trigger_type, budget, engine)
         except Exception:
             logger.exception("Agent cycle failed")
 
     interval = settings.scheduler.interval_minutes * 60
-    scheduler = Scheduler(
-        interval_seconds=interval,
-        cooldown_seconds=settings.scheduler.cooldown_seconds,
-        callback=on_tick,
-    )
+    scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
     console.print(
-        f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min "
-        f"(cooldown {settings.scheduler.cooldown_seconds}s)[/]"
+        f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min[/]"
     )
     console.print(f"[bold]LLM Budget: {settings.llm_budget.daily_max_tokens:,} tokens/day[/]")
     console.print("[dim]Press Ctrl+C to stop[/]\n")
