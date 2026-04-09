@@ -783,7 +783,13 @@ class Scheduler:
 Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_scheduler.py -v`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Remove cooldown_seconds from Scheduler usage in app.py**
+
+In `src/cli/app.py`, the Scheduler construction currently passes `cooldown_seconds`. Update it to use the new signature (just `interval_seconds` and `callback`). The cooldown parameter is no longer needed — interval handles the spacing, and event triggers bypass it.
+
+Note: `SchedulerConfig.cooldown_seconds` in config.py and settings.yaml can remain as-is (unused but harmless). Removing it would break existing YAML files.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/scheduler/scheduler.py tests/test_scheduler.py
@@ -1041,9 +1047,17 @@ class SimulatedExchange(BaseExchange):
 
         async with self._lock:
             if order_type == "market":
-                return self._execute_market_order(symbol, side, amount)
+                order = self._execute_market_order(symbol, side, amount)
+                if self._db_engine:
+                    await self._persist_state(new_orders=[
+                        (order, self._last_order_position_side)
+                    ])
+                return order
             else:
-                return self._create_conditional_order(symbol, side, order_type, amount, price)  # type: ignore[arg-type]
+                order = self._create_conditional_order(symbol, side, order_type, amount, price)  # type: ignore[arg-type]
+                if self._db_engine:
+                    await self._persist_state()  # persist new pending order
+                return order
 
     def _execute_market_order(self, symbol: str, side: str, amount: float) -> Order:
         if self._latest_ticker is None:
@@ -1076,12 +1090,14 @@ class SimulatedExchange(BaseExchange):
 
         # Check leverage consistency for add-to-position
         pos = self._positions.get(symbol)
+        position_side = "long" if side == "buy" else "short"
         if pos is not None:
             if pos.leverage != leverage:
                 raise ValueError(
                     f"Leverage mismatch: position has {pos.leverage}x, "
                     f"current is {leverage}x. Close position first."
                 )
+            position_side = pos.side  # add-to-position: same direction
             # Merge position
             new_contracts = pos.contracts + amount
             new_entry = (pos.entry_price * pos.contracts + fill_price * amount) / new_contracts
@@ -1089,7 +1105,6 @@ class SimulatedExchange(BaseExchange):
             pos.entry_price = new_entry
             pos.updated_at = datetime.now(timezone.utc)
         else:
-            position_side = "long" if side == "buy" else "short"
             self._positions[symbol] = _Position(
                 side=position_side,
                 contracts=amount,
@@ -1102,19 +1117,22 @@ class SimulatedExchange(BaseExchange):
         self._free_usdt = round(self._free_usdt, 8)
         self._used_usdt = round(self._used_usdt, 8)
 
-        position_side = "long" if side == "buy" else "short"
         order_id = str(uuid.uuid4())
-        logger.info(f"Market order filled: {side} {amount} {symbol} @ {fill_price:.2f}, fee={fee:.4f}")
-        return Order(
+        order = Order(
             id=order_id, symbol=symbol, side=side, order_type="market",
             amount=amount, price=fill_price, status="closed", fee=fee,
         )
+        # Track position_side for persistence
+        self._last_order_position_side = position_side
+        logger.info(f"Market order filled: {side} {amount} {symbol} @ {fill_price:.2f}, fee={fee:.4f}")
+        return order
 
     def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> Order:
         ticker = self._latest_ticker
         assert ticker is not None
         # Clamp amount
         actual_amount = min(amount, pos.contracts)
+        position_side = pos.side  # record BEFORE close (pos may be deleted)
         fill_price = ticker.bid if pos.side == "long" else ticker.ask
         pnl, fee, released_margin = self._close_position_core(
             symbol, pos.side, actual_amount, fill_price,
@@ -1125,14 +1143,17 @@ class SimulatedExchange(BaseExchange):
             self._cancel_orphaned_orders()
 
         order_id = str(uuid.uuid4())
+        order = Order(
+            id=order_id, symbol=symbol, side=side, order_type="market",
+            amount=actual_amount, price=fill_price, status="closed", fee=fee,
+        )
+        # Track position_side for persistence
+        self._last_order_position_side = position_side
         logger.info(
             f"Market close filled: {side} {actual_amount} {symbol} @ {fill_price:.2f}, "
             f"pnl={pnl:.4f}, fee={fee:.4f}"
         )
-        return Order(
-            id=order_id, symbol=symbol, side=side, order_type="market",
-            amount=actual_amount, price=fill_price, status="closed", fee=fee,
-        )
+        return order
 
     def _close_position_core(
         self, symbol: str, position_side: str, amount: float, fill_price: float,
@@ -1212,7 +1233,28 @@ class SimulatedExchange(BaseExchange):
     # --- Order query methods ---
 
     async def fetch_order(self, order_id: str) -> Order:
-        raise NotImplementedError("fetch_order requires DB — implemented with persistence")
+        # Check in-memory pending orders first
+        for o in self._pending_orders:
+            if o.id == order_id:
+                return Order(id=o.id, symbol=o.symbol, side=o.side,
+                             order_type=o.order_type, amount=o.amount,
+                             price=o.trigger_price, status="open")
+        # Query DB for filled/cancelled orders
+        if self._db_engine:
+            from sqlalchemy import select
+            from src.storage.database import get_session
+            from src.storage.models import SimOrder
+            async with get_session(self._db_engine) as session:
+                result = await session.execute(
+                    select(SimOrder).where(SimOrder.order_id == order_id)
+                )
+                row = result.scalar_one_or_none()
+                if row:
+                    price = row.filled_price if row.status == "closed" else row.trigger_price
+                    return Order(id=row.order_id, symbol=row.symbol, side=row.side,
+                                 order_type=row.order_type, amount=row.amount,
+                                 price=price, status=row.status, fee=row.fee)
+        raise ValueError(f"Order not found: {order_id}")
 
     async def fetch_open_orders(self, symbol: str) -> list[Order]:
         self._validate_symbol(symbol)
@@ -1226,7 +1268,31 @@ class SimulatedExchange(BaseExchange):
         ]
 
     async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]:
-        raise NotImplementedError("fetch_closed_orders requires DB — implemented with persistence")
+        self._validate_symbol(symbol)
+        if not self._db_engine:
+            return []
+        from sqlalchemy import select, func
+        from src.storage.database import get_session
+        from src.storage.models import SimOrder
+        async with get_session(self._db_engine) as session:
+            result = await session.execute(
+                select(SimOrder)
+                .where(SimOrder.session_id == self._session_id)
+                .where(SimOrder.symbol == symbol)
+                .where(SimOrder.status.in_(["closed", "cancelled"]))
+                .order_by(func.coalesce(SimOrder.filled_at, SimOrder.created_at).desc())
+                .limit(limit)
+            )
+            rows = result.scalars().all()
+            return [
+                Order(
+                    id=row.order_id, symbol=row.symbol, side=row.side,
+                    order_type=row.order_type, amount=row.amount,
+                    price=row.filled_price if row.status == "closed" else row.trigger_price,
+                    status=row.status, fee=row.fee,
+                )
+                for row in rows
+            ]
 
     # --- Fill callback ---
 
@@ -1604,6 +1670,9 @@ async def _process_tick(self, ticker: Ticker) -> None:
     self._latest_ticker = ticker
 
     triggered: list[FillEvent] = []
+    filled_order_ids: list[str] = []  # conditional orders that were filled
+    new_orders: list[tuple[Order, str]] = []  # (order, position_side) for sim_orders INSERT
+
     async with self._lock:
         # 1. Liquidation check (must be before conditional orders)
         for symbol, pos in list(self._positions.items()):
@@ -1611,9 +1680,22 @@ async def _process_tick(self, ticker: Ticker) -> None:
             if pos.side == "long" and ticker.bid <= liq:
                 fill = self._force_liquidate(pos, symbol, ticker.bid)
                 triggered.append(fill)
+                # Create Order record for sim_orders
+                new_orders.append((Order(
+                    id=fill.order_id, symbol=symbol,
+                    side="sell", order_type="liquidation",
+                    amount=fill.amount, price=fill.fill_price,
+                    status="closed", fee=fill.fee,
+                ), fill.position_side))
             elif pos.side == "short" and ticker.ask >= liq:
                 fill = self._force_liquidate(pos, symbol, ticker.ask)
                 triggered.append(fill)
+                new_orders.append((Order(
+                    id=fill.order_id, symbol=symbol,
+                    side="buy", order_type="liquidation",
+                    amount=fill.amount, price=fill.fill_price,
+                    status="closed", fee=fill.fee,
+                ), fill.position_side))
 
         # 2. Conditional order check
         for order in list(self._pending_orders):
@@ -1622,12 +1704,18 @@ async def _process_tick(self, ticker: Ticker) -> None:
                     continue
                 fill = self._execute_fill(order, ticker)
                 triggered.append(fill)
+                filled_order_ids.append(order.id)  # track for DB UPDATE
 
         if triggered:
             for fill in triggered:
                 self._remove_order_by_id(fill.order_id)
             self._cancel_orphaned_orders()
-            # Persistence handled in Task 8
+            if self._db_engine:
+                await self._persist_state(
+                    new_orders=new_orders,
+                    filled_order_ids=filled_order_ids,
+                    filled_fills=triggered,
+                )
 
     # Notify outside lock
     for fill in triggered:
@@ -1817,27 +1905,45 @@ async def _restore_state(self) -> None:
         f"positions={len(self._positions)}, pending_orders={len(self._pending_orders)}"
     )
 
-async def _persist_state(self, new_orders: list[Order] | None = None) -> None:
-    """Persist all internal state to sim_* tables in a single transaction."""
+async def _persist_state(
+    self,
+    new_orders: list[tuple[Order, str]] | None = None,
+    filled_order_ids: list[str] | None = None,
+    filled_fills: list[FillEvent] | None = None,
+) -> None:
+    """Persist all internal state to sim_* tables in a single transaction.
+
+    Args:
+        new_orders: list of (Order, position_side) tuples for INSERT (market/liquidation)
+        filled_order_ids: order_ids of conditional orders that were filled this tick
+        filled_fills: FillEvent data for updating filled conditional orders
+    """
     from sqlalchemy import delete, update
     from src.storage.database import get_session
     from src.storage.models import SimBalance, SimPosition, SimOrder
 
+    now = datetime.now(timezone.utc)
+
     async with get_session(self._db_engine) as session:
-        # 1. Upsert balance
+        # 1. Upsert balance (explicitly set updated_at — onupdate won't fire for upsert)
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
         stmt = sqlite_insert(SimBalance).values(
             session_id=self._session_id,
             free_usdt=self._free_usdt,
             used_usdt=self._used_usdt,
+            updated_at=now,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["session_id"],
-            set_={"free_usdt": stmt.excluded.free_usdt, "used_usdt": stmt.excluded.used_usdt},
+            set_={
+                "free_usdt": stmt.excluded.free_usdt,
+                "used_usdt": stmt.excluded.used_usdt,
+                "updated_at": now,
+            },
         )
         await session.execute(stmt)
 
-        # 2. Positions: delete → insert
+        # 2. Positions: delete → insert (carry original created_at)
         await session.execute(
             delete(SimPosition).where(SimPosition.session_id == self._session_id)
         )
@@ -1849,14 +1955,33 @@ async def _persist_state(self, new_orders: list[Order] | None = None) -> None:
                 created_at=pos.created_at, updated_at=pos.updated_at,
             ))
 
-        # 3. Orders: reconciliation + insert new
+        # 3a. Orders: UPDATE filled conditional orders BEFORE reconciliation
+        if filled_order_ids and filled_fills:
+            fill_map = {f.order_id: f for f in filled_fills}
+            for oid in filled_order_ids:
+                fill = fill_map.get(oid)
+                if fill:
+                    await session.execute(
+                        update(SimOrder)
+                        .where(SimOrder.order_id == oid)
+                        .values(
+                            status="closed",
+                            filled_price=fill.fill_price,
+                            fee=fill.fee,
+                            filled_at=now,
+                        )
+                    )
+
+        # 3b. Orders: reconciliation — cancel orphaned pending orders
         pending_ids = [o.id for o in self._pending_orders]
-        if pending_ids:
+        filled_ids = filled_order_ids or []
+        exclude_ids = pending_ids + filled_ids  # don't cancel orders we just filled
+        if exclude_ids:
             await session.execute(
                 update(SimOrder)
                 .where(SimOrder.session_id == self._session_id)
                 .where(SimOrder.status == "open")
-                .where(SimOrder.order_id.notin_(pending_ids))
+                .where(SimOrder.order_id.notin_(exclude_ids))
                 .values(status="cancelled")
             )
         else:
@@ -1867,19 +1992,33 @@ async def _persist_state(self, new_orders: list[Order] | None = None) -> None:
                 .values(status="cancelled")
             )
 
+        # 3c. Orders: INSERT new orders (market orders, liquidation orders)
         if new_orders:
-            for o in new_orders:
+            for order, position_side in new_orders:
                 session.add(SimOrder(
-                    session_id=self._session_id, order_id=o.id,
-                    symbol=o.symbol, side=o.side,
-                    position_side=self._positions.get(o.symbol, _Position("", 0, 0, 1)).side if o.order_type != "market" else ("long" if o.side == "buy" else "short"),
-                    order_type=o.order_type, amount=o.amount,
-                    trigger_price=o.price if o.status == "open" else None,
-                    status=o.status,
-                    filled_price=o.price if o.status == "closed" else None,
-                    fee=o.fee,
-                    filled_at=datetime.now(timezone.utc) if o.status == "closed" else None,
+                    session_id=self._session_id, order_id=order.id,
+                    symbol=order.symbol, side=order.side,
+                    position_side=position_side,
+                    order_type=order.order_type, amount=order.amount,
+                    trigger_price=order.price if order.status == "open" else None,
+                    status=order.status,
+                    filled_price=order.price if order.status == "closed" else None,
+                    fee=order.fee,
+                    filled_at=now if order.status == "closed" else None,
                 ))
+
+        # 3d. Upsert pending conditional orders (ensure they exist in DB)
+        for pending in self._pending_orders:
+            stmt = sqlite_insert(SimOrder).values(
+                session_id=self._session_id, order_id=pending.id,
+                symbol=pending.symbol, side=pending.side,
+                position_side=pending.position_side,
+                order_type=pending.order_type, amount=pending.amount,
+                trigger_price=pending.trigger_price,
+                status="open", created_at=now,
+            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["order_id"])
+            await session.execute(stmt)
 
         await session.commit()
 ```
