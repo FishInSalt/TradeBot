@@ -90,7 +90,7 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)` |
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
 | `set_leverage(symbol, leverage)` | 记录到内部状态 |
-| `amount_to_precision(symbol, amount)` | 固定精度规则（BTC: 3 位小数） |
+| `amount_to_precision(symbol, amount)` | 按 symbol 精度规则截断（见下方配置） |
 | `close()` | 停止撮合循环，断开 WebSocket |
 
 构造函数 `__init__(config, db_engine, session_id)` 不属于 `BaseExchange` 接口。不同实现有不同的构造参数（`OKXExchange` 需要 API 密钥，`SimulatedExchange` 需要 db_engine 和 session_id）。实例化由 `app.py` 中的工厂逻辑根据 `exchange.name` 配置决定。
@@ -102,10 +102,12 @@ unrealized_pnl:
   long:  (ticker.bid - entry_price) * contracts
   short: (entry_price - ticker.ask) * contracts
 
-liquidation_price:
+liquidation_price (simplified, ignores maintenance margin rate):
   long:  entry_price * (1 - 1 / leverage)
   short: entry_price * (1 + 1 / leverage)
 ```
+
+注：清算价公式是简化版本，真实 OKX 还考虑维持保证金率。当前规模下差异极小，精确清算价模拟列为 out of scope。
 
 ### set_leverage() 与 create_order() 的隐式依赖
 
@@ -156,8 +158,8 @@ liquidation_price:
    ```
 3. 更新内部状态：
    - 释放保证金：`used_usdt -= (entry_price * amount) / leverage`，`free_usdt += released_margin + pnl - fee`
-   - 移除持仓（全部平仓）或减少 contracts（部分平仓）
-   - 取消该 symbol 的所有残留条件单
+   - 如果 amount >= position.contracts，全部平仓并移除持仓；如果 amount < position.contracts，减少 contracts（部分平仓）。如果 amount > position.contracts，clamp 到 position.contracts（防止 agent 错误输入意外反向开仓）
+   - 取消该 symbol 的所有残留条件单（全部平仓时）
 4. 持久化到 sim_* 表
 5. 返回 `Order(id, symbol, side, "market", amount, price, "closed", fee=fee)`
 
@@ -208,7 +210,13 @@ async def _matching_loop(self):
                 await self._notify_fill(fill)   # 触发回调 → Scheduler
 ```
 
+**并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。虽然 asyncio 是单线程，但 matching loop 在 `await _persist_state()` 时会 yield 控制权，此时 `create_order()` 可能被调度执行。使用 `asyncio.Lock` 保护所有内部状态修改操作，确保同一时刻只有一个协程在修改 balance/positions/pending_orders。
+
+**WebSocket 首次 tick 竞态**：在 WebSocket 连接建立后、收到第一个 tick 之前，`fetch_ticker()` 可能被调用。启动时先通过 REST API 拉取一次 ticker 作为种子值写入 `_latest_ticker`，再启动 WebSocket 和撮合循环。
+
 **WebSocket 断连处理**：ccxt 的 `watch_ticker` 内置自动重连机制。断连期间撮合循环阻塞在 `_watch_ticker()` 上，不会产生错误触发。重连后自动恢复，挂单继续按最新行情检查。
+
+**Order ID 生成**：使用 UUID（`str(uuid.uuid4())`），避免计数器状态管理。
 
 ### Trigger Conditions
 
@@ -238,9 +246,50 @@ class FillEvent:
     timestamp: int
 ```
 
-上层 fill_handler 收到后：
-1. 更新 TradeRecord（`_update_trade_closed()`）
-2. 通知 Scheduler 触发 agent cycle（`trigger_type="conditional"`）
+### fill_handler (app.py)
+
+fill_handler 是连接 SimulatedExchange 和上层系统的胶水层，定义在 `app.py` 中：
+
+```python
+def _create_fill_handler(db_engine, session_id, scheduler):
+    async def handle_fill(event: FillEvent):
+        # 1. 更新 TradeRecord
+        await _update_trade_closed(
+            deps, event.symbol, event.side,
+            pnl=event.pnl, exit_price=event.fill_price, fee=event.fee
+        )
+        # 2. 唤醒 agent
+        await scheduler.trigger("conditional", context=event)
+    return handle_fill
+
+# 注册回调
+exchange.on_fill(_create_fill_handler(db_engine, session_id, scheduler))
+```
+
+通过闭包捕获 db_engine、session_id、scheduler 引用，调用现有的 `_update_trade_closed()` 写 TradeRecord。
+
+### Scheduler.trigger() 语义
+
+Scheduler 新增 `trigger(trigger_type, context=None)` 方法：
+
+| 行为 | 说明 |
+|---|---|
+| 绕过 cooldown | 条件单触发是时间敏感的，不等待 cooldown 倒计时 |
+| 防重入 | 如果 agent cycle 正在运行，将事件排队，当前 cycle 结束后立即执行 |
+| 与定时触发的关系 | 事件触发独立于定时调度。事件触发后重置定时计时器（避免刚处理完 fill 又立即触发定时 cycle） |
+
+callback 签名变更：
+
+```python
+# 现有
+callback: Callable[[], Awaitable[None]]
+
+# 变更为
+callback: Callable[[str, Any | None], Awaitable[None]]
+#          trigger_type ↑    context ↑
+```
+
+`run_agent_cycle(trigger_type, context)` 将 trigger_type 传递给 agent，使 agent 知道自己被唤醒的原因（"scheduled" 常规分析 vs "conditional" 止损/止盈触发需要应对）。
 
 ## Internal State
 
@@ -294,7 +343,7 @@ new_contracts = old_contracts + new_contracts
 ```python
 [
     {
-        id: "sim_001",
+        id: "a1b2c3d4-...",    # UUID
         symbol: "BTC/USDT:USDT",
         side: "sell",
         order_type: "stop",
@@ -337,7 +386,7 @@ new_contracts = old_contracts + new_contracts
 |---|---|---|
 | id | int | PK |
 | session_id | str FK | 关联 Session |
-| order_id | str | 模拟订单 ID（如 "sim_001"） |
+| order_id | str | 模拟订单 ID（UUID） |
 | symbol | str | 交易对 |
 | side | str | buy / sell |
 | order_type | str | stop / take_profit |
@@ -381,6 +430,18 @@ class Order:
 
 `tools_execution.py` 中 `_record_trade_open()` 和 `_update_trade_closed()` 从 `Order.fee` 读取手续费并写入此字段。
 
+### tools_execution.py 价格/PnL 准确性修复
+
+现有代码使用 `ticker.last` 近似 entry_price 和 exit_price，实际成交价（特别是模拟模式下）是 ask/bid。趁此次修改一并修复：
+
+| 字段 | 现有（不准确） | 修正为 |
+|---|---|---|
+| entry_price | `ticker.last` (tools_execution.py:144) | `order.price`（create_order 返回的实际成交价） |
+| exit_price | `ticker.last` (tools_execution.py:181) | `order.price` |
+| pnl | `p.unrealized_pnl`（平仓前估算值） | 从 `order.price` 和已知 `entry_price` 计算：`(order.price - entry_price) * contracts`（long）或反向（short） |
+
+这样 TradeRecord 中的价格和 PnL 都是基于实际成交价，两种 exchange 模式下行为一致。
+
 ## Configuration
 
 ### settings.yaml
@@ -389,12 +450,19 @@ class Order:
 exchange:
   name: simulated       # "okx" → real trading, "simulated" → mock exchange
   fee_rate: 0.0005      # simulated mode: taker fee rate (0.05%)
+  precision:            # simulated mode: symbol → decimal places for amount_to_precision()
+    BTC/USDT:USDT: 3
+    ETH/USDT:USDT: 2
 ```
 
 - `name: "okx"` → 创建 `OKXExchange`（需要 API 密钥）
 - `name: "simulated"` → 创建 `SimulatedExchange`（使用 OKX 公开 WebSocket，无需交易权限密钥）
 
-`fee_rate` 仅在模拟模式下使用。默认 0.05% 对齐 OKX taker 费率。
+`fee_rate` 仅在模拟模式下使用。默认 0.05% 对齐 OKX taker 费率。`precision` 为 symbol → 小数位数映射，供 `amount_to_precision()` 使用。
+
+### Dependencies
+
+SimulatedExchange 使用 `watch_ticker()`（WebSocket），这是 ccxt Pro API。需要在 `pyproject.toml` 中将 `ccxt` 依赖改为 `ccxt[pro]`（ccxt Pro 包含标准版全部功能，向后兼容）。
 
 ### Session.initial_balance
 
@@ -410,9 +478,10 @@ SimulatedExchange.__init__(config, db_engine, session_id)
 ├── 1. 从 sim_* 表查询是否有该 session_id 的记录
 │      ├── 有 → 恢复余额、持仓、挂单
 │      └── 无 → 用 Session.initial_balance 初始化，写入 sim_balances
-├── 2. 连接 OKX 公开 WebSocket（ticker 频道）
-├── 3. 启动撮合循环（async task）
-└── 4. 就绪
+├── 2. 通过 REST API 拉取一次 ticker 写入 _latest_ticker（种子值，避免首次 tick 前竞态）
+├── 3. 连接 OKX 公开 WebSocket（ticker 频道）
+├── 4. 启动撮合循环（async task）
+└── 5. 就绪
 ```
 
 ### Shutdown
@@ -539,8 +608,9 @@ main.py                  SimulatedExchange              DB (sim_*)
 | `src/integrations/exchange/base.py` | `Order` dataclass 新增 `fee: float \| None = None` 字段 |
 | `src/integrations/exchange/okx.py` | `create_order()` 从 ccxt 响应解析 fee 并填入 Order |
 | `src/storage/models.py` | Add `SimBalance`, `SimPosition`, `SimOrder` tables; add `fee` field to `TradeRecord` |
-| `src/agent/tools_execution.py` | `_record_trade_open()` / `_update_trade_closed()` 从 Order.fee 读取手续费写入 TradeRecord |
-| `src/config.py` | Add `fee_rate` to `ExchangeConfig` |
+| `src/agent/tools_execution.py` | `_record_trade_open()` / `_update_trade_closed()` 从 Order.fee 读取手续费写入 TradeRecord；entry_price/exit_price/pnl 改用 Order.price 计算 |
+| `src/config.py` | Add `fee_rate`, `precision` to `ExchangeConfig` |
+| `pyproject.toml` | `ccxt` → `ccxt[pro]`（WebSocket 支持） |
 | `config/settings.yaml` | Add `fee_rate` config |
 | `src/cli/app.py` | Route exchange creation by `exchange.name`; register fill callback |
 | `src/scheduler/scheduler.py` | Add event-based trigger support (`trigger("conditional")`) |
@@ -578,3 +648,4 @@ main.py                  SimulatedExchange              DB (sim_*)
 - 限价单（当前 agent 只用市价单）
 - 部分成交
 - 多市场支持（现货、股票）
+- 精确清算价计算（含维持保证金率）
