@@ -162,7 +162,7 @@ liquidation_price (simplified, ignores maintenance margin rate):
    fee = fill_price * amount * fee_rate
    ```
 3. 更新内部状态：
-   - 释放保证金：`used_usdt -= (entry_price * amount) / leverage`，`free_usdt += released_margin + pnl - fee`
+   - 释放保证金：`used_usdt -= (entry_price * amount) / leverage`，`free_usdt += released_margin + pnl - fee`。注：entry_price 是加权均价，`weighted_avg * total_amount == Σ(price_i * amount_i)`，所以即使经过加仓，按均价释放保证金总额是正确的
    - 如果 amount >= position.contracts，全部平仓并移除持仓；如果 amount < position.contracts，减少 contracts（部分平仓）。如果 amount > position.contracts，clamp 到 position.contracts（防止 agent 错误输入意外反向开仓）
    - 取消该 symbol 的所有残留条件单（全部平仓时）
 4. 持久化到 sim_* 表
@@ -195,29 +195,38 @@ liquidation_price (simplified, ignores maintenance margin rate):
 async def _matching_loop(self):
     while self._running:
         ticker = await self._watch_ticker()   # 阻塞等待下一个 WebSocket tick
-        self._latest_ticker = ticker          # 缓存供 fetch_ticker() 使用
+
+        # _latest_ticker 在 lock 外更新，是 best-effort 缓存值
+        # 不需要与内部状态保持原子一致性——它只是 fetch_ticker() 的快照
+        self._latest_ticker = ticker
 
         # 使用同一个 ticker 快照进行触发判断和成交，避免中间价格变化
+        # _has_position 检查保证同一持仓最多触发一个条件单：
+        # 第一个 fill 平掉持仓后，后续条件单因 _has_position=False 被跳过
         triggered = []
-        for order in list(self._pending_orders):  # iterate copy
-            if self._should_trigger(order, ticker):
-                if not self._has_position(order.symbol):
-                    continue  # 持仓已被前一个 fill 平掉，跳过
-                fill = self._execute_fill(order, ticker)
-                triggered.append(fill)
+        async with self._lock:
+            for order in list(self._pending_orders):  # iterate copy
+                if self._should_trigger(order, ticker):
+                    if not self._has_position(order.symbol):
+                        continue  # 持仓已被前一个 fill 平掉，跳过
+                    fill = self._execute_fill(order, ticker)
+                    triggered.append(fill)
 
-        if triggered:
-            # 同一 tick 触发的多个条件单，批量更新后统一持久化
-            for fill in triggered:
-                self._remove_order_by_id(fill.order_id)
-            # 平仓后自动取消该 symbol 的残留条件单
-            self._cancel_orphaned_orders()
-            await self._persist_state()
-            for fill in triggered:
-                await self._notify_fill(fill)   # 触发回调 → Scheduler
+            if triggered:
+                for fill in triggered:
+                    self._remove_order_by_id(fill.order_id)
+                self._cancel_orphaned_orders()
+                await self._persist_state()
+        # lock 已释放 —— _notify_fill 必须在 lock 外执行
+        # 否则 fill → agent → create_order() → acquire lock → 死锁
+        # （asyncio.Lock 不可重入，同一 task 再次 acquire 会永久阻塞）
+        for fill in triggered:
+            await self._notify_fill(fill)
 ```
 
-**并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。虽然 asyncio 是单线程，但 matching loop 在 `await _persist_state()` 时会 yield 控制权，此时 `create_order()` 可能被调度执行。使用 `asyncio.Lock` 保护所有内部状态修改操作，确保同一时刻只有一个协程在修改 balance/positions/pending_orders。
+**并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。使用 `asyncio.Lock` 保护所有内部状态修改操作（balance/positions/pending_orders）。关键约束：`_notify_fill()` 必须在 lock 释放后执行，因为通知链路（fill → fill_handler → scheduler.trigger → agent_cycle → create_order）会重新请求 lock。
+
+**启动失败处理**：`start()` 中 WebSocket 连接失败（网络问题、OKX 服务不可用）时直接抛异常，由上层 `app.py` 处理（打日志 + 退出）。不在 `start()` 内重试——启动阶段的失败应快速暴露。
 
 **WebSocket 首次 tick 竞态**：在 WebSocket 连接建立后、收到第一个 tick 之前，`fetch_ticker()` 可能被调用。启动时先通过 REST API 拉取一次 ticker 作为种子值写入 `_latest_ticker`，再启动 WebSocket 和撮合循环。
 
@@ -283,7 +292,7 @@ Scheduler 新增 `trigger(trigger_type, context=None)` 方法：
 | 行为 | 说明 |
 |---|---|
 | 绕过 cooldown | 条件单触发是时间敏感的，不等待 cooldown 倒计时 |
-| 防重入 | 如果 agent cycle 正在运行，将事件排队，当前 cycle 结束后立即执行 |
+| 防重入 | 如果 agent cycle 正在运行，将事件排队，当前 cycle 结束后触发一次新 cycle。队列中多个事件合并为一次触发（丢弃重复），避免连续 cycle 风暴 |
 | 与定时触发的关系 | 事件触发独立于定时调度。事件触发后重置定时计时器（避免刚处理完 fill 又立即触发定时 cycle） |
 
 callback 签名变更：
@@ -504,8 +513,8 @@ SimulatedExchange.__init__(config, db_engine, session_id)   # 同步，仅保存
 │
 await exchange.start()                                       # 异步初始化
 │
-├── 1. 从 sim_* 表查询是否有该 session_id 的记录
-│      ├── 有 → 恢复余额、持仓、挂单
+├── 1. 从 sim_* 表查询该 session_id 的记录
+│      ├── 有 → 恢复余额、持仓、挂单（仅 sim_orders.status='open'）
 │      └── 无 → 用 Session.initial_balance 初始化，写入 sim_balances
 ├── 2. 通过 REST API 拉取一次 ticker 写入 _latest_ticker（种子值，避免首次 tick 前竞态）
 ├── 3. 连接 OKX 公开 WebSocket（ticker 频道）
