@@ -182,7 +182,7 @@ liquidation_price (simplified, includes fee_rate but ignores maintenance margin 
 
 ### Market Order
 
-`create_order(symbol, side, order_type="market", amount)` 时在 `async with self._lock` 内同步处理（与 _matching_loop 共用锁，防止余额校验和扣减之间被撮合引擎修改状态）。入口校验：symbol 匹配配置交易对、`amount > 0`、`order_type in ("market", "stop", "take_profit")`（未知类型抛异常），否则抛异常。条件单（stop/take_profit）必须提供 price 参数，否则抛异常。根据当前持仓状态推断意图（对齐 OKX 净仓模式）：
+`create_order(symbol, side, order_type="market", amount, price=None)` 时在 `async with self._lock` 内同步处理（与 _matching_loop 共用锁，防止余额校验和扣减之间被撮合引擎修改状态）。入口校验：symbol 匹配配置交易对、`amount > 0`、`order_type in ("market", "stop", "take_profit")`（未知类型抛异常）。market order 忽略 price 参数（对齐 OKX 行为）；条件单（stop/take_profit）必须提供 price 参数，否则抛异常。根据当前持仓状态推断意图（对齐 OKX 净仓模式）：
 
 | 当前持仓 | side="buy" | side="sell" |
 |---|---|---|
@@ -308,12 +308,14 @@ async def _matching_loop(self):
         self._error_count += 1
         logger.error("Matching loop error (count=%d)", self._error_count, exc_info=True)
         if self._error_count >= 3:
-            await asyncio.sleep(min(5 * self._error_count, 60))  # 指数退避，防止高频日志
+            await asyncio.sleep(min(5 * self._error_count, 60))  # 线性退避，防止高频日志
+        # error_count < 3 时不退避，给瞬态错误快速重试的机会
         # log + continue：单次 tick 处理失败不应导致整个撮合循环崩溃
-        # 成功处理时重置：self._error_count = 0
+      else:
+        self._error_count = 0  # 成功处理时重置
 ```
 
-**并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。使用 `asyncio.Lock` 保护所有内部状态修改操作（balance/positions/pending_orders）。关键约束：`_notify_fill()` 必须在 lock 释放后执行，因为通知链路（fill → fill_handler → scheduler.trigger → agent_cycle → create_order）会重新请求 lock。
+**并发安全**：`create_order()` 和 `_matching_loop()` 都修改内部状态。使用 `asyncio.Lock` 保护所有内部状态修改操作（balance/positions/pending_orders）。关键约束：`_notify_fill()` 必须在 lock 释放后执行，因为通知链路（fill → fill_handler → scheduler.trigger → agent_cycle → create_order）会重新请求 lock。只读查询方法（`fetch_balance`/`fetch_positions`/`fetch_ticker`）全部是同步操作，在 asyncio 单线程模型下保证原子性，不需要 lock。
 
 **启动失败处理**：`start()` 中任何 I/O 步骤失败（DB 查询、REST ticker 拉取、WebSocket 连接）都直接抛异常，由上层 `app.py` 处理（打日志 + 退出）。不在 `start()` 内重试——启动阶段的失败应快速暴露。WebSocket 连接超时依赖 ccxt 内部超时（默认 30s）。
 
@@ -360,7 +362,7 @@ class FillEvent:
 **内部方法关系**：
 
 - `_execute_fill(order, ticker)` — 条件单触发时调用，内部调用 `_close_position_core(pnl_cap=False)` 完成平仓，返回 FillEvent
-- `_force_liquidate(pos, price)` — 清算触发时调用，内部调用 `_close_position_core(pnl_cap=True)`，创建 `Order(order_type="liquidation", status="closed")` 记录传入 _persist_state 写入 sim_orders，返回 FillEvent
+- `_force_liquidate(pos, price)` — 清算触发时调用，内部调用 `_close_position_core(pnl_cap=True)`，创建 `Order(order_type="liquidation", status="closed")` 记录传入 _persist_state 写入 sim_orders，返回 FillEvent。注："liquidation" 是仅由撮合引擎内部使用的 order_type，不通过 create_order 创建（create_order 的合法类型为 market/stop/take_profit）
 - `_close_position_core(symbol, side, amount, fill_price, *, pnl_cap: bool = False)` — 共享核心逻辑。`side` 为 position side（"long"/"short"），用于 PnL 方向计算。执行顺序：
   1. 计算 PnL
   2. 如果 `pnl_cap=True`：`pnl = max(pnl, -(released_margin - fee))`
@@ -455,6 +457,10 @@ async def _run_cycle(self, trigger_type, context):
 ```
 
 关键设计：**scheduler loop 是唯一运行 agent cycle 的地方**。trigger() 只设 flag + 唤醒，不直接执行。这保证了：(a) 任何时刻最多一个 cycle 在运行，(b) matching loop 不被阻塞。pending flag 合并策略假设单 symbol（与 Scope Boundaries 对齐）。
+
+**时序安全**：trigger() 在 scheduler.start() 之前调用是安全的（如崩溃恢复后首个 tick 立即触发条件单），前提是 scheduler.__init__ 已初始化 _wake_event 和 _pending_trigger。flag 会被 scheduler loop 启动后的首轮消费。
+
+**post-cycle 后新 trigger 的处理**：post-cycle conditional cycle 执行期间如有新 fill 触发 trigger()，新 _pending_trigger=True 会在下一轮 _interruptible_sleep 入口因 _pending_trigger 检查立即返回，无延迟。
 
 **cooldown 处理**：现有 scheduler.py 有 cooldown_seconds 参数。在新设计中，cooldown 被 `_interruptible_sleep(interval)` 替代——interval 本身保证了定时 cycle 间的间隔，event trigger 明确绕过间隔（时间敏感）。实现时可移除独立的 cooldown 参数，或将其保留为 interval 的别名。
 
@@ -699,7 +705,7 @@ exchange:
 
 SimulatedExchange 使用 `watch_ticker()`（WebSocket），这是 ccxt Pro API。需要在 `pyproject.toml` 中将 `ccxt` 依赖改为 `ccxt[pro]`（ccxt Pro 包含标准版全部功能，向后兼容）。
 
-SimulatedExchange 内部使用一个无认证的 `ccxt.pro.okx` 实例，同时用于 REST API（K 线查询、种子 ticker）和 WebSocket（实时行情）。无需交易权限密钥——公开行情接口不需要认证。
+SimulatedExchange 内部使用一个无认证的 `ccxt.pro.okx()` 实例（无参构造），同时用于 REST API（K 线查询、种子 ticker）和 WebSocket（实时行情）。无需交易权限密钥——公开行情接口不需要认证。实现时需验证 `watch_ticker()` 在无 key 实例上正常工作。
 
 ### Session.initial_balance
 
@@ -861,7 +867,7 @@ main.py                  SimulatedExchange              DB (sim_*)
 | `src/integrations/exchange/base.py` | `Order` dataclass 新增 `fee` 字段；新增 `fetch_order`、`fetch_open_orders`、`fetch_closed_orders` 抽象方法 |
 | `src/integrations/exchange/okx.py` | 实现新增的三个查询方法（通过 ccxt）；`create_order()` 解析 fee |
 | `src/storage/models.py` | Add `SimBalance`, `SimPosition`, `SimOrder` tables |
-| `src/config.py` | Add `fee_rate`, `precision` to `ExchangeConfig` |
+| `src/config.py` | Add `fee_rate: float \| None = None`, `precision: dict[str, int] \| None = None` to `ExchangeConfig`（Optional，仅 simulated 模式使用，okx 模式忽略） |
 | `pyproject.toml` | `ccxt` → `ccxt[pro]`（WebSocket 支持） |
 | `config/settings.yaml` | Add `fee_rate`, `precision` config |
 
@@ -870,7 +876,7 @@ main.py                  SimulatedExchange              DB (sim_*)
 | File | Change |
 |---|---|
 | `src/cli/app.py` | Route exchange creation by `exchange.name`; register fill callback; `run_agent_cycle` 新增 `context` 参数 |
-| `src/scheduler/scheduler.py` | Add event-based trigger support (`trigger("conditional")`) |
+| `src/scheduler/scheduler.py` | Add event-based trigger support（`trigger("conditional")`）。**Breaking change**：callback 签名从 `Callable[[], Awaitable[None]]` 变为 `Callable[[str, Any \| None], Awaitable[None]]`，需同步更新 app.py 中的 on_tick 闭包 |
 
 ### New Files
 
