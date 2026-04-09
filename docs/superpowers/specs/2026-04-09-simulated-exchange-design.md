@@ -141,7 +141,7 @@ SimulatedExchange 实现 `BaseExchange` 的全部方法：
 | `fetch_balance()` | 从内部状态返回 `Balance(total_usdt, free_usdt, used_usdt)`，含未实现盈亏（见下方公式） |
 | `fetch_positions(symbol)` | 从内部状态返回持仓列表，用最新 ticker 计算 unrealized_pnl 和 liquidation_price（见下方公式） |
 | `set_leverage(symbol, leverage)` | 校验范围 1-125（对齐 OKX 上限）`[安全护栏]`；如果该 symbol 已有持仓且 leverage != position.leverage，抛异常 `[安全护栏]`（OKX 允许持仓期间改杠杆并自动调保证金，此处简化为 fail fast，避免多杠杆保证金账不平） |
-| `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额） |
+| `amount_to_precision(symbol, amount)` | 按 symbol 精度规则向下截断 truncate（与 OKXExchange/ccxt 一致，避免超出余额）。symbol 不在 precision 配置中时抛 KeyError（fail fast） |
 | `fetch_order(order_id)` | 查询单个订单的当前状态，返回 Order（含 status: open/closed/cancelled） |
 | `fetch_open_orders(symbol)` | 返回该 symbol 所有未成交的条件单 |
 | `fetch_closed_orders(symbol, limit)` | 返回该 symbol 最近的已成交/已取消订单（ORDER BY COALESCE(filled_at, created_at) DESC，按实际成交/取消时间排序，limit 默认 20） |
@@ -364,7 +364,7 @@ class FillEvent:
   3. 更新余额（free_usdt, used_usdt）
   4. 浮点精度对齐：`free_usdt = round(free_usdt, 8)`，`used_usdt = round(used_usdt, 8)`（消除部分平仓累积的浮点误差）
   5. 防御性检查：`if free_usdt < -0.01: raise`（使用容差阈值，不用 assert——Python `-O` 会跳过）
-  5. 更新/移除持仓
+  6. 更新/移除持仓
 
 ### fill_handler (app.py)
 
@@ -413,9 +413,12 @@ async def trigger(self, trigger_type: str, context: Any | None = None):
     self._wake_event.set()  # 唤醒 scheduler 从 sleep 中返回
 
 async def _scheduler_loop(self):
+    # 首次立即执行（保持现有行为：先 callback 再 sleep）
+    await self._run_cycle("scheduled", None)
+
     while self._running:
-        # 可中断的 sleep（复用现有 _stop_event.wait 模式）
-        # trigger() 的 _wake_event.set() 或 stop() 都能打断
+        # 可中断的 sleep。stop() 通过 _wake_event.set() + _running=False 打断
+        # （合并 _stop_event 和 _wake_event 为一个 event，stop 和 trigger 共用）
         await self._interruptible_sleep(self._interval)
 
         if self._pending_trigger:
@@ -448,7 +451,20 @@ async def _run_cycle(self, trigger_type, context):
 
 **cooldown 处理**：现有 scheduler.py 有 cooldown_seconds 参数。在新设计中，cooldown 被 `_interruptible_sleep(interval)` 替代——interval 本身保证了定时 cycle 间的间隔，event trigger 明确绕过间隔（时间敏感）。实现时可移除独立的 cooldown 参数，或将其保留为 interval 的别名。
 
-**_wake_event 生命周期**：`_interruptible_sleep` 在进入等待前调用 `_wake_event.clear()`，然后 `await asyncio.wait_for(_wake_event.wait(), timeout=interval)`。trigger() 的 `_wake_event.set()` 立即唤醒。唤醒后主循环会再次进入 sleep 时 clear，不存在 event 残留。
+**_wake_event 生命周期**：
+
+```python
+async def _interruptible_sleep(self, duration):
+    if self._pending_trigger:
+        return  # 已有待处理触发，跳过 sleep
+    self._wake_event.clear()
+    try:
+        await asyncio.wait_for(self._wake_event.wait(), timeout=duration)
+    except asyncio.TimeoutError:
+        pass
+```
+
+入口先检查 _pending_trigger 再 clear，避免竞态：post-cycle check 的 conditional cycle 执行期间新到的 trigger 设置了 _wake_event，clear 不会吞掉它（因为 _pending_trigger=True 直接 return）。
 
 **定时/事件优先级**：当 interval 自然到期同时 _pending_trigger=True 时，优先执行 conditional cycle，定时 cycle 合并跳过（伪代码中 if _pending_trigger 分支先于 else）。
 
@@ -705,9 +721,10 @@ await exchange.start()                                       # 异步初始化
 ```
 SimulatedExchange.close()
 │
-├── 1. 停止撮合循环（self._running = False）
-├── 2. 断开 WebSocket
-└── 3. 内部状态已持久化（每次状态变更时已写入 sim_* 表），无需额外操作
+├── 1. self._running = False
+├── 2. cancel 撮合循环的 async task（直接终止 _watch_ticker 阻塞，避免虚假错误日志）
+├── 3. 断开 WebSocket
+└── 4. 内部状态已持久化（每次状态变更时已写入 sim_* 表），无需额外操作
 ```
 
 ### Crash Recovery
@@ -888,6 +905,10 @@ main.py                  SimulatedExchange              DB (sim_*)
 - Agent tools 改造（tools_execution.py 适配新的交易所接口和日志方案）
 - MetricsService 改造（PnL 计算方式调整）
 - 现有测试适配
+
+**已知过渡期限制**：在 agent 层改造完成前，条件单/清算触发平仓时 TradeRecord 不会自动更新（因为不经过 close_position 工具），CLI 展示和 MetricsService 数据可能不准确。
+
+**Agent 实现提示**：agent 应在持仓期间记录 entry_price（如写入自身的交易日志），条件单触发平仓后通过 entry_price + FillEvent.fill_price 推导 PnL。平仓后 fetch_positions() 返回空，entry_price 信息从交易所不可获取（与真实交易所一致）。
 
 ## Test Strategy
 
