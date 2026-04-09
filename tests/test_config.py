@@ -72,3 +72,17 @@ def test_settings_missing_env_keys_uses_empty(tmp_path: Path):
     from src.config import load_settings
     settings = load_settings(settings_file, env_overrides={})
     assert settings.exchange.api_key == ""
+
+
+def test_exchange_config_simulated_fields():
+    from src.config import ExchangeConfig
+    config = ExchangeConfig(name="simulated", fee_rate=0.0005, precision={"BTC/USDT:USDT": 3})
+    assert config.fee_rate == 0.0005
+    assert config.precision["BTC/USDT:USDT"] == 3
+
+
+def test_exchange_config_okx_ignores_sim_fields():
+    from src.config import ExchangeConfig
+    config = ExchangeConfig(name="okx")
+    assert config.fee_rate is None
+    assert config.precision is None

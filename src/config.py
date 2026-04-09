@@ -14,6 +14,8 @@ class ExchangeConfig(BaseModel):
     api_key: str = ""
     secret: str = ""
     password: str = ""
+    fee_rate: float | None = None
+    precision: dict[str, int] | None = None
 
 
 class TradingConfig(BaseModel):
