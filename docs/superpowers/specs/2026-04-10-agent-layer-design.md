@@ -108,10 +108,10 @@ Agent:
   决策完成，等待下一周期处理成交事宜
 ```
 
-**Cycle 2 — 成交触发，agent 确认并设风控：**
+**Cycle 2 — 成交触发，agent 确认并设风控（紧接 Cycle 1）：**
 
 ```
-[15:00] FillEvent: 市价单成交 @ 60200
+[15:00+] FillEvent: 市价单成交 @ 60200
 
   → TradeAction 自动写入：action="order_filled"
   → Scheduler conditional 触发
@@ -235,6 +235,7 @@ class TradeAction(Base):
     symbol: Mapped[str] = mapped_column(String(50))
     side: Mapped[str | None] = mapped_column(String(10), nullable=True)      # long / short
     trigger_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)  # market / stop / take_profit / liquidation
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)          # SL/TP 价位等结构化价格
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)          # 平仓时的已实现盈亏
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)       # agent 的决策理由
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -246,8 +247,11 @@ class TradeAction(Base):
 - **order_id 关联** — 通过 order_id 可反查交易所获取成交价、手续费等客观数据
 - **session_id 隔离** — 未来多 agent 共享同一交易所账户时，每个 agent 只看到自己的操作
 - **trigger_reason 字段** — 结构化的触发原因（market/stop/take_profit/liquidation），支持按触发类型统计查询
+- **price 字段** — SL/TP 的目标价位等结构化价格，支持查询"最近一次止损设在什么价位"
 - **pnl 字段** — 仅在平仓类成交时填写，由交易所计算提供。MetricsService 直接聚合此字段，无需自行配对计算
 - **reasoning 字段** — agent 主动操作时记录决策理由；系统自动记录时填写触发描述
+
+**已知限制：** `create_order` 与 `_record_action` 之间无事务保证。如果订单已执行但 TradeAction 写入失败（DB 错误），交易日志会缺少该条记录。FillEvent handler 仍会写入 `order_filled`，但缺少对应的 agent 决策记录。早期阶段可接受此 trade-off。
 
 ### 废弃：TradeRecord
 
@@ -400,7 +404,8 @@ async def open_position(
 
 ```python
 async def _record_action(deps: TradingDeps, action: str, order_id: str | None = None,
-                          side: str | None = None, reasoning: str | None = None) -> None:
+                          side: str | None = None, price: float | None = None,
+                          pnl: float | None = None, reasoning: str | None = None) -> None:
     """写入一条 TradeAction 记录。"""
     if deps.db_engine is None:
         return
@@ -414,6 +419,8 @@ async def _record_action(deps: TradingDeps, action: str, order_id: str | None = 
             order_id=order_id,
             symbol=deps.symbol,
             side=side,
+            price=price,
+            pnl=pnl,
             reasoning=reasoning,
         ))
         await session.commit()
@@ -463,6 +470,10 @@ class BaseExchange(ABC):
     ...
     @abstractmethod
     async def cancel_order(self, order_id: str, symbol: str) -> None: ...
+
+    def drain_pending_fills(self) -> list[FillEvent]:
+        """取出待处理的 FillEvent 队列。默认空实现，OKX 等无需覆写。"""
+        return []
 ```
 
 - **OKXExchange**：包装 `self._client.cancel_order(order_id, symbol)`
@@ -495,7 +506,7 @@ async def set_stop_loss(deps: TradingDeps, price: float) -> str:
 
     await _record_action(
         deps, action="set_stop_loss", order_id=order.id,
-        side=p.side, reasoning=f"Stop loss set at {price:.2f}",
+        side=p.side, price=price, reasoning=f"Stop loss set at {price:.2f}",
     )
     return f"Stop loss set at {price:.2f} | Order: {order.id}"
 ```
@@ -591,10 +602,12 @@ async def on_tick(trigger_type, context=None):
     except Exception:
         logger.exception("Agent cycle failed")
     finally:
-        # 处理本周期内积累的市价单 FillEvent
-        if hasattr(exchange, 'drain_pending_fills'):
-            for fill in exchange.drain_pending_fills():
+        # 处理本周期内积累的市价单 FillEvent（每个独立 try/except 防止丢失）
+        for fill in exchange.drain_pending_fills():
+            try:
                 await handle_fill(fill)
+            except Exception:
+                logger.exception("Fill handler failed for order %s", fill.order_id)
 ```
 
 这样的执行时序为：
@@ -608,7 +621,7 @@ async def on_tick(trigger_type, context=None):
 T1 < T2 ✅ 时序正确
 ```
 
-条件单的处理不变：`_process_tick()` 中直接调用 `_fill_callback`（在 agent cycle 之外触发，无时序冲突）。
+条件单的处理不变：`_process_tick()` 只处理 `_pending_orders` 列表中的条件单匹配和触发，不涉及市价单（市价单在 `create_order` 中立即成交，不进入 `_pending_orders`）。条件单触发时直接调用 `_fill_callback`（在 agent cycle 之外触发，无时序冲突）。
 
 **`_execute_market_order` 返回值变更：** 从 `(order, position_side)` 扩展为 `(order, position_side, pnl)`。开仓路径（`_open_market_order`）返回 `pnl=None`；平仓路径（`_close_market_order`）从 `_close_position_core` 获取 pnl 并返回。`_execute_fill`（条件单触发）同理，已有 pnl 计算逻辑。
 
@@ -703,7 +716,7 @@ class MetricsService:
         return _compute_metrics(pnls, initial_balance, current_position)
 ```
 
-`current_position` 由调用方（app.py）从 `exchange.fetch_positions()` 获取后传入，与当前逻辑一致。
+`current_position` 由调用方（app.py）从 `exchange.fetch_positions()` 获取后传入；`initial_balance` 从 `Session.initial_balance` 获取（会话创建时从配置写入，session 恢复时不变）。与当前逻辑一致。
 
 **简化关键：** 交易所在撮合时已经计算了 PnL（SimulatedExchange 的 `_close_position_core` 返回 pnl），通过 FillEvent.pnl → TradeAction.pnl 传递到 agent 层。MetricsService 无需重新配对计算，避免了部分平仓、加仓均价等复杂场景。
 
