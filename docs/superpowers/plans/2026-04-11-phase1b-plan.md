@@ -165,7 +165,7 @@ Expected: FAIL — 当前 Scheduler 硬编码 `"conditional"`，trigger_type 不
 
 - [ ] **Step 3: 实现 Scheduler 事件队列化**
 
-将 `src/scheduler/scheduler.py` 完整替换为：
+将 `src/scheduler/scheduler.py` 完整替换为以下内容。注意：原代码第 51-54 行的二次检查逻辑（`if self._pending_trigger: ... await self._run_cycle("conditional", None)`）在新 deque 方案中被自然取代，不再需要：
 
 ```python
 # src/scheduler/scheduler.py
