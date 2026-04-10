@@ -154,6 +154,45 @@ Agent:
   决策：观望
 ```
 
+## 变更影响范围
+
+### 文件变更映射
+
+| 文件 | 变更类型 | 说明 |
+|------|---------|------|
+| `src/storage/models.py` | 修改 | 新增 TradeAction 模型，删除 TradeRecord 模型 |
+| `src/agent/tools_execution.py` | 重写 | 删除 `_record_trade_open`/`_update_trade_closed`，新增 `_record_action`；简化 `open_position`（去 SL/TP）、`close_position`（去 TradeRecord）；所有执行 tool 改写入 TradeAction |
+| `src/agent/tools_perception.py` | 修改 | 新增 `get_open_orders`、`get_trade_journal`；重命名 `get_trade_history` → `get_memories` |
+| `src/agent/trader.py` | 修改 | 注册新 tools（`get_open_orders`、`get_trade_journal`），重命名 `get_trade_history` → `get_memories`，更新 `open_position` 参数签名 |
+| `src/integrations/exchange/simulated.py` | 修改 | `create_order()` 中市价单成交后触发 FillEvent callback |
+| `src/services/metrics.py` | 重写 | 数据源从 TradeRecord 改为交易所订单 + TradeAction；接口变为异步 |
+| `src/cli/app.py` | 修改 | FillEvent handler 从 `pass` 改为写入 TradeAction + 触发唤醒；初始 metrics 改用新接口 |
+| `tests/` | 修改 | 相关测试适配新数据模型和接口 |
+
+### 当前代码关键现状（供审查员参考）
+
+**`tools_execution.py` 当前结构：**
+- `_record_trade_open(deps, **kwargs)` — 创建 TradeRecord（status="open"）
+- `_update_trade_closed(deps, symbol, side, pnl, exit_price)` — 查找匹配的 open 记录，更新为 closed
+- `open_position()` — 下市价单 + 设 SL + 设 TP + 写 TradeRecord（一次性完成）
+- `close_position()` — 遍历持仓逐个平仓 + 更新 TradeRecord
+- `set_stop_loss/set_take_profit/adjust_leverage` — 纯交易所操作，无数据库写入
+
+**`app.py` FillEvent handler 当前状态：**
+```python
+async def handle_fill(event: FillEvent):
+    try:
+        pass  # Agent layer recording — out of scope for this phase
+    finally:
+        await sched.trigger("conditional", context=event)
+```
+
+**`metrics.py` 当前接口：**
+```python
+class MetricsService:
+    def compute_from_trades(self, trades: list[TradeRecord], current_position: str = "none") -> dict
+```
+
 ## 数据模型
 
 ### 新增：TradeAction（替代 TradeRecord）
@@ -326,6 +365,67 @@ async def open_position(
     )
 ```
 
+#### _record_action 辅助函数
+
+所有执行类 tools 共用的 TradeAction 写入函数：
+
+```python
+async def _record_action(deps: TradingDeps, action: str, order_id: str | None = None,
+                          side: str | None = None, reasoning: str | None = None) -> None:
+    """写入一条 TradeAction 记录。"""
+    if deps.db_engine is None:
+        return
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+
+    async with get_session(deps.db_engine) as session:
+        session.add(TradeAction(
+            session_id=deps.session_id,
+            action=action,
+            order_id=order_id,
+            symbol=deps.symbol,
+            side=side,
+            reasoning=reasoning,
+        ))
+        await session.commit()
+```
+
+#### close_position 简化后
+
+```python
+async def close_position(deps: TradingDeps) -> str:
+    """Close all open positions."""
+    positions = await deps.exchange.fetch_positions(deps.symbol)
+    if not positions:
+        return "No positions to close."
+
+    total_pnl = sum(p.unrealized_pnl for p in positions)
+    reasoning = f"Close {len(positions)} position(s), total PnL: {total_pnl:.2f} USDT"
+    approved = await _check_approval(deps, "close", reasoning, 0, 0)
+    if not approved:
+        return "Close rejected by human approval."
+
+    results = []
+    for p in positions:
+        order_side = "sell" if p.side == "long" else "buy"
+        order = await deps.exchange.create_order(
+            symbol=deps.symbol, side=order_side, order_type="market", amount=p.contracts
+        )
+        # 写入 TradeAction（不再更新 TradeRecord）
+        await _record_action(
+            deps, action="close_position", order_id=order.id,
+            side=p.side, reasoning=reasoning,
+        )
+        results.append(f"Closed {p.side} {p.contracts} | Order: {order.id}")
+
+    return "Orders submitted:\n" + "\n".join(results) + "\nYou will be notified when filled."
+```
+
+**与当前代码的主要差异：**
+- 删除 `_update_trade_closed()` 调用
+- 删除 `ticker` 查询（不再需要记录 exit_price，由交易所提供）
+- 返回 "Orders submitted" 而非 "Positions closed"（统一异步语义）
+
 ### 记忆类 Tools
 
 | Tool | 变更 |
@@ -469,6 +569,34 @@ class MetricsService:
 - `trade_records` — 删除 TradeRecord 模型
 
 **迁移策略：** 由于系统处于早期开发阶段，不存在生产数据需要迁移，直接删除旧表、新增新表即可。通过 `init_db()` 的 `create_all()` 自动建表。
+
+## 端到端验证标准
+
+使用 `config/settings_sim.yaml`（`exchange.name: simulated`）启动系统，验证以下场景：
+
+### 验证场景
+
+1. **完整开仓流程**
+   - Scheduler 定时触发 → agent 收集信息 → 调用 `open_position` → TradeAction 写入
+   - FillEvent 触发新周期 → agent 确认成交 → 调用 `set_stop_loss` + `set_take_profit` → TradeAction 写入
+   - 验证：`trade_actions` 表有 3 条记录（open_position + order_filled + set_stop_loss/set_take_profit）
+
+2. **条件单触发复盘**
+   - 价格变动触发止损/止盈 → FillEvent → TradeAction 自动写入
+   - agent 被唤醒 → 调用 `get_trade_journal` 看到完整时间线 → 调用 `save_memory` 记录教训
+   - 验证：TradeAction 有 order_filled 记录，MemoryEntry 有新增条目
+
+3. **交易日志完整性**
+   - `get_trade_journal` 返回的时间线包含所有操作，且通过 order_id 关联了成交价/手续费
+   - 验证：日志输出包含 action、reasoning、成交价、手续费
+
+4. **Metrics 正确性**
+   - 经过若干轮交易后，MetricsService 能从交易所订单数据计算出正确的收益率、胜率、最大回撤
+   - 验证：指标数值与手动计算一致
+
+5. **工具覆盖**
+   - 所有感知 tools（`get_market_data`、`get_account_balance`、`get_position`、`get_open_orders`、`get_trade_journal`、`get_memories`）正常返回
+   - 所有执行 tools（`open_position`、`close_position`、`set_stop_loss`、`set_take_profit`、`adjust_leverage`）正常执行并写入 TradeAction
 
 ## 不在本轮范围
 
