@@ -229,8 +229,10 @@ async def _watch_orders_loop(self) -> None:
         except asyncio.CancelledError:
             break
         except Exception:
-            logger.error("watch_orders error", exc_info=True)
-            await asyncio.sleep(5)  # 断连后等待重连
+            self._ws_error_count += 1
+            delay = min(5 * (2 ** (self._ws_error_count - 1)), 60)
+            logger.error("watch_orders error (retry in %ds)", delay, exc_info=True)
+            await asyncio.sleep(delay)
 ```
 
 ### FillEvent 构造
@@ -450,7 +452,7 @@ alerts:
 4. **价格异动** → BTC 5 分钟跌 4% → PriceAlertService 触发 → 唤醒 agent → Agent 检查仓位、收紧止损
 5. **Agent 调整预警** → Agent 判断当前高波动，调用 `set_price_alert(threshold_pct=1.5, ...)` 收紧阈值
 6. **止损触发** → OKX 执行止损 → WebSocket fill 推送 → 唤醒 agent → Agent 复盘 + save_memory
-6. **定时唤醒** → Agent 查看 trade journal + memories → 决定是否重新入场
+7. **定时唤醒** → Agent 查看 trade journal + memories → 决定是否重新入场
 
 ---
 
