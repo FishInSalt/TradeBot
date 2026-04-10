@@ -23,7 +23,8 @@ from src.services.llm_router import LLMRouter
 from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
-from src.storage.models import DecisionLog, Session, TradeRecord
+from src.storage.models import DecisionLog, Session, TradeAction
+from src.integrations.exchange.base import FillEvent
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -62,6 +63,22 @@ class TokenBudget:
         return self._used >= self._daily_max
 
 
+async def _record_action_from_fill(engine, session_id, event: FillEvent):
+    """将 FillEvent 记录为 TradeAction（独立函数，便于未来 OKX WebSocket 复用）。"""
+    async with get_session(engine) as session:
+        session.add(TradeAction(
+            session_id=session_id,
+            action="order_filled",
+            order_id=event.order_id,
+            symbol=event.symbol,
+            side=event.position_side,
+            trigger_reason=event.trigger_reason,
+            pnl=event.pnl,
+            reasoning=f"(exchange: {event.trigger_reason} order filled @ {event.fill_price:.2f})",
+        ))
+        await session.commit()
+
+
 async def run_agent_cycle(
     agent,
     deps: TradingDeps,
@@ -82,10 +99,13 @@ async def run_agent_cycle(
         "Use your tools to gather data before making a decision."
     )
     if context is not None and hasattr(context, "trigger_reason"):
-        prompt += (
+        msg = (
             f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
             f"— {context.symbol} {context.amount} @ {context.fill_price}"
         )
+        if context.pnl is not None:
+            msg += f", PnL: {context.pnl:.2f} USDT"
+        prompt += msg
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":
@@ -237,6 +257,8 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
+    handle_fill = None  # will be set for simulated exchange
+
     async def on_tick(trigger_type: str, context=None):
         if shutdown_event.is_set():
             return
@@ -244,42 +266,41 @@ async def run(
             await run_agent_cycle(agent, deps, trigger_type, budget, engine, context)
         except Exception:
             logger.exception("Agent cycle failed")
+        finally:
+            if handle_fill is not None:
+                for fill in exchange.drain_pending_fills():
+                    try:
+                        await handle_fill(fill)
+                    except Exception:
+                        logger.exception("Fill handler failed for order %s", fill.order_id)
 
     interval = settings.scheduler.interval_minutes * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
     # Register fill handler for simulated exchange
     if settings.exchange.name == "simulated":
-        from src.integrations.exchange.simulated import FillEvent
-
-        def _create_fill_handler(sched):
+        def _create_fill_handler(sched, eng, sid):
             async def handle_fill(event: FillEvent):
                 try:
-                    pass  # Agent layer recording — out of scope for this phase
+                    await _record_action_from_fill(eng, sid, event)
+                except Exception:
+                    logger.warning("Failed to record fill event", exc_info=True)
                 finally:
                     await sched.trigger("conditional", context=event)
             return handle_fill
 
-        exchange.on_fill(_create_fill_handler(scheduler))
+        handle_fill = _create_fill_handler(scheduler, engine, session_id)
+        exchange.on_fill(handle_fill)
 
     # Start exchange (simulated needs async start for WebSocket + state restore)
     if settings.exchange.name == "simulated":
         await exchange.start()
 
     # Show initial metrics (after start so simulated mode has restored state)
-    async with get_session(engine) as session:
-        result = await session.execute(
-            select(TradeRecord)
-            .where(TradeRecord.session_id == session_id)
-            .where(TradeRecord.status == "closed")
-        )
-        trades = list(result.scalars().all())
     positions = await exchange.fetch_positions(settings.trading.symbol)
-    if positions:
-        pos_str = f"{positions[0].side} {positions[0].contracts}"
-    else:
-        pos_str = "none"
-    display_metrics(metrics_service.compute_from_trades(trades, current_position=pos_str))
+    pos_str = f"{positions[0].side} {positions[0].contracts}" if positions else "none"
+    metrics = await metrics_service.compute(engine, session_id, current_position=pos_str)
+    display_metrics(metrics)
 
     console.print(
         f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min[/]"
