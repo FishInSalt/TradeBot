@@ -278,32 +278,39 @@ async def _watch_orders_loop(self) -> None:
 新建 `src/services/price_alert.py`：
 
 ```python
+from collections import deque
+
 class PriceAlertService:
     def __init__(self, window_minutes, threshold_pct, cooldown_minutes):
         self._window_ms = window_minutes * 60 * 1000
         self._threshold_pct = threshold_pct
         self._cooldown_ms = cooldown_minutes * 60 * 1000
-        # 滑动窗口状态 — 只维护 high/low/起点，不存完整序列
-        self._window_high: float = 0.0
-        self._window_low: float = float('inf')
-        self._window_start_price: float = 0.0
-        self._window_start_ts: int = 0
+        self._ticks: deque[tuple[float, int]] = deque()  # (price, timestamp)
         self._last_alert_ts: dict[str, int] = {}  # direction → timestamp
 
     def check(self, price: float, timestamp: int) -> AlertInfo | None:
         """喂入 tick 价格，返回 AlertInfo 或 None。"""
-        # 窗口过期 → 重置 high/low/start
-        # 更新 high/low
-        # 计算 drop = (price - window_high) / window_high（跌幅）
-        # 计算 rise = (price - window_low) / window_low（涨幅）
-        # 取绝对值更大的方向，超阈值且不在冷却期 → 返回 AlertInfo
+        # 1. 追加当前 tick，淘汰窗口外的旧数据
+        self._ticks.append((price, timestamp))
+        cutoff = timestamp - self._window_ms
+        while self._ticks and self._ticks[0][1] < cutoff:
+            self._ticks.popleft()
+        # 2. 计算窗口内 high/low
+        high = max(p for p, _ in self._ticks)
+        low = min(p for p, _ in self._ticks)
+        # 3. 计算偏离
+        drop_pct = (price - high) / high * 100 if high > 0 else 0
+        rise_pct = (price - low) / low * 100 if low > 0 else 0
+        # 4. 取绝对值更大的方向，超阈值且不在冷却期 → 返回 AlertInfo
 
     def update_params(self, threshold_pct, window_minutes, cooldown_minutes):
         """运行时更新参数（由 agent tool 调用）。"""
         ...
 ```
 
-检测方式：比较当前价格与窗口内 high/low 的偏离（而非仅与窗口起点比较），避免 V 形反弹等盲区场景。例如：价格从 100 → 97 → 100，窗口 low=97，当 price=97 时 `(97-100)/100 = -3%` 正确触发。
+使用 **sliding window**（deque 存储采样点），而非 tumbling window。每个 tick 淘汰窗口外旧数据，实时计算 high/low。5 分钟窗口、每秒一个 tick ≈ 300 个点，`max()/min()` 微秒级，内存可忽略。
+
+Sliding window 避免了 tumbling window 的窗口重置盲区：tumbling 每 5 分钟重置时丢失历史极值，可能低估真实波动幅度。Sliding window 始终准确反映最近 N 分钟内的 high/low。
 
 `AlertInfo` 数据：
 - `symbol`: 交易对
@@ -449,7 +456,7 @@ alerts:
 | `config/models.json` | 新建 | 模型配置（gitignored） |
 | `.gitignore` | 修改 | 添加 `config/models.json` |
 | `src/services/model_manager.py` | 新建 | 模型配置读写、pydantic-ai model 构造、API 连通性测试、启动交互 |
-| `src/services/price_alert.py` | 新建 | 价格异动检测（滑动窗口 high/low + 阈值 + 冷却） |
+| `src/services/price_alert.py` | 新建 | 价格异动检测（deque sliding window + 阈值 + 冷却） |
 | `src/integrations/exchange/okx.py` | 修改 | 新增 ccxt.pro 客户端、on_fill、on_alert、start()、watch_orders + watch_ticker 循环 |
 | `src/integrations/exchange/simulated.py` | 修改 | 集成 PriceAlertService、on_alert（锁外回调） |
 | `src/integrations/exchange/base.py` | 修改 | BaseExchange 添加 `start()` 默认空实现、`on_fill`、`on_alert` 默认空实现 |
