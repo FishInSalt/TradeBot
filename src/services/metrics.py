@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.storage.models import TradeRecord
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from src.storage.database import get_session
+from src.storage.models import TradeAction
 
 
 @dataclass
@@ -22,13 +26,23 @@ class MetricsService:
     def __init__(self, initial_balance: float = 10000.0):
         self._initial_balance = initial_balance
 
-    def compute_from_trades(
-        self, trades: list[TradeRecord], current_position: str = "none"
+    async def compute(
+        self,
+        engine: AsyncEngine,
+        session_id: str,
+        current_position: str = "none",
     ) -> PerformanceMetrics:
-        # Extract closed trades with known PnL as float list
-        pnls: list[float] = [
-            t.pnl for t in trades if t.status == "closed" and t.pnl is not None
-        ]
+        async with get_session(engine) as session:
+            result = await session.execute(
+                select(TradeAction)
+                .where(TradeAction.session_id == session_id)
+                .where(TradeAction.action == "order_filled")
+                .where(TradeAction.pnl.isnot(None))
+                .order_by(TradeAction.created_at)
+            )
+            fills = result.scalars().all()
+
+        pnls: list[float] = [f.pnl for f in fills]
         if not pnls:
             return PerformanceMetrics(current_position=current_position)
 
@@ -38,7 +52,6 @@ class MetricsService:
         gross_profit = sum(winning_pnls) if winning_pnls else 0.0
         gross_loss = abs(sum(losing_pnls)) if losing_pnls else 0.0
 
-        # Max drawdown
         cumulative = 0.0
         peak = 0.0
         max_dd = 0.0

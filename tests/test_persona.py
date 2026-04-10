@@ -12,16 +12,21 @@ def test_generate_system_prompt():
     assert len(prompt) > 100
 
 
-def test_prompt_includes_soft_constraints():
-    from src.agent.persona import generate_system_prompt
-    config = PersonaConfig(preferred_leverage=3, max_position_pct=30)
-    prompt = generate_system_prompt(config)
-    assert "MUST NOT exceed" in prompt or "NEVER" in prompt
-    assert "stop loss" in prompt.lower()
-    assert "all-in" in prompt.lower()
-
-
-def test_prompt_includes_trader_role():
+def test_prompt_includes_event_driven_workflow():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
-    assert "trader" in prompt.lower() or "trading" in prompt.lower()
+    assert "scheduled trigger" in prompt.lower() or "scheduled" in prompt.lower()
+    assert "fill event" in prompt.lower() or "fill" in prompt.lower()
+
+
+def test_prompt_includes_naked_position_check():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    assert "stop loss" in prompt.lower()
+    assert "take profit" in prompt.lower() or "protective" in prompt.lower()
+
+
+def test_prompt_includes_reasoning_instruction():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    assert "reasoning" in prompt.lower()

@@ -184,3 +184,58 @@ async def test_okx_create_order_fee_none_when_missing():
     exchange._client = mock_ccxt
     order = await exchange.create_order(symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01)
     assert order.fee is None
+
+
+def test_fill_event_from_base():
+    """FillEvent should be importable from base.py with pnl field."""
+    from src.integrations.exchange.base import FillEvent
+    event = FillEvent(
+        order_id="o1", symbol="BTC/USDT:USDT", side="buy",
+        position_side="long", trigger_reason="market",
+        fill_price=60200.0, amount=0.001, fee=0.03,
+        pnl=None, timestamp=1712534400000,
+    )
+    assert event.pnl is None
+
+    event_with_pnl = FillEvent(
+        order_id="o2", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", trigger_reason="stop",
+        fill_price=58394.0, amount=0.001, fee=0.03,
+        pnl=-1.35, timestamp=1712534401000,
+    )
+    assert event_with_pnl.pnl == -1.35
+
+
+def test_base_exchange_drain_pending_fills():
+    """BaseExchange.drain_pending_fills default returns empty list."""
+    from src.integrations.exchange.base import BaseExchange
+    class DummyExchange(BaseExchange):
+        async def fetch_ticker(self, symbol): ...
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100): ...
+        async def create_order(self, symbol, side, order_type, amount, price=None): ...
+        async def fetch_balance(self): ...
+        async def fetch_positions(self, symbol): ...
+        async def set_leverage(self, symbol, leverage): ...
+        def amount_to_precision(self, symbol, amount): ...
+        async def close(self): ...
+        async def fetch_order(self, order_id, symbol=None): ...
+        async def fetch_open_orders(self, symbol): ...
+        async def fetch_closed_orders(self, symbol, limit=20): ...
+        async def cancel_order(self, order_id, symbol): ...
+    ex = DummyExchange()
+    assert ex.drain_pending_fills() == []
+
+
+async def test_okx_cancel_order(monkeypatch):
+    from src.integrations.exchange.okx import OKXExchange
+    from unittest.mock import AsyncMock, MagicMock
+    import ccxt.async_support as ccxt
+
+    mock_client = MagicMock(spec=ccxt.okx)
+    mock_client.cancel_order = AsyncMock(return_value={"id": "o1", "status": "cancelled"})
+
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_client
+
+    await exchange.cancel_order("o1", "BTC/USDT:USDT")
+    mock_client.cancel_order.assert_called_once_with("o1", "BTC/USDT:USDT")

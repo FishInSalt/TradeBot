@@ -14,21 +14,15 @@ _executor = ThreadPoolExecutor(max_workers=1)
 
 def format_decision_for_approval(
     action: str,
-    reasoning: str,
+    description: str,
     position_pct: float,
     leverage: int,
-    stop_loss: float | None = None,
-    take_profit: float | None = None,
 ) -> str:
     lines = [
         f"Action: {action.upper()}",
         f"Position: {position_pct}% of balance | Leverage: {leverage}x",
+        f"\nDescription: {description}",
     ]
-    if stop_loss is not None:
-        lines.append(f"Stop Loss: {stop_loss:.2f}")
-    if take_profit is not None:
-        lines.append(f"Take Profit: {take_profit:.2f}")
-    lines.append(f"\nReasoning: {reasoning}")
     return "\n".join(lines)
 
 
@@ -40,16 +34,14 @@ class ApprovalGate:
     def check_sync(
         self,
         action: str,
-        reasoning: str,
+        description: str,
         position_pct: float,
         leverage: int,
-        stop_loss: float | None = None,
-        take_profit: float | None = None,
     ) -> bool:
         if not self._enabled:
             return True
         text = format_decision_for_approval(
-            action, reasoning, position_pct, leverage, stop_loss, take_profit
+            action, description, position_pct, leverage
         )
         console.print(
             Panel(text, title="[bold yellow]Trade Approval Required[/]", border_style="yellow")
@@ -60,11 +52,9 @@ class ApprovalGate:
     async def check(
         self,
         action: str,
-        reasoning: str,
+        description: str,
         position_pct: float,
         leverage: int,
-        stop_loss: float | None = None,
-        take_profit: float | None = None,
     ) -> bool:
         if not self._enabled:
             return True
@@ -74,7 +64,7 @@ class ApprovalGate:
                 loop.run_in_executor(
                     _executor,
                     lambda: self.check_sync(
-                        action, reasoning, position_pct, leverage, stop_loss, take_profit
+                        action, description, position_pct, leverage
                     ),
                 ),
                 timeout=self._timeout,

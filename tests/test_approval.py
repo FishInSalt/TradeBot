@@ -3,15 +3,13 @@ def test_format_decision():
 
     text = format_decision_for_approval(
         action="open_long",
-        reasoning="Bullish trend",
+        description="Bullish trend",
         position_pct=20.0,
         leverage=3,
-        stop_loss=63000.0,
-        take_profit=68000.0,
     )
     assert "LONG" in text.upper()
-    assert "63000" in text
-    assert "68000" in text
+    assert "20" in text
+    assert "3" in text
 
 
 def test_auto_approve_when_disabled():

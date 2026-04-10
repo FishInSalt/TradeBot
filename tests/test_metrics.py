@@ -1,33 +1,53 @@
 import pytest
-from datetime import datetime, timezone
-from src.storage.models import TradeRecord
+from src.storage.database import init_db, get_session
+from src.storage.models import Session, TradeAction
 
 
-def _trade(pnl: float) -> TradeRecord:
-    return TradeRecord(
-        id=0, session_id="test-session",
-        symbol="BTC/USDT:USDT", side="long", entry_price=65000.0,
-        exit_price=65000.0 + pnl * 100, quantity=0.01, leverage=3,
-        status="closed", pnl=pnl,
-        created_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
-        closed_at=datetime(2026, 4, 1, 4, tzinfo=timezone.utc),
-    )
+@pytest.fixture
+async def metrics_db(tmp_path):
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/metrics_test.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="test-session", name="metrics-test", initial_balance=10000.0))
+        await session.commit()
+    yield engine
+    await engine.dispose()
 
 
-def test_compute_metrics():
+async def _add_fill(engine, pnl, trigger_reason="market"):
+    async with get_session(engine) as session:
+        session.add(TradeAction(
+            session_id="test-session", action="order_filled",
+            order_id=f"o-{pnl}", symbol="BTC/USDT:USDT", side="long",
+            trigger_reason=trigger_reason, pnl=pnl,
+            reasoning=f"(exchange: {trigger_reason} filled)",
+        ))
+        await session.commit()
+
+
+async def test_compute_metrics(metrics_db):
     from src.services.metrics import MetricsService
+    await _add_fill(metrics_db, 30.0)
+    await _add_fill(metrics_db, -15.0)
+    await _add_fill(metrics_db, 180.0)
+
     service = MetricsService(initial_balance=10000.0)
-    trades = [_trade(30.0), _trade(-15.0), _trade(180.0)]
-    metrics = service.compute_from_trades(trades)
+    metrics = await service.compute(metrics_db, "test-session")
     assert metrics.total_trades == 3
     assert metrics.win_rate == pytest.approx(2 / 3, abs=0.01)
     assert metrics.total_pnl == pytest.approx(195.0)
     assert metrics.profit_factor > 1.0
 
 
-def test_compute_metrics_empty():
+async def test_compute_metrics_empty(metrics_db):
     from src.services.metrics import MetricsService
     service = MetricsService(initial_balance=10000.0)
-    metrics = service.compute_from_trades([])
+    metrics = await service.compute(metrics_db, "test-session")
     assert metrics.total_trades == 0
     assert metrics.win_rate == 0.0
+
+
+async def test_compute_metrics_with_position(metrics_db):
+    from src.services.metrics import MetricsService
+    service = MetricsService(initial_balance=10000.0)
+    metrics = await service.compute(metrics_db, "test-session", current_position="long 0.001")
+    assert metrics.current_position == "long 0.001"

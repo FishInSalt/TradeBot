@@ -1,7 +1,8 @@
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from src.integrations.exchange.base import Ticker
-from src.integrations.exchange.simulated import FillEvent
+from src.integrations.exchange.base import FillEvent
 
 
 def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT"):
@@ -481,3 +482,90 @@ async def test_liquidation_short():
     assert fill_events[0].position_side == "short"
     balance = await ex.fetch_balance()
     assert balance.free_usdt >= 0.0
+
+
+async def test_cancel_order():
+    ex = _make_exchange(initial_balance=100.0)
+    await ex.set_leverage("BTC/USDT:USDT", 3)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    sl_order = await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
+    assert len(await ex.fetch_open_orders("BTC/USDT:USDT")) == 1
+    await ex.cancel_order(sl_order.id, "BTC/USDT:USDT")
+    assert len(await ex.fetch_open_orders("BTC/USDT:USDT")) == 0
+
+
+async def test_cancel_nonexistent_order():
+    ex = _make_exchange()
+    with pytest.raises(ValueError, match="not found"):
+        await ex.cancel_order("nonexistent-id", "BTC/USDT:USDT")
+
+
+async def test_fill_event_carries_pnl_on_stop():
+    """When a stop order triggers, FillEvent should include pnl."""
+    ex = _make_exchange(initial_balance=100.0)
+    fills = []
+    ex.on_fill(lambda event: fills.append(event) or asyncio.sleep(0))
+
+    await ex.set_leverage("BTC/USDT:USDT", 3)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
+
+    drop_ticker = Ticker("BTC/USDT:USDT", 89000.0, 89000.0, 89010.0,
+                         96000.0, 88000.0, 1000.0, 1712534500000)
+    await ex._process_tick(drop_ticker)
+
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "stop"
+    assert fills[0].pnl is not None
+    assert fills[0].pnl < 0
+
+
+async def test_market_order_queues_fill_event():
+    """Market order should queue FillEvent, not call callback immediately."""
+    ex = _make_exchange(initial_balance=100.0)
+    callback_calls = []
+    ex.on_fill(lambda event: callback_calls.append(event) or asyncio.sleep(0))
+
+    await ex.set_leverage("BTC/USDT:USDT", 3)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    assert len(callback_calls) == 0
+    fills = ex.drain_pending_fills()
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "market"
+    assert fills[0].pnl is None
+    assert len(ex.drain_pending_fills()) == 0
+
+
+async def test_market_close_fill_event_has_pnl():
+    """Market close should produce FillEvent with pnl in pending queue."""
+    ex = _make_exchange(initial_balance=100.0)
+    await ex.set_leverage("BTC/USDT:USDT", 3)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    ex.drain_pending_fills()
+
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+    fills = ex.drain_pending_fills()
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "market"
+    assert fills[0].pnl is not None
+
+
+async def test_force_liquidate_fill_event_has_pnl():
+    """Liquidation FillEvent should include pnl."""
+    ex = _make_exchange(initial_balance=100.0)
+    fills = []
+    ex.on_fill(lambda event: fills.append(event) or asyncio.sleep(0))
+
+    await ex.set_leverage("BTC/USDT:USDT", 10)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    ex.drain_pending_fills()
+
+    liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 80000.0, 80010.0,
+                        96000.0, 79000.0, 1000.0, 1712534500000)
+    await ex._process_tick(liq_ticker)
+
+    assert len(fills) >= 1
+    liq_fill = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fill) == 1
+    assert liq_fill[0].pnl is not None

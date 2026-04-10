@@ -35,26 +35,22 @@ class Session(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
-class TradeRecord(Base):
-    """A single trade lifecycle — created on open, updated on close."""
+class TradeAction(Base):
+    """Agent 的交易操作日志 — append-only 事件模型。"""
 
-    __tablename__ = "trade_records"
+    __tablename__ = "trade_actions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
-    symbol: Mapped[str] = mapped_column(String(50))                                # Trading pair (e.g. BTC/USDT:USDT)
-    side: Mapped[str] = mapped_column(String(10))                                  # long / short
-    entry_price: Mapped[float] = mapped_column(Float)                              # Price at position open
-    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)         # Price at position close (null while open)
-    quantity: Mapped[float] = mapped_column(Float)                                 # Position size in contracts
-    leverage: Mapped[int] = mapped_column(Integer, default=1)                      # Leverage multiplier
-    stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)          # Stop loss price level
-    take_profit: Mapped[float | None] = mapped_column(Float, nullable=True)        # Take profit price level
-    status: Mapped[str] = mapped_column(String(20))                                # open / closed / cancelled
-    pnl: Mapped[float | None] = mapped_column(Float, nullable=True)                # Realized PnL in USDT (set on close)
-    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)       # Agent's reasoning for this trade
+    action: Mapped[str] = mapped_column(String(30))
+    order_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(50))
+    side: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    trigger_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # Timestamp when position was closed
 
 
 class DecisionLog(Base):

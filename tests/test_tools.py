@@ -54,6 +54,8 @@ def deps():
     )
     d.exchange.set_leverage = AsyncMock()
     d.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, amt: round(amt, 3))
+    d.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    d.exchange.cancel_order = AsyncMock()
     d.memory.format_for_prompt.return_value = "No memories."
     return d
 
@@ -81,44 +83,152 @@ async def test_get_account_balance(deps):
     assert "10000" in result
 
 
-async def test_get_trade_history(deps):
-    from src.agent.tools_perception import get_trade_history
-
-    result = await get_trade_history(deps)
+async def test_get_memories(deps):
+    from src.agent.tools_perception import get_memories
+    result = await get_memories(deps)
     assert "No memories" in result
 
 
 async def test_open_position(deps):
     from src.agent.tools_execution import open_position
-
-    result = await open_position(deps, "long", 20.0, 3)
-    assert "o1" in result or "opened" in result.lower()
+    result = await open_position(deps, "long", 20.0, 3, reasoning="RSI oversold")
+    assert "submitted" in result.lower()
+    assert "o1" in result
     deps.exchange.set_leverage.assert_called_once()
+
+
+async def test_open_position_too_small(deps):
+    from src.agent.tools_execution import open_position
+    deps.exchange.amount_to_precision = MagicMock(return_value=0.0)
+    result = await open_position(deps, "long", 0.001, 1, reasoning="test")
+    assert "too small" in result.lower()
 
 
 async def test_close_position(deps):
     from src.agent.tools_execution import close_position
+    result = await close_position(deps, reasoning="MACD death cross")
+    assert "submitted" in result.lower()
 
-    result = await close_position(deps)
-    assert "close" in result.lower()
+
+async def test_close_position_no_positions(deps):
+    from src.agent.tools_execution import close_position
+    deps.exchange.fetch_positions.return_value = []
+    result = await close_position(deps, reasoning="test")
+    assert "no positions" in result.lower()
 
 
-async def test_set_stop_loss(deps):
+async def test_set_stop_loss_cancels_existing(deps):
     from src.agent.tools_execution import set_stop_loss
-
-    result = await set_stop_loss(deps, 63000.0)
+    deps.exchange.fetch_open_orders.return_value = [
+        Order("old-sl", "BTC/USDT:USDT", "sell", "stop", 0.01, 60000.0, "open"),
+    ]
+    deps.exchange.cancel_order = AsyncMock()
+    result = await set_stop_loss(deps, 63000.0, reasoning="trailing stop")
     assert "63000" in result
+    deps.exchange.cancel_order.assert_called_once_with("old-sl", "BTC/USDT:USDT")
 
 
 async def test_set_take_profit(deps):
     from src.agent.tools_execution import set_take_profit
-
-    result = await set_take_profit(deps, 68000.0)
+    deps.exchange.fetch_open_orders.return_value = []
+    deps.exchange.cancel_order = AsyncMock()
+    result = await set_take_profit(deps, 68000.0, reasoning="target reached")
     assert "68000" in result
 
 
 async def test_adjust_leverage(deps):
     from src.agent.tools_execution import adjust_leverage
-
-    result = await adjust_leverage(deps, 5)
+    result = await adjust_leverage(deps, 5, reasoning="reducing risk")
     assert "5" in result
+
+
+async def test_get_open_orders(deps):
+    from src.agent.tools_perception import get_open_orders
+    deps.exchange.fetch_open_orders.return_value = [
+        Order("sl1", "BTC/USDT:USDT", "sell", "stop", 0.01, 63000.0, "open"),
+    ]
+    result = await get_open_orders(deps)
+    assert "STOP" in result
+    assert "63000" in result
+
+
+async def test_get_open_orders_empty(deps):
+    from src.agent.tools_perception import get_open_orders
+    deps.exchange.fetch_open_orders.return_value = []
+    result = await get_open_orders(deps)
+    assert "no pending" in result.lower()
+
+
+async def test_get_trade_journal_empty(deps):
+    from src.agent.tools_perception import get_trade_journal
+    result = await get_trade_journal(deps)
+    assert "no trade journal" in result.lower()
+
+
+async def test_get_trade_journal_with_entries(tmp_path):
+    """Test journal formatting with real DB entries and order lookup."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+    from src.agent.tools_perception import get_trade_journal
+    from unittest.mock import AsyncMock, MagicMock
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/journal_test.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="s1", name="journal-test", initial_balance=100.0))
+        await session.commit()
+        session.add(TradeAction(
+            session_id="s1", action="open_position", order_id="o1",
+            symbol="BTC/USDT:USDT", side="long", reasoning="RSI oversold",
+        ))
+        session.add(TradeAction(
+            session_id="s1", action="order_filled", order_id="o1",
+            symbol="BTC/USDT:USDT", side="long", trigger_reason="market",
+            reasoning="(exchange: market order filled @ 60200)",
+        ))
+        await session.commit()
+
+    mock_deps = MagicMock()
+    mock_deps.db_engine = engine
+    mock_deps.session_id = "s1"
+    mock_deps.symbol = "BTC/USDT:USDT"
+    mock_deps.exchange = AsyncMock()
+    mock_deps.exchange.fetch_order.return_value = Order(
+        "o1", "BTC/USDT:USDT", "buy", "market", 0.001, 60200.0, "closed", fee=0.03
+    )
+
+    result = await get_trade_journal(mock_deps)
+    assert "open_position" in result
+    assert "order_filled" in result
+    assert "60200" in result
+    assert "RSI oversold" in result
+    await engine.dispose()
+
+
+async def test_get_trade_journal_order_fetch_failure(tmp_path):
+    """Journal should work even if order fetch fails."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+    from src.agent.tools_perception import get_trade_journal
+    from unittest.mock import AsyncMock, MagicMock
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/journal_fail.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="s1", name="fail-test", initial_balance=100.0))
+        await session.commit()
+        session.add(TradeAction(
+            session_id="s1", action="open_position", order_id="o-fail",
+            symbol="BTC/USDT:USDT", side="long", reasoning="test",
+        ))
+        await session.commit()
+
+    mock_deps = MagicMock()
+    mock_deps.db_engine = engine
+    mock_deps.session_id = "s1"
+    mock_deps.symbol = "BTC/USDT:USDT"
+    mock_deps.exchange = AsyncMock()
+    mock_deps.exchange.fetch_order.side_effect = ValueError("not found")
+
+    result = await get_trade_journal(mock_deps)
+    assert "open_position" in result
+    assert "test" in result
+    await engine.dispose()

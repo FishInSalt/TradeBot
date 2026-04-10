@@ -58,9 +58,23 @@ def create_trader_agent(
         return await _impl(ctx.deps)
 
     @agent.tool
-    async def get_trade_history(ctx: RunContext[TradingDeps]) -> str:
-        """Get trade history and memories."""
-        from src.agent.tools_perception import get_trade_history as _impl
+    async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
+        """Get pending conditional orders (stop loss, take profit)."""
+        from src.agent.tools_perception import get_open_orders as _impl
+
+        return await _impl(ctx.deps)
+
+    @agent.tool
+    async def get_trade_journal(ctx: RunContext[TradingDeps]) -> str:
+        """Get trade journal — agent's decision timeline with fill details."""
+        from src.agent.tools_perception import get_trade_journal as _impl
+
+        return await _impl(ctx.deps)
+
+    @agent.tool
+    async def get_memories(ctx: RunContext[TradingDeps]) -> str:
+        """Get long-term memories (lessons, patterns, trade reviews)."""
+        from src.agent.tools_perception import get_memories as _impl
 
         return await _impl(ctx.deps)
 
@@ -72,43 +86,40 @@ def create_trader_agent(
         side: str,
         position_pct: float,
         leverage: int,
-        stop_loss_price: float | None = None,
-        take_profit_price: float | None = None,
+        reasoning: str,
     ) -> str:
-        """Open a new position. side='long' or 'short'. position_pct=% of free balance."""
+        """Open a new position. side='long' or 'short'. position_pct=% of free balance. Always provide reasoning."""
         from src.agent.tools_execution import open_position as _impl
 
-        return await _impl(
-            ctx.deps, side, position_pct, leverage, stop_loss_price, take_profit_price
-        )
+        return await _impl(ctx.deps, side, position_pct, leverage, reasoning=reasoning)
 
     @agent.tool
-    async def close_position(ctx: RunContext[TradingDeps]) -> str:
-        """Close all open positions."""
+    async def close_position(ctx: RunContext[TradingDeps], reasoning: str) -> str:
+        """Close all open positions. Always provide reasoning."""
         from src.agent.tools_execution import close_position as _impl
 
-        return await _impl(ctx.deps)
+        return await _impl(ctx.deps, reasoning=reasoning)
 
     @agent.tool
-    async def set_stop_loss(ctx: RunContext[TradingDeps], price: float) -> str:
-        """Set stop loss on current position."""
+    async def set_stop_loss(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
+        """Set stop loss on current position. Auto-cancels existing stop orders. Always provide reasoning."""
         from src.agent.tools_execution import set_stop_loss as _impl
 
-        return await _impl(ctx.deps, price)
+        return await _impl(ctx.deps, price, reasoning=reasoning)
 
     @agent.tool
-    async def set_take_profit(ctx: RunContext[TradingDeps], price: float) -> str:
-        """Set take profit on current position."""
+    async def set_take_profit(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
+        """Set take profit on current position. Auto-cancels existing TP orders. Always provide reasoning."""
         from src.agent.tools_execution import set_take_profit as _impl
 
-        return await _impl(ctx.deps, price)
+        return await _impl(ctx.deps, price, reasoning=reasoning)
 
     @agent.tool
-    async def adjust_leverage(ctx: RunContext[TradingDeps], leverage: int) -> str:
-        """Adjust leverage."""
+    async def adjust_leverage(ctx: RunContext[TradingDeps], leverage: int, reasoning: str) -> str:
+        """Adjust leverage. Always provide reasoning."""
         from src.agent.tools_execution import adjust_leverage as _impl
 
-        return await _impl(ctx.deps, leverage)
+        return await _impl(ctx.deps, leverage, reasoning=reasoning)
 
     # === Memory Tools ===
 
