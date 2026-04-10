@@ -47,6 +47,7 @@
 | 价格警报实现位置 | Exchange 内部 + 独立 PriceAlertService | 检测逻辑独立可测（PriceAlertService），触发源在 Exchange 内部（复用已有 ticker 流） |
 | 价格警报暴露为 agent tool | `set_price_alert` tool | 模拟真实交易员行为 — 交易员根据市场状况自主调整预警条件；配置文件提供默认值兜底 |
 | 模型配置迁出 settings.yaml | 统一到 `config/models.json` + 启动交互 | 启动时用户选择模型的流程取代了 YAML 静态配置；routing（strong/weak tier 分发）留待 sub-agent 阶段 |
+| LLMRouter 处置 | 保留代码，不使用 | 单 agent 阶段所有工作在同一次 `agent.run()` 中完成，tier routing 无实际效果；sub-agent 阶段（不同 agent 用不同 tier）再启用 |
 
 ---
 
@@ -80,7 +81,7 @@
 ```
 
 字段说明：
-- `id`: 用户可读的唯一标识，用于启动时选择
+- `id`: 用户可读的唯一标识，用于启动时选择和 CLI 参数引用
 - `provider`: pydantic-ai provider 类型（`anthropic` / `openai` / `google-gla` / `groq` 等）
 - `model`: provider 内的模型标识
 - `api_key`: 该 provider 的 API key
@@ -91,31 +92,61 @@
 ```
 启动系统
   ↓
-扫描 config/models.json
-  ↓
-有已配置模型?
-  ├─ 是 → 列出已配置模型，用户选择或输入新模型
-  └─ 否 → 提示用户输入模型信息（provider, model, api_key, base_url）
+检查 CLI 参数 --model <id>
+  ├─ 有 → 从 models.json 查找该 id，跳过交互
+  └─ 无 → 进入交互模式
+         ↓
+       扫描 config/models.json
+         ↓
+       有已配置模型?
+         ├─ 是 → 列出已配置模型，用户选择或输入新模型
+         └─ 否 → 提示用户输入模型信息（provider, model, api_key, base_url）
   ↓
 测试 API 连通性（发送简单请求）
   ├─ 成功 → 保存到 models.json（如果是新模型），继续启动
-  └─ 失败 → 提示错误，要求重新输入
+  └─ 失败 → 提示错误，要求重新输入（CLI 模式下直接报错退出）
 ```
+
+CLI 参数 `--model <id>` 支持无人值守启动（cron / systemd 等场景）。
 
 ### 运行时模型切换
 
 - 启动时用户选择的模型作为当前 session 的模型
 - `run_agent_cycle` 调用 `agent.run()` 时传入 `model=` 参数覆盖 agent 默认模型
-- 模型管理统一由 `config/models.json` + 启动交互负责，`settings.yaml` 中不再配置模型（原 `models` 配置段移除，routing 留待 sub-agent 阶段）
+- 模型管理统一由 `config/models.json` + 启动交互负责，`settings.yaml` 中移除 `models` 配置段
+- `LLMRouter` 代码保留不删除，但本阶段不使用（单 agent 模式下所有 tool 调用在同一次 `agent.run()` 中完成，tier routing 无实际效果）；sub-agent 阶段再启用
 
-### pydantic-ai model 字符串构造
+### pydantic-ai model 构造
 
-根据 `provider` 和 `model` 字段拼接 pydantic-ai 格式的 model ID：
-- `provider=anthropic, model=claude-opus-4-6` → `"anthropic:claude-opus-4-6"`
-- `provider=openai, model=deepseek/deepseek-chat` → `"openai:deepseek/deepseek-chat"`
-- `provider=google-gla, model=gemini-2.5-pro` → `"google-gla:gemini-2.5-pro"`
+根据 `provider`、`model`、`base_url`、`api_key` 字段构造 pydantic-ai 的 model 对象：
 
-对于 `base_url` 非空的条目（如 OpenRouter），需要在 `agent.run()` 前设置对应环境变量或通过 pydantic-ai 的 provider 配置传入。
+```python
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.google import GoogleModel
+
+def create_model(config: ModelConfig):
+    model_id = f"{config.provider}:{config.model}"
+
+    if config.base_url:
+        # OpenRouter 等兼容 API — 使用 OpenAIModel 直接传入 base_url 和 api_key
+        return OpenAIModel(
+            config.model,
+            base_url=config.base_url,
+            api_key=config.api_key,
+        )
+    else:
+        # 原生 provider — 通过环境变量传入 api_key，返回 model_id 字符串
+        # pydantic-ai 根据前缀自动选择 provider
+        os.environ[_env_var_for_provider(config.provider)] = config.api_key
+        return model_id
+```
+
+provider → 环境变量映射：
+- `anthropic` → `ANTHROPIC_API_KEY`
+- `openai` → `OPENAI_API_KEY`
+- `google-gla` → `GOOGLE_API_KEY`
+- `groq` → `GROQ_API_KEY`
 
 ### 不做的事
 
@@ -142,6 +173,17 @@ OKXExchange
 ```
 
 ### 接口变更
+
+`BaseExchange` 新增 `start()` 默认空实现（`close()` 已有 abstract 声明）：
+
+```python
+# src/integrations/exchange/base.py
+class BaseExchange(ABC):
+    ...
+    async def start(self) -> None:
+        """启动 WebSocket 等后台任务。默认空实现，子类按需覆写。"""
+        pass
+```
 
 `OKXExchange` 新增以下方法（与 SimulatedExchange 接口一致）：
 
@@ -188,13 +230,22 @@ async def _watch_orders_loop(self) -> None:
 | `order_id` | `order_data["id"]` |
 | `symbol` | `order_data["symbol"]` |
 | `side` | `order_data["side"]` |
-| `position_side` | 根据 order_type + side 推断（sell stop on long → "long"） |
+| `position_side` | 优先取 `order_data["info"]["posSide"]`（OKX 原始字段）；缺失时根据 side + order_type 推断 |
 | `trigger_reason` | order_type 映射：stop → "stop", take_profit → "take_profit", market → "market" |
 | `fill_price` | `order_data["average"]` 或 `order_data["price"]` |
 | `amount` | `order_data["filled"]` |
 | `fee` | `order_data["fee"]["cost"]` |
-| `pnl` | 优先取 `order_data["info"]["pnl"]`；缺失则调 REST `fetch_order` 补查 |
+| `pnl` | 优先取 `order_data["info"]["pnl"]`；缺失则调 REST `fetch_order` 补查（超时 5s，失败则 pnl=None） |
 | `timestamp` | `order_data["timestamp"]` |
+
+`position_side` 推断规则（仅当 `info.posSide` 缺失时使用）：
+
+| side | order_type | position_side |
+|------|-----------|---------------|
+| sell | stop | long（多头止损） |
+| buy | stop | short（空头止损） |
+| sell | take_profit | long（多头止盈） |
+| buy | take_profit | short（空头止盈） |
 
 ### app.py 改动
 
@@ -206,7 +257,8 @@ async def _watch_orders_loop(self) -> None:
 
 - WebSocket 断连：ccxt.pro 内置自动重连，监听循环捕获异常后 sleep 再重试
 - 解析失败的订单：跳过并 log warning，不影响后续推送
-- `start()` 失败：不阻塞系统启动，降级为定时轮询模式（现有行为），log error 提示
+- pnl 补查：设 5 秒超时上限，失败时 pnl=None（不阻塞后续 fill 处理），后续 agent cycle 可通过 `get_trade_journal` 补充查询
+- `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态），log error 提示 WebSocket 连接失败
 
 ### 不做的事
 
@@ -228,25 +280,36 @@ async def _watch_orders_loop(self) -> None:
 ```python
 class PriceAlertService:
     def __init__(self, window_minutes, threshold_pct, cooldown_minutes):
-        ...
+        self._window_ms = window_minutes * 60 * 1000
+        self._threshold_pct = threshold_pct
+        self._cooldown_ms = cooldown_minutes * 60 * 1000
+        # 滑动窗口状态 — 只维护 high/low/起点，不存完整序列
+        self._window_high: float = 0.0
+        self._window_low: float = float('inf')
+        self._window_start_price: float = 0.0
+        self._window_start_ts: int = 0
+        self._last_alert_ts: dict[str, int] = {}  # direction → timestamp
 
     def check(self, price: float, timestamp: int) -> AlertInfo | None:
         """喂入 tick 价格，返回 AlertInfo 或 None。"""
-        # 维护滑动时间窗口内的价格记录
-        # 计算当前价格与窗口起点的变化百分比
-        # 超过阈值且不在冷却期 → 返回 AlertInfo
-        # 否则返回 None
+        # 窗口过期 → 重置 high/low/start
+        # 更新 high/low
+        # 计算 drop = (price - window_high) / window_high（跌幅）
+        # 计算 rise = (price - window_low) / window_low（涨幅）
+        # 取绝对值更大的方向，超阈值且不在冷却期 → 返回 AlertInfo
 
-    def update_params(self, window_minutes, threshold_pct, cooldown_minutes):
+    def update_params(self, threshold_pct, window_minutes, cooldown_minutes):
         """运行时更新参数（由 agent tool 调用）。"""
         ...
 ```
 
+检测方式：比较当前价格与窗口内 high/low 的偏离（而非仅与窗口起点比较），避免 V 形反弹等盲区场景。例如：价格从 100 → 97 → 100，窗口 low=97，当 price=97 时 `(97-100)/100 = -3%` 正确触发。
+
 `AlertInfo` 数据：
 - `symbol`: 交易对
 - `current_price`: 当前价格
-- `reference_price`: 窗口起点价格
-- `change_pct`: 变化百分比（正 = 涨，负 = 跌）
+- `reference_price`: 触发方向的参考价格（跌时为 window_high，涨时为 window_low）
+- `change_pct`: 变化百分比（负 = 跌，正 = 涨）
 - `window_minutes`: 时间窗口
 
 ### 触发流程
@@ -256,9 +319,9 @@ Exchange ticker 流（每个 tick）
   ↓
 PriceAlertService.check(price, timestamp)
   ↓
-超过阈值且不在冷却期?
+|当前价格 vs 窗口 high/low| > 阈值，且不在冷却期?
   ├─ 否 → 忽略
-  └─ 是 → alert callback
+  └─ 是 → alert callback（在 Exchange 锁外执行，与 fill callback 同模式）
         ↓
       scheduler.trigger("alert", context=alert_info)
         ↓
@@ -271,16 +334,19 @@ PriceAlertService.check(price, timestamp)
 - 触发一次 alert 后，同方向（涨/跌）在 cooldown_minutes 内不重复触发
 - 反方向不受影响（跌触发 alert 后，如果快速反弹涨超阈值，仍然触发）
 - 冷却计时器在每次触发时重置
+- **不做冷却期内的累计加倍触发**（如跌 3% 后又跌 5%）：agent 在首次 alert 唤醒后会自行处理（平仓/调止损），再次触发不会改变 agent 的决策依据（agent 每次唤醒都会重新获取最新行情）
 
 ### Exchange 集成
 
-- **SimulatedExchange**: 在 `_process_tick` 中调用 `PriceAlertService.check()`，有结果则调用 alert callback
+- **SimulatedExchange**: 在 `_process_tick` 中调用 `PriceAlertService.check()`，有结果则在锁外调用 alert callback（与 fill callback 同模式，避免死锁）
 - **OKXExchange**: 在 `start()` 中新增 `watch_ticker` 循环（与 `watch_orders` 并行），每个 tick 调用 `PriceAlertService.check()`
 
 两种 Exchange 注册 alert callback 的接口一致：
 ```python
 def on_alert(self, callback: Callable[[AlertInfo], Awaitable[None]]) -> None
 ```
+
+BaseExchange 添加默认空实现。
 
 ### Agent Tool
 
@@ -296,6 +362,8 @@ async def set_price_alert(
 ) -> str:
     """Adjust price alert parameters."""
 ```
+
+参数边界验证：`threshold_pct` 最小 0.5%，`window_minutes` 最小 1，`cooldown_minutes` 最小 1。超出范围返回错误提示，不执行更新。
 
 agent 可以根据市场状况调整（如高波动时收紧阈值），也可以不调（使用默认值）。
 
@@ -325,8 +393,28 @@ alerts:
 - **不做多级阈值**（如 3%/5%/10% 分级）：agent 自己判断严重程度
 - **不做自定义指标触发**（如 RSI 跌破 30）：agent 在定时 cycle 中已分析指标
 - **不做外部通知推送**（Slack/Telegram）：当前系统是 agent 自主交易，不通知人类
+- **不做冷却期内累计加倍触发**：agent 首次唤醒后会重新获取行情自行判断，多次 alert 不增加信息量
 
 ---
+
+## 统一启动流程
+
+```
+1. 加载 settings.yaml 配置
+2. 模型选择（交互或 --model 参数）
+   → 扫描 models.json → 用户选择/新增 → 测试 API 连通性
+3. 价格预警参数（交互或使用默认值）
+   → 用户设置 window/threshold/cooldown
+4. 初始化 Exchange
+   → SimulatedExchange 或 OKXExchange
+5. 注册 fill handler + alert handler
+6. exchange.start()
+   → SimulatedExchange: 恢复状态 + WebSocket ticker 撮合循环
+   → OKXExchange: WebSocket watch_orders + watch_ticker 循环
+7. 显示初始 metrics
+8. 启动 Scheduler
+9. 等待 shutdown 信号
+```
 
 ## 典型端到端流程
 
@@ -341,19 +429,33 @@ alerts:
 
 ---
 
+## 测试策略
+
+| 模块 | 测试方式 |
+|------|---------|
+| `PriceAlertService` | 纯逻辑单元测试：阈值触发、冷却机制、V 形反弹场景、参数更新、边界验证 |
+| `ModelManager` | 单元测试：models.json 读写、model 字符串构造；API 连通性测试需 mock HTTP 请求 |
+| `OKX WebSocket fill` | mock `ccxt.pro` 的 `watch_orders` 返回数据，验证 FillEvent 构造和 callback 调用；pnl 补查失败场景 |
+| `OKX WebSocket ticker` | mock `watch_ticker`，验证 PriceAlertService 集成和 alert callback |
+| `set_price_alert tool` | 通过 mock deps 验证参数边界、PriceAlertService 参数更新 |
+| `启动流程` | 集成测试：验证 CLI 参数 `--model`、交互模式、models.json 不存在等场景 |
+
+---
+
 ## 文件变更概览
 
 | 文件 | 变更类型 | 说明 |
 |------|---------|------|
 | `config/models.json` | 新建 | 模型配置（gitignored） |
-| `src/services/model_manager.py` | 新建 | 模型配置读写、API 连通性测试、启动交互 |
-| `src/services/price_alert.py` | 新建 | 价格异动检测（滑动窗口 + 阈值 + 冷却） |
-| `src/integrations/exchange/okx.py` | 修改 | 新增 ccxt.pro 客户端、on_fill、on_alert、start()、watch 循环 |
-| `src/integrations/exchange/simulated.py` | 修改 | 集成 PriceAlertService、on_alert |
-| `src/integrations/exchange/base.py` | 修改 | BaseExchange 添加 on_fill、on_alert 默认空实现 |
-| `src/agent/tools_execution.py` | 修改 | 新增 set_price_alert tool |
-| `src/agent/trader.py` | 修改 | 注册 set_price_alert、动态模型传入 |
-| `src/cli/app.py` | 修改 | 启动交互流程、OKX fill handler 注册、alert handler 注册 |
-| `src/config.py` | 修改 | alerts 配置项、移除 ModelsConfig（模型配置迁移到 models.json） |
-| `src/services/llm_router.py` | 修改/移除 | 单 agent 阶段不再需要 tier routing，逻辑迁入 model_manager |
+| `.gitignore` | 修改 | 添加 `config/models.json` |
+| `src/services/model_manager.py` | 新建 | 模型配置读写、pydantic-ai model 构造、API 连通性测试、启动交互 |
+| `src/services/price_alert.py` | 新建 | 价格异动检测（滑动窗口 high/low + 阈值 + 冷却） |
+| `src/integrations/exchange/okx.py` | 修改 | 新增 ccxt.pro 客户端、on_fill、on_alert、start()、watch_orders + watch_ticker 循环 |
+| `src/integrations/exchange/simulated.py` | 修改 | 集成 PriceAlertService、on_alert（锁外回调） |
+| `src/integrations/exchange/base.py` | 修改 | BaseExchange 添加 `start()` 默认空实现、`on_fill`、`on_alert` 默认空实现 |
+| `src/agent/tools_execution.py` | 修改 | 新增 set_price_alert tool（含参数边界验证） |
+| `src/agent/trader.py` | 修改 | 注册 set_price_alert、动态模型传入 `agent.run(model=...)` |
+| `src/cli/app.py` | 修改 | 统一启动交互流程、fill/alert handler 注册扩展到 OKX、CLI `--model` 参数 |
+| `src/config.py` | 修改 | 新增 alerts 配置项 |
+| `src/services/llm_router.py` | 保留 | 代码不删除但本阶段不使用，sub-agent 阶段再启用 |
 | `config/settings.yaml` | 修改 | 新增 alerts 配置段、移除 models 配置段 |
