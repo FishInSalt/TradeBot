@@ -445,7 +445,7 @@ async def close_position(deps: TradingDeps) -> str:
             deps, action="close_position", order_id=order.id,
             side=p.side, reasoning=reasoning,
         )
-        results.append(f"Closed {p.side} {p.contracts} | Order: {order.id}")
+        results.append(f"Close {p.side} {p.contracts} submitted | Order: {order.id}")
 
     return "Orders submitted:\n" + "\n".join(results) + "\nYou will be notified when filled."
 ```
