@@ -514,7 +514,7 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
 
     await _record_action(
         deps, action="set_stop_loss", order_id=order.id,
-        side=p.side, price=price, reasoning=f"Stop loss set at {price:.2f}",
+        side=p.side, price=price, reasoning=reasoning,
     )
     return f"Stop loss set at {price:.2f} | Order: {order.id}"
 ```
