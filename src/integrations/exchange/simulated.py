@@ -12,25 +12,13 @@ from src.integrations.exchange.base import (
     Balance,
     BaseExchange,
     Candle,
+    FillEvent,
     Order,
     Position,
     Ticker,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class FillEvent:
-    order_id: str
-    symbol: str
-    side: str
-    position_side: str
-    trigger_reason: str
-    fill_price: float
-    amount: float
-    fee: float
-    timestamp: int
 
 
 @dataclass
@@ -75,6 +63,7 @@ class SimulatedExchange(BaseExchange):
         self._running = False
         self._lock = asyncio.Lock()
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
+        self._pending_fills: list[FillEvent] = []
         self._error_count = 0
 
     def _validate_symbol(self, symbol: str) -> None:
@@ -172,9 +161,17 @@ class SimulatedExchange(BaseExchange):
 
         async with self._lock:
             if order_type == "market":
-                order, position_side = self._execute_market_order(symbol, side, amount)
+                order, position_side, pnl = self._execute_market_order(symbol, side, amount)
                 if self._db_engine:
                     await self._persist_state(new_orders=[(order, position_side)])
+                self._pending_fills.append(FillEvent(
+                    order_id=order.id, symbol=symbol, side=order.side,
+                    position_side=position_side,
+                    trigger_reason="market",
+                    fill_price=order.price, amount=order.amount,
+                    fee=order.fee, pnl=pnl,
+                    timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
+                ))
                 return order
             else:
                 order = self._create_conditional_order(symbol, side, order_type, amount, price)  # type: ignore[arg-type]
@@ -182,8 +179,8 @@ class SimulatedExchange(BaseExchange):
                     await self._persist_state()  # persist new pending order
                 return order
 
-    def _execute_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str]:
-        """Returns (Order, position_side) tuple."""
+    def _execute_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str, float | None]:
+        """Returns (Order, position_side, pnl) tuple."""
         if self._latest_ticker is None:
             raise RuntimeError("No ticker data available")
 
@@ -198,7 +195,7 @@ class SimulatedExchange(BaseExchange):
         else:
             return self._open_market_order(symbol, side, amount)
 
-    def _open_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str]:
+    def _open_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str, None]:
         ticker = self._latest_ticker
         if ticker is None:
             raise RuntimeError("No ticker data available")
@@ -248,9 +245,9 @@ class SimulatedExchange(BaseExchange):
             amount=amount, price=fill_price, status="closed", fee=fee,
         )
         logger.info(f"Market order filled: {side} {amount} {symbol} @ {fill_price:.2f}, fee={fee:.4f}")
-        return order, position_side
+        return order, position_side, None
 
-    def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> tuple[Order, str]:
+    def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> tuple[Order, str, float]:
         ticker = self._latest_ticker
         if ticker is None:
             raise RuntimeError("No ticker data available")
@@ -275,7 +272,7 @@ class SimulatedExchange(BaseExchange):
             f"Market close filled: {side} {actual_amount} {symbol} @ {fill_price:.2f}, "
             f"pnl={pnl:.4f}, fee={fee:.4f}"
         )
-        return order, position_side
+        return order, position_side, pnl
 
     def _close_position_core(
         self, symbol: str, position_side: str, amount: float, fill_price: float,
@@ -379,6 +376,7 @@ class SimulatedExchange(BaseExchange):
             order_id=order.id, symbol=order.symbol, side=order.side,
             position_side=order.position_side, trigger_reason=order.order_type,
             fill_price=fill_price, amount=actual_amount, fee=fee,
+            pnl=pnl,
             timestamp=now_ms,
         )
 
@@ -395,6 +393,7 @@ class SimulatedExchange(BaseExchange):
             side="sell" if pos.side == "long" else "buy",
             position_side=pos.side, trigger_reason="liquidation",
             fill_price=price, amount=contracts, fee=fee,
+            pnl=pnl,
             timestamp=now_ms,
         )
 
@@ -519,25 +518,34 @@ class SimulatedExchange(BaseExchange):
             ]
 
     async def cancel_order(self, order_id: str, symbol: str) -> None:
-        self._remove_order_by_id(order_id)
-        if self._db_engine:
-            from sqlalchemy import update
-            from src.storage.database import get_session
-            from src.storage.models import SimOrder
-            async with get_session(self._db_engine) as session:
-                await session.execute(
-                    update(SimOrder)
-                    .where(SimOrder.order_id == order_id)
-                    .where(SimOrder.status == "open")
-                    .values(status="cancelled")
-                )
-                await session.commit()
+        self._validate_symbol(symbol)
+        async with self._lock:
+            found = any(o.id == order_id for o in self._pending_orders)
+            if not found:
+                raise ValueError(f"Order not found: {order_id}")
+            self._remove_order_by_id(order_id)
+            if self._db_engine:
+                from sqlalchemy import update
+                from src.storage.database import get_session
+                from src.storage.models import SimOrder
+                async with get_session(self._db_engine) as session:
+                    await session.execute(
+                        update(SimOrder)
+                        .where(SimOrder.order_id == order_id)
+                        .values(status="cancelled")
+                    )
+                    await session.commit()
         logger.info(f"Order cancelled: {order_id}")
 
     # --- Fill callback ---
 
     def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
         self._fill_callback = callback
+
+    def drain_pending_fills(self) -> list[FillEvent]:
+        fills = self._pending_fills.copy()
+        self._pending_fills.clear()
+        return fills
 
     # --- Persistence ---
 
