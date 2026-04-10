@@ -6,6 +6,48 @@
 
 **Tech Stack:** Python 3.12+, pydantic-ai, ccxt / ccxt.pro, asyncio
 
+**Design spec:** `docs/superpowers/specs/2026-04-10-agent-layer-design.md`（Phase 1a Agent 层设计）
+
+---
+
+## 背景
+
+### 当前系统能力（Phase 1a 已完成）
+
+系统实现了基于事件驱动的 AI 交易 agent：
+- **Agent 决策循环**：Scheduler 定时唤醒 → Agent（pydantic-ai）调用感知 tools 获取市场/持仓/挂单信息 → LLM 分析决策 → 调用执行 tools 下单
+- **SimulatedExchange**：本地撮合引擎，通过 OKX WebSocket `watch_ticker` 获取实时价格驱动撮合，支持市价单/条件单/清算
+- **FillEvent 异步流程**：订单成交后构造 FillEvent → 回调通知 → 唤醒 agent 设置止损止盈或复盘
+- **TradeAction 事件模型**：append-only 记录 agent 决策（带 reasoning）和交易所成交（带 pnl），支持交易日志查询和绩效计算
+
+关键代码路径：
+- `src/cli/app.py` — `run_agent_cycle()` 执行 agent 决策循环，`on_tick()` 处理 Scheduler 触发并在 finally 中 drain 市价单 fill
+- `src/integrations/exchange/simulated.py` — `_process_tick()` 处理每个 ticker，检查清算和条件单触发；`drain_pending_fills()` 返回并清空市价单 fill 队列
+- `src/integrations/exchange/base.py` — `FillEvent` dataclass（含 pnl 字段），`BaseExchange` 定义 `on_fill()`、`drain_pending_fills()` 接口
+
+### 当前缺失
+
+1. **模型锁定**：只能用 Anthropic Claude，无法切换其他大模型测试决策质量
+2. **OKX 实盘 fill 缺失**：OKXExchange 只有 REST 接口，条件单被 OKX 触发后 agent 最多等 15 分钟才知道（下次定时唤醒）
+3. **无价格异动响应**：市场剧烈波动时 agent 无法被主动唤醒，只能按固定间隔定时分析
+
+## 模块间依赖
+
+三个模块**技术上独立**，可以按任意顺序实现。建议顺序：
+1. 多模型支持（改动最小，立即可用）
+2. OKX WebSocket fill 推送（补完实盘闭环）
+3. 价格异动警报（两种 Exchange 都需要集成，放最后统一做）
+
+## 关键设计决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| API key 存储方式 | 明文 JSON 文件 | 业界标准（Claude Code、Cursor、Continue.dev 等均如此），加密需要 master key 管理，复杂度不匹配当前阶段 |
+| OKX 客户端架构 | REST + WebSocket 双客户端共存 | 职责分离：REST 负责主动请求（查询/下单），WebSocket 负责被动监听（fill/ticker），互不影响 |
+| 价格警报实现位置 | Exchange 内部 + 独立 PriceAlertService | 检测逻辑独立可测（PriceAlertService），触发源在 Exchange 内部（复用已有 ticker 流） |
+| 价格警报暴露为 agent tool | `set_price_alert` tool | 模拟真实交易员行为 — 交易员根据市场状况自主调整预警条件；配置文件提供默认值兜底 |
+| 模型配置迁出 settings.yaml | 统一到 `config/models.json` + 启动交互 | 启动时用户选择模型的流程取代了 YAML 静态配置；routing（strong/weak tier 分发）留待 sub-agent 阶段 |
+
 ---
 
 ## 模块一：多模型支持
@@ -62,9 +104,9 @@
 
 ### 运行时模型切换
 
-- 模型解析从启动时一次性确定改为每个 agent cycle 动态读取
+- 启动时用户选择的模型作为当前 session 的模型
 - `run_agent_cycle` 调用 `agent.run()` 时传入 `model=` 参数覆盖 agent 默认模型
-- 修改 `settings.yaml` 中的模型配置后，下个 cycle 自动使用新模型，无需重启
+- 模型管理统一由 `config/models.json` + 启动交互负责，`settings.yaml` 中不再配置模型（原 `models` 配置段移除，routing 留待 sub-agent 阶段）
 
 ### pydantic-ai model 字符串构造
 
@@ -312,5 +354,6 @@ alerts:
 | `src/agent/tools_execution.py` | 修改 | 新增 set_price_alert tool |
 | `src/agent/trader.py` | 修改 | 注册 set_price_alert、动态模型传入 |
 | `src/cli/app.py` | 修改 | 启动交互流程、OKX fill handler 注册、alert handler 注册 |
-| `src/config.py` | 修改 | alerts 配置项 |
-| `config/settings.yaml` | 修改 | 新增 alerts 配置段 |
+| `src/config.py` | 修改 | alerts 配置项、移除 ModelsConfig（模型配置迁移到 models.json） |
+| `src/services/llm_router.py` | 修改/移除 | 单 agent 阶段不再需要 tier routing，逻辑迁入 model_manager |
+| `config/settings.yaml` | 修改 | 新增 alerts 配置段、移除 models 配置段 |
