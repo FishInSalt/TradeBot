@@ -18,16 +18,23 @@ def test_trader_agent_has_all_tools():
 
     agent = create_trader_agent(model="test", persona_config=PersonaConfig())
     tool_names = set(agent._function_toolset.tools)
+    # 感知类
     assert "get_market_data" in tool_names
     assert "get_position" in tool_names
     assert "get_account_balance" in tool_names
-    assert "get_trade_history" in tool_names
+    assert "get_open_orders" in tool_names
+    assert "get_trade_journal" in tool_names
+    assert "get_memories" in tool_names
+    # 执行类
     assert "open_position" in tool_names
     assert "close_position" in tool_names
     assert "set_stop_loss" in tool_names
     assert "set_take_profit" in tool_names
     assert "adjust_leverage" in tool_names
+    # 记忆类
     assert "save_memory" in tool_names
+    # 旧名称不存在
+    assert "get_trade_history" not in tool_names
 
 
 def test_trading_deps_creation():
