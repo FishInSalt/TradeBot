@@ -348,11 +348,13 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
 
 | Tool | 变更 | 说明 |
 |------|------|------|
-| `open_position` | **简化** | 去掉 `stop_loss_price` 和 `take_profit_price` 参数，只下市价单 |
-| `close_position` | **简化** | 去掉 TradeRecord 更新逻辑 |
-| `set_stop_loss` | **改造** | 先取消已有同类型挂单，再创建新单；写入 TradeAction |
-| `set_take_profit` | **改造** | 先取消已有同类型挂单，再创建新单；写入 TradeAction |
-| `adjust_leverage` | 不变（功能），改写入 TradeAction | |
+| `open_position` | **改造** | 去掉 SL/TP 参数，新增 `reasoning` 参数；只下市价单 |
+| `close_position` | **改造** | 去掉 TradeRecord 逻辑，新增 `reasoning` 参数 |
+| `set_stop_loss` | **改造** | 新增 `reasoning` 参数；先取消同类型旧单，再创建新单；写入 TradeAction |
+| `set_take_profit` | **改造** | 新增 `reasoning` 参数；先取消同类型旧单，再创建新单；写入 TradeAction |
+| `adjust_leverage` | **改造** | 新增 `reasoning` 参数；写入 TradeAction |
+
+所有执行类 tools 统一新增 `reasoning: str` 参数，由 agent 传入真实的决策理由（如"RSI 超卖 + 金叉，在支撑位做多"），而非工具内部生成的参数格式化描述。这使得交易日志成为真正有价值的决策记录。
 
 #### open_position 简化后
 
@@ -362,8 +364,9 @@ async def open_position(
     side: str,
     position_pct: float,
     leverage: int,
+    reasoning: str,
 ) -> str:
-    """Open a new position. side='long' or 'short'. position_pct=% of free balance."""
+    """Open a new position. side='long' or 'short'. position_pct=% of free balance. reasoning=why."""
     balance = await deps.exchange.fetch_balance()
     ticker = await deps.market_data.get_ticker(deps.symbol)
     usdt_amount = balance.free_usdt * (position_pct / 100.0)
@@ -372,9 +375,9 @@ async def open_position(
     if quantity <= 0:
         return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
 
-    reasoning = f"Open {side} {position_pct}% at ~{ticker.last:.2f}, {leverage}x leverage"
+    action_desc = f"Open {side} {position_pct}% at ~{ticker.last:.2f}, {leverage}x leverage"
     approved = await _check_approval(
-        deps, f"open_{side}", reasoning, position_pct, leverage
+        deps, f"open_{side}", action_desc, position_pct, leverage
     )
     if not approved:
         return "Trade rejected by human approval."
@@ -385,7 +388,7 @@ async def open_position(
         symbol=deps.symbol, side=order_side, order_type="market", amount=quantity
     )
 
-    # 写入 TradeAction
+    # 写入 TradeAction — reasoning 来自 agent 的真实决策理由
     await _record_action(
         deps, action="open_position", order_id=order.id,
         side=side, reasoning=reasoning,
@@ -406,38 +409,41 @@ async def open_position(
 async def _record_action(deps: TradingDeps, action: str, order_id: str | None = None,
                           side: str | None = None, price: float | None = None,
                           pnl: float | None = None, reasoning: str | None = None) -> None:
-    """写入一条 TradeAction 记录。"""
+    """写入一条 TradeAction 记录。写入失败不影响 tool 返回（容错，与现有 _record_trade_open 行为一致）。"""
     if deps.db_engine is None:
         return
     from src.storage.database import get_session
     from src.storage.models import TradeAction
 
-    async with get_session(deps.db_engine) as session:
-        session.add(TradeAction(
-            session_id=deps.session_id,
-            action=action,
-            order_id=order_id,
-            symbol=deps.symbol,
-            side=side,
-            price=price,
-            pnl=pnl,
-            reasoning=reasoning,
-        ))
-        await session.commit()
+    try:
+        async with get_session(deps.db_engine) as session:
+            session.add(TradeAction(
+                session_id=deps.session_id,
+                action=action,
+                order_id=order_id,
+                symbol=deps.symbol,
+                side=side,
+                price=price,
+                pnl=pnl,
+                reasoning=reasoning,
+            ))
+            await session.commit()
+    except Exception:
+        logger.warning("Failed to record TradeAction", exc_info=True)
 ```
 
 #### close_position 简化后
 
 ```python
-async def close_position(deps: TradingDeps) -> str:
-    """Close all open positions."""
+async def close_position(deps: TradingDeps, reasoning: str) -> str:
+    """Close all open positions. reasoning=why closing."""
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if not positions:
         return "No positions to close."
 
     total_pnl = sum(p.unrealized_pnl for p in positions)
-    reasoning = f"Close {len(positions)} position(s), total PnL: {total_pnl:.2f} USDT"
-    approved = await _check_approval(deps, "close", reasoning, 0, 0)
+    action_desc = f"Close {len(positions)} position(s), est. PnL: {total_pnl:.2f} USDT"
+    approved = await _check_approval(deps, "close", action_desc, 0, 0)
     if not approved:
         return "Close rejected by human approval."
 
@@ -461,6 +467,8 @@ async def close_position(deps: TradingDeps) -> str:
 - 删除 `_update_trade_closed()` 调用
 - 删除 `ticker` 查询（不再需要记录 exit_price，由交易所提供）
 - 返回 "Orders submitted" 而非 "Positions closed"（统一异步语义）
+- 新增 `reasoning` 参数
+- `_check_approval` 签名需适配：去掉 `stop_loss` 和 `take_profit` 参数（open_position 不再传递这两个值）
 
 #### BaseExchange 新增 cancel_order
 
@@ -486,8 +494,8 @@ class BaseExchange(ABC):
 新设计中 SL/TP 在独立周期设置，agent 更容易重复调用（如 Cycle 2 设 SL，Cycle 3 调整 SL）。为避免多个同类型条件单共存，设置前先取消已有同类型挂单：
 
 ```python
-async def set_stop_loss(deps: TradingDeps, price: float) -> str:
-    """Set stop loss on current position. Cancels existing stop order if any."""
+async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
+    """Set stop loss on current position. Cancels existing stop order if any. reasoning=why this price."""
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if not positions:
         return "No open position to set stop loss on."
@@ -550,7 +558,7 @@ class FillEvent:
 
 ### SimulatedExchange 改造
 
-**核心变更：** 市价单 FillEvent 改为**入队延迟处理**，不在 `create_order()` 内立即回调。这确保 Tool 写入 TradeAction（T1）先于 FillEvent handler 写入（T2），时序正确。
+**核心变更：** 为市价单**新增** FillEvent 入队机制。当前代码中市价单路径是纯同步的（`create_order` → 立即返回 Order，无 FillEvent、无 callback），条件单路径已有 `_fill_callback`。改造后市价单成交时将 FillEvent 入队延迟处理（不在 `create_order()` 内立即回调），由 app 层在 cycle 结束后 drain。这确保 Tool 写入 TradeAction（T1）先于 FillEvent handler 写入（T2），时序正确。
 
 #### create_order 改造
 
@@ -623,7 +631,13 @@ T1 < T2 ✅ 时序正确
 
 条件单的处理不变：`_process_tick()` 只处理 `_pending_orders` 列表中的条件单匹配和触发，不涉及市价单（市价单在 `create_order` 中立即成交，不进入 `_pending_orders`）。条件单触发时直接调用 `_fill_callback`（在 agent cycle 之外触发，无时序冲突）。
 
-**`_execute_market_order` 返回值变更：** 从 `(order, position_side)` 扩展为 `(order, position_side, pnl)`。开仓路径（`_open_market_order`）返回 `pnl=None`；平仓路径（`_close_market_order`）从 `_close_position_core` 获取 pnl 并返回。`_execute_fill`（条件单触发）同理，已有 pnl 计算逻辑。
+**需要传递 pnl 到 FillEvent 的三个路径：**
+
+| 路径 | 当前状态 | 改造 |
+|------|---------|------|
+| `_execute_market_order` | 返回 `(order, position_side)` | 扩展为 `(order, position_side, pnl)`。开仓 pnl=None，平仓从 `_close_position_core` 获取 |
+| `_execute_fill`（条件单触发） | 调用 `_close_position_core` 获取 pnl 但未传入 FillEvent | FillEvent 构造时传入 `pnl=pnl` |
+| `_force_liquidate`（强平） | 调用 `_close_position_core` 获取 pnl 但未传入 FillEvent | FillEvent 构造时传入 `pnl=pnl` |
 
 **时序兼容：** 市价单的 FillEvent 在 `create_order()` 内部产生，此时 agent 仍在当前决策周期中（tool 调用尚未返回）。FillEvent handler 调用 `scheduler.trigger()` 仅设置 `_pending_trigger` 标志和 context，不会立即启动新周期。当前周期结束后，Scheduler 主循环检测到 pending trigger，才启动下一个周期。现有 Scheduler 设计已支持此流程，无需改造。
 
