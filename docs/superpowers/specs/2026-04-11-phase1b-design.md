@@ -47,7 +47,7 @@
 | 价格警报实现位置 | Exchange 内部 + 独立 PriceAlertService | 检测逻辑独立可测（PriceAlertService），触发源在 Exchange 内部（复用已有 ticker 流） |
 | 价格警报暴露为 agent tool | `set_price_alert` tool | 模拟真实交易员行为 — 交易员根据市场状况自主调整预警条件；配置文件提供默认值兜底 |
 | 模型配置迁出 settings.yaml | 统一到 `config/models.json` + 启动交互 | 启动时用户选择模型的流程取代了 YAML 静态配置；routing（strong/weak tier 分发）留待 sub-agent 阶段 |
-| LLMRouter 处置 | 保留代码，不使用 | 单 agent 阶段所有工作在同一次 `agent.run()` 中完成，tier routing 无实际效果；sub-agent 阶段（不同 agent 用不同 tier）再启用 |
+| LLMRouter 处置 | 保留代码，迁移调用点 | 当前 app.py 使用 `llm_router.resolve("trade_decision")` 获取模型，Phase 1b 将该调用点替换为 ModelManager 获取 model 对象。LLMRouter 类保留，sub-agent 阶段再启用 |
 
 ---
 
@@ -129,8 +129,6 @@ from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
 
 def create_model(config: ModelConfig):
-    model_id = f"{config.provider}:{config.model}"
-
     if config.base_url:
         # OpenRouter 等兼容 API — 使用 OpenAIModel 直接传入 base_url 和 api_key
         return OpenAIModel(
@@ -142,7 +140,7 @@ def create_model(config: ModelConfig):
         # 原生 provider — 通过环境变量传入 api_key，返回 model_id 字符串
         # pydantic-ai 根据前缀自动选择 provider
         os.environ[_env_var_for_provider(config.provider)] = config.api_key
-        return model_id
+        return f"{config.provider}:{config.model}"
 ```
 
 provider → 环境变量映射：
@@ -210,8 +208,12 @@ async def start(self) -> None:
     # 启动 _watch_orders_loop 后台任务
 
 async def close(self) -> None:
-    """关闭 REST + WebSocket 客户端。"""
-    # 现有 REST close + 新增 WebSocket close
+    """关闭 REST + WebSocket 客户端（try/finally 确保两个都尝试关闭）。"""
+    try:
+        await self._client.close()
+    finally:
+        if hasattr(self, '_ws_client') and self._ws_client:
+            await self._ws_client.close()
 ```
 
 ### watch_orders 监听循环
@@ -221,6 +223,7 @@ async def _watch_orders_loop(self) -> None:
     while self._running:
         try:
             orders = await self._ws_client.watch_orders(self._symbol)
+            self._ws_orders_error_count = 0  # 成功后重置
             for order_data in orders:
                 if order_data["status"] == "closed":  # 已成交
                     fill_event = self._parse_fill_event(order_data)
@@ -229,8 +232,8 @@ async def _watch_orders_loop(self) -> None:
         except asyncio.CancelledError:
             break
         except Exception:
-            self._ws_error_count += 1
-            delay = min(5 * (2 ** (self._ws_error_count - 1)), 60)
+            self._ws_orders_error_count += 1
+            delay = min(5 * (2 ** (self._ws_orders_error_count - 1)), 60)
             logger.error("watch_orders error (retry in %ds)", delay, exc_info=True)
             await asyncio.sleep(delay)
 ```
@@ -261,6 +264,8 @@ async def _watch_orders_loop(self) -> None:
 | sell | take_profit | long（多头止盈） |
 | buy | take_profit | short（空头止盈） |
 
+注：market 类型不走此推断表 — 市价单 fill 不通过 WebSocket 处理（见"不做的事"）。
+
 ### app.py 改动
 
 - fill handler 注册逻辑从 `if simulated` 扩展到 OKX 模式，共用同一个 `_create_fill_handler`
@@ -272,7 +277,7 @@ async def _watch_orders_loop(self) -> None:
 - WebSocket 断连：ccxt.pro 内置自动重连，监听循环捕获异常后 sleep 再重试
 - 解析失败的订单：跳过并 log warning，不影响后续推送
 - pnl 补查：设 5 秒超时上限，失败时 pnl=None（不阻塞后续 fill 处理），后续 agent cycle 可通过 `get_trade_journal` 补充查询
-- `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态）。除 log error 外，在 CLI 显示醒目 warning（如 `"⚠ WebSocket connection failed, running in REST-only mode"`），确保用户知晓降级状态
+- `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态）。除 log error 外，在 CLI 显示醒目 warning（如 `"⚠ WebSocket connection failed, running in REST-only mode"`）。设置 `_ws_connected = False` 标志；降级后 fill/alert callback 无需注销（WebSocket 未启动，callback 不会被调用）
 
 ### 不做的事
 
@@ -334,6 +339,7 @@ Sliding window 避免了 tumbling window 的窗口重置盲区：tumbling 每 5 
 - `reference_price`: 触发方向的参考价格（跌时为 window_high，涨时为 window_low）
 - `change_pct`: 变化百分比（负 = 跌，正 = 涨）
 - `window_minutes`: 时间窗口
+- `timestamp`: 警报产生时间（ms），与 FillEvent.timestamp 格式一致
 
 ### 触发流程
 
@@ -350,6 +356,8 @@ PriceAlertService.check(price, timestamp)
         ↓
       agent cycle 启动，prompt 追加:
       "PRICE ALERT: BTC/USDT:USDT dropped 3.5% in 5min (61200 → 59058)"
+
+注：Scheduler 为**串行调度** — 当前 cycle 完成后才处理下一个 trigger。如果 agent 正在执行定时 cycle 时收到 fill 或 alert，`scheduler.trigger()` 只设标志位，待当前 cycle 完成后再启动新 cycle。不存在两个 agent cycle 并发操作仓位的情况。
 ```
 
 ### 冷却机制
@@ -362,7 +370,28 @@ PriceAlertService.check(price, timestamp)
 ### Exchange 集成
 
 - **SimulatedExchange**: 在 `_process_tick` 中调用 `PriceAlertService.check()`，有结果则在锁外调用 alert callback（与 fill callback 同模式，避免死锁）
-- **OKXExchange**: 在 `start()` 中新增 `watch_ticker` 循环（与 `watch_orders` 并行），每个 tick 调用 `PriceAlertService.check()`
+- **OKXExchange**: 在 `start()` 中新增 `_watch_ticker_loop` 后台任务（与 `_watch_orders_loop` 并行），共用同一个 `_ws_client`（ccxt.pro 支持单客户端多 subscription），共用 `_running` 标志控制生命周期
+
+```python
+async def _watch_ticker_loop(self) -> None:
+    error_count = 0
+    while self._running:
+        try:
+            raw = await self._ws_client.watch_ticker(self._symbol)
+            error_count = 0  # 成功后重置
+            ticker = self._parse_ticker(raw)
+            if self._alert_service:
+                alert = self._alert_service.check(ticker.last, ticker.timestamp)
+                if alert and self._alert_callback:
+                    await self._alert_callback(alert)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            error_count += 1
+            delay = min(5 * (2 ** (error_count - 1)), 60)
+            logger.error("watch_ticker error (retry in %ds)", delay, exc_info=True)
+            await asyncio.sleep(delay)
+```
 
 两种 Exchange 注册 alert callback 的接口一致：
 ```python
@@ -386,7 +415,7 @@ async def set_price_alert(
     """Adjust price alert parameters."""
 ```
 
-参数边界验证：`threshold_pct` 最小 0.5%，`window_minutes` 最小 1，`cooldown_minutes` 最小 1。超出范围返回错误提示，不执行更新。
+参数边界验证：`threshold_pct` 0.5%–50%，`window_minutes` 1–60，`cooldown_minutes` 1–120。超出范围返回错误提示，不执行更新。
 
 agent 可以根据市场状况调整（如高波动时收紧阈值），也可以不调（使用默认值）。
 
