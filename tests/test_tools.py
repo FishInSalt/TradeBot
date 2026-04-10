@@ -54,6 +54,8 @@ def deps():
     )
     d.exchange.set_leverage = AsyncMock()
     d.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, amt: round(amt, 3))
+    d.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    d.exchange.cancel_order = AsyncMock()
     d.memory.format_for_prompt.return_value = "No memories."
     return d
 
@@ -90,35 +92,52 @@ async def test_get_trade_history(deps):
 
 async def test_open_position(deps):
     from src.agent.tools_execution import open_position
-
-    result = await open_position(deps, "long", 20.0, 3)
-    assert "o1" in result or "opened" in result.lower()
+    result = await open_position(deps, "long", 20.0, 3, reasoning="RSI oversold")
+    assert "submitted" in result.lower()
+    assert "o1" in result
     deps.exchange.set_leverage.assert_called_once()
+
+
+async def test_open_position_too_small(deps):
+    from src.agent.tools_execution import open_position
+    deps.exchange.amount_to_precision = MagicMock(return_value=0.0)
+    result = await open_position(deps, "long", 0.001, 1, reasoning="test")
+    assert "too small" in result.lower()
 
 
 async def test_close_position(deps):
     from src.agent.tools_execution import close_position
+    result = await close_position(deps, reasoning="MACD death cross")
+    assert "submitted" in result.lower()
 
-    result = await close_position(deps)
-    assert "close" in result.lower()
+
+async def test_close_position_no_positions(deps):
+    from src.agent.tools_execution import close_position
+    deps.exchange.fetch_positions.return_value = []
+    result = await close_position(deps, reasoning="test")
+    assert "no positions" in result.lower()
 
 
-async def test_set_stop_loss(deps):
+async def test_set_stop_loss_cancels_existing(deps):
     from src.agent.tools_execution import set_stop_loss
-
-    result = await set_stop_loss(deps, 63000.0)
+    deps.exchange.fetch_open_orders.return_value = [
+        Order("old-sl", "BTC/USDT:USDT", "sell", "stop", 0.01, 60000.0, "open"),
+    ]
+    deps.exchange.cancel_order = AsyncMock()
+    result = await set_stop_loss(deps, 63000.0, reasoning="trailing stop")
     assert "63000" in result
+    deps.exchange.cancel_order.assert_called_once_with("old-sl", "BTC/USDT:USDT")
 
 
 async def test_set_take_profit(deps):
     from src.agent.tools_execution import set_take_profit
-
-    result = await set_take_profit(deps, 68000.0)
+    deps.exchange.fetch_open_orders.return_value = []
+    deps.exchange.cancel_order = AsyncMock()
+    result = await set_take_profit(deps, 68000.0, reasoning="target reached")
     assert "68000" in result
 
 
 async def test_adjust_leverage(deps):
     from src.agent.tools_execution import adjust_leverage
-
-    result = await adjust_leverage(deps, 5)
+    result = await adjust_leverage(deps, 5, reasoning="reducing risk")
     assert "5" in result
