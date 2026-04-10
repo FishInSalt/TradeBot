@@ -391,13 +391,15 @@ Expected: FAIL
 
 在 `src/integrations/exchange/simulated.py` 中：
 
+**调用链说明：** `create_order` → `_execute_market_order`（入口，判断开仓/平仓）→ `_open_market_order`（开仓，pnl=None）或 `_close_market_order`（平仓，从 `_close_position_core` 获取 pnl）。三层方法都需要返回 pnl。
+
 1. 在 `__init__` 中添加 `self._pending_fills: list[FillEvent] = []`
 
 2. 修改 `_open_market_order` 返回值为 `(order, position_side, None)` — 末尾的 `return order, position_side` 改为 `return order, position_side, None`
 
 3. 修改 `_close_market_order` 返回值为 `(order, position_side, pnl)` — 已有 `pnl, fee, _ = self._close_position_core(...)`，末尾 `return order, position_side` 改为 `return order, position_side, pnl`
 
-4. 修改 `_execute_market_order`：`order, position_side = ...` 改为 `order, position_side, pnl = ...`，并 `return order, position_side, pnl`
+4. 修改 `_execute_market_order`（入口方法）：接收下层返回的三元组，`order, position_side, pnl = self._open/close_market_order(...)`，并 `return order, position_side, pnl`
 
 5. 修改 `create_order` 中 market 分支：
 
@@ -689,7 +691,20 @@ async def _check_approval(deps: TradingDeps, action: str, action_desc: str,
     return True
 ```
 
-其余所有执行类 tools 的完整代码参见设计文档 §执行类 Tools（open_position, close_position, set_stop_loss, set_take_profit, adjust_leverage）。关键变更：
+`adjust_leverage` 改造（新增 reasoning + TradeAction）：
+
+```python
+async def adjust_leverage(deps: TradingDeps, leverage: int, reasoning: str) -> str:
+    """Adjust leverage for the trading symbol."""
+    await deps.exchange.set_leverage(deps.symbol, leverage)
+    await _record_action(
+        deps, action="adjust_leverage",
+        reasoning=reasoning,
+    )
+    return f"Leverage adjusted to {leverage}x for {deps.symbol}"
+```
+
+其余 tools（open_position, close_position, set_stop_loss, set_take_profit）的完整代码见设计文档 §执行类 Tools。关键变更：
 - 删除 `_record_trade_open` 和 `_update_trade_closed`
 - 所有 tool 增加 `reasoning: str` 参数
 - `open_position` 去掉 SL/TP 参数，返回 "Order submitted"
@@ -1317,7 +1332,7 @@ display_metrics(metrics)
 
 删除旧的 `select(TradeRecord)` 查询块。
 
-6. 更新 `_create_fill_handler` 调用（去掉 symbol 参数，简化）。
+6. 更新 `_create_fill_handler` 调用（当前只有 `sched` 参数，新增 `engine`, `session_id` 参数）。
 
 - [ ] **Step 2: Run all tests to verify nothing is broken**
 
