@@ -3,7 +3,7 @@ def test_format_decision():
 
     text = format_decision_for_approval(
         action="open_long",
-        reasoning="Bullish trend",
+        description="Bullish trend",
         position_pct=20.0,
         leverage=3,
     )
