@@ -107,6 +107,8 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
             if od.fee:
                 line += f", fee={od.fee:.4f}"
             line += f" [{od.status}]"
+        if a.pnl is not None:
+            line += f", pnl={a.pnl:.2f}"
         if a.reasoning:
             line += f"\n  Reasoning: {a.reasoning}"
         lines.append(line)

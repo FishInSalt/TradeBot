@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -102,11 +101,10 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
             symbol=deps.symbol, side=order_side, order_type="market", amount=p.contracts
         )
         order_ids.append(order.id)
-
-    await _record_action(
-        deps, action="close_position", order_id=order_ids[0] if order_ids else None,
-        side=positions[0].side, reasoning=reasoning,
-    )
+        await _record_action(
+            deps, action="close_position", order_id=order.id,
+            side=p.side, reasoning=reasoning,
+        )
 
     return f"Orders submitted: close {len(positions)} position(s) | IDs: {', '.join(order_ids)}"
 
