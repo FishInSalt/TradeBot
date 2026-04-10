@@ -51,6 +51,57 @@
 
 ---
 
+## 前置改造：Scheduler 事件队列化
+
+### 问题
+
+当前 Scheduler 有两个缺陷阻碍 price alert 集成：
+
+1. **trigger_type 丢失**：`trigger()` 接收 `trigger_type` 参数但不存储，`start()` 硬编码 `"conditional"` 传给 callback。alert 触发（`"alert"`）和 fill 触发（`"conditional"`）无法区分。
+2. **context 去重覆盖**：如果已有 pending trigger 时又收到一个，第二个会把 `_pending_context` 设为 `None`，两个事件的 context 都丢失。
+
+### 改造方案
+
+将单标志位（`_pending_trigger` + `_pending_context`）替换为事件队列（`deque`）：
+
+```python
+from collections import deque
+from dataclasses import dataclass
+
+@dataclass
+class _TriggerEvent:
+    trigger_type: str
+    context: Any | None
+
+class Scheduler:
+    def __init__(self, ...):
+        ...
+        self._pending_events: deque[_TriggerEvent] = deque()
+
+    async def trigger(self, trigger_type: str, context=None):
+        self._pending_events.append(_TriggerEvent(trigger_type, context))
+        self._wake_event.set()
+
+    async def start(self):
+        self._running = True
+        await self._run_cycle("scheduled", None)
+        while self._running:
+            await self._interruptible_sleep(self._interval)
+            if not self._running:
+                break
+            # 先处理所有 pending 事件
+            while self._pending_events:
+                event = self._pending_events.popleft()
+                await self._run_cycle(event.trigger_type, event.context)
+            # 如果没有 pending 事件，执行定时 cycle
+            if not self._pending_events:
+                await self._run_cycle("scheduled", None)
+```
+
+每个事件保留完整的 `trigger_type` + `context`，不会丢失。多个事件按 FIFO 顺序串行处理。
+
+---
+
 ## 模块一：多模型支持
 
 ### 目标
@@ -102,7 +153,7 @@
          ├─ 是 → 列出已配置模型，用户选择或输入新模型
          └─ 否 → 提示用户输入模型信息（provider, model, api_key, base_url）
   ↓
-测试 API 连通性（发送简短 chat completion 请求，如 "say hi"，验证 API key 有效且模型可访问）
+测试 API 连通性（通过 pydantic-ai 创建临时 Agent 发送简短 completion 请求，如 "say hi"，验证 API key 有效且模型可访问）
   ├─ 成功 → 保存到 models.json（如果是新模型），继续启动
   └─ 失败 → 提示具体错误（认证失败/模型不存在/网络超时），要求重新输入（CLI 模式下直接报错退出）
 ```
@@ -182,8 +233,8 @@ OKXExchange
 
 ```python
 # src/integrations/exchange/base.py — 新增到 BaseExchange
-async def start(self) -> None:
-    """启动 WebSocket 等后台任务。默认空实现。"""
+async def start(self, symbol: str | None = None) -> None:
+    """启动 WebSocket 等后台任务。默认空实现。symbol 供 OKXExchange 使用，SimulatedExchange 从构造函数获取。"""
     pass
 
 def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
@@ -192,6 +243,10 @@ def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
 
 def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
     """注册价格异动回调。默认空实现。"""
+    pass
+
+def set_alert_service(self, service) -> None:
+    """注入 PriceAlertService。默认空实现。"""
     pass
 
 def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
@@ -208,10 +263,11 @@ def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
     """注册 fill 回调。"""
     self._fill_callback = callback
 
-async def start(self) -> None:
-    """启动 WebSocket 监听循环。"""
+async def start(self, symbol: str) -> None:
+    """启动 WebSocket 监听循环。symbol 从 app.py 的 settings.trading.symbol 传入。"""
+    self._symbol = symbol
     # 创建 ccxt.pro 客户端（复用相同 API credentials）
-    # 启动 _watch_orders_loop 后台任务
+    # 启动 _watch_orders_loop + _watch_ticker_loop 后台任务
 
 async def close(self) -> None:
     """关闭 REST + WebSocket 客户端（try/finally 确保两个都尝试关闭）。"""
@@ -278,6 +334,21 @@ async def _watch_orders_loop(self) -> None:
 - fill handler 注册逻辑从 `if simulated` 扩展到 OKX 模式，共用同一个 `_create_fill_handler`
 - OKX 模式也调用 `exchange.start()` 启动 WebSocket
 - OKX 不需要 `drain_pending_fills`（fill 通过 callback 直接推送，不入队）
+- `run_agent_cycle` prompt 构造扩展：根据 context 类型分别处理 FillEvent 和 AlertInfo
+
+```python
+# FillEvent context（已有逻辑）
+if context is not None and hasattr(context, "trigger_reason"):
+    msg = f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered ..."
+    prompt += msg
+# AlertInfo context（新增）
+elif context is not None and hasattr(context, "change_pct"):
+    direction = "dropped" if context.change_pct < 0 else "surged"
+    prompt += (
+        f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+        f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+    )
+```
 
 ### 错误处理
 
@@ -289,7 +360,8 @@ async def _watch_orders_loop(self) -> None:
 ### 不做的事
 
 - 不处理 OKX 市价单的 fill（市价单 REST `create_order` 返回时已成交，不需要 WebSocket 通知）
-- 不处理部分成交（partial fill）通知：只在订单完全成交（`status == "closed"`）时推送 FillEvent。OKX 合约大额单可能分批成交（`status` 仍为 `"open"` 但 `filled > 0`），当前不处理中间状态
+- 不处理部分成交（partial fill）通知：只在订单完全成交（`status == "closed"`）时推送 FillEvent。OKX 合约大额单可能分批成交（`status` 仍为 `"open"` 但 `filled > 0`），当前不处理中间状态。**风险**：极端行情下止损单可能因流动性不足无法完全成交，agent 将不会收到通知
+- OKX order_type 映射不完整时（如 `stopLimit`、`trailingStop` 等变体），trigger_reason 设为 `"unknown"`，不阻塞 FillEvent 构造
 - 不做主动重连逻辑（依赖 ccxt.pro 内置机制）。外层循环异常捕获后使用指数退避重试（5s → 10s → 20s → 60s 封顶），避免 ccxt.pro 内部重连失败时的高频重试
 
 ---
@@ -489,12 +561,11 @@ alerts:
 以 OKX 实盘 agent 首次开仓为例：
 
 1. **启动** → 用户选择模型 + 设置价格预警参数 → 系统测试 API 连通性 → 启动 WebSocket（watch_orders + watch_ticker）
-2. **定时唤醒** → Agent 分析市场 → 决定开多 → `open_position` 提交市价单到 OKX
-3. **Fill 推送** → WebSocket 收到成交通知 → FillEvent → 唤醒 agent → Agent 设置 SL/TP
-4. **价格异动** → BTC 5 分钟跌 4% → PriceAlertService 触发 → 唤醒 agent → Agent 检查仓位、收紧止损
-5. **Agent 调整预警** → Agent 判断当前高波动，调用 `set_price_alert(threshold_pct=1.5, ...)` 收紧阈值
-6. **止损触发** → OKX 执行止损 → WebSocket fill 推送 → 唤醒 agent → Agent 复盘 + save_memory
-7. **定时唤醒** → Agent 查看 trade journal + memories → 决定是否重新入场
+2. **定时唤醒** → Agent 分析市场 → 决定开多 → `open_position` 提交市价单到 OKX → REST 返回已成交 → Agent 在同一 cycle 内设置 SL/TP（注：OKX 市价单不经过 WebSocket fill 推送，REST 响应已包含成交结果）
+3. **价格异动** → BTC 5 分钟跌 4% → PriceAlertService 触发 → 唤醒 agent（trigger_type="alert"）→ Agent 检查仓位、收紧止损
+4. **Agent 调整预警** → Agent 判断当前高波动，调用 `set_price_alert(threshold_pct=1.5, ...)` 收紧阈值
+5. **止损触发** → OKX 执行止损 → WebSocket fill 推送（trigger_type="conditional"）→ 唤醒 agent → Agent 复盘 + save_memory
+6. **定时唤醒** → Agent 查看 trade journal + memories → 决定是否重新入场
 
 ---
 
@@ -507,6 +578,7 @@ alerts:
 | `OKX WebSocket fill` | mock `ccxt.pro` 的 `watch_orders` 返回数据，验证 FillEvent 构造和 callback 调用；pnl 补查失败场景 |
 | `OKX WebSocket ticker` | mock `watch_ticker`，验证 PriceAlertService 集成和 alert callback |
 | `set_price_alert tool` | 通过 mock deps 验证参数边界、PriceAlertService 参数更新 |
+| `Scheduler 事件队列` | 单元测试：多事件 FIFO 顺序、trigger_type 保留、context 不丢失、定时 + 事件混合调度 |
 | `启动流程` | 集成测试：验证 CLI 参数 `--model`、交互模式、models.json 不存在等场景 |
 
 ---
@@ -521,10 +593,11 @@ alerts:
 | `src/services/price_alert.py` | 新建 | 价格异动检测（deque sliding window + 阈值 + 冷却） |
 | `src/integrations/exchange/okx.py` | 修改 | 新增 ccxt.pro 客户端、on_fill、on_alert、start()、watch_orders + watch_ticker 循环 |
 | `src/integrations/exchange/simulated.py` | 修改 | 集成 PriceAlertService、on_alert（锁外回调） |
-| `src/integrations/exchange/base.py` | 修改 | BaseExchange 提升 `start()`、`on_fill()`、`on_alert()` 为统一接口（默认空实现） |
+| `src/integrations/exchange/base.py` | 修改 | BaseExchange 提升 `start()`、`on_fill()`、`on_alert()`、`set_alert_service()`、`update_alert_params()` 为统一接口（默认空实现） |
 | `src/agent/tools_execution.py` | 修改 | 新增 set_price_alert tool（含参数边界验证） |
 | `src/agent/trader.py` | 修改 | 注册 set_price_alert、动态模型传入 `agent.run(model=...)` |
 | `src/cli/app.py` | 修改 | 统一启动交互流程、fill/alert handler 注册扩展到 OKX、CLI `--model` 参数 |
 | `src/config.py` | 修改 | 新增 alerts 配置项 |
-| `src/services/llm_router.py` | 保留 | 代码不删除但本阶段不使用，sub-agent 阶段再启用 |
+| `src/scheduler/scheduler.py` | 修改 | 事件队列化改造：单标志位 → deque 队列，保留 trigger_type + context |
+| `src/services/llm_router.py` | 保留 | 代码不删除，app.py 中的调用点迁移到 ModelManager，sub-agent 阶段再启用 |
 | `config/settings.yaml` | 修改 | 新增 alerts 配置段、移除 models 配置段 |
