@@ -359,6 +359,27 @@ async def test_market_close_fill_event_has_pnl():
     assert len(fills) == 1
     assert fills[0].trigger_reason == "market"
     assert fills[0].pnl is not None  # close has pnl
+
+
+async def test_force_liquidate_fill_event_has_pnl():
+    """Liquidation FillEvent should include pnl."""
+    ex = _make_exchange(initial_balance=100.0)
+    fills = []
+    ex.on_fill(lambda event: fills.append(event) or asyncio.sleep(0))
+
+    await ex.set_leverage("BTC/USDT:USDT", 10)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    ex.drain_pending_fills()  # clear open fill
+
+    # Simulate extreme price drop to trigger liquidation
+    liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 80000.0, 80010.0,
+                        96000.0, 79000.0, 1000.0, 1712534500000)
+    await ex._process_tick(liq_ticker)
+
+    assert len(fills) >= 1
+    liq_fill = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fill) == 1
+    assert liq_fill[0].pnl is not None
 ```
 
 - [ ] **Step 6: Run pnl/queue tests to verify they fail**
@@ -625,16 +646,55 @@ Expected: FAIL — open_position signature changed
 
 - [ ] **Step 3: Rewrite src/agent/tools_execution.py**
 
-完整替换文件内容，实现设计文档中的所有执行类 tools（`_record_action`、`_check_approval` 简化、`open_position`、`close_position`、`set_stop_loss`、`set_take_profit`、`adjust_leverage`）。
+完整替换文件内容。核心新增的 `_record_action` 辅助函数：
 
-关键变更：
+```python
+async def _record_action(deps: TradingDeps, action: str, order_id: str | None = None,
+                          side: str | None = None, price: float | None = None,
+                          pnl: float | None = None, reasoning: str | None = None) -> None:
+    """写入一条 TradeAction 记录。写入失败不影响 tool 返回（容错）。"""
+    if deps.db_engine is None:
+        return
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+
+    try:
+        async with get_session(deps.db_engine) as session:
+            session.add(TradeAction(
+                session_id=deps.session_id,
+                action=action,
+                order_id=order_id,
+                symbol=deps.symbol,
+                side=side,
+                price=price,
+                pnl=pnl,
+                reasoning=reasoning,
+            ))
+            await session.commit()
+    except Exception:
+        logger.warning("Failed to record TradeAction", exc_info=True)
+```
+
+`_check_approval` 简化（去掉 stop_loss/take_profit，参数 reasoning 改名为 action_desc 避免与 agent reasoning 混淆）：
+
+```python
+async def _check_approval(deps: TradingDeps, action: str, action_desc: str,
+                           position_pct: float, leverage: int) -> bool:
+    """Check human approval. action_desc is a formatted description (NOT agent reasoning)."""
+    if not deps.approval_enabled or deps.approval_gate is None:
+        return True
+    gate = deps.approval_gate
+    if hasattr(gate, 'check'):
+        return await gate.check(action, action_desc, position_pct, leverage)
+    return True
+```
+
+其余所有执行类 tools 的完整代码参见设计文档 §执行类 Tools（open_position, close_position, set_stop_loss, set_take_profit, adjust_leverage）。关键变更：
 - 删除 `_record_trade_open` 和 `_update_trade_closed`
-- 新增 `_record_action` (容错，try/except)
 - 所有 tool 增加 `reasoning: str` 参数
 - `open_position` 去掉 SL/TP 参数，返回 "Order submitted"
 - `close_position` 去掉 TradeRecord 逻辑，返回 "Orders submitted"
 - `set_stop_loss`/`set_take_profit` 先取消同类型旧单
-- `_check_approval` 去掉 stop_loss/take_profit 参数
 
 - [ ] **Step 4: Run all tool tests**
 
@@ -688,6 +748,75 @@ async def test_get_trade_journal_empty(deps):
     from src.agent.tools_perception import get_trade_journal
     result = await get_trade_journal(deps)
     assert "no trade journal" in result.lower()
+
+
+async def test_get_trade_journal_with_entries(tmp_path):
+    """Test journal formatting with real DB entries and order lookup."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+    from src.agent.tools_perception import get_trade_journal
+    from unittest.mock import AsyncMock, MagicMock
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/journal_test.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="s1", name="journal-test", initial_balance=100.0))
+        await session.commit()
+        session.add(TradeAction(
+            session_id="s1", action="open_position", order_id="o1",
+            symbol="BTC/USDT:USDT", side="long", reasoning="RSI oversold",
+        ))
+        session.add(TradeAction(
+            session_id="s1", action="order_filled", order_id="o1",
+            symbol="BTC/USDT:USDT", side="long", trigger_reason="market",
+            reasoning="(exchange: market order filled @ 60200)",
+        ))
+        await session.commit()
+
+    mock_deps = MagicMock()
+    mock_deps.db_engine = engine
+    mock_deps.session_id = "s1"
+    mock_deps.symbol = "BTC/USDT:USDT"
+    mock_deps.exchange = AsyncMock()
+    mock_deps.exchange.fetch_order.return_value = Order(
+        "o1", "BTC/USDT:USDT", "buy", "market", 0.001, 60200.0, "closed", fee=0.03
+    )
+
+    result = await get_trade_journal(mock_deps)
+    assert "open_position" in result
+    assert "order_filled" in result
+    assert "60200" in result
+    assert "RSI oversold" in result
+    await engine.dispose()
+
+
+async def test_get_trade_journal_order_fetch_failure(tmp_path):
+    """Journal should work even if order fetch fails."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+    from src.agent.tools_perception import get_trade_journal
+    from unittest.mock import AsyncMock, MagicMock
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/journal_fail.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="s1", name="fail-test", initial_balance=100.0))
+        await session.commit()
+        session.add(TradeAction(
+            session_id="s1", action="open_position", order_id="o-fail",
+            symbol="BTC/USDT:USDT", side="long", reasoning="test",
+        ))
+        await session.commit()
+
+    mock_deps = MagicMock()
+    mock_deps.db_engine = engine
+    mock_deps.session_id = "s1"
+    mock_deps.symbol = "BTC/USDT:USDT"
+    mock_deps.exchange = AsyncMock()
+    mock_deps.exchange.fetch_order.side_effect = ValueError("not found")
+
+    result = await get_trade_journal(mock_deps)
+    assert "open_position" in result  # still shows action even without order details
+    assert "test" in result
+    await engine.dispose()
 ```
 
 更新旧的 `test_get_trade_history` 测试为 `test_get_memories`。
@@ -1121,21 +1250,26 @@ git commit -m "feat: update system prompt for event-driven decision workflow"
 2. 将 `_create_fill_handler` 中的 `pass` 替换为 TradeAction 写入：
 
 ```python
+async def _record_action_from_fill(engine, session_id, event: FillEvent):
+    """将 FillEvent 记录为 TradeAction（独立函数，便于未来 OKX WebSocket 复用）。"""
+    async with get_session(engine) as session:
+        session.add(TradeAction(
+            session_id=session_id,
+            action="order_filled",
+            order_id=event.order_id,
+            symbol=event.symbol,
+            side=event.position_side,
+            trigger_reason=event.trigger_reason,
+            pnl=event.pnl,
+            reasoning=f"(exchange: {event.trigger_reason} order filled @ {event.fill_price:.2f})",
+        ))
+        await session.commit()
+
+
 def _create_fill_handler(sched, engine, session_id):
     async def handle_fill(event: FillEvent):
         try:
-            async with get_session(engine) as session:
-                session.add(TradeAction(
-                    session_id=session_id,
-                    action="order_filled",
-                    order_id=event.order_id,
-                    symbol=event.symbol,
-                    side=event.position_side,
-                    trigger_reason=event.trigger_reason,
-                    pnl=event.pnl,
-                    reasoning=f"(exchange: {event.trigger_reason} order filled @ {event.fill_price:.2f})",
-                ))
-                await session.commit()
+            await _record_action_from_fill(engine, session_id, event)
         except Exception:
             logger.warning("Failed to record fill event", exc_info=True)
         finally:
