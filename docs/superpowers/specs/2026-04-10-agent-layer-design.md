@@ -160,13 +160,16 @@ Agent:
 
 | 文件 | 变更类型 | 说明 |
 |------|---------|------|
-| `src/storage/models.py` | 修改 | 新增 TradeAction 模型，删除 TradeRecord 模型 |
-| `src/agent/tools_execution.py` | 重写 | 删除 `_record_trade_open`/`_update_trade_closed`，新增 `_record_action`；简化 `open_position`（去 SL/TP）、`close_position`（去 TradeRecord）；所有执行 tool 改写入 TradeAction |
+| `src/storage/models.py` | 修改 | 新增 TradeAction 模型（含 trigger_reason、pnl 字段），删除 TradeRecord 模型 |
+| `src/integrations/exchange/base.py` | 修改 | FillEvent 从 simulated.py 移入（新增 pnl 字段）；BaseExchange 新增 `cancel_order` 抽象方法 |
+| `src/integrations/exchange/simulated.py` | 修改 | `create_order()` 市价单触发 FillEvent；实现 `cancel_order()`；FillEvent 改从 base.py 导入 |
+| `src/integrations/exchange/okx.py` | 修改 | 实现 `cancel_order()`（包装 ccxt） |
+| `src/agent/tools_execution.py` | 重写 | 删除 `_record_trade_open`/`_update_trade_closed`，新增 `_record_action`；简化 `open_position`/`close_position`；`set_stop_loss`/`set_take_profit` 增加自动取消旧单逻辑 |
 | `src/agent/tools_perception.py` | 修改 | 新增 `get_open_orders`、`get_trade_journal`；重命名 `get_trade_history` → `get_memories` |
-| `src/agent/trader.py` | 修改 | 注册新 tools（`get_open_orders`、`get_trade_journal`），重命名 `get_trade_history` → `get_memories`，更新 `open_position` 参数签名 |
-| `src/integrations/exchange/simulated.py` | 修改 | `create_order()` 中市价单成交后触发 FillEvent callback |
-| `src/services/metrics.py` | 重写 | 数据源从 TradeRecord 改为交易所订单 + TradeAction；接口变为异步 |
-| `src/cli/app.py` | 修改 | FillEvent handler 从 `pass` 改为写入 TradeAction + 触发唤醒；初始 metrics 改用新接口 |
+| `src/agent/trader.py` | 修改 | 注册新 tools，重命名旧 tool，更新 `open_position` 参数签名 |
+| `src/agent/persona.py` | 修改 | System prompt 更新：事件驱动决策流程、去掉 SL/TP 捆绑指令、裸仓检测提示 |
+| `src/services/metrics.py` | 重写 | 数据源从 TradeRecord 改为 TradeAction.pnl 聚合；接口变为异步 |
+| `src/cli/app.py` | 修改 | FillEvent handler 写入 TradeAction（含 trigger_reason、pnl）+ 触发唤醒；初始 metrics 改用新接口 |
 | `tests/` | 修改 | 相关测试适配新数据模型和接口 |
 
 ### 当前代码关键现状（供审查员参考）
@@ -209,10 +212,12 @@ class TradeAction(Base):
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
     action: Mapped[str] = mapped_column(String(30))
     # agent 主动操作: open_position, close_position, set_stop_loss, set_take_profit, adjust_leverage
-    # 系统自动记录: order_filled (条件单成交), order_expired (订单过期)
+    # 系统自动记录: order_filled (订单成交), order_expired (订单过期)
     order_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # 关联交易所订单
     symbol: Mapped[str] = mapped_column(String(50))
     side: Mapped[str | None] = mapped_column(String(10), nullable=True)      # long / short
+    trigger_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)  # market / stop / take_profit / liquidation
+    pnl: Mapped[float | None] = mapped_column(Float, nullable=True)          # 平仓时的已实现盈亏
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)       # agent 的决策理由
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 ```
@@ -222,7 +227,9 @@ class TradeAction(Base):
 - **append-only** — 不修改已有记录，每次操作追加一条
 - **order_id 关联** — 通过 order_id 可反查交易所获取成交价、手续费等客观数据
 - **session_id 隔离** — 未来多 agent 共享同一交易所账户时，每个 agent 只看到自己的操作
-- **reasoning 字段** — agent 主动操作时记录决策理由；系统自动记录时填写触发原因
+- **trigger_reason 字段** — 结构化的触发原因（market/stop/take_profit/liquidation），支持按触发类型统计查询
+- **pnl 字段** — 仅在平仓类成交时填写，由交易所计算提供。MetricsService 直接聚合此字段，无需自行配对计算
+- **reasoning 字段** — agent 主动操作时记录决策理由；系统自动记录时填写触发描述
 
 ### 废弃：TradeRecord
 
@@ -272,7 +279,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
 ```python
 async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
     """查看交易日志 — agent 的操作决策时间线，包含成交详情。"""
-    # 1. 从 DB 获取 TradeAction 记录
+    # 1. 从 DB 获取 TradeAction 记录（按 session_id 过滤，created_at DESC 排序，取最近 limit 条）
     actions = await _fetch_trade_actions(deps.db_engine, deps.session_id, limit)
     if not actions:
         return "No trade journal entries yet."
@@ -317,8 +324,8 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
 |------|------|------|
 | `open_position` | **简化** | 去掉 `stop_loss_price` 和 `take_profit_price` 参数，只下市价单 |
 | `close_position` | **简化** | 去掉 TradeRecord 更新逻辑 |
-| `set_stop_loss` | 不变（功能），改写入 TradeAction | |
-| `set_take_profit` | 不变（功能），改写入 TradeAction | |
+| `set_stop_loss` | **改造** | 先取消已有同类型挂单，再创建新单；写入 TradeAction |
+| `set_take_profit` | **改造** | 先取消已有同类型挂单，再创建新单；写入 TradeAction |
 | `adjust_leverage` | 不变（功能），改写入 TradeAction | |
 
 #### open_position 简化后
@@ -426,6 +433,53 @@ async def close_position(deps: TradingDeps) -> str:
 - 删除 `ticker` 查询（不再需要记录 exit_price，由交易所提供）
 - 返回 "Orders submitted" 而非 "Positions closed"（统一异步语义）
 
+#### BaseExchange 新增 cancel_order
+
+```python
+# base.py
+class BaseExchange(ABC):
+    ...
+    @abstractmethod
+    async def cancel_order(self, order_id: str, symbol: str) -> None: ...
+```
+
+- **OKXExchange**：包装 `self._client.cancel_order(order_id, symbol)`
+- **SimulatedExchange**：从 `_pending_orders` 移除 + 更新 SimOrder 状态为 "cancelled"
+
+本轮仅作为内部方法使用（SL/TP 自动替换），不暴露为 agent tool。
+
+#### set_stop_loss / set_take_profit 自动替换
+
+新设计中 SL/TP 在独立周期设置，agent 更容易重复调用（如 Cycle 2 设 SL，Cycle 3 调整 SL）。为避免多个同类型条件单共存，设置前先取消已有同类型挂单：
+
+```python
+async def set_stop_loss(deps: TradingDeps, price: float) -> str:
+    """Set stop loss on current position. Cancels existing stop order if any."""
+    positions = await deps.exchange.fetch_positions(deps.symbol)
+    if not positions:
+        return "No open position to set stop loss on."
+
+    # 取消已有的 stop 挂单
+    open_orders = await deps.exchange.fetch_open_orders(deps.symbol)
+    for o in open_orders:
+        if o.order_type == "stop":
+            await deps.exchange.cancel_order(o.id, deps.symbol)
+
+    p = positions[0]
+    side = "sell" if p.side == "long" else "buy"
+    order = await deps.exchange.create_order(
+        symbol=deps.symbol, side=side, order_type="stop", amount=p.contracts, price=price
+    )
+
+    await _record_action(
+        deps, action="set_stop_loss", order_id=order.id,
+        side=p.side, reasoning=f"Stop loss set at {price:.2f}",
+    )
+    return f"Stop loss set at {price:.2f} | Order: {order.id}"
+```
+
+`set_take_profit` 逻辑相同，将 `order_type` 过滤条件换为 `"take_profit"`。
+
 ### 记忆类 Tools
 
 | Tool | 变更 |
@@ -437,6 +491,27 @@ async def close_position(deps: TradingDeps) -> str:
 ### 核心原则
 
 **所有订单成交统一走 FillEvent 流程。** 无论市价单还是条件单，成交后都通过 FillEvent 写入 TradeAction 并唤醒 agent。
+
+### FillEvent 移至 base.py
+
+FillEvent 当前定义在 `simulated.py` 内部。为了让 `app.py` 的 fill handler 和未来的 OKX WebSocket 监听都能使用，将 FillEvent 移至 `src/integrations/exchange/base.py`，并增加 `pnl` 字段：
+
+```python
+@dataclass
+class FillEvent:
+    order_id: str
+    symbol: str
+    side: str
+    position_side: str
+    trigger_reason: str    # market / stop / take_profit / liquidation
+    fill_price: float
+    amount: float
+    fee: float
+    pnl: float | None      # 新增：平仓时的已实现盈亏（开仓时为 None）
+    timestamp: int
+```
+
+`pnl` 由交易所在平仓时计算提供（SimulatedExchange 的 `_close_position_core` 和 `_execute_fill` 已经算出了 pnl），开仓时为 None。
 
 ### SimulatedExchange 改造
 
@@ -469,6 +544,12 @@ async def create_order(self, symbol, side, order_type, amount, price=None):
 
 **时序兼容：** 市价单的 FillEvent 在 `create_order()` 内部产生，此时 agent 仍在当前决策周期中（tool 调用尚未返回）。FillEvent handler 调用 `scheduler.trigger()` 仅设置 `_pending_trigger` 标志和 context，不会立即启动新周期。当前周期结束后，Scheduler 主循环检测到 pending trigger，才启动下一个周期。现有 Scheduler 设计已支持此流程，无需改造。
 
+**Scheduler 单 pending 限制：** 当前 Scheduler 的 `trigger()` 方法仅保留一个 pending context。如果同一周期内产生多个 FillEvent（如 `close_position` 遍历多个持仓），只有第一个的 context 会保留在 prompt 中，后续的 context 丢失（`_pending_context = None`）。
+
+当前不影响：系统为单交易对设计（SimPosition 有 `UniqueConstraint("session_id", "symbol")`），每个 session 每个 symbol 最多一个持仓，因此 `close_position` 只产生一个 FillEvent。**所有 FillEvent 产生的 TradeAction 记录不受影响**（每个 FillEvent 独立写入 TradeAction），agent 可以通过 `get_trade_journal` 获取完整信息。
+
+未来多交易对支持时需要将 Scheduler 改造为事件队列模式。
+
 ### FillEvent Handler
 
 当前 `app.py` 中的 fill handler 是空实现（`pass`）。改造后：
@@ -493,6 +574,8 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
             order_id=event.order_id,
             symbol=event.symbol,
             side=event.position_side,
+            trigger_reason=event.trigger_reason,
+            pnl=event.pnl,
             reasoning=f"(exchange: {event.trigger_reason} order filled @ {event.fill_price:.2f})",
         ))
         await session.commit()
@@ -521,28 +604,30 @@ FillEvent handler 的职责明确：
 
 ### 改造方案
 
-MetricsService 从交易所的 `fetch_closed_orders()` 获取已成交订单数据，结合 agent 的 TradeAction 日志（用于确定哪些订单属于当前 agent session）计算指标。
+TradeAction 的 `pnl` 字段直接携带了交易所计算的已实现盈亏（来自 FillEvent），MetricsService 只需聚合 TradeAction 中 `action="order_filled"` 且 `pnl IS NOT NULL` 的记录，无需自行配对开仓/平仓订单。
 
 ```python
 class MetricsService:
-    async def compute(self, exchange, symbol, engine, session_id, initial_balance):
-        # 1. 获取当前 agent 的所有 order_id
-        agent_order_ids = await _get_agent_order_ids(engine, session_id)
+    async def compute(self, engine, session_id, initial_balance):
+        # 1. 查询所有有 pnl 的 order_filled 记录
+        async with get_session(engine) as session:
+            result = await session.execute(
+                select(TradeAction)
+                .where(TradeAction.session_id == session_id)
+                .where(TradeAction.action == "order_filled")
+                .where(TradeAction.pnl.isnot(None))
+                .order_by(TradeAction.created_at)
+            )
+            fills = result.scalars().all()
 
-        # 2. 从交易所获取已成交订单
-        closed_orders = await exchange.fetch_closed_orders(symbol)
-
-        # 3. 过滤出属于当前 agent 的订单
-        my_orders = [o for o in closed_orders if o.id in agent_order_ids]
-
-        # 4. 配对开仓/平仓订单，计算 PnL
-        trades = _pair_orders_to_trades(my_orders)
-
-        # 5. 计算指标
-        return _compute_metrics(trades, initial_balance)
+        # 2. 直接从 pnl 字段计算指标
+        pnls = [f.pnl for f in fills]
+        return _compute_metrics(pnls, initial_balance)
 ```
 
-**接口变更：** `compute_from_trades(trade_records)` → `compute(exchange, symbol, engine, session_id, initial_balance)`。MetricsService 变为异步，需要访问交易所和数据库。
+**简化关键：** 交易所在撮合时已经计算了 PnL（SimulatedExchange 的 `_close_position_core` 返回 pnl），通过 FillEvent.pnl → TradeAction.pnl 传递到 agent 层。MetricsService 无需重新配对计算，避免了部分平仓、加仓均价等复杂场景。
+
+**接口变更：** `compute_from_trades(trade_records)` → `compute(engine, session_id, initial_balance)`。MetricsService 变为异步，但不再需要访问交易所，只需查询 TradeAction 表。
 
 ## App 层改造
 
@@ -557,6 +642,36 @@ class MetricsService:
 ### TradingDeps
 
 无需新增字段。TradeAction 的读写通过已有的 `db_engine` 和 `session_id` 完成。
+
+## System Prompt 改造
+
+当前 system prompt（`persona.py`）的 "Decision Output Format" 要求 agent 在每次决策中同时输出 Stop Loss 和 Take Profit。新的统一异步流程将 SL/TP 拆到 FillEvent 触发的独立周期中，system prompt 需要相应更新。
+
+### 需要更新的内容
+
+1. **决策流程指引** — 告诉 agent 每个周期的职责：
+
+```
+## Decision Workflow
+
+You operate in event-driven cycles. Each cycle is triggered by either a scheduled timer
+or a fill event. Follow the appropriate workflow:
+
+### On scheduled trigger (routine market check):
+1. Gather information: market data, positions, open orders, trade journal, memories
+2. Analyze and decide: open/close/adjust/skip
+3. If opening a position: call open_position. SL/TP will be set after fill confirmation.
+
+### On fill event (order was filled):
+1. Review what happened (the fill details are in your prompt)
+2. If a new position was opened: set stop loss and take profit based on the actual fill price
+3. If a position was closed (SL/TP/manual): review the outcome, save lessons to memory
+4. Decide if any further action is needed
+```
+
+2. **去掉 SL/TP 捆绑指令** — 删除 "Decision Output Format" 中要求每次同时输出 Stop Loss 和 Take Profit 的内容
+
+3. **裸仓检测提示** — 提醒 agent 在 FillEvent 周期中检查是否有裸仓（持仓但无挂单保护）
 
 ## 数据库迁移
 
@@ -603,8 +718,9 @@ class MetricsService:
 | 功能 | 原因 |
 |------|------|
 | 限价单支持 | 新的 order_type，独立功能扩展 |
-| `cancel_order` tool | 依赖限价单场景，BaseExchange 尚无 cancel_order 方法 |
+| `cancel_order` agent tool | `cancel_order` 已作为 BaseExchange 内部方法实现（SL/TP 自动替换），但不暴露为 agent tool。等限价单支持时再加 |
 | 多 agent 协作 | 架构已预留（session_id 隔离），但编排逻辑是独立工程 |
 | 新闻/消息面数据 | Phase 1b 范畴 |
 | 语义化记忆检索 | 当前 relevance_score 方案够用 |
 | Short-term memory 生命周期 | clear_short_term() 未使用，不影响核心流程 |
+| Scheduler 事件队列 | 当前单 pending trigger 在单交易对下不影响，多交易对支持时再改造 |
