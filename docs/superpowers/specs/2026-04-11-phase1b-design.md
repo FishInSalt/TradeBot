@@ -89,12 +89,12 @@ class Scheduler:
             await self._interruptible_sleep(self._interval)
             if not self._running:
                 break
-            # 先处理所有 pending 事件
-            while self._pending_events:
-                event = self._pending_events.popleft()
-                await self._run_cycle(event.trigger_type, event.context)
-            # 如果没有 pending 事件，执行定时 cycle
-            if not self._pending_events:
+            # pending 事件和定时 cycle 二选一（与原 Scheduler 行为一致）
+            if self._pending_events:
+                while self._pending_events:
+                    event = self._pending_events.popleft()
+                    await self._run_cycle(event.trigger_type, event.context)
+            else:
                 await self._run_cycle("scheduled", None)
 ```
 
