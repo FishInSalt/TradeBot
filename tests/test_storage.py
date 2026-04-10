@@ -15,20 +15,45 @@ async def db_session(tmp_path):
         yield session
 
 
-async def test_create_trade_record(db_session):
-    from src.storage.models import TradeRecord
-    trade = TradeRecord(
+async def test_create_trade_action(db_session):
+    from src.storage.models import TradeAction
+    action = TradeAction(
         session_id="test-session",
-        symbol="BTC/USDT:USDT", side="long", entry_price=65000.0,
-        quantity=0.01, leverage=3, status="open",
-        decision_reason="Bullish MA crossover",
+        action="open_position",
+        order_id="uuid-order-1",
+        symbol="BTC/USDT:USDT",
+        side="long",
+        trigger_reason=None,
+        price=None,
+        pnl=None,
+        reasoning="RSI oversold + golden cross",
     )
-    db_session.add(trade)
+    db_session.add(action)
     await db_session.commit()
-    await db_session.refresh(trade)
-    assert trade.id is not None
-    assert trade.session_id == "test-session"
-    assert trade.created_at is not None
+    await db_session.refresh(action)
+    assert action.id is not None
+    assert action.reasoning == "RSI oversold + golden cross"
+    assert action.created_at is not None
+
+
+async def test_create_trade_action_with_pnl(db_session):
+    from src.storage.models import TradeAction
+    action = TradeAction(
+        session_id="test-session",
+        action="order_filled",
+        order_id="uuid-order-2",
+        symbol="BTC/USDT:USDT",
+        side="long",
+        trigger_reason="stop",
+        price=None,
+        pnl=-1.35,
+        reasoning="(exchange: stop order filled @ 60200)",
+    )
+    db_session.add(action)
+    await db_session.commit()
+    await db_session.refresh(action)
+    assert action.pnl == -1.35
+    assert action.trigger_reason == "stop"
 
 
 async def test_create_decision_log(db_session):
