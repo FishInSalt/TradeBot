@@ -186,5 +186,9 @@ class OKXExchange(BaseExchange):
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         return float(self._client.amount_to_precision(symbol, amount))  # type: ignore[arg-type]
 
+    @_retry()
+    async def cancel_order(self, order_id: str, symbol: str) -> None:  # type: ignore[override]
+        await self._client.cancel_order(order_id, symbol)
+
     async def close(self) -> None:
         await self._client.close()

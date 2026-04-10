@@ -518,6 +518,22 @@ class SimulatedExchange(BaseExchange):
                 for row in rows
             ]
 
+    async def cancel_order(self, order_id: str, symbol: str) -> None:
+        self._remove_order_by_id(order_id)
+        if self._db_engine:
+            from sqlalchemy import update
+            from src.storage.database import get_session
+            from src.storage.models import SimOrder
+            async with get_session(self._db_engine) as session:
+                await session.execute(
+                    update(SimOrder)
+                    .where(SimOrder.order_id == order_id)
+                    .where(SimOrder.status == "open")
+                    .values(status="cancelled")
+                )
+                await session.commit()
+        logger.info(f"Order cancelled: {order_id}")
+
     # --- Fill callback ---
 
     def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:

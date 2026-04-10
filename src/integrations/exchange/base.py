@@ -78,3 +78,23 @@ class BaseExchange(ABC):
     async def fetch_open_orders(self, symbol: str) -> list[Order]: ...
     @abstractmethod
     async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]: ...
+    @abstractmethod
+    async def cancel_order(self, order_id: str, symbol: str) -> None: ...
+
+    def drain_pending_fills(self) -> list['FillEvent']:
+        """Return and clear queued FillEvents. Default: empty (OKX etc. need not override)."""
+        return []
+
+
+@dataclass
+class FillEvent:
+    order_id: str
+    symbol: str
+    side: str
+    position_side: str
+    trigger_reason: str    # market / stop / take_profit / liquidation
+    fill_price: float
+    amount: float
+    fee: float
+    pnl: float | None      # 已实现盈亏（开仓时 None）
+    timestamp: int
