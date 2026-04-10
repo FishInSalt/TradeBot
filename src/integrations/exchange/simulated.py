@@ -532,6 +532,7 @@ class SimulatedExchange(BaseExchange):
                     await session.execute(
                         update(SimOrder)
                         .where(SimOrder.order_id == order_id)
+                        .where(SimOrder.status == "open")
                         .values(status="cancelled")
                     )
                     await session.commit()
