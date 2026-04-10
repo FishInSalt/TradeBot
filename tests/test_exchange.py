@@ -224,3 +224,18 @@ def test_base_exchange_drain_pending_fills():
         async def cancel_order(self, order_id, symbol): ...
     ex = DummyExchange()
     assert ex.drain_pending_fills() == []
+
+
+async def test_okx_cancel_order(monkeypatch):
+    from src.integrations.exchange.okx import OKXExchange
+    from unittest.mock import AsyncMock, MagicMock
+    import ccxt.async_support as ccxt
+
+    mock_client = MagicMock(spec=ccxt.okx)
+    mock_client.cancel_order = AsyncMock(return_value={"id": "o1", "status": "cancelled"})
+
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = mock_client
+
+    await exchange.cancel_order("o1", "BTC/USDT:USDT")
+    mock_client.cancel_order.assert_called_once_with("o1", "BTC/USDT:USDT")
