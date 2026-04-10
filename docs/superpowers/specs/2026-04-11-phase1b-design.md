@@ -91,14 +91,19 @@ class Scheduler:
                 break
             # pending 事件和定时 cycle 二选一（与原 Scheduler 行为一致）
             if self._pending_events:
-                while self._pending_events:
+                # 安全阀：单次最多 drain 10 个事件，防止 cycle 内产生的新事件导致无限循环
+                for _ in range(min(len(self._pending_events), 10)):
+                    if not self._pending_events:
+                        break
                     event = self._pending_events.popleft()
                     await self._run_cycle(event.trigger_type, event.context)
             else:
                 await self._run_cycle("scheduled", None)
 ```
 
-每个事件保留完整的 `trigger_type` + `context`，不会丢失。多个事件按 FIFO 顺序串行处理。
+注：原 Scheduler 的二次检查逻辑（第 51-54 行，处理 cycle 期间到达的新 trigger 但丢弃 context）在新方案中被 deque 队列自然取代，实现时应一并移除。
+
+每个事件保留完整的 `trigger_type` + `context`，不会丢失。多个事件按 FIFO 顺序串行处理。当前 trigger_type 硬编码 `"conditional"` 不算 bug（现有系统只有 fill 一种外部触发），但 Phase 1b 新增 alert 后必须修复。
 
 ---
 
@@ -166,7 +171,8 @@ CLI 参数 `--model <id>` 支持无人值守启动（cron / systemd 等场景）
 ### 运行时模型切换
 
 - 启动时用户选择的模型作为当前 session 的模型
-- `run_agent_cycle` 调用 `agent.run()` 时传入 `model=` 参数覆盖 agent 默认模型
+- `create_trader_agent(model=..., ...)` 签名保持不变（接受 `str`），传入一个占位字符串（如 `"placeholder"`）
+- `run_agent_cycle` 调用 `agent.run()` 时传入 `model=model_obj` 覆盖 agent 默认模型（pydantic-ai 的 `agent.run(model=...)` 接受 `str | Model`，运行时覆盖优先于构造时默认值）
 - 模型管理统一由 `config/models.json` + 启动交互负责，`settings.yaml` 中移除 `models` 配置段
 - 迁移改造点：
   - `config.py`：`ModelsConfig`、`ModelRouting` 类保留不删除（sub-agent 阶段复用），但 `Settings` 中的 `models` 字段改为 `Optional` 并默认 `None`
@@ -181,6 +187,7 @@ CLI 参数 `--model <id>` 支持无人值守启动（cron / systemd 等场景）
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.models.groq import GroqModel
 
 def create_model(config: ModelConfig) -> Model:
     """返回 pydantic-ai Model 对象，统一使用直接构造，避免环境变量副作用。"""
@@ -333,7 +340,7 @@ async def _watch_orders_loop(self) -> None:
 | sell | take_profit | long（多头止盈） |
 | buy | take_profit | short（空头止盈） |
 
-注：market 类型不走此推断表 — 市价单 fill 不通过 WebSocket 处理（见"不做的事"）。
+注：market 类型不走此推断表 — 市价单 fill 不通过 WebSocket 处理（见"不做的事"）。推断逻辑假设单向持仓模式（one-way mode），双向持仓（hedge mode）应确保 OKX 返回 `info.posSide` 字段。
 
 ### app.py 改动
 
@@ -364,8 +371,10 @@ elif trigger_type == "alert" and context is not None:
 
 ### 错误处理
 
-- WebSocket 断连：ccxt.pro 内置自动重连，监听循环捕获异常后 sleep 再重试
+- **启动时连接失败**（`start()` 异常）：永久降级为 REST-only 模式，不启动 loop（见下方详述）
+- **运行中断连**（loop 内异常）：ccxt.pro 内置自动重连 + 外层指数退避重试，不影响已启动的系统
 - 解析失败的订单：跳过并 log warning，不影响后续推送
+- watch_orders 错误使用 `logger.error`（影响交易通知），watch_ticker 错误使用 `logger.warning`（仅影响价格预警）
 - pnl 补查：设 5 秒超时上限，失败时 pnl=None（不阻塞后续 fill 处理），后续 agent cycle 可通过 `get_trade_journal` 补充查询
 - `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态）。除 log error 外，在 CLI 显示醒目 warning（如 `"⚠ WebSocket connection failed, running in REST-only mode"`）。设置 `_ws_connected = False` 标志；降级后 fill callback 和 price alert 均不工作（WebSocket 未启动，callback 不会被调用，PriceAlertService 无 tick 数据输入）。**降级为本次启动永久状态**，不自动恢复，需重启系统重新连接。这是可接受的降级行为 — OKX WebSocket 不可用是严重故障，REST-only 模式下系统仍能通过定时 cycle 运作，但失去实时响应能力
 
