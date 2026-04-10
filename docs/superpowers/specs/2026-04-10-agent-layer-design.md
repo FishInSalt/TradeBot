@@ -286,7 +286,6 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
     if not actions:
         return "No trade journal entries yet."
 
-    # 2. 收集有 order_id 的记录，批量从交易所获取订单详情
     # 2. 收集有 order_id 的记录，从交易所获取订单详情
     # 已知限制：逐个查询存在 N+1 问题。SimulatedExchange 下是 DB 查询，性能可接受。
     # OKX 适配时需改为 asyncio.gather 并发或 BaseExchange 增加批量接口。
