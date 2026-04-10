@@ -128,7 +128,9 @@ from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
 
-def create_model(config: ModelConfig):
+def create_model(config: ModelConfig) -> Model | str:
+    """返回 pydantic-ai Model 对象或 model_id 字符串。agent.run(model=...) 两种类型都接受。
+    注意：base_url=None 的路径有环境变量副作用（设置 provider 对应的 API_KEY）。"""
     if config.base_url:
         # OpenRouter 等兼容 API — 使用 OpenAIModel 直接传入 base_url 和 api_key
         return OpenAIModel(
@@ -191,6 +193,10 @@ def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
 def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
     """注册价格异动回调。默认空实现。"""
     pass
+
+def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+    """更新价格预警参数。默认空实现，委托给内部 PriceAlertService。"""
+    pass
 ```
 
 注：`start()` 和 `on_fill()` 已在 SimulatedExchange 中有实现，提升到 BaseExchange 后 SimulatedExchange 保持不变。`close()` 已是 abstract method。
@@ -220,10 +226,11 @@ async def close(self) -> None:
 
 ```python
 async def _watch_orders_loop(self) -> None:
+    error_count = 0
     while self._running:
         try:
             orders = await self._ws_client.watch_orders(self._symbol)
-            self._ws_orders_error_count = 0  # 成功后重置
+            error_count = 0  # 成功后重置
             for order_data in orders:
                 if order_data["status"] == "closed":  # 已成交
                     fill_event = self._parse_fill_event(order_data)
@@ -232,8 +239,8 @@ async def _watch_orders_loop(self) -> None:
         except asyncio.CancelledError:
             break
         except Exception:
-            self._ws_orders_error_count += 1
-            delay = min(5 * (2 ** (self._ws_orders_error_count - 1)), 60)
+            error_count += 1
+            delay = min(5 * (2 ** (error_count - 1)), 60)
             logger.error("watch_orders error (retry in %ds)", delay, exc_info=True)
             await asyncio.sleep(delay)
 ```
@@ -277,7 +284,7 @@ async def _watch_orders_loop(self) -> None:
 - WebSocket 断连：ccxt.pro 内置自动重连，监听循环捕获异常后 sleep 再重试
 - 解析失败的订单：跳过并 log warning，不影响后续推送
 - pnl 补查：设 5 秒超时上限，失败时 pnl=None（不阻塞后续 fill 处理），后续 agent cycle 可通过 `get_trade_journal` 补充查询
-- `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态）。除 log error 外，在 CLI 显示醒目 warning（如 `"⚠ WebSocket connection failed, running in REST-only mode"`）。设置 `_ws_connected = False` 标志；降级后 fill/alert callback 无需注销（WebSocket 未启动，callback 不会被调用）
+- `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态）。除 log error 外，在 CLI 显示醒目 warning（如 `"⚠ WebSocket connection failed, running in REST-only mode"`）。设置 `_ws_connected = False` 标志；降级后 fill callback 和 price alert 均不工作（WebSocket 未启动，callback 不会被调用，PriceAlertService 无 tick 数据输入）。这是可接受的降级行为 — OKX WebSocket 不可用是严重故障，REST-only 模式下系统仍能通过定时 cycle 运作，但失去实时响应能力
 
 ### 不做的事
 
@@ -369,6 +376,8 @@ PriceAlertService.check(price, timestamp)
 
 ### Exchange 集成
 
+**PriceAlertService 注入方式：** app.py 启动流程中创建 PriceAlertService 实例，通过 Exchange 的 setter `set_alert_service(service)` 注入。两种 Exchange 注入方式一致。Exchange 内部持有引用，在 ticker 流中调用 `service.check()`。`update_alert_params()` 委托给内部 service。
+
 - **SimulatedExchange**: 在 `_process_tick` 中调用 `PriceAlertService.check()`，有结果则在锁外调用 alert callback（与 fill callback 同模式，避免死锁）
 - **OKXExchange**: 在 `start()` 中新增 `_watch_ticker_loop` 后台任务（与 `_watch_orders_loop` 并行），共用同一个 `_ws_client`（ccxt.pro 支持单客户端多 subscription），共用 `_running` 标志控制生命周期
 
@@ -412,10 +421,14 @@ async def set_price_alert(
     cooldown_minutes: int,
     reasoning: str,
 ) -> str:
-    """Adjust price alert parameters."""
+    """Adjust price alert parameters.
+    通过 deps.exchange.update_alert_params() 委托给 Exchange 内部的 PriceAlertService。
+    """
 ```
 
 参数边界验证：`threshold_pct` 0.5%–50%，`window_minutes` 1–60，`cooldown_minutes` 1–120。超出范围返回错误提示，不执行更新。
+
+Tool 通过 `deps.exchange.update_alert_params(...)` 访问 PriceAlertService，不直接引用 service 对象，保持封装。
 
 agent 可以根据市场状况调整（如高波动时收紧阈值），也可以不调（使用默认值）。
 
