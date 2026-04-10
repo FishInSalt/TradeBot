@@ -187,7 +187,8 @@ Agent:
 | `src/agent/trader.py` | 修改 | 注册新 tools，重命名旧 tool，更新 `open_position` 参数签名 |
 | `src/agent/persona.py` | 修改 | System prompt 更新：事件驱动决策流程、去掉 SL/TP 捆绑指令、裸仓检测提示 |
 | `src/services/metrics.py` | 重写 | 数据源从 TradeRecord 改为 TradeAction.pnl 聚合；接口变为异步 |
-| `src/cli/app.py` | 修改 | FillEvent handler 写入 TradeAction（含 trigger_reason、pnl）+ 触发唤醒；初始 metrics 改用新接口 |
+| `src/cli/approval.py` | 修改 | `ApprovalGate.check()` 接口去掉 `stop_loss`、`take_profit` 参数 |
+| `src/cli/app.py` | 修改 | FillEvent handler 写入 TradeAction（含 trigger_reason、pnl）+ 触发唤醒；drain 市价单队列；初始 metrics 改用新接口；prompt 追加 pnl |
 | `tests/` | 修改 | 相关测试适配新数据模型和接口 |
 
 ### 当前代码关键现状（供审查员参考）
@@ -251,7 +252,11 @@ class TradeAction(Base):
 - **pnl 字段** — 仅在平仓类成交时填写，由交易所计算提供。MetricsService 直接聚合此字段，无需自行配对计算
 - **reasoning 字段** — agent 主动操作时记录决策理由；系统自动记录时填写触发描述
 
-**已知限制：** `create_order` 与 `_record_action` 之间无事务保证。如果订单已执行但 TradeAction 写入失败（DB 错误），交易日志会缺少该条记录。FillEvent handler 仍会写入 `order_filled`，但缺少对应的 agent 决策记录。早期阶段可接受此 trade-off。
+**已知限制：**
+
+1. **非事务性：** `create_order` 与 `_record_action` 之间无事务保证。如果订单已执行但 TradeAction 写入失败（DB 错误），交易日志会缺少该条记录。FillEvent handler 仍会写入 `order_filled`，但缺少对应的 agent 决策记录。早期阶段可接受此 trade-off。
+
+2. **裸仓风险窗口：** SL/TP 拆到 FillEvent 周期设置，如果该周期失败（LLM API 故障、token 预算用尽、异常），持仓将无风控保护，直到下一次成功的定时周期才可能修复。未来可考虑在 FillEvent handler 中增加 fallback（如自动设置固定百分比的应急止损），但不在本轮实现。
 
 ### 废弃：TradeRecord
 
@@ -318,7 +323,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
             order = await deps.exchange.fetch_order(oid, deps.symbol)
             order_details[oid] = order
         except Exception:
-            pass  # 订单查询失败不影响日志展示
+            logger.warning("Failed to fetch order %s", oid, exc_info=True)
 
     # 3. 格式化输出
     lines = ["=== Trade Journal ==="]
@@ -432,6 +437,14 @@ async def _record_action(deps: TradingDeps, action: str, order_id: str | None = 
         logger.warning("Failed to record TradeAction", exc_info=True)
 ```
 
+**注意：** `_record_action` 不含 `trigger_reason` 参数——agent 主动操作的触发者就是 agent 自己，无需记录交易所层面的触发原因。`trigger_reason` 仅由 `_record_action_from_fill` 设置（来自 FillEvent）。
+
+```python
+# 两条写入路径的字段分工：
+# _record_action（agent tools）   → reasoning ✓, trigger_reason ✗（agent 发起，无交易所触发）
+# _record_action_from_fill        → reasoning ✓, trigger_reason ✓, pnl ✓（交易所触发，携带结果）
+```
+
 #### close_position 简化后
 
 ```python
@@ -468,7 +481,8 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
 - 删除 `ticker` 查询（不再需要记录 exit_price，由交易所提供）
 - 返回 "Orders submitted" 而非 "Positions closed"（统一异步语义）
 - 新增 `reasoning` 参数
-- `_check_approval` 签名需适配：去掉 `stop_loss` 和 `take_profit` 参数（open_position 不再传递这两个值）
+- `_check_approval` 签名需适配：去掉 `stop_loss` 和 `take_profit` 参数，新签名为 `_check_approval(deps, action, reasoning, position_pct, leverage)`。`ApprovalGate.check()` 接口同步变更
+- close_position 平仓后的 SL/TP 挂单清理依赖交易所层面的 `_cancel_orphaned_orders`（SimulatedExchange 已实现）。OKX 适配时需确认条件单是否与持仓自动关联清理
 
 #### BaseExchange 新增 cancel_order
 
@@ -844,3 +858,4 @@ or a fill event. Follow the appropriate workflow:
 | 语义化记忆检索 | 当前 relevance_score 方案够用 |
 | Short-term memory 生命周期 | clear_short_term() 未使用，不影响核心流程 |
 | Scheduler 事件队列 | 当前单 pending trigger 在单交易对下不影响，多交易对支持时再改造 |
+| 加仓场景 SL/TP 数量不匹配 | 已有问题：加仓后原 SL/TP 条件单数量为旧仓位大小，不覆盖新增部分。需在 SL/TP 设置流程中用最新仓位数量重建（当前 set_stop_loss 已用 `p.contracts` 取最新值，但需要 agent 主动调用） |
