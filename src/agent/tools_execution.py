@@ -79,7 +79,10 @@ async def open_position(
         side=side, reasoning=reasoning,
     )
 
-    return f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order.id}"
+    return (
+        f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order.id}\n"
+        f"You will be notified when filled."
+    )
 
 
 async def close_position(deps: TradingDeps, reasoning: str) -> str:
@@ -106,7 +109,7 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
             side=p.side, reasoning=reasoning,
         )
 
-    return f"Orders submitted: close {len(positions)} position(s) | IDs: {', '.join(order_ids)}"
+    return f"Orders submitted: close {len(positions)} position(s) | IDs: {', '.join(order_ids)}\nYou will be notified when filled."
 
 
 async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
