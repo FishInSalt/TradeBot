@@ -138,6 +138,8 @@ class Scheduler:
 - `api_key`: 该 provider 的 API key
 - `base_url`: 可选，用于 OpenRouter 等兼容 API（`null` 表示使用 provider 默认地址）
 
+文件创建/写入时设置 `0o600` 权限（仅 owner 可读写），保护 API key。
+
 ### 启动交互流程
 
 ```
@@ -153,9 +155,10 @@ class Scheduler:
          ├─ 是 → 列出已配置模型，用户选择或输入新模型
          └─ 否 → 提示用户输入模型信息（provider, model, api_key, base_url）
   ↓
-测试 API 连通性（通过 pydantic-ai 创建临时 Agent 发送简短 completion 请求，如 "say hi"，验证 API key 有效且模型可访问）
-  ├─ 成功 → 保存到 models.json（如果是新模型），继续启动
-  └─ 失败 → 提示具体错误（认证失败/模型不存在/网络超时），要求重新输入（CLI 模式下直接报错退出）
+测试 API 连通性（通过 pydantic-ai 创建临时 Agent 发送简短 completion 请求，如 "say hi"，超时 10s）
+  ├─ 成功 → 保存到 models.json（如果是新模型，写入时 chmod 0o600），继续启动
+  ├─ 失败 → 提示具体错误（认证失败/模型不存在/网络超时），要求重新输入（CLI 模式下直接报错退出）
+  └─ 超时 → 允许用户选择"跳过测试强制使用"或重新输入
 ```
 
 CLI 参数 `--model <id>` 支持无人值守启动（cron / systemd 等场景）。
@@ -179,35 +182,31 @@ from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
 
-def create_model(config: ModelConfig) -> Model | str:
-    """返回 pydantic-ai Model 对象或 model_id 字符串。agent.run(model=...) 两种类型都接受。
-    注意：base_url=None 的路径有环境变量副作用（设置 provider 对应的 API_KEY）。"""
+def create_model(config: ModelConfig) -> Model:
+    """返回 pydantic-ai Model 对象，统一使用直接构造，避免环境变量副作用。"""
+    _PROVIDER_MAP = {
+        "anthropic": AnthropicModel,
+        "openai": OpenAIModel,
+        "google-gla": GoogleModel,
+        "groq": GroqModel,
+    }
+    model_cls = _PROVIDER_MAP.get(config.provider)
+    if model_cls is None:
+        raise ValueError(f"Unsupported provider: {config.provider}")
+
+    kwargs = {"api_key": config.api_key}
     if config.base_url:
-        # OpenRouter 等兼容 API — 使用 OpenAIModel 直接传入 base_url 和 api_key
-        return OpenAIModel(
-            config.model,
-            base_url=config.base_url,
-            api_key=config.api_key,
-        )
-    else:
-        # 原生 provider — 通过环境变量传入 api_key，返回 model_id 字符串
-        # pydantic-ai 根据前缀自动选择 provider
-        os.environ[_env_var_for_provider(config.provider)] = config.api_key
-        return f"{config.provider}:{config.model}"
+        kwargs["base_url"] = config.base_url
+    return model_cls(config.model, **kwargs)
 ```
 
-provider → 环境变量映射：
-- `anthropic` → `ANTHROPIC_API_KEY`
-- `openai` → `OPENAI_API_KEY`
-- `google-gla` → `GOOGLE_API_KEY`
-- `groq` → `GROQ_API_KEY`
+支持的 provider：`anthropic`、`openai`、`google-gla`、`groq`。不支持的 provider 抛 ValueError。如需新增 provider，在 `_PROVIDER_MAP` 中添加映射即可。
 
 ### 不做的事
 
 - **不做 provider 自动发现**：不根据 model ID 自动判断需要哪个 SDK 或环境变量。用户配置什么就用什么。
 - **不做模型能力检测**：不验证模型是否支持 tool calling。如果不支持，运行时报错。
 - **不做 fallback 链**：主模型失败不自动切换备用模型。现有 3 次重试仍保留，但只重试同一模型。
-- **不支持同一 provider 多 API key 并存**：`create_model()` 通过环境变量设置 API key，同 provider 后设置的会覆盖前者。当前启动时只选一个模型，不会实际冲突。未来做运行时切换到同 provider 不同 key 时需要改用 provider 对象直接传入。
 
 ---
 
@@ -233,8 +232,8 @@ OKXExchange
 
 ```python
 # src/integrations/exchange/base.py — 新增到 BaseExchange
-async def start(self, symbol: str | None = None) -> None:
-    """启动 WebSocket 等后台任务。默认空实现。symbol 供 OKXExchange 使用，SimulatedExchange 从构造函数获取。"""
+async def start(self) -> None:
+    """启动 WebSocket 等后台任务。默认空实现。"""
     pass
 
 def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
@@ -256,6 +255,14 @@ def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldow
 
 注：`start()` 和 `on_fill()` 已在 SimulatedExchange 中有实现，提升到 BaseExchange 后 SimulatedExchange 保持不变。`close()` 已是 abstract method。
 
+`OKXExchange` 构造函数新增 `symbol` 参数（与 SimulatedExchange 一致，都在构造时绑定交易对）：
+
+```python
+def __init__(self, api_key: str, secret: str, password: str, symbol: str):
+    ...
+    self._symbol = symbol
+```
+
 `OKXExchange` 新增以下方法（与 SimulatedExchange 接口一致）：
 
 ```python
@@ -263,9 +270,8 @@ def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
     """注册 fill 回调。"""
     self._fill_callback = callback
 
-async def start(self, symbol: str) -> None:
-    """启动 WebSocket 监听循环。symbol 从 app.py 的 settings.trading.symbol 传入。"""
-    self._symbol = symbol
+async def start(self) -> None:
+    """启动 WebSocket 监听循环。_symbol 从构造函数获取。"""
     # 创建 ccxt.pro 客户端（复用相同 API credentials）
     # 启动 _watch_orders_loop + _watch_ticker_loop 后台任务
 
@@ -337,12 +343,18 @@ async def _watch_orders_loop(self) -> None:
 - `run_agent_cycle` prompt 构造扩展：根据 context 类型分别处理 FillEvent 和 AlertInfo
 
 ```python
-# FillEvent context（已有逻辑）
-if context is not None and hasattr(context, "trigger_reason"):
-    msg = f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered ..."
+# 根据 trigger_type 分发（不用 hasattr 鸭子类型，更可靠）
+if trigger_type == "conditional" and context is not None:
+    # FillEvent context
+    msg = (
+        f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
+        f"— {context.symbol} {context.amount} @ {context.fill_price}"
+    )
+    if context.pnl is not None:
+        msg += f", PnL: {context.pnl:.2f} USDT"
     prompt += msg
-# AlertInfo context（新增）
-elif context is not None and hasattr(context, "change_pct"):
+elif trigger_type == "alert" and context is not None:
+    # AlertInfo context
     direction = "dropped" if context.change_pct < 0 else "surged"
     prompt += (
         f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
@@ -355,12 +367,12 @@ elif context is not None and hasattr(context, "change_pct"):
 - WebSocket 断连：ccxt.pro 内置自动重连，监听循环捕获异常后 sleep 再重试
 - 解析失败的订单：跳过并 log warning，不影响后续推送
 - pnl 补查：设 5 秒超时上限，失败时 pnl=None（不阻塞后续 fill 处理），后续 agent cycle 可通过 `get_trade_journal` 补充查询
-- `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态）。除 log error 外，在 CLI 显示醒目 warning（如 `"⚠ WebSocket connection failed, running in REST-only mode"`）。设置 `_ws_connected = False` 标志；降级后 fill callback 和 price alert 均不工作（WebSocket 未启动，callback 不会被调用，PriceAlertService 无 tick 数据输入）。这是可接受的降级行为 — OKX WebSocket 不可用是严重故障，REST-only 模式下系统仍能通过定时 cycle 运作，但失去实时响应能力
+- `start()` 失败：不阻塞系统启动，降级为现有行为（仅在 agent cycle 中通过 REST 查询订单状态）。除 log error 外，在 CLI 显示醒目 warning（如 `"⚠ WebSocket connection failed, running in REST-only mode"`）。设置 `_ws_connected = False` 标志；降级后 fill callback 和 price alert 均不工作（WebSocket 未启动，callback 不会被调用，PriceAlertService 无 tick 数据输入）。**降级为本次启动永久状态**，不自动恢复，需重启系统重新连接。这是可接受的降级行为 — OKX WebSocket 不可用是严重故障，REST-only 模式下系统仍能通过定时 cycle 运作，但失去实时响应能力
 
 ### 不做的事
 
 - 不处理 OKX 市价单的 fill（市价单 REST `create_order` 返回时已成交，不需要 WebSocket 通知）
-- 不处理部分成交（partial fill）通知：只在订单完全成交（`status == "closed"`）时推送 FillEvent。OKX 合约大额单可能分批成交（`status` 仍为 `"open"` 但 `filled > 0`），当前不处理中间状态。**风险**：极端行情下止损单可能因流动性不足无法完全成交，agent 将不会收到通知
+- 不处理部分成交（partial fill）通知：只在订单完全成交（`status == "closed"`）时推送 FillEvent。OKX 合约大额单可能分批成交（`status` 仍为 `"open"` 但 `filled > 0`），当前不处理中间状态。**风险**：极端行情下止损单可能因流动性不足无法完全成交，agent 将不会收到通知。`_watch_orders_loop` 中检测到 partial fill（`filled > 0 and status != "closed"`）时记录 warning 级别日志，提高可观测性
 - OKX order_type 映射不完整时（如 `stopLimit`、`trailingStop` 等变体），trigger_reason 设为 `"unknown"`，不阻塞 FillEvent 构造
 - 不做主动重连逻辑（依赖 ccxt.pro 内置机制）。外层循环异常捕获后使用指数退避重试（5s → 10s → 20s → 60s 封顶），避免 ccxt.pro 内部重连失败时的高频重试
 
@@ -436,7 +448,9 @@ PriceAlertService.check(price, timestamp)
       agent cycle 启动，prompt 追加:
       "PRICE ALERT: BTC/USDT:USDT dropped 3.5% in 5min (61200 → 59058)"
 
-注：Scheduler 为**串行调度** — 当前 cycle 完成后才处理下一个 trigger。如果 agent 正在执行定时 cycle 时收到 fill 或 alert，`scheduler.trigger()` 只设标志位，待当前 cycle 完成后再启动新 cycle。不存在两个 agent cycle 并发操作仓位的情况。
+注：Scheduler 为**串行调度** — 当前 cycle 完成后才处理下一个 trigger。如果 agent 正在执行定时 cycle 时收到 fill 或 alert，`scheduler.trigger()` 入队等待，当前 cycle 完成后按 FIFO 顺序处理。不存在两个 agent cycle 并发操作仓位的情况。
+
+**定时 cycle 饥饿风险**：如果 pending events 持续积累，scheduled cycle 会被推迟。实际风险低 — alert 有 cooldown（默认 15 分钟），fill 事件会清仓（无仓位则无后续 fill）。当前不做防饥饿机制，如果未来事件源增多再考虑限制单次 drain 数量。
 ```
 
 ### 冷却机制
@@ -577,6 +591,7 @@ alerts:
 | `ModelManager` | 单元测试：models.json 读写、model 字符串构造；API 连通性测试需 mock HTTP 请求 |
 | `OKX WebSocket fill` | mock `ccxt.pro` 的 `watch_orders` 返回数据，验证 FillEvent 构造和 callback 调用；pnl 补查失败场景 |
 | `OKX WebSocket ticker` | mock `watch_ticker`，验证 PriceAlertService 集成和 alert callback |
+| `OKX 双 loop 并发` | 验证 watch_orders + watch_ticker 并行运行在同一 ccxt.pro 客户端时不互相阻塞或丢数据 |
 | `set_price_alert tool` | 通过 mock deps 验证参数边界、PriceAlertService 参数更新 |
 | `Scheduler 事件队列` | 单元测试：多事件 FIFO 顺序、trigger_type 保留、context 不丢失、定时 + 事件混合调度 |
 | `启动流程` | 集成测试：验证 CLI 参数 `--model`、交互模式、models.json 不存在等场景 |
