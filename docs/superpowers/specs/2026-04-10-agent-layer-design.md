@@ -522,7 +522,9 @@ async def create_order(self, symbol, side, order_type, amount, price=None):
     ...
     async with self._lock:
         if order_type == "market":
-            order, position_side = self._execute_market_order(symbol, side, amount)
+            # 返回值需扩展为 (order, position_side, pnl)
+            # 开仓时 pnl=None，平仓时 pnl 由 _close_position_core 计算
+            order, position_side, pnl = self._execute_market_order(symbol, side, amount)
             if self._db_engine:
                 await self._persist_state(new_orders=[(order, position_side)])
             # 新增：市价单成交也触发 FillEvent
@@ -532,6 +534,7 @@ async def create_order(self, symbol, side, order_type, amount, price=None):
                 trigger_reason="market",
                 fill_price=order.price, amount=order.amount,
                 fee=order.fee,
+                pnl=pnl,
                 timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
             )
             # 注意：callback 在 lock 外调用，与条件单行为一致
@@ -541,6 +544,8 @@ async def create_order(self, symbol, side, order_type, amount, price=None):
     return order
     ...
 ```
+
+**注意：** `_execute_market_order` 的返回值需从 `(order, position_side)` 扩展为 `(order, position_side, pnl)`。开仓路径（`_open_market_order`）返回 `pnl=None`；平仓路径（`_close_market_order`）从 `_close_position_core` 获取 pnl 并返回。`_execute_fill`（条件单）同理，已有 pnl 计算逻辑。
 
 **时序兼容：** 市价单的 FillEvent 在 `create_order()` 内部产生，此时 agent 仍在当前决策周期中（tool 调用尚未返回）。FillEvent handler 调用 `scheduler.trigger()` 仅设置 `_pending_trigger` 标志和 context，不会立即启动新周期。当前周期结束后，Scheduler 主循环检测到 pending trigger，才启动下一个周期。现有 Scheduler 设计已支持此流程，无需改造。
 
@@ -694,7 +699,7 @@ or a fill event. Follow the appropriate workflow:
 1. **完整开仓流程**
    - Scheduler 定时触发 → agent 收集信息 → 调用 `open_position` → TradeAction 写入
    - FillEvent 触发新周期 → agent 确认成交 → 调用 `set_stop_loss` + `set_take_profit` → TradeAction 写入
-   - 验证：`trade_actions` 表有 3 条记录（open_position + order_filled + set_stop_loss/set_take_profit）
+   - 验证：`trade_actions` 表有 4 条记录（open_position + order_filled + set_stop_loss + set_take_profit）
 
 2. **条件单触发复盘**
    - 价格变动触发止损/止盈 → FillEvent → TradeAction 自动写入
