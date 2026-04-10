@@ -83,11 +83,11 @@ Agent:
   分析 → 决策：RSI 超卖 + 金叉，做多
 
   7. open_position(side="long", position_pct=30, leverage=3)
-     → 市价单成交 @ 60200
+     → 返回 "Order submitted: long 0.0075, order: aaa"
      → TradeAction 记录：action="open_position", reasoning="RSI超卖+金叉"
-     → FillEvent 产生（排队等当前周期结束）
+     → 内部：市价单成交，FillEvent 产生（排队等当前周期结束）
 
-  决策完成，等待成交确认
+  决策完成，等待下一周期处理成交事宜
 ```
 
 **Cycle 2 — 成交触发，agent 确认并设风控：**
@@ -320,9 +320,9 @@ async def open_position(
     )
 
     return (
-        f"Position opened:\n"
+        f"Order submitted:\n"
         f"  Side: {side} | Quantity: {quantity:.6f} | Leverage: {leverage}x\n"
-        f"  Entry: ~{ticker.last:.2f} | Order: {order.id} ({order.status})"
+        f"  Order: {order.id} | You will be notified when filled."
     )
 ```
 
