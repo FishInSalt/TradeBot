@@ -133,10 +133,10 @@ Agent:
 **Cycle 4 — 止损触发，agent 复盘：**
 
 ```
-[18:30] BTC 跌至 58394，止损单被交易所撮合
+[16:00] BTC 跌至 60200，止损单被交易所撮合（保本止损）
 
-  → FillEvent 产生（条件单异步触发）
-  → TradeAction 自动写入：action="order_filled", trigger_reason="stop"
+  → FillEvent 产生（条件单异步触发, pnl ≈ 0）
+  → TradeAction 自动写入：action="order_filled", trigger_reason="stop", pnl=-0.23
   → Scheduler conditional 触发
 
 Agent:
@@ -145,13 +145,13 @@ Agent:
      "15:00 开多 — RSI超卖+金叉
       15:00 成交确认 @ 60200
       15:00 设 SL@58394 / TP@63812
-      15:15 上移 SL 到 60200
-      18:30 止损触发 @ 58394, 亏损 -13.5 USDT"
-  3. 复盘分析
+      15:15 上移 SL 到 60200（保本）
+      16:00 止损触发 @ 60200, pnl=-0.23 USDT（手续费）"
+  3. 复盘分析：保本出场，手续费为唯一损失
 
-  4. save_memory("lesson", "RSI超卖不代表见底，需确认趋势", 0.8)
+  4. save_memory("trade_review", "金叉+超卖入场后趋势未延续，保本止损有效", 0.6)
 
-  决策：观望
+  决策：观望，等待更明确的趋势信号
 ```
 
 ## 变更影响范围
@@ -247,6 +247,8 @@ DecisionLog 与 TradeAction 职责不同：
 
 一个 agent 决策周期可能不产生任何交易操作（决定观望），也可能产生多条操作。两者记录不同维度的信息，保留各自独立。
 
+**有意不设 cycle_id 关联：** TradeAction 不包含 cycle_id 字段。原因：FillEvent handler 写入的 TradeAction（action="order_filled"）在 agent cycle 启动之前产生（handler 先写 TradeAction，再触发 Scheduler），天然不属于任何 cycle。强制关联会引入不自然的归属问题。如需分析"哪些 cycle 产生了亏损操作"，可通过 TradeAction.created_at 与 DecisionLog.created_at 的时间窗口近似匹配。
+
 ## Tools 改造
 
 ### 感知类 Tools
@@ -285,6 +287,9 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
         return "No trade journal entries yet."
 
     # 2. 收集有 order_id 的记录，批量从交易所获取订单详情
+    # 2. 收集有 order_id 的记录，从交易所获取订单详情
+    # 已知限制：逐个查询存在 N+1 问题。SimulatedExchange 下是 DB 查询，性能可接受。
+    # OKX 适配时需改为 asyncio.gather 并发或 BaseExchange 增加批量接口。
     order_ids = [a.order_id for a in actions if a.order_id]
     order_details = {}
     for oid in order_ids:
@@ -480,6 +485,8 @@ async def set_stop_loss(deps: TradingDeps, price: float) -> str:
 
 `set_take_profit` 逻辑相同，将 `order_type` 过滤条件换为 `"take_profit"`。
 
+**OKX 适配已知风险：** 在真实交易所中，cancel_order 到 create_order 之间存在竞争窗口——如果旧止损在取消过程中被价格触发并成交，cancel_order 会返回 "order already filled"。SimulatedExchange 中不存在此问题（单线程 tick 处理）。OKX 适配时需处理此异常。
+
 ### 记忆类 Tools
 
 | Tool | 变更 |
@@ -519,33 +526,41 @@ class FillEvent:
 
 ```python
 async def create_order(self, symbol, side, order_type, amount, price=None):
-    ...
+    self._validate_symbol(symbol)
+    # ... 参数校验（amount > 0, order_type 合法, 条件单需要 price）...
+
+    fill_event = None  # 仅市价单会赋值
+
     async with self._lock:
         if order_type == "market":
-            # 返回值需扩展为 (order, position_side, pnl)
+            # 返回值扩展为 (order, position_side, pnl)
             # 开仓时 pnl=None，平仓时 pnl 由 _close_position_core 计算
             order, position_side, pnl = self._execute_market_order(symbol, side, amount)
             if self._db_engine:
                 await self._persist_state(new_orders=[(order, position_side)])
-            # 新增：市价单成交也触发 FillEvent
             fill_event = FillEvent(
                 order_id=order.id, symbol=symbol, side=order.side,
                 position_side=position_side,
                 trigger_reason="market",
                 fill_price=order.price, amount=order.amount,
-                fee=order.fee,
-                pnl=pnl,
+                fee=order.fee, pnl=pnl,
                 timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
             )
-            # 注意：callback 在 lock 外调用，与条件单行为一致
-    # 在 lock 外触发回调
-    if order_type == "market" and self._fill_callback:
+        else:
+            # 条件单（stop / take_profit）：加入 _pending_orders，不立即成交
+            # 现有逻辑不变：_create_conditional_order()
+            order = self._create_conditional_order(symbol, side, order_type, amount, price)
+            if self._db_engine:
+                await self._persist_state()
+
+    # callback 在 lock 外调用，与 _process_tick 中条件单触发的行为一致
+    if fill_event and self._fill_callback:
         await self._fill_callback(fill_event)
+
     return order
-    ...
 ```
 
-**注意：** `_execute_market_order` 的返回值需从 `(order, position_side)` 扩展为 `(order, position_side, pnl)`。开仓路径（`_open_market_order`）返回 `pnl=None`；平仓路径（`_close_market_order`）从 `_close_position_core` 获取 pnl 并返回。`_execute_fill`（条件单）同理，已有 pnl 计算逻辑。
+**`_execute_market_order` 返回值变更：** 从 `(order, position_side)` 扩展为 `(order, position_side, pnl)`。开仓路径（`_open_market_order`）返回 `pnl=None`；平仓路径（`_close_market_order`）从 `_close_position_core` 获取 pnl 并返回。`_execute_fill`（条件单触发）同理，已有 pnl 计算逻辑。
 
 **时序兼容：** 市价单的 FillEvent 在 `create_order()` 内部产生，此时 agent 仍在当前决策周期中（tool 调用尚未返回）。FillEvent handler 调用 `scheduler.trigger()` 仅设置 `_pending_trigger` 标志和 context，不会立即启动新周期。当前周期结束后，Scheduler 主循环检测到 pending trigger，才启动下一个周期。现有 Scheduler 设计已支持此流程，无需改造。
 
@@ -595,7 +610,13 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
 
 两条记录通过相同的 `order_id` 关联，共同构成完整的决策 → 执行时间线。`get_trade_journal` 展示时可合并同 order_id 的记录以提升可读性。
 
-条件单只有 FillEvent 写入的一条记录（agent 未主动发起操作），但 agent 在 FillEvent 周期中的 `save_memory` 或后续操作会补充主观记录。
+`close_position` 同理，也产生两条记录：
+- **Tool 写入**：`action="close_position"`, `reasoning="MACD死叉，主动平仓"`
+- **FillEvent 写入**：`action="order_filled"`, `trigger_reason="market"`, `pnl=8.25`（携带交易所计算的已实现盈亏）
+
+**pnl 只出现在 FillEvent 写入的记录中**，因为盈亏由交易所在撮合时计算。Tool 写入的记录只记录 agent 的决策意图。
+
+条件单（止损/止盈/强平）只有 FillEvent 写入的一条记录（agent 未主动发起操作），携带 trigger_reason 和 pnl。agent 在 FillEvent 周期中的 `save_memory` 或后续操作会补充主观记录。
 
 FillEvent handler 的职责明确：
 1. 将成交事件写入 TradeAction（agent 下次查看 `get_trade_journal` 时可见）
