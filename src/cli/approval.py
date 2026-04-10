@@ -17,18 +17,12 @@ def format_decision_for_approval(
     reasoning: str,
     position_pct: float,
     leverage: int,
-    stop_loss: float | None = None,
-    take_profit: float | None = None,
 ) -> str:
     lines = [
         f"Action: {action.upper()}",
         f"Position: {position_pct}% of balance | Leverage: {leverage}x",
+        f"\nReasoning: {reasoning}",
     ]
-    if stop_loss is not None:
-        lines.append(f"Stop Loss: {stop_loss:.2f}")
-    if take_profit is not None:
-        lines.append(f"Take Profit: {take_profit:.2f}")
-    lines.append(f"\nReasoning: {reasoning}")
     return "\n".join(lines)
 
 
@@ -43,13 +37,11 @@ class ApprovalGate:
         reasoning: str,
         position_pct: float,
         leverage: int,
-        stop_loss: float | None = None,
-        take_profit: float | None = None,
     ) -> bool:
         if not self._enabled:
             return True
         text = format_decision_for_approval(
-            action, reasoning, position_pct, leverage, stop_loss, take_profit
+            action, reasoning, position_pct, leverage
         )
         console.print(
             Panel(text, title="[bold yellow]Trade Approval Required[/]", border_style="yellow")
@@ -63,8 +55,6 @@ class ApprovalGate:
         reasoning: str,
         position_pct: float,
         leverage: int,
-        stop_loss: float | None = None,
-        take_profit: float | None = None,
     ) -> bool:
         if not self._enabled:
             return True
@@ -74,7 +64,7 @@ class ApprovalGate:
                 loop.run_in_executor(
                     _executor,
                     lambda: self.check_sync(
-                        action, reasoning, position_pct, leverage, stop_loss, take_profit
+                        action, reasoning, position_pct, leverage
                     ),
                 ),
                 timeout=self._timeout,
