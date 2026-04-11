@@ -1,6 +1,8 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -80,6 +82,26 @@ class BaseExchange(ABC):
     async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]: ...
     @abstractmethod
     async def cancel_order(self, order_id: str, symbol: str) -> None: ...
+
+    async def start(self) -> None:
+        """启动 WebSocket 等后台任务。默认空实现。"""
+        pass
+
+    def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
+        """注册 fill 回调。默认空实现。"""
+        pass
+
+    def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
+        """注册价格异动回调。默认空实现。"""
+        pass
+
+    def set_alert_service(self, service: Any) -> None:
+        """注入 PriceAlertService。默认空实现。"""
+        pass
+
+    def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+        """更新价格预警参数。默认空实现。"""
+        pass
 
     def drain_pending_fills(self) -> list['FillEvent']:
         """Return and clear queued FillEvents. Default: empty (OKX etc. need not override)."""

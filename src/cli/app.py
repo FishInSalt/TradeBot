@@ -19,7 +19,6 @@ from src.config import load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
-from src.services.llm_router import LLMRouter
 from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
@@ -64,7 +63,7 @@ class TokenBudget:
 
 
 async def _record_action_from_fill(engine, session_id, event: FillEvent):
-    """将 FillEvent 记录为 TradeAction（独立函数，便于未来 OKX WebSocket 复用）。"""
+    """将 FillEvent 记录为 TradeAction。"""
     async with get_session(engine) as session:
         session.add(TradeAction(
             session_id=session_id,
@@ -87,6 +86,7 @@ async def run_agent_cycle(
     budget: TokenBudget,
     engine,
     context=None,
+    model=None,
 ):
     if budget.exhausted:
         logger.warning("Daily LLM token budget exhausted, skipping cycle")
@@ -99,7 +99,7 @@ async def run_agent_cycle(
         "Analyze the current market, check your positions, and decide what to do.\n"
         "Use your tools to gather data before making a decision."
     )
-    if context is not None and hasattr(context, "trigger_reason"):
+    if trigger_type == "conditional" and context is not None:
         msg = (
             f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
             f"— {context.symbol} {context.amount} @ {context.fill_price}"
@@ -107,16 +107,26 @@ async def run_agent_cycle(
         if context.pnl is not None:
             msg += f", PnL: {context.pnl:.2f} USDT"
         prompt += msg
+    elif trigger_type == "alert" and context is not None:
+        direction = "dropped" if context.change_pct < 0 else "surged"
+        prompt += (
+            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+        )
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":
         prompt += f"\n\nYour memories:\n{memory_context}"
 
     # LLM call with exponential backoff retry
+    run_kwargs = {"deps": deps}
+    if model is not None:
+        run_kwargs["model"] = model
+
     result = None
     for attempt in range(3):
         try:
-            result = await agent.run(prompt, deps=deps)
+            result = await agent.run(prompt, **run_kwargs)
             break
         except Exception as e:
             if attempt < 2:
@@ -138,7 +148,7 @@ async def run_agent_cycle(
                 trigger_type=trigger_type,
                 decision="completed",
                 reasoning=result.output[:500],
-                model_used=str(agent.model),
+                model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
                 tokens_used=tokens,
             )
         )
@@ -152,6 +162,7 @@ async def run_agent_cycle(
 async def run(
     settings_path: Path = Path("config/settings.yaml"),
     trader_path: Path = Path("config/trader.yaml"),
+    model_id: str | None = None,
 ):
     logging.basicConfig(
         level=logging.INFO,
@@ -159,7 +170,7 @@ async def run(
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
 
-    console.print("[bold green]TradeBot Phase 1a — Starting...[/]\n")
+    console.print("[bold green]TradeBot Phase 1b — Starting...[/]\n")
 
     settings = load_settings(settings_path)
     trader_config = load_trader_config(trader_path)
@@ -170,8 +181,71 @@ async def run(
         f"Persona: {trader_config.persona.risk_tolerance} / {trader_config.persona.trading_style}\n"
     )
 
-    # Resolve database path relative to project root (where config lives)
+    # --- Model selection via ModelManager ---
+    from src.services.model_manager import ModelManager
+
     project_root = settings_path.resolve().parent.parent
+    model_manager = ModelManager(config_path=project_root / "config" / "models.json")
+    existing_models = model_manager.load_models()
+
+    selected_model = None  # pydantic-ai Model object
+    selected_config = None
+
+    if model_id:
+        selected_config = model_manager.get_model_by_id(model_id, existing_models)
+        if selected_config is None:
+            console.print(f"[red]Model '{model_id}' not found in models.json[/]")
+            return
+        selected_model = model_manager.create_model(selected_config)
+        console.print(f"Model: {selected_config.id} ({selected_config.provider}:{selected_config.model})")
+    elif existing_models:
+        console.print("[bold]Available models:[/]")
+        for i, m in enumerate(existing_models):
+            console.print(f"  {i + 1}. {m.id} ({m.provider}:{m.model})")
+        console.print(f"  {len(existing_models) + 1}. Add new model")
+
+        choice = input(f"\nSelect model [1-{len(existing_models) + 1}]: ").strip()
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            idx = 0
+
+        if 0 <= idx < len(existing_models):
+            selected_config = existing_models[idx]
+            selected_model = model_manager.create_model(selected_config)
+        else:
+            selected_config, selected_model = await _interactive_add_model(
+                model_manager, existing_models
+            )
+    else:
+        console.print("[yellow]No models configured. Let's add one.[/]\n")
+        selected_config, selected_model = await _interactive_add_model(
+            model_manager, existing_models
+        )
+
+    if selected_model is None:
+        console.print("[red]No model selected. Exiting.[/]")
+        return
+
+    # 测试 API 连通性
+    console.print(f"\nTesting API connectivity for {selected_config.id}...")
+    success, error = await model_manager.test_connectivity(selected_model)
+    if success:
+        console.print("[green]API connection OK[/]")
+    else:
+        console.print(f"[red]API connection failed: {error}[/]")
+        skip = input("Skip test and continue anyway? [y/N]: ").strip().lower()
+        if skip != "y":
+            return
+
+    if selected_config not in existing_models:
+        existing_models.append(selected_config)
+        model_manager.save_models(existing_models)
+        console.print(f"[green]Model '{selected_config.id}' saved to models.json[/]")
+
+    console.print(f"Model: {selected_config.id} ({selected_config.provider}:{selected_config.model})\n")
+
+    # Resolve database path relative to project root (where config lives)
     data_dir = project_root / "data"
     data_dir.mkdir(exist_ok=True)
     db_url = settings.database.url
@@ -192,7 +266,7 @@ async def run(
                 name="default",
                 symbol=settings.trading.symbol,
                 persona_config=json.dumps(trader_config.persona.model_dump()),
-                model_config=json.dumps(settings.models.model_dump()),
+                model_config=json.dumps({"id": selected_config.id, "provider": selected_config.provider, "model": selected_config.model}),
                 initial_balance=settings.trading.initial_balance_usdt,
                 status="active",
             )
@@ -218,11 +292,11 @@ async def run(
             api_key=settings.exchange.api_key,
             secret=settings.exchange.secret,
             password=settings.exchange.password,
+            symbol=settings.trading.symbol,
         )
         console.print(f"Exchange: {settings.exchange.name} (REAL account)")
     market_data = MarketDataService(exchange)
     technical = TechnicalAnalysisService()
-    llm_router = LLMRouter(settings.models)
     memory = MemoryService(engine, session_id=session_id)
     metrics_service = MetricsService(initial_balance=trading_session.initial_balance)
     budget = TokenBudget(daily_max=settings.llm_budget.daily_max_tokens)
@@ -231,8 +305,7 @@ async def run(
         timeout_seconds=settings.approval.timeout_seconds,
     )
 
-    model = llm_router.resolve("trade_decision")
-    agent = create_trader_agent(model=model, persona_config=trader_config.persona)
+    agent = create_trader_agent(model=selected_model, persona_config=trader_config.persona)
 
     deps = TradingDeps(
         symbol=settings.trading.symbol,
@@ -258,16 +331,53 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    handle_fill = None  # will be set for simulated exchange
+    # --- Price alert setup ---
+    from src.services.price_alert import PriceAlertService
+
+    alert_service = None
+    if settings.alerts.enabled:
+        console.print("\n[bold]Price alert settings:[/]")
+        try:
+            window_input = input(f"  Window (minutes) [{settings.alerts.window_minutes}]: ").strip()
+            threshold_input = input(f"  Threshold (%) [{settings.alerts.threshold_pct}]: ").strip()
+            cooldown_input = input(f"  Cooldown (minutes) [{settings.alerts.cooldown_minutes}]: ").strip()
+            window = int(window_input) if window_input else settings.alerts.window_minutes
+            threshold = float(threshold_input) if threshold_input else settings.alerts.threshold_pct
+            cooldown = int(cooldown_input) if cooldown_input else settings.alerts.cooldown_minutes
+            alert_service = PriceAlertService(
+                symbol=settings.trading.symbol,
+                window_minutes=window,
+                threshold_pct=threshold,
+                cooldown_minutes=cooldown,
+            )
+            console.print(f"  Price alerts: ON (threshold={threshold}%, window={window}min, cooldown={cooldown}min)")
+        except (ValueError, TypeError) as e:
+            console.print(f"[yellow]Invalid alert settings ({e}), using defaults[/]")
+            alert_service = PriceAlertService(
+                symbol=settings.trading.symbol,
+                window_minutes=settings.alerts.window_minutes,
+                threshold_pct=settings.alerts.threshold_pct,
+                cooldown_minutes=settings.alerts.cooldown_minutes,
+            )
+            console.print(
+                f"  Price alerts: ON (threshold={settings.alerts.threshold_pct}%, "
+                f"window={settings.alerts.window_minutes}min, cooldown={settings.alerts.cooldown_minutes}min)"
+            )
+        exchange.set_alert_service(alert_service)
+    else:
+        console.print("Price alerts: OFF")
+
+    handle_fill = None
 
     async def on_tick(trigger_type: str, context=None):
         if shutdown_event.is_set():
             return
         try:
-            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context)
+            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context, model=selected_model)
         except Exception:
             logger.exception("Agent cycle failed")
         finally:
+            # drain_pending_fills: SimulatedExchange 返回市价单 fill，OKX 返回 []（无害）
             if handle_fill is not None:
                 for fill in exchange.drain_pending_fills():
                     try:
@@ -278,24 +388,29 @@ async def run(
     interval = settings.scheduler.interval_minutes * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
-    # Register fill handler for simulated exchange
-    if settings.exchange.name == "simulated":
-        def _create_fill_handler(sched, eng, sid):
-            async def handle_fill(event: FillEvent):
-                try:
-                    await _record_action_from_fill(eng, sid, event)
-                except Exception:
-                    logger.warning("Failed to record fill event", exc_info=True)
-                finally:
-                    await sched.trigger("conditional", context=event)
-            return handle_fill
+    # --- Fill handler registration (unified for both exchange types) ---
+    def _create_fill_handler(sched, eng, sid):
+        async def handle_fill(event: FillEvent):
+            try:
+                await _record_action_from_fill(eng, sid, event)
+            except Exception:
+                logger.warning("Failed to record fill event", exc_info=True)
+            finally:
+                await sched.trigger("conditional", context=event)
+        return handle_fill
 
-        handle_fill = _create_fill_handler(scheduler, engine, session_id)
-        exchange.on_fill(handle_fill)
+    handle_fill = _create_fill_handler(scheduler, engine, session_id)
+    exchange.on_fill(handle_fill)
 
-    # Start exchange (simulated needs async start for WebSocket + state restore)
-    if settings.exchange.name == "simulated":
-        await exchange.start()
+    # --- Alert handler registration ---
+    if settings.alerts.enabled:
+        async def handle_alert(alert_info):
+            await scheduler.trigger("alert", context=alert_info)
+
+        exchange.on_alert(handle_alert)
+
+    # --- Start exchange (both simulated and OKX) ---
+    await exchange.start()  # SimulatedExchange: 恢复状态 + 撮合循环; OKXExchange: WebSocket loops
 
     # Show initial metrics (after start so simulated mode has restored state)
     positions = await exchange.fetch_positions(settings.trading.symbol)
@@ -316,3 +431,36 @@ async def run(
     await scheduler_task
     await exchange.close()
     console.print("[green]TradeBot stopped.[/]")
+
+
+async def _interactive_add_model(model_manager, existing_models):
+    """交互式添加新模型。返回 (ModelConfig, pydantic-ai Model) 或 (None, None)。"""
+    from src.services.model_manager import ModelConfig
+
+    console.print("Supported providers: anthropic, openai, google-gla, groq")
+    provider = input("Provider: ").strip()
+    model_name = input("Model name (e.g. claude-opus-4-6, gpt-4o): ").strip()
+    api_key = input("API key: ").strip()
+    base_url_input = input("Base URL (press Enter for default): ").strip()
+    base_url = base_url_input if base_url_input else None
+    model_id = input("Friendly ID (e.g. claude-opus, gpt4o): ").strip()
+
+    if not all([provider, model_name, api_key, model_id]):
+        console.print("[red]All fields except base_url are required.[/]")
+        return None, None
+
+    config = ModelConfig(
+        id=model_id,
+        provider=provider,
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+    try:
+        model = model_manager.create_model(config)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        return None, None
+
+    return config, model

@@ -65,6 +65,8 @@ class SimulatedExchange(BaseExchange):
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._pending_fills: list[FillEvent] = []
         self._error_count = 0
+        self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
+        self._alert_service: Any | None = None
 
     def _validate_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
@@ -398,12 +400,13 @@ class SimulatedExchange(BaseExchange):
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
-        """Process a single tick -- check liquidations and conditional orders."""
+        """Process a single tick -- check liquidations, conditional orders, and price alerts."""
         self._latest_ticker = ticker
 
         triggered: list[FillEvent] = []
         filled_order_ids: list[str] = []
         new_orders: list[tuple[Order, str]] = []
+        alert_info = None
 
         async with self._lock:
             # 1. Liquidation check (must be before conditional orders)
@@ -448,10 +451,18 @@ class SimulatedExchange(BaseExchange):
                         fill_events=triggered,
                     )
 
+            # 3. Price alert check (inside lock for consistent ticker reading)
+            if self._alert_service:
+                alert_info = self._alert_service.check(ticker.last, ticker.timestamp)
+
         # Notify outside lock
         for fill in triggered:
             if self._fill_callback:
                 await self._fill_callback(fill)
+
+        # Alert callback outside lock
+        if alert_info and self._alert_callback:
+            await self._alert_callback(alert_info)
 
     # --- Order query methods ---
 
@@ -542,6 +553,16 @@ class SimulatedExchange(BaseExchange):
 
     def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
         self._fill_callback = callback
+
+    def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
+        self._alert_callback = callback
+
+    def set_alert_service(self, service: Any) -> None:
+        self._alert_service = service
+
+    def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+        if self._alert_service:
+            self._alert_service.update_params(threshold_pct, window_minutes, cooldown_minutes)
 
     def drain_pending_fills(self) -> list[FillEvent]:
         fills = self._pending_fills.copy()
