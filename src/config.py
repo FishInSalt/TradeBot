@@ -55,14 +55,22 @@ class ApprovalConfig(BaseModel):
     timeout_seconds: int = 300
 
 
+class AlertsConfig(BaseModel):
+    enabled: bool = True
+    window_minutes: int = 5
+    threshold_pct: float = 3.0
+    cooldown_minutes: int = 15
+
+
 class Settings(BaseModel):
     exchange: ExchangeConfig = ExchangeConfig()
     trading: TradingConfig = TradingConfig()
-    models: ModelsConfig = ModelsConfig()
+    models: ModelsConfig | None = None
     scheduler: SchedulerConfig = SchedulerConfig()
     llm_budget: LLMBudgetConfig = LLMBudgetConfig()
     database: DatabaseConfig = DatabaseConfig()
     approval: ApprovalConfig = ApprovalConfig()
+    alerts: AlertsConfig = AlertsConfig()
 
 
 class PersonaConfig(BaseModel):
