@@ -2089,7 +2089,7 @@ async def test_parse_fill_event_infer_position_side():
 
 
 async def test_parse_fill_event_pnl_missing():
-    """当 info.pnl 缺失时 pnl 应为 None。"""
+    """当 info.pnl 缺失且 REST 补查也无 pnl 时，pnl 应为 None。"""
     with patch("ccxt.async_support.okx") as mock_okx:
         mock_okx.return_value = MagicMock()
         from src.integrations.exchange.okx import OKXExchange
@@ -2097,6 +2097,8 @@ async def test_parse_fill_event_pnl_missing():
             api_key="test", secret="test", password="test",
             symbol="BTC/USDT:USDT",
         )
+        # 显式 mock REST fetch_order — 返回的 info 中也无 pnl
+        exchange._client.fetch_order = AsyncMock(return_value={"info": {}})
         order_data = {
             "id": "order-no-pnl",
             "symbol": "BTC/USDT:USDT",
@@ -2112,6 +2114,7 @@ async def test_parse_fill_event_pnl_missing():
         }
         fill = await exchange._parse_fill_event(order_data)
         assert fill.pnl is None
+        exchange._client.fetch_order.assert_called_once()  # 确认触发了 REST 补查
 
 
 async def test_parse_fill_event_pnl_rest_fallback():
@@ -2154,6 +2157,7 @@ async def test_parse_fill_event_pnl_rest_fallback_timeout():
             api_key="test", secret="test", password="test",
             symbol="BTC/USDT:USDT",
         )
+        exchange._pnl_fetch_timeout = 0.1  # 缩短超时，避免测试等 5 秒
         order_data = {
             "id": "order-timeout",
             "symbol": "BTC/USDT:USDT",
@@ -2167,7 +2171,7 @@ async def test_parse_fill_event_pnl_rest_fallback_timeout():
             "timestamp": 1712534600000,
             "info": {"posSide": "long"},  # 无 pnl
         }
-        # Mock REST fetch_order 超时
+        # Mock REST fetch_order 慢响应
         async def slow_fetch(*args):
             await asyncio.sleep(10)
         exchange._client.fetch_order = slow_fetch
@@ -2483,6 +2487,7 @@ class OKXExchange(BaseExchange):
         self._running = False
         self._ws_client: Any | None = None
         self._ws_connected = False
+        self._pnl_fetch_timeout: float = 5.0  # 秒，可在测试中覆盖
         logger.info("OKX exchange initialized (real account)")
 
     # --- Fill / Alert callback registration ---
@@ -2626,7 +2631,7 @@ class OKXExchange(BaseExchange):
             try:
                 fetched = await asyncio.wait_for(
                     self._client.fetch_order(order_id, symbol),
-                    timeout=5.0,
+                    timeout=self._pnl_fetch_timeout,
                 )
                 pnl_fetched = fetched.get("info", {}).get("pnl")
                 if pnl_fetched is not None:
