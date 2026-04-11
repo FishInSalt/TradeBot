@@ -1577,7 +1577,7 @@ def test_window_eviction():
         symbol="BTC/USDT:USDT",
         window_minutes=1,  # 1 分钟窗口
         threshold_pct=3.0,
-        cooldown_minutes=0,  # 无冷却（测试方便）
+        cooldown_minutes=1,  # 最小冷却（tick 间隔 2min > 1min 冷却，测试不受影响）
     )
     base_ts = 1_000_000_000_000
     # 喂入高价
@@ -2767,9 +2767,30 @@ Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_exchange.py -v`
 
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 更新 app.py 中 OKXExchange 构造调用**
 
-Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/okx.py tests/test_okx_websocket.py && git commit -m "feat: add OKX WebSocket fill push via ccxt.pro watch_orders loop"`
+Task 8 将 OKXExchange 构造函数改为 `symbol: str` 必填参数，需要同步更新 `src/cli/app.py` 中的调用：
+
+```python
+# src/cli/app.py — 找到 OKXExchange 构造调用（大约在 run() 函数中）
+# 旧:
+exchange = OKXExchange(
+    api_key=settings.exchange.api_key,
+    secret=settings.exchange.secret,
+    password=settings.exchange.password,
+)
+# 新:
+exchange = OKXExchange(
+    api_key=settings.exchange.api_key,
+    secret=settings.exchange.secret,
+    password=settings.exchange.password,
+    symbol=settings.trading.symbol,
+)
+```
+
+- [ ] **Step 6: 提交**
+
+Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/okx.py src/cli/app.py tests/test_okx_websocket.py && git commit -m "feat: add OKX WebSocket fill push via ccxt.pro watch_orders loop"`
 
 ---
 
