@@ -569,3 +569,159 @@ async def test_force_liquidate_fill_event_has_pnl():
     liq_fill = [f for f in fills if f.trigger_reason == "liquidation"]
     assert len(liq_fill) == 1
     assert liq_fill[0].pnl is not None
+
+
+async def test_simulated_exchange_alert_service_integration():
+    """SimulatedExchange 应在 _process_tick 中调用 PriceAlertService.check。"""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.base import Ticker
+    from src.services.price_alert import AlertInfo
+    from unittest.mock import MagicMock, AsyncMock
+    from src.config import ExchangeConfig
+
+    config = ExchangeConfig(
+        name="simulated", fee_rate=0.0005,
+        precision={"BTC/USDT:USDT": 3},
+    )
+    exchange = SimulatedExchange(
+        config=config, db_engine=None, session_id="test",
+        symbol="BTC/USDT:USDT",
+    )
+    exchange._free_usdt = 1000.0
+    exchange._running = True
+
+    mock_alert = AlertInfo(
+        symbol="BTC/USDT:USDT",
+        current_price=57900.0,
+        reference_price=60000.0,
+        change_pct=-3.5,
+        window_minutes=5,
+        timestamp=1712534400000,
+    )
+    mock_service = MagicMock()
+    mock_service.check.return_value = mock_alert
+    exchange.set_alert_service(mock_service)
+
+    alert_callback = AsyncMock()
+    exchange.on_alert(alert_callback)
+
+    ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=57900.0,
+        bid=57899.0, ask=57901.0,
+        high=60000.0, low=57800.0,
+        base_volume=12345.0, timestamp=1712534400000,
+    )
+    await exchange._process_tick(ticker)
+
+    mock_service.check.assert_called_once_with(57900.0, 1712534400000)
+    alert_callback.assert_called_once()
+    alert_info = alert_callback.call_args[0][0]
+    assert alert_info.change_pct == -3.5
+
+
+async def test_simulated_exchange_no_alert_when_service_returns_none():
+    """PriceAlertService.check 返回 None 时不应调用 alert callback。"""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.base import Ticker
+    from unittest.mock import MagicMock, AsyncMock
+    from src.config import ExchangeConfig
+
+    config = ExchangeConfig(
+        name="simulated", fee_rate=0.0005,
+        precision={"BTC/USDT:USDT": 3},
+    )
+    exchange = SimulatedExchange(
+        config=config, db_engine=None, session_id="test",
+        symbol="BTC/USDT:USDT",
+    )
+    exchange._free_usdt = 1000.0
+    exchange._running = True
+
+    mock_service = MagicMock()
+    mock_service.check.return_value = None
+    exchange.set_alert_service(mock_service)
+
+    alert_callback = AsyncMock()
+    exchange.on_alert(alert_callback)
+
+    ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=60000.0,
+        bid=59999.0, ask=60001.0,
+        high=60500.0, low=59500.0,
+        base_volume=12345.0, timestamp=1712534400000,
+    )
+    await exchange._process_tick(ticker)
+
+    mock_service.check.assert_called_once()
+    alert_callback.assert_not_called()
+
+
+async def test_simulated_exchange_update_alert_params():
+    """update_alert_params 应委托给内部 PriceAlertService。"""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from unittest.mock import MagicMock
+    from src.config import ExchangeConfig
+
+    config = ExchangeConfig(
+        name="simulated", fee_rate=0.0005,
+        precision={"BTC/USDT:USDT": 3},
+    )
+    exchange = SimulatedExchange(
+        config=config, db_engine=None, session_id="test",
+        symbol="BTC/USDT:USDT",
+    )
+
+    mock_service = MagicMock()
+    exchange.set_alert_service(mock_service)
+    exchange.update_alert_params(2.0, 10, 30)
+    mock_service.update_params.assert_called_once_with(2.0, 10, 30)
+
+
+async def test_simulated_exchange_alert_callback_outside_lock():
+    """alert callback 应在锁外执行（与 fill callback 同模式）。"""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.base import Ticker
+    from src.services.price_alert import AlertInfo
+    from unittest.mock import MagicMock, AsyncMock
+    from src.config import ExchangeConfig
+
+    config = ExchangeConfig(
+        name="simulated", fee_rate=0.0005,
+        precision={"BTC/USDT:USDT": 3},
+    )
+    exchange = SimulatedExchange(
+        config=config, db_engine=None, session_id="test",
+        symbol="BTC/USDT:USDT",
+    )
+    exchange._free_usdt = 1000.0
+    exchange._running = True
+
+    mock_alert = AlertInfo(
+        symbol="BTC/USDT:USDT",
+        current_price=57900.0,
+        reference_price=60000.0,
+        change_pct=-3.5,
+        window_minutes=5,
+        timestamp=1712534400000,
+    )
+    mock_service = MagicMock()
+    mock_service.check.return_value = mock_alert
+    exchange.set_alert_service(mock_service)
+
+    lock_held_during_callback = False
+
+    async def alert_callback(info):
+        nonlocal lock_held_during_callback
+        lock_held_during_callback = exchange._lock.locked()
+
+    exchange.on_alert(alert_callback)
+
+    ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=57900.0,
+        bid=57899.0, ask=57901.0,
+        high=60000.0, low=57800.0,
+        base_volume=12345.0, timestamp=1712534400000,
+    )
+    await exchange._process_tick(ticker)
+
+    assert lock_held_during_callback is False
