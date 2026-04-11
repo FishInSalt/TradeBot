@@ -292,6 +292,7 @@ async def run(
             api_key=settings.exchange.api_key,
             secret=settings.exchange.secret,
             password=settings.exchange.password,
+            symbol=settings.trading.symbol,
         )
         console.print(f"Exchange: {settings.exchange.name} (REAL account)")
     market_data = MarketDataService(exchange)
