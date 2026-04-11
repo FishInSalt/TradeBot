@@ -3306,6 +3306,7 @@ Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/simulated.py t
                 threshold_pct=threshold,
                 cooldown_minutes=cooldown,
             )
+            console.print(f"  Price alerts: ON (threshold={threshold}%, window={window}min, cooldown={cooldown}min)")
         except (ValueError, TypeError) as e:
             console.print(f"[yellow]Invalid alert settings ({e}), using defaults[/]")
             alert_service = PriceAlertService(
@@ -3314,8 +3315,11 @@ Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/simulated.py t
                 threshold_pct=settings.alerts.threshold_pct,
                 cooldown_minutes=settings.alerts.cooldown_minutes,
             )
+            console.print(
+                f"  Price alerts: ON (threshold={settings.alerts.threshold_pct}%, "
+                f"window={settings.alerts.window_minutes}min, cooldown={settings.alerts.cooldown_minutes}min)"
+            )
         exchange.set_alert_service(alert_service)
-        console.print(f"  Price alerts: ON (threshold={threshold}%, window={window}min, cooldown={cooldown}min)")
     else:
         console.print("Price alerts: OFF")
 
