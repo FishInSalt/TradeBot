@@ -94,7 +94,7 @@ class OKXExchange(BaseExchange):
         self._ws_client: Any | None = None
         self._ws_connected = False
         self._pnl_fetch_timeout: float = 5.0
-        self._seen_order_ids: set[str] = set()
+        self._seen_order_ids: dict[str, None] = {}
         self._seen_order_ids_max = 10000
         logger.info("OKX exchange initialized (real account)")
 
@@ -155,11 +155,12 @@ class OKXExchange(BaseExchange):
                         if order_id in self._seen_order_ids:
                             logger.debug("Skipping duplicate order %s", order_id)
                             continue
-                        self._seen_order_ids.add(order_id)
+                        self._seen_order_ids[order_id] = None
                         if len(self._seen_order_ids) > self._seen_order_ids_max:
-                            # 淘汰一半旧条目
-                            to_remove = list(self._seen_order_ids)[:len(self._seen_order_ids) // 2]
-                            self._seen_order_ids -= set(to_remove)
+                            # FIFO 淘汰最旧的一半（dict 保持插入顺序）
+                            keys = list(self._seen_order_ids)
+                            for k in keys[:len(keys) // 2]:
+                                del self._seen_order_ids[k]
                         fill_event = await self._parse_fill_event(order_data)
                         if self._fill_callback:
                             try:
@@ -189,16 +190,20 @@ class OKXExchange(BaseExchange):
                 error_count = 0
                 if any(raw.get(k) is None for k in ("timestamp", "last", "bid", "ask", "high", "low", "baseVolume")):
                     continue
-                ticker = Ticker(
-                    symbol=raw["symbol"],
-                    last=float(raw["last"]),
-                    bid=float(raw["bid"]),
-                    ask=float(raw["ask"]),
-                    high=float(raw["high"]),
-                    low=float(raw["low"]),
-                    base_volume=float(raw["baseVolume"]),
-                    timestamp=raw["timestamp"],
-                )
+                try:
+                    ticker = Ticker(
+                        symbol=raw["symbol"],
+                        last=float(raw["last"]),
+                        bid=float(raw["bid"]),
+                        ask=float(raw["ask"]),
+                        high=float(raw["high"]),
+                        low=float(raw["low"]),
+                        base_volume=float(raw["baseVolume"]),
+                        timestamp=raw["timestamp"],
+                    )
+                except (ValueError, TypeError):
+                    logger.warning("Invalid ticker data, skipping: %s", raw.get("symbol"))
+                    continue
                 if self._alert_service:
                     alert = self._alert_service.check(ticker.last, ticker.timestamp)
                     if alert and self._alert_callback:
@@ -410,6 +415,11 @@ class OKXExchange(BaseExchange):
                     pass
         try:
             await self._client.close()
+        except Exception:
+            logger.warning("REST client close failed", exc_info=True)
         finally:
             if self._ws_client:
-                await self._ws_client.close()
+                try:
+                    await self._ws_client.close()
+                except Exception:
+                    logger.warning("WebSocket client close failed", exc_info=True)

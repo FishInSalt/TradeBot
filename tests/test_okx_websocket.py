@@ -602,6 +602,48 @@ async def test_watch_ticker_loop_skips_none_bid():
         mock_service.check.assert_called_once()
 
 
+async def test_close_closes_both_clients():
+    """close() 应关闭 REST 和 WS 客户端，即使 REST 关闭失败。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+
+        mock_rest = AsyncMock()
+        mock_rest.close = AsyncMock(side_effect=Exception("REST close failed"))
+        exchange._client = mock_rest
+
+        mock_ws = AsyncMock()
+        mock_ws.close = AsyncMock()
+        exchange._ws_client = mock_ws
+
+        await exchange.close()
+
+        mock_rest.close.assert_called_once()
+        mock_ws.close.assert_called_once()
+
+
+async def test_close_without_ws_client():
+    """没有 WS 客户端时 close() 不应崩溃。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+
+        mock_rest = AsyncMock()
+        exchange._client = mock_rest
+        exchange._ws_client = None
+
+        await exchange.close()
+        mock_rest.close.assert_called_once()
+
+
 async def test_okx_set_alert_service():
     """set_alert_service 应注入 PriceAlertService。"""
     with patch("ccxt.async_support.okx") as mock_okx:
