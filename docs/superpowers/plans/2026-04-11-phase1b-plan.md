@@ -485,6 +485,8 @@ Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/base.py tests/
 
 **概述:** 在 `config.py` 中新增 `AlertsConfig`，在 `Settings` 中添加 `alerts` 字段；将 `Settings.models` 改为 `Optional`（Phase 1b 用 ModelManager 替代，sub-agent 阶段再启用 routing）。更新 `settings.yaml` 和 `settings_sim.yaml` 添加 alerts 配置段。
 
+**注意：** 本 Task 将 `Settings.models` 改为 `Optional` 并默认 `ModelsConfig()`（不是 `None`），保持向后兼容。`settings.yaml` 中的 `models:` 段暂不移除（由 Task 5 统一处理），确保 Task 3 完成后 `app.py` 的 `settings.models.model_dump()` 不会崩溃。
+
 **Files:**
 - Modify: `src/config.py`
 - Modify: `config/settings.yaml`
@@ -617,7 +619,7 @@ class AlertsConfig(BaseModel):
 class Settings(BaseModel):
     exchange: ExchangeConfig = ExchangeConfig()
     trading: TradingConfig = TradingConfig()
-    models: ModelsConfig | None = None
+    models: ModelsConfig | None = ModelsConfig()  # 保持向后兼容，Task 5 移除 yaml 段后变为 None
     scheduler: SchedulerConfig = SchedulerConfig()
     llm_budget: LLMBudgetConfig = LLMBudgetConfig()
     database: DatabaseConfig = DatabaseConfig()
@@ -1025,8 +1027,19 @@ Run: `cd /Users/z/Z/TradeBot && git add src/services/model_manager.py tests/test
 
 **概述:** 替换 `app.py` 中的 `llm_router.resolve()` 调用为 ModelManager 的启动交互流程。添加 `--model` CLI 参数支持无人值守启动。`run_agent_cycle` 传入 `model=model_obj` 覆盖 agent 默认模型。
 
+**重要：本 Task 只修改模型相关代码。** 对 `app.py` 的修改采用增量 diff 方式，不替换整个 `run()` 函数。具体改动：
+1. 删除 3 行 LLMRouter 代码（import、实例化、resolve 调用）
+2. 在 `run()` 签名中新增 `model_id` 参数
+3. 在 load_settings 后插入 ModelManager 选择/测试/保存逻辑
+4. 替换 `create_trader_agent(model=model, ...)` 为 `model="placeholder"`
+5. 在 `on_tick` 的 `run_agent_cycle` 调用中新增 `model=selected_model`
+6. 更新 Session 创建时的 model_config 字段
+
+fill handler 注册、alert handler、exchange.start()、scheduler 等代码**保持不变**，由 Task 11 统一修改。
+
 **Files:**
 - Modify: `src/cli/app.py`
+- Modify: `main.py`
 - Modify: `.gitignore`
 
 - [ ] **Step 1: 更新 `.gitignore`**
@@ -1317,7 +1330,10 @@ async def run(
     # ... (rest of run() unchanged from Phase 1a: fill handler, scheduler,
     #  exchange.start, metrics display, scheduler loop, shutdown — see existing app.py)
 
-    # 在 on_tick 中传入 model（关键修改）
+    # on_tick：仅在 run_agent_cycle 调用中新增 model=selected_model，其余逻辑保持不变
+    # handle_fill 在下方 simulated exchange 分支中赋值；闭包捕获变量名，调用时能看到正确的值
+    handle_fill = None
+
     async def on_tick(trigger_type: str, context=None):
         if shutdown_event.is_set():
             return
@@ -1325,6 +1341,14 @@ async def run(
             await run_agent_cycle(agent, deps, trigger_type, budget, engine, context, model=selected_model)
         except Exception:
             logger.exception("Agent cycle failed")
+        finally:
+            # 保留 drain_pending_fills 逻辑（SimulatedExchange 市价单 fill 处理）
+            if handle_fill is not None:
+                for fill in exchange.drain_pending_fills():
+                    try:
+                        await handle_fill(fill)
+                    except Exception:
+                        logger.exception("Fill handler failed for order %s", fill.order_id)
 
 
 async def _interactive_add_model(model_manager, existing_models):
@@ -2773,19 +2797,21 @@ class OKXExchange(BaseExchange):
                 await self._ws_client.close()
 ```
 
-- [ ] **Step 4: 运行测试**
+- [ ] **Step 4: 更新 tests/test_exchange.py 中的 OKX 测试**
 
-Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_okx_websocket.py -v`
+构造函数新增 `symbol` 必填参数后，现有所有 `OKXExchange.__new__(OKXExchange)` 测试不受影响（它们绕过 `__init__`），但使用完整构造函数的测试需要添加 `symbol`。搜索 `tests/test_exchange.py` 中所有 `OKXExchange(` 调用并补上 `symbol="BTC/USDT:USDT"` 参数。
 
-Expected: PASS — 所有测试通过。
+当前 `test_exchange.py` 中所有 OKX 测试使用 `OKXExchange.__new__(OKXExchange)` 绕过构造函数（直接设置 `exchange._client = mock_ccxt`），所以**不需要修改**。但如果有使用完整构造函数的测试，需添加 symbol 参数。
 
-同时确保现有 OKX 测试无回归：
+Run: `cd /Users/z/Z/TradeBot && grep -n "OKXExchange(" tests/test_exchange.py` 确认是否需要修改。
 
-Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_exchange.py -v`
+- [ ] **Step 5: 运行测试**
 
-Expected: PASS
+Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_okx_websocket.py tests/test_exchange.py -v`
 
-- [ ] **Step 5: 更新 app.py 中 OKXExchange 构造调用**
+Expected: PASS — 所有新旧测试通过。
+
+- [ ] **Step 6: 更新 app.py 中 OKXExchange 构造调用**
 
 Task 8 将 OKXExchange 构造函数改为 `symbol: str` 必填参数，需要同步更新 `src/cli/app.py` 中的调用：
 
