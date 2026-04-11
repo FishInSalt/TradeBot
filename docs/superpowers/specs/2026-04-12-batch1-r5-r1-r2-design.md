@@ -1,6 +1,6 @@
 # Batch 1 设计文档：R5 / R1 / R2
 
-> **状态**: 二审修订后
+> **状态**: 三审修订后
 > **日期**: 2026-04-12
 > **范围**: 日志分离 (R5) → 交互式配置向导 (R1) → Session 管理 (R2)
 
@@ -160,7 +160,7 @@ run()
 ### 现状
 
 - `app.py:167-171`: `logging.basicConfig` + `RichHandler`，仅终端输出
-- 会话内容通过 `console.print()` 输出（~20 处调用）
+- 会话内容通过 `console.print()` 输出（app.py ~25 处 + display.py ~5 处调用）
 - 系统日志通过 `logger.info/warning/error()` 输出
 - 两者已形成自然分离，设计利用这一现有分离
 
@@ -201,12 +201,13 @@ def setup_session_logging(session_id: str, log_dir: Path) -> SessionConsole:
 
 ### console.print 迁移策略
 
-当前 `console` 是 `app.py` 的模块级全局变量（~32 处调用）。`SessionConsole` 在运行时才创建，不能替代全局变量。迁移方式：
+当前 `console` 是 `app.py` 和 `display.py` 的模块级全局变量（合计约 30 处调用）。`SessionConsole` 在运行时才创建，不能替代全局变量。迁移方式：
 
 - **阶段 1（session_id 未知）**：`setup_system_logging()` 返回临时 `Console()`，用于欢迎页、DB 初始化等启动信息
 - **阶段 2（session_id 确定后）**：创建 `SessionConsole`，作为参数传入后续函数
 - `run_agent_cycle()`、`build_services()` 等需要会话输出的函数增加 `console` 参数，不依赖全局变量
-- 模块级 `console = Console()` 删除
+- `display.py` 的 `display_metrics()` / `log_trade()` 同样改为接受 `console` 参数（当前有独立的模块级 `console = Console()`）
+- `app.py` 和 `display.py` 的模块级 `console = Console()` 均删除
 
 ### Known Limitation: 日志轮转
 
@@ -242,6 +243,7 @@ logging.basicConfig(level=logging.DEBUG, handlers=[file_handler, terminal_handle
 |------|------|
 | `src/cli/logging_config.py` | 新建 |
 | `src/cli/app.py` | 删除 `logging.basicConfig` + 模块级 `console`，用 `SessionConsole` 替换 |
+| `src/cli/display.py` | `display_metrics()` / `log_trade()` 增加 `console` 参数，删除模块级 `console` |
 | `main.py` | 新增 `--debug` |
 | `.gitignore` | 新增 `logs/` |
 
@@ -286,6 +288,7 @@ class WizardResult:
     alert_enabled: bool
     alert_window_min: int | None
     alert_threshold_pct: float | None
+    alert_cooldown_min: int | None      # R3 将移除此字段（改为触发后重置）
     token_budget: int
 
     # Persona
@@ -334,7 +337,8 @@ async def run_wizard(
 **Step 4: 风控与调度**
 - 唤醒间隔 [15 min]
 - 审批开关 — 模拟默认 OFF, 实盘默认 ON
-- 价格告警开关 + 参数 (window [5min], threshold [3%])  ← 注：此默认值将在 R3 中更新为 1h/5%
+- 价格告警开关 + 参数 (window [5min], threshold [3%], cooldown [15min])
+  - 注：window/threshold 默认值将在 R3 中更新为 1h/5%；cooldown 字段将在 R3 中移除（改为触发后重置语义）
 - Token 预算 [500000/day]
 
 **Step 5: 交易员人设**
@@ -355,7 +359,7 @@ Rich Table 汇总全部配置，用户确认或返回修改：
 │ 模型        │ claude-opus (anthropic)  │
 │ 唤醒间隔    │ 15 min                   │
 │ 审批        │ OFF                      │
-│ 价格告警    │ ON (5min / 3%)           │
+│ 价格告警    │ ON (5min / 3% / cd 15min)│
 │ Persona    │ moderate / trend_following│
 └────────────┴──────────────────────────┘
 确认启动？ [Y/n]
@@ -386,6 +390,18 @@ Rich Table 汇总全部配置，用户确认或返回修改：
 
 下次向导检测到该文件时提示复用。`config/.credentials` 加入 `.gitignore`。
 
+#### 模拟交易所精度处理
+
+`SimulatedExchange.amount_to_precision()` 需要 symbol → 小数位数映射，当前从 `settings_sim.yaml` 的 `precision` 字段读取。向导不收集此参数（对用户无意义），由 `build_services()` 内置常见交易对的默认精度表：
+
+```python
+_DEFAULT_PRECISION = {
+    "BTC/USDT:USDT": 3,
+    "ETH/USDT:USDT": 2,
+}
+# 不在表中的 symbol 使用保守默认值 3
+```
+
 #### YAML 文件的新角色
 
 ```
@@ -393,6 +409,10 @@ Rich Table 汇总全部配置，用户确认或返回修改：
 ```
 
 YAML 从"用户编辑的配置源"变为"向导默认值模板"。高级用户仍可通过修改 YAML 调整默认值。
+
+**`settings_sim.yaml` 废弃**：向导引入后，`settings.yaml` 作为唯一默认值源。模拟模式特有参数（`fee_rate`、`precision`）由向导 Step 1 提供默认值 / `build_services()` 内置。`settings_sim.yaml` 不再被读取，保留为参考但不影响运行。
+
+**`load_settings()` 调用**：始终传入 `settings.yaml`，不再区分 sim/real 传不同文件。exchange type 由 `WizardResult.exchange_type` 决定。
 
 ### 对 `app.py` 的影响
 
@@ -433,7 +453,7 @@ exchange_type: Mapped[str]              # "simulated" / "okx"
 timeframe: Mapped[str]                  # "15m", "1H" 等
 scheduler_interval_min: Mapped[int]     # 唤醒间隔（分钟）
 approval_enabled: Mapped[bool]          # SQLAlchemy 自动处理 SQLite 0/1 映射
-alert_config: Mapped[str | None]        # JSON: {"enabled":true,"window":5,"threshold":3.0}
+alert_config: Mapped[str | None]        # JSON: {"enabled":true,"window":5,"threshold":3.0,"cooldown":15}
 fee_rate: Mapped[float | None]          # 模拟手续费率
 token_budget: Mapped[int]              # 每日 token 预算
 last_active_at: Mapped[datetime | None] # 最后 agent cycle 时间
@@ -461,7 +481,7 @@ last_active_at: Mapped[datetime | None] # 最后 agent cycle 时间
 | `timeframe` | `timeframe` | 直接写入 |
 | `scheduler_interval_min` | `scheduler_interval_min` | 直接写入 |
 | `approval_enabled` | `approval_enabled` | 直接写入 |
-| `alert_enabled/window/threshold` | `alert_config` | `json.dumps({enabled, window, threshold})` |
+| `alert_enabled/window/threshold/cooldown` | `alert_config` | `json.dumps({enabled, window, threshold, cooldown})` |
 | `fee_rate` | `fee_rate` | 直接写入 |
 | `token_budget` | `token_budget` | 直接写入 |
 
@@ -534,6 +554,7 @@ async def _migrate_session_table(conn):
 ```
 恢复 "BTC sim #1"
   ├── 从 DB 加载: exchange/symbol/timeframe/persona/scheduler/alert
+  │     └── alert_config 为 NULL → alerts disabled（迁移产生的旧 session）
   ├── 模型选择:
   │     ├── 有 --model X → 直接使用 X（显式 flag 优先于历史记录）
   │     └── 无 --model → "上次使用 claude-opus，继续？[Y/n]"
@@ -579,7 +600,8 @@ active/paused ──┴── 用户主动结束 → stopped（首版不实现 U
 
 ```python
 async def select_or_create_session(
-    engine, settings, trader_config, model_manager, model_id
+    engine, settings, trader_config, model_manager, model_id,
+    console: Console,  # Phase 1 返回的 pre_console（SessionConsole 尚未创建）
 ) -> tuple[WizardResult, str]:
     """入口。返回 (WizardResult, session_id)。"""
 ```
@@ -646,6 +668,7 @@ async def run(
     model_manager = ModelManager(config_path=...)
     result, session_id = await select_or_create_session(
         engine, settings, trader_config, model_manager, model_id,
+        console=pre_console,
     )
     #   → result: WizardResult（新建走向导，恢复走 DB 加载）
     #   → session_id: str
@@ -655,28 +678,64 @@ async def run(
     #   → sc: SessionConsole（后续所有会话输出通过它）
 
     # ── Phase 5: 服务构建 ──
-    exchange, deps, agent, budget, scheduler = await build_services(
+    exchange, deps, agent, budget = await build_services(
         result, engine, session_id, sc,
     )
     #   → exchange: BaseExchange
     #   → deps: TradingDeps
     #   → agent: Agent[TradingDeps, str]
     #   → budget: TokenBudget
-    #   → scheduler: Scheduler
+    #   注意: scheduler 不在此阶段创建（见下方说明）
 
     # ── Phase 6: 主循环 ──
     await run_main_loop(
-        exchange, deps, agent, budget, scheduler,
+        exchange, deps, agent, budget,
         engine, session_id, result, sc,
     )
-    #   内部: 注册 handler → exchange.start() → scheduler.start()
-    #         → shutdown_event.wait() → 清理 + session.status="paused"
+    #   内部: 创建 scheduler → 注册 fill/alert handler → exchange.start()
+    #         → scheduler.start() → shutdown_event.wait()
+    #         → 清理 + session.status="paused"
 ```
 
 **关键数据流**：
 - Phase 3 输出 `(WizardResult, session_id)` → 后续所有阶段依赖
 - Phase 4 输出 `SessionConsole` → Phase 5/6 的会话输出通道
-- Phase 5 输出多个服务对象 → Phase 6 组装并运行
+- Phase 5 输出服务对象（exchange, deps, agent, budget）→ Phase 6 组装并运行
+
+**Phase 5 `build_services()` 内部要点**：
+
+```python
+async def build_services(result: WizardResult, engine, session_id, sc):
+    # Exchange 构造
+    if result.exchange_type == "simulated":
+        precision = _DEFAULT_PRECISION.get(result.symbol, {result.symbol: 3})
+        config = ExchangeConfig(
+            name="simulated", fee_rate=result.fee_rate, precision=precision,
+        )
+        exchange = SimulatedExchange(config=config, db_engine=engine,
+                                     session_id=session_id, symbol=result.symbol)
+    else:
+        # 实盘凭证从 WizardResult.api_credentials 获取
+        # （向导已从 config/.credentials 或用户输入中读取）
+        creds = result.api_credentials
+        exchange = OKXExchange(api_key=creds["api_key"], secret=creds["secret"],
+                               password=creds["password"], symbol=result.symbol)
+
+    # ApprovalGate: timeout 使用 YAML 默认值（非 per-session 配置）
+    approval_gate = ApprovalGate(
+        enabled=result.approval_enabled,
+        timeout_seconds=defaults.approval.timeout_seconds,  # 来自 settings.yaml
+    )
+
+    # ... MarketData, Technical, Memory, Metrics, Budget, Agent 构造
+    return exchange, deps, agent, budget
+```
+
+注意：`approval_timeout_seconds` 不持久化到 Session 表，恢复 session 时从 `settings.yaml` 读取默认值（300s）。这是系统级常量，非 per-session 配置。
+
+**Scheduler 为何在 Phase 6 而非 Phase 5 创建**：
+
+Scheduler 构造需要 callback（`on_tick`），而 `on_tick` 内部需要调用 `handle_fill`，`handle_fill` 又需要引用 scheduler 本身（`scheduler.trigger("conditional", ...)`）。这是一个循环依赖。当前代码用闭包延迟绑定解决（`handle_fill = None` → 后赋值）。将 scheduler、callback、handler 统一在 `run_main_loop()` 内创建，闭包引用自然在同一作用域内完成，无需跨函数传递。
 
 ---
 
@@ -730,6 +789,7 @@ async def run(
 | 文件 | 需求 | 改动 |
 |------|------|------|
 | `src/cli/app.py` | R5+R1+R2 | 重构 run() 为 6 阶段，删除 logging.basicConfig/console/scattered input |
+| `src/cli/display.py` | R5 | `display_metrics()` / `log_trade()` 增加 console 参数，删除模块级 console |
 | `src/storage/models.py` | R2 | Session 表新增 8 字段 |
 | `main.py` | R5 | 新增 `--debug` flag |
 | `.gitignore` | R5+R1 | 新增 `logs/`, `config/.credentials` |
@@ -743,7 +803,9 @@ async def run(
 | `src/scheduler/scheduler.py` | 接口不变 |
 | `src/integrations/exchange/*` | 接口不变 |
 | 各模块 `logger = logging.getLogger(__name__)` | root logger 配置自动生效 |
-| `config/*.yaml` | 内容不变，角色从"配置源"变为"默认值模板" |
+| `config/settings.yaml` | 内容不变，角色从"配置源"变为"唯一默认值模板" |
+| `config/settings_sim.yaml` | 废弃，不再被读取（保留为参考） |
+| `config/trader.yaml` | 内容不变 |
 
 ---
 
