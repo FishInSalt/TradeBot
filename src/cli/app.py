@@ -331,7 +331,43 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    handle_fill = None  # will be set for simulated exchange
+    # --- Price alert setup ---
+    from src.services.price_alert import PriceAlertService
+
+    alert_service = None
+    if settings.alerts.enabled:
+        console.print("\n[bold]Price alert settings:[/]")
+        try:
+            window_input = input(f"  Window (minutes) [{settings.alerts.window_minutes}]: ").strip()
+            threshold_input = input(f"  Threshold (%) [{settings.alerts.threshold_pct}]: ").strip()
+            cooldown_input = input(f"  Cooldown (minutes) [{settings.alerts.cooldown_minutes}]: ").strip()
+            window = int(window_input) if window_input else settings.alerts.window_minutes
+            threshold = float(threshold_input) if threshold_input else settings.alerts.threshold_pct
+            cooldown = int(cooldown_input) if cooldown_input else settings.alerts.cooldown_minutes
+            alert_service = PriceAlertService(
+                symbol=settings.trading.symbol,
+                window_minutes=window,
+                threshold_pct=threshold,
+                cooldown_minutes=cooldown,
+            )
+            console.print(f"  Price alerts: ON (threshold={threshold}%, window={window}min, cooldown={cooldown}min)")
+        except (ValueError, TypeError) as e:
+            console.print(f"[yellow]Invalid alert settings ({e}), using defaults[/]")
+            alert_service = PriceAlertService(
+                symbol=settings.trading.symbol,
+                window_minutes=settings.alerts.window_minutes,
+                threshold_pct=settings.alerts.threshold_pct,
+                cooldown_minutes=settings.alerts.cooldown_minutes,
+            )
+            console.print(
+                f"  Price alerts: ON (threshold={settings.alerts.threshold_pct}%, "
+                f"window={settings.alerts.window_minutes}min, cooldown={settings.alerts.cooldown_minutes}min)"
+            )
+        exchange.set_alert_service(alert_service)
+    else:
+        console.print("Price alerts: OFF")
+
+    handle_fill = None
 
     async def on_tick(trigger_type: str, context=None):
         if shutdown_event.is_set():
@@ -341,6 +377,7 @@ async def run(
         except Exception:
             logger.exception("Agent cycle failed")
         finally:
+            # drain_pending_fills 仅用于 simulated exchange 的市价单
             if handle_fill is not None:
                 for fill in exchange.drain_pending_fills():
                     try:
@@ -351,24 +388,29 @@ async def run(
     interval = settings.scheduler.interval_minutes * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
-    # Register fill handler for simulated exchange
-    if settings.exchange.name == "simulated":
-        def _create_fill_handler(sched, eng, sid):
-            async def handle_fill(event: FillEvent):
-                try:
-                    await _record_action_from_fill(eng, sid, event)
-                except Exception:
-                    logger.warning("Failed to record fill event", exc_info=True)
-                finally:
-                    await sched.trigger("conditional", context=event)
-            return handle_fill
+    # --- Fill handler registration (unified for both exchange types) ---
+    def _create_fill_handler(sched, eng, sid):
+        async def handle_fill(event: FillEvent):
+            try:
+                await _record_action_from_fill(eng, sid, event)
+            except Exception:
+                logger.warning("Failed to record fill event", exc_info=True)
+            finally:
+                await sched.trigger("conditional", context=event)
+        return handle_fill
 
-        handle_fill = _create_fill_handler(scheduler, engine, session_id)
-        exchange.on_fill(handle_fill)
+    handle_fill = _create_fill_handler(scheduler, engine, session_id)
+    exchange.on_fill(handle_fill)
 
-    # Start exchange (simulated needs async start for WebSocket + state restore)
-    if settings.exchange.name == "simulated":
-        await exchange.start()
+    # --- Alert handler registration ---
+    if settings.alerts.enabled:
+        async def handle_alert(alert_info):
+            await scheduler.trigger("alert", context=alert_info)
+
+        exchange.on_alert(handle_alert)
+
+    # --- Start exchange (both simulated and OKX) ---
+    await exchange.start()  # SimulatedExchange: 恢复状态 + 撮合循环; OKXExchange: WebSocket loops
 
     # Show initial metrics (after start so simulated mode has restored state)
     positions = await exchange.fetch_positions(settings.trading.symbol)
