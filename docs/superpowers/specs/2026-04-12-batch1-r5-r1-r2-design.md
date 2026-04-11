@@ -6,6 +6,112 @@
 
 ---
 
+## 项目背景
+
+### TradeBot 是什么
+
+TradeBot 是一个 AI 驱动的加密货币合约交易机器人。核心理念：LLM Agent 扮演交易员角色，自主分析市场、做出交易决策、管理仓位。
+
+用户启动后，Agent 按固定间隔（如 15 分钟）被唤醒，或被价格波动/订单成交等事件打断唤醒。每次唤醒时，Agent 通过 tool 调用获取市场数据、查看持仓、回顾历史，然后决定操作（开仓/平仓/设止损/观望）。
+
+### 项目阶段
+
+- **Phase 1a** (已完成) — 最小 agent 循环：单模型、REST 轮询、定时唤醒、模拟交易所
+- **Phase 1b** (已完成, PR #3 已合并) — 事件驱动闭环：多模型选择、WebSocket fill 推送、价格告警、Scheduler 事件队列化
+- **当前** — 基础设施改造（本文档），改善开发体验和可维护性
+- **Phase 2** (规划中) — 产品化：Web UI、多会话并行、多交易对
+
+### 技术栈
+
+| 组件 | 技术 |
+|------|------|
+| 语言 | Python 3.12+, asyncio |
+| LLM 框架 | pydantic-ai（Agent + tool 定义） |
+| 交易所接口 | ccxt / ccxt.pro（REST + WebSocket） |
+| 数据库 | SQLite + SQLAlchemy async（aiosqlite） |
+| 终端 UI | Rich（表格、面板、彩色输出、交互 prompt） |
+| 测试 | pytest + pytest-asyncio，193 个测试 |
+
+### 当前架构
+
+```
+main.py                          ← 入口，argparse --model
+  └── src/cli/app.py::run()      ← 270 行巨函数，混杂配置/交互/初始化/主循环
+        ├── src/config.py              ← Settings/PersonaConfig (Pydantic)，读 YAML
+        ├── src/services/model_manager.py  ← ModelManager，models.json CRUD + 交互选择
+        ├── src/storage/
+        │     ├── database.py          ← init_db(), get_session(), SQLAlchemy async engine
+        │     └── models.py            ← Session/TradeAction/DecisionLog/MemoryEntry/Sim* 表
+        ├── src/integrations/
+        │     ├── exchange/base.py     ← BaseExchange 抽象接口
+        │     ├── exchange/simulated.py  ← SimulatedExchange（本地撮合引擎 + DB 状态持久化）
+        │     ├── exchange/okx.py      ← OKXExchange（ccxt.pro WebSocket）
+        │     └── market_data.py       ← MarketDataService（OHLCV via ccxt）
+        ├── src/agent/
+        │     ├── trader.py            ← create_trader_agent()，系统 prompt + tool 注册
+        │     ├── tools_execution.py   ← 交易执行 tools（开仓/平仓/止损/止盈）
+        │     ├── tools_perception.py  ← 感知 tools（市场数据/持仓/余额/日志）
+        │     └── memory.py            ← MemoryService（短期/长期记忆 CRUD）
+        ├── src/scheduler/scheduler.py ← Scheduler（事件队列 + 可中断 sleep）
+        ├── src/services/
+        │     ├── price_alert.py       ← PriceAlertService（滑动窗口 + 方向冷却）
+        │     ├── metrics.py           ← MetricsService（收益率/胜率/回撤）
+        │     └── technical.py         ← TechnicalAnalysisService（TA 指标计算）
+        └── src/cli/
+              ├── approval.py          ← ApprovalGate（人工审批门）
+              └── display.py           ← 终端 metrics 展示
+```
+
+### 当前启动流程（改造前）
+
+`app.py::run()` 当前的执行顺序（270 行，单一函数）：
+
+```
+1. logging.basicConfig + RichHandler         ← 日志初始化（仅终端，无文件）
+2. load_settings(yaml) + load_trader_config  ← 读 YAML 配置
+3. console.print(symbol, approval, persona)  ← 显示配置摘要
+4. ModelManager 交互选择模型                 ← input() 散落在 run() 中
+5. API 连通性测试                            ← input() 询问是否跳过
+6. 保存新模型到 models.json
+7. init_db()                                 ← SQLite 初始化
+8. select Session where name="default"       ← 硬编码查找
+9. 创建 Exchange (sim/okx)
+10. 创建 MarketData/Technical/Memory/Metrics/Budget/Approval
+11. create_trader_agent()
+12. 价格告警交互配置                         ← 又一处 input() 散落
+13. 注册 fill/alert handler
+14. exchange.start()
+15. 显示 metrics + scheduler info
+16. 启动 Scheduler 主循环
+17. 等待 shutdown_event
+18. 清理退出
+```
+
+**痛点**：配置交互散落在步骤 3/4/5/12 中，Session 硬编码无法恢复，日志无文件持久化。
+
+### 需求池与优先级
+
+本文档涉及的 R1-R7 来自项目需求池，按主题分组：
+
+| 编号 | 需求 | 类别 |
+|------|------|------|
+| R1 | 交互式 CLI 配置向导 | 基础设施 |
+| R2 | Session 新建/恢复管理 | 基础设施 |
+| R3 | 百分比告警重设计（触发后重置） | Agent 自主性 |
+| R4 | 动态唤醒间隔（Agent 控制看盘节奏） | Agent 自主性 |
+| R5 | 日志分离（会话/系统） | 基础设施 |
+| R6 | SimExchange 与真实交易所行为对齐 | 引擎对齐 |
+| R7 | 价位级别 Alert（Agent 设定关注价位） | Agent 自主性 |
+
+**实施分批**：
+- **第一批（本文档）**：R5 → R1 → R2 — 基础设施，后续所有需求依赖
+- **第二批**：R4 + R3 + R7 — Agent 自主性，可并行
+- **第三批**：R6 — 引擎对齐，改动量大且独立
+
+**R5 排在 R1/R2 之前的原因**：R1/R2 会重写启动流程，重写过程中需要使用新的日志架构。如果先做 R1 再做 R5，R1 的代码要被 R5 改第二遍。
+
+---
+
 ## 概述
 
 第一批需求是基础设施改造，为后续 Agent 自主性（R3/R4/R7）和引擎对齐（R6）打地基。依赖链：
@@ -490,3 +596,54 @@ PR #3: R2 Session 管理
 | `src/integrations/exchange/*` | 接口不变 |
 | 各模块 `logger = logging.getLogger(__name__)` | root logger 配置自动生效 |
 | `config/*.yaml` | 内容不变，角色从"配置源"变为"默认值模板" |
+
+---
+
+## 设计决策记录
+
+在 brainstorming 阶段讨论并确认的关键决策：
+
+### D1: `run()` 拆分方式 — 分阶段函数 vs Application 类
+
+**决策**：分阶段函数
+
+**备选方案**：
+- (A) 分阶段函数 ✅ — 把 `run()` 拆为 6 个顺序调用的阶段，每个 30-50 行
+- (B) `TradeBotApp` 类 — 封装整个生命周期为 start/run/shutdown 方法
+- (C) 维持现状 — 只插入 wizard/session 调用，不重构
+
+**理由**：方案 A 在结构清晰和改动量之间取得平衡。方案 B 引入新抽象层，当前阶段过度设计。方案 C 会让 270 行膨胀到 350+ 行，可读性进一步恶化。
+
+### D2: API 凭证存储 — keyring vs 加密文件 vs 0o600 文件
+
+**决策**：0o600 权限的 JSON 文件（`config/.credentials`）
+
+**备选方案**：
+- (A) `keyring` 库（OS 密钥链）— 最安全，但在无桌面服务器上不可用，新增依赖
+- (B) `cryptography.Fernet` 加密文件 — 跨平台可靠，但需管理加密密钥
+- (C) 0o600 JSON 文件 ✅ — 与现有 `models.json` 同模式，零新增依赖
+
+**理由**：项目已有 `models.json` 以 0o600 存储 API key 的先例，保持一致。当前单用户本地运行，文件权限足够。
+
+### D3: 数据库迁移 — Alembic vs ALTER TABLE vs 删库重建
+
+**决策**：幂等 `ALTER TABLE ADD COLUMN`
+
+**备选方案**：
+- (A) 幂等 ALTER TABLE ✅ — ~20 行代码，在 `init_db()` 后执行，检查列存在性后按需添加
+- (B) Alembic migration — 规范但增加配置复杂度（alembic.ini, versions 目录, 依赖）
+- (C) 删旧库重建 — 最简单但会丢数据
+
+**理由**：方案 C 在 R5/R1 实施期间用户可能已产生模拟交易数据，删库有风险。方案 B 对 pre-v1 单用户项目过重。方案 A 代码量极小且安全，Phase 2 产品化时再引入 Alembic。
+
+### D4: 终端交互库 — Rich 内置 vs 外部 TUI 库
+
+**决策**：Rich 内置 Prompt/Confirm/Table
+
+**理由**：项目已依赖 Rich，其 `Prompt.ask(choices=...)` / `Confirm.ask()` / `IntPrompt` 覆盖了向导所需的全部交互类型。无需引入 `questionary`、`inquirer` 等外部库。
+
+### D5: alert_config 存储 — JSON 字段 vs 独立列
+
+**决策**：JSON 字符串字段
+
+**理由**：R3（第二批）会重设计告警参数（去掉 cooldown，改默认值）。JSON 比独立列更灵活，schema 变化时不需要再次 ALTER TABLE。参数只有 3 个，查询需求不强。
