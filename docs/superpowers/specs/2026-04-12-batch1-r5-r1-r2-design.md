@@ -323,8 +323,10 @@ async def run_wizard(
 **Step 1: 交易所模式**
 - "模拟 / 实盘？" → `Prompt.ask(choices=["sim","real"], default="sim")` — 默认模拟，对新用户更安全
 - (sim) 手续费率 [0.05%], 初始余额 [100 USDT]
-- (real) 交易所 [okx], API 凭证（`password=True` 隐藏输入）
+  - fee_rate/initial_balance 的 wizard 内部 fallback 常量：`0.0005` / `100.0`（当 YAML 值为 None 时使用）
+- (real) 交易所 [okx], API 凭证（`password=True` 隐藏输入）, 初始余额 [100 USDT]
   - 检测 `config/.credentials` → 有则提示复用
+  - 初始余额用于 MetricsService 计算收益率，实盘用户应输入实际起始资金
 
 > **增强项（非首版范围）**：实盘分支可在凭证输入后增加交易所连通性测试（如 `exchange.fetch_balance()`），避免配置完 5 步后才发现凭证无效。当前代码也没有此测试，首版保持一致，后续迭代加入。
 
@@ -610,7 +612,7 @@ active/paused ──┴── 用户主动结束 → stopped（首版不实现 U
 | wizard 完成 | → active | `session_manager.py` |
 | 恢复 session | paused → active | `session_manager.py` |
 | 正常退出 Ctrl+C | active → paused | `run()` shutdown |
-| agent cycle 完成 | 更新 `last_active_at` | `run_agent_cycle()` |
+| agent cycle 完成 | 更新 `last_active_at` | `run_main_loop()` 的 on_tick 回调末尾（run_agent_cycle 返回后） |
 | 启动发现残留 active | → paused | `select_or_create_session()` 入口 |
 
 ### Known Limitation: 单 session 运行
@@ -634,6 +636,8 @@ async def select_or_create_session(
 ```
 
 职责：修复残留 active → paused、显示列表、路由恢复/wizard、返回 `(WizardResult, session_id)`。
+
+**取消处理**：如果 `run_wizard()` 返回 `None`（Ctrl+C），`select_or_create_session` 内部打印 "Cancelled." 并调用 `sys.exit(0)`。返回类型保持 `tuple[WizardResult, str]`，调用方无需处理取消场景。
 
 ### 文件变化
 
