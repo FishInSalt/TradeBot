@@ -226,3 +226,30 @@ async def test_scheduler_event_preempts_scheduled():
     # 第一次是 scheduled（初始启动），第二次应是 conditional（不是 scheduled）
     assert fired[0] == ("scheduled", None)
     assert fired[1] == ("conditional", "urgent")
+
+
+async def test_scheduler_drain_respects_stop():
+    """drain 循环中调用 stop() 应立即终止剩余事件处理。"""
+    from src.scheduler.scheduler import Scheduler
+
+    fired = []
+
+    async def callback(trigger_type: str, context):
+        fired.append((trigger_type, context))
+        if context == "event_2":
+            scheduler.stop()  # 处理 event_2 后立即停止
+
+    scheduler = Scheduler(interval_seconds=10, callback=callback)
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.05)
+
+    for i in range(5):
+        await scheduler.trigger("conditional", context=f"event_{i}")
+    await asyncio.sleep(0.5)
+
+    await task
+
+    conditional = [c for t, c in fired if t == "conditional"]
+    # event_0, event_1, event_2 应被处理，event_3+ 应被跳过
+    assert "event_2" in conditional
+    assert "event_3" not in conditional

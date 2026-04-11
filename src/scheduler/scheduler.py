@@ -47,7 +47,7 @@ class Scheduler:
             if self._pending_events:
                 # 安全阀：单次最多 drain 10 个事件，防止 cycle 内产生的新事件导致无限循环
                 for _ in range(min(len(self._pending_events), 10)):
-                    if not self._pending_events:
+                    if not self._running or not self._pending_events:
                         break
                     event = self._pending_events.popleft()
                     await self._run_cycle(event.trigger_type, event.context)

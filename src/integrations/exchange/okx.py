@@ -151,7 +151,10 @@ class OKXExchange(BaseExchange):
                     if status == "closed":
                         fill_event = await self._parse_fill_event(order_data)
                         if self._fill_callback:
-                            await self._fill_callback(fill_event)
+                            try:
+                                await self._fill_callback(fill_event)
+                            except Exception:
+                                logger.exception("Fill callback failed for order %s", order_data.get("id"))
                     elif filled > 0 and status != "closed":
                         logger.warning(
                             "Partial fill detected: order %s filled=%s status=%s (not processing)",

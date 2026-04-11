@@ -398,6 +398,57 @@ async def test_watch_orders_loop_error_recovery():
         assert call_count == 2
 
 
+async def test_watch_orders_loop_callback_error_no_backoff():
+    """fill callback 异常不应触发 WebSocket 指数退避。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+
+        callback = AsyncMock(side_effect=Exception("DB write failed"))
+        exchange.on_fill(callback)
+        exchange._running = True
+
+        order_data = {
+            "id": "order-cb-err",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "type": "stop",
+            "status": "closed",
+            "average": 59000.0,
+            "price": 59000.0,
+            "filled": 0.01,
+            "fee": {"cost": 0.295, "currency": "USDT"},
+            "timestamp": 1712534400000,
+            "info": {"posSide": "long", "pnl": "-5.00"},
+        }
+
+        mock_ws = AsyncMock()
+        call_count = 0
+
+        async def mock_watch_orders(symbol):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return [order_data]
+            exchange._running = False
+            return []
+
+        mock_ws.watch_orders = mock_watch_orders
+        exchange._ws_client = mock_ws
+
+        # 不应触发 asyncio.sleep（退避）
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await exchange._watch_orders_loop()
+            mock_sleep.assert_not_called()
+
+        # callback 被调用了（即使失败）
+        callback.assert_called_once()
+
+
 async def test_okx_set_alert_service():
     """set_alert_service 应注入 PriceAlertService。"""
     with patch("ccxt.async_support.okx") as mock_okx:
