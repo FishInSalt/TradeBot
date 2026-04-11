@@ -63,7 +63,7 @@ class TokenBudget:
 
 
 async def _record_action_from_fill(engine, session_id, event: FillEvent):
-    """将 FillEvent 记录为 TradeAction（独立函数，便于未来 OKX WebSocket 复用）。"""
+    """将 FillEvent 记录为 TradeAction。"""
     async with get_session(engine) as session:
         session.add(TradeAction(
             session_id=session_id,
@@ -305,7 +305,7 @@ async def run(
         timeout_seconds=settings.approval.timeout_seconds,
     )
 
-    agent = create_trader_agent(model="placeholder", persona_config=trader_config.persona)
+    agent = create_trader_agent(model=selected_model, persona_config=trader_config.persona)
 
     deps = TradingDeps(
         symbol=settings.trading.symbol,
@@ -377,7 +377,7 @@ async def run(
         except Exception:
             logger.exception("Agent cycle failed")
         finally:
-            # drain_pending_fills 仅用于 simulated exchange 的市价单
+            # drain_pending_fills: SimulatedExchange 返回市价单 fill，OKX 返回 []（无害）
             if handle_fill is not None:
                 for fill in exchange.drain_pending_fills():
                     try:

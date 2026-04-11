@@ -94,6 +94,7 @@ class OKXExchange(BaseExchange):
         self._ws_client: Any | None = None
         self._ws_connected = False
         self._pnl_fetch_timeout: float = 5.0
+        self._seen_order_ids: set[str] = set()
         logger.info("OKX exchange initialized (real account)")
 
     # --- Fill / Alert callback registration ---
@@ -149,6 +150,11 @@ class OKXExchange(BaseExchange):
                     filled = order_data.get("filled", 0) or 0
 
                     if status == "closed":
+                        order_id = order_data.get("id")
+                        if order_id in self._seen_order_ids:
+                            logger.debug("Skipping duplicate order %s", order_id)
+                            continue
+                        self._seen_order_ids.add(order_id)
                         fill_event = await self._parse_fill_event(order_data)
                         if self._fill_callback:
                             try:
@@ -176,6 +182,8 @@ class OKXExchange(BaseExchange):
             try:
                 raw = await self._ws_client.watch_ticker(self._symbol)
                 error_count = 0
+                if raw.get("timestamp") is None or raw.get("last") is None:
+                    continue
                 ticker = Ticker(
                     symbol=raw["symbol"],
                     last=float(raw["last"]),
@@ -257,7 +265,7 @@ class OKXExchange(BaseExchange):
             timestamp=timestamp,
         )
 
-    # --- REST interface (unchanged from Phase 1a) ---
+    # --- REST interface ---
 
     @_retry()
     async def fetch_ticker(self, symbol: str) -> Ticker:  # type: ignore[override]

@@ -400,7 +400,7 @@ class SimulatedExchange(BaseExchange):
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
-        """Process a single tick -- check liquidations and conditional orders."""
+        """Process a single tick -- check liquidations, conditional orders, and price alerts."""
         self._latest_ticker = ticker
 
         triggered: list[FillEvent] = []

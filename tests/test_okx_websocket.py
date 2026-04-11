@@ -449,6 +449,108 @@ async def test_watch_orders_loop_callback_error_no_backoff():
         callback.assert_called_once()
 
 
+async def test_watch_orders_loop_dedup_orders():
+    """重连后重复的 closed order 不应重复触发 fill callback。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        callback = AsyncMock()
+        exchange.on_fill(callback)
+        exchange._running = True
+
+        order_data = {
+            "id": "order-dup",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "type": "stop",
+            "status": "closed",
+            "average": 59000.0,
+            "price": 59000.0,
+            "filled": 0.01,
+            "fee": {"cost": 0.295, "currency": "USDT"},
+            "timestamp": 1712534400000,
+            "info": {"posSide": "long", "pnl": "-5.00"},
+        }
+
+        mock_ws = AsyncMock()
+        call_count = 0
+
+        async def mock_watch_orders(symbol):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return [order_data]  # 同一 order 返回两次
+            exchange._running = False
+            return []
+
+        mock_ws.watch_orders = mock_watch_orders
+        exchange._ws_client = mock_ws
+
+        await exchange._watch_orders_loop()
+
+        # 只应触发一次
+        callback.assert_called_once()
+
+
+async def test_watch_ticker_loop_skips_none_timestamp():
+    """timestamp 为 None 的 ticker 应被跳过，不触发退避。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+
+        mock_service = MagicMock()
+        mock_service.check.return_value = None
+        exchange.set_alert_service(mock_service)
+
+        exchange._running = True
+        mock_ws = AsyncMock()
+        call_count = 0
+
+        async def mock_watch_ticker(symbol):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "symbol": "BTC/USDT:USDT",
+                    "last": "60000",
+                    "bid": "59999",
+                    "ask": "60001",
+                    "high": "60500",
+                    "low": "59500",
+                    "baseVolume": "12345",
+                    "timestamp": None,  # None timestamp
+                }
+            exchange._running = False
+            return {
+                "symbol": "BTC/USDT:USDT",
+                "last": "60000",
+                "bid": "59999",
+                "ask": "60001",
+                "high": "60500",
+                "low": "59500",
+                "baseVolume": "12345",
+                "timestamp": 1712534401000,
+            }
+
+        mock_ws.watch_ticker = mock_watch_ticker
+        exchange._ws_client = mock_ws
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await exchange._watch_ticker_loop()
+            mock_sleep.assert_not_called()
+
+        # 只有第二个 tick（有 timestamp）才喂入 service
+        mock_service.check.assert_called_once()
+
+
 async def test_okx_set_alert_service():
     """set_alert_service 应注入 PriceAlertService。"""
     with patch("ccxt.async_support.okx") as mock_okx:
