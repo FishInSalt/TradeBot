@@ -248,11 +248,9 @@ class Scheduler:
             pass
 ```
 
-- [ ] **Step 4: 运行全部 Scheduler 测试**
+- [ ] **Step 4: 更新旧测试适配新行为**
 
-Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_scheduler.py -v`
-
-Expected: PASS — 所有新旧测试通过。注意 `test_scheduler_trigger_merges_multiple_events` 行为将变化（不再合并，而是 FIFO 保留所有事件），需要更新该测试以匹配新行为：
+`test_scheduler_trigger_merges_multiple_events` 行为将变化（不再合并，而是 FIFO 保留所有事件），需要更新该测试以匹配新行为：
 
 ```python
 # tests/test_scheduler.py — 替换 test_scheduler_trigger_merges_multiple_events
@@ -283,7 +281,13 @@ async def test_scheduler_trigger_merges_multiple_events():
     assert contexts == ["event1", "event2"]
 ```
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 运行全部 Scheduler 测试**
+
+Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/test_scheduler.py -v`
+
+Expected: PASS — 所有新旧测试通过。
+
+- [ ] **Step 6: 提交**
 
 Run: `cd /Users/z/Z/TradeBot && git add src/scheduler/scheduler.py tests/test_scheduler.py && git commit -m "refactor: replace Scheduler pending trigger with deque event queue"`
 
@@ -1261,6 +1265,8 @@ async def run(
         )
         console.print("Exchange: simulated (local matching)")
     else:
+        # 注意：Task 5 的 app.py 保持 OKXExchange 旧构造函数调用（3 参数），
+        # Task 8 Step 5 将统一更新为 4 参数（添加 symbol）。
         exchange = OKXExchange(
             api_key=settings.exchange.api_key,
             secret=settings.exchange.secret,
@@ -1308,9 +1314,17 @@ async def run(
     # Existing Phase 1a code (on_tick, fill handler, scheduler, exchange.start) remains as-is.
     # Task 11 will unify fill/alert handler registration for both exchange types.
 
-    # ... (rest of run() unchanged from Phase 1a: on_tick, scheduler, fill handler,
+    # ... (rest of run() unchanged from Phase 1a: fill handler, scheduler,
     #  exchange.start, metrics display, scheduler loop, shutdown — see existing app.py)
-    # Only change in on_tick: pass model=selected_model to run_agent_cycle
+
+    # 在 on_tick 中传入 model（关键修改）
+    async def on_tick(trigger_type: str, context=None):
+        if shutdown_event.is_set():
+            return
+        try:
+            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context, model=selected_model)
+        except Exception:
+            logger.exception("Agent cycle failed")
 
 
 async def _interactive_add_model(model_manager, existing_models):
@@ -1346,7 +1360,11 @@ async def _interactive_add_model(model_manager, existing_models):
     return config, model
 ```
 
-移除 `app.py` 顶部的 `from src.services.llm_router import LLMRouter` import（保留 llm_router.py 文件本身不删除）。
+Remove these 3 lines from `src/cli/app.py`（保留 `llm_router.py` 文件本身不删除）：
+
+1. Top-level import: `from src.services.llm_router import LLMRouter` (currently around line 22)
+2. Instance creation: `llm_router = LLMRouter(settings.models)` (currently around line 225)
+3. Model resolution: `model = llm_router.resolve("trade_decision")` (currently around line 234)
 
 - [ ] **Step 4: 运行全部测试确保无回归**
 
@@ -3274,22 +3292,28 @@ Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/simulated.py t
 
     alert_service = None
     if settings.alerts.enabled:
-        # 交互询问参数（或使用默认值）
         console.print("\n[bold]Price alert settings:[/]")
-        window_input = input(f"  Window (minutes) [{settings.alerts.window_minutes}]: ").strip()
-        threshold_input = input(f"  Threshold (%) [{settings.alerts.threshold_pct}]: ").strip()
-        cooldown_input = input(f"  Cooldown (minutes) [{settings.alerts.cooldown_minutes}]: ").strip()
-
-        window = int(window_input) if window_input else settings.alerts.window_minutes
-        threshold = float(threshold_input) if threshold_input else settings.alerts.threshold_pct
-        cooldown = int(cooldown_input) if cooldown_input else settings.alerts.cooldown_minutes
-
-        alert_service = PriceAlertService(
-            symbol=settings.trading.symbol,
-            window_minutes=window,
-            threshold_pct=threshold,
-            cooldown_minutes=cooldown,
-        )
+        try:
+            window_input = input(f"  Window (minutes) [{settings.alerts.window_minutes}]: ").strip()
+            threshold_input = input(f"  Threshold (%) [{settings.alerts.threshold_pct}]: ").strip()
+            cooldown_input = input(f"  Cooldown (minutes) [{settings.alerts.cooldown_minutes}]: ").strip()
+            window = int(window_input) if window_input else settings.alerts.window_minutes
+            threshold = float(threshold_input) if threshold_input else settings.alerts.threshold_pct
+            cooldown = int(cooldown_input) if cooldown_input else settings.alerts.cooldown_minutes
+            alert_service = PriceAlertService(
+                symbol=settings.trading.symbol,
+                window_minutes=window,
+                threshold_pct=threshold,
+                cooldown_minutes=cooldown,
+            )
+        except (ValueError, TypeError) as e:
+            console.print(f"[yellow]Invalid alert settings ({e}), using defaults[/]")
+            alert_service = PriceAlertService(
+                symbol=settings.trading.symbol,
+                window_minutes=settings.alerts.window_minutes,
+                threshold_pct=settings.alerts.threshold_pct,
+                cooldown_minutes=settings.alerts.cooldown_minutes,
+            )
         exchange.set_alert_service(alert_service)
         console.print(f"  Price alerts: ON (threshold={threshold}%, window={window}min, cooldown={cooldown}min)")
     else:
