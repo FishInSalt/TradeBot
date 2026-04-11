@@ -95,6 +95,7 @@ class OKXExchange(BaseExchange):
         self._ws_connected = False
         self._pnl_fetch_timeout: float = 5.0
         self._seen_order_ids: set[str] = set()
+        self._seen_order_ids_max = 10000
         logger.info("OKX exchange initialized (real account)")
 
     # --- Fill / Alert callback registration ---
@@ -155,6 +156,10 @@ class OKXExchange(BaseExchange):
                             logger.debug("Skipping duplicate order %s", order_id)
                             continue
                         self._seen_order_ids.add(order_id)
+                        if len(self._seen_order_ids) > self._seen_order_ids_max:
+                            # 淘汰一半旧条目
+                            to_remove = list(self._seen_order_ids)[:len(self._seen_order_ids) // 2]
+                            self._seen_order_ids -= set(to_remove)
                         fill_event = await self._parse_fill_event(order_data)
                         if self._fill_callback:
                             try:
@@ -182,7 +187,7 @@ class OKXExchange(BaseExchange):
             try:
                 raw = await self._ws_client.watch_ticker(self._symbol)
                 error_count = 0
-                if raw.get("timestamp") is None or raw.get("last") is None:
+                if any(raw.get(k) is None for k in ("timestamp", "last", "bid", "ask", "high", "low", "baseVolume")):
                     continue
                 ticker = Ticker(
                     symbol=raw["symbol"],
