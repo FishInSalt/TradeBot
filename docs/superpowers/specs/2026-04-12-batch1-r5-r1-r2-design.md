@@ -1,6 +1,6 @@
 # Batch 1 设计文档：R5 / R1 / R2
 
-> **状态**: 待审阅
+> **状态**: 审阅修订后
 > **日期**: 2026-04-12
 > **范围**: 日志分离 (R5) → 交互式配置向导 (R1) → Session 管理 (R2)
 
@@ -74,7 +74,7 @@ session_id 在 DB 初始化后才确定，因此日志分两阶段：
 
 ```python
 def setup_system_logging(debug: bool, log_dir: Path) -> Console:
-    """阶段 1 — 配置 root logger，返回临时 Console。"""
+    """阶段 1 — 创建 log_dir，配置 root logger，返回临时 Console。"""
 
 class SessionConsole:
     """阶段 2 — 终端 + 会话文件双写。"""
@@ -90,7 +90,17 @@ def setup_session_logging(session_id: str, log_dir: Path) -> SessionConsole:
 
 - 内部两个 Rich Console：终端输出 + 文件输出（`no_color=True, width=120`）
 - 文件 append 模式 — 恢复 session 时日志续写
+- 每次 `print()` 后对文件执行 `flush()`，防止非正常退出（SIGKILL）时丢尾部日志
 - `close()` 在 graceful shutdown 时调用
+
+### console.print 迁移策略
+
+当前 `console` 是 `app.py` 的模块级全局变量（~32 处调用）。`SessionConsole` 在运行时才创建，不能替代全局变量。迁移方式：
+
+- **阶段 1（session_id 未知）**：`setup_system_logging()` 返回临时 `Console()`，用于欢迎页、DB 初始化等启动信息
+- **阶段 2（session_id 确定后）**：创建 `SessionConsole`，作为参数传入后续函数
+- `run_agent_cycle()`、`build_services()` 等需要会话输出的函数增加 `console` 参数，不依赖全局变量
+- 模块级 `console = Console()` 删除
 
 ### Root Logger 配置
 
@@ -168,6 +178,9 @@ class WizardResult:
 
     # Persona
     persona: PersonaConfig
+
+    # Session
+    session_name: str               # 如 "BTC sim #1"，向导最后一步生成，用户可改
 ```
 
 这是向导与后续启动流程之间的唯一接口。
@@ -181,8 +194,10 @@ async def run_wizard(
     trader_defaults: TraderConfig,
     model_id: str | None = None,
 ) -> WizardResult | None:
-    """运行交互式配置向导。返回 None 表示用户中途退出。"""
+    """运行交互式配置向导。返回 None 表示用户中途退出（含 Ctrl+C）。"""
 ```
+
+向导整体用 `try/except KeyboardInterrupt` 包裹，中途 Ctrl+C 返回 `None`，由调用方决定退出行为。
 
 #### 向导流程（5 步）
 
@@ -205,7 +220,7 @@ async def run_wizard(
 **Step 4: 风控与调度**
 - 唤醒间隔 [15 min]
 - 审批开关 — 模拟默认 OFF, 实盘默认 ON
-- 价格告警开关 + 参数 (window [5min], threshold [3%])
+- 价格告警开关 + 参数 (window [5min], threshold [3%])  ← 注：此默认值将在 R3 中更新为 1h/5%
 - Token 预算 [500000/day]
 
 **Step 5: 交易员人设**
@@ -312,7 +327,29 @@ last_active_at: Mapped[datetime | None] # 最后 agent cycle 时间
 
 **不存 DB**：API 凭证（`config/.credentials`）、模型 API key（`models.json`）。
 
-**迁移策略**：无历史数据，删旧库重建，`create_all()` 直接创建新 schema。
+**迁移策略**：幂等 `ALTER TABLE ADD COLUMN`。在 `init_db()` 中 `create_all()` 之后调用：
+
+```python
+async def _migrate_session_table(conn):
+    """检查并添加 Session 表新增字段。幂等，可重复执行。"""
+    result = await conn.execute(text("PRAGMA table_info(sessions)"))
+    existing = {row[1] for row in result}
+    migrations = [
+        ("exchange_type", "TEXT DEFAULT 'simulated'"),
+        ("timeframe", "TEXT DEFAULT '15m'"),
+        ("scheduler_interval_min", "INTEGER DEFAULT 15"),
+        ("approval_enabled", "INTEGER DEFAULT 1"),
+        ("alert_config", "TEXT"),
+        ("fee_rate", "REAL"),
+        ("token_budget", "INTEGER DEFAULT 500000"),
+        ("last_active_at", "TIMESTAMP"),
+    ]
+    for col, defn in migrations:
+        if col not in existing:
+            await conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {col} {defn}"))
+```
+
+这比删库重建更安全（不丢 R5/R1 期间可能产生的交易数据），比 Alembic 更轻量。
 
 ### 启动流程
 
@@ -330,18 +367,19 @@ last_active_at: Mapped[datetime | None] # 最后 agent cycle 时间
 
 ```
  TradeBot Sessions
- ─────────────────────────────────────────────────
-  #  Name              Mode   Status     Last Active
- ─────────────────────────────────────────────────
-  1  BTC sim #1        sim    ▶ active   2 hours ago
-  2  ETH sim #2        sim    ⏸ paused   3 days ago
- ─────────────────────────────────────────────────
+ ──────────────────────────────────────────────────────────────────
+  #  Name              Mode   Status     Position        Last Active
+ ──────────────────────────────────────────────────────────────────
+  1  BTC sim #1        sim    ▶ active   long 0.5 BTC    2 hours ago
+  2  ETH sim #2        sim    ⏸ paused   —               3 days ago
+ ──────────────────────────────────────────────────────────────────
   3  + New Session
 ```
 
 - 按 `last_active_at` 降序
 - 仅显示 `status in ("active", "paused")`
 - 时间显示为相对时间
+- 持仓摘要：模拟模式从 `SimPosition` 表直接查询；实盘模式显示 "—"（exchange 未连接，无法获取实时持仓）
 
 ### 恢复流程
 
