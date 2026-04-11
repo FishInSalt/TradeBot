@@ -1405,9 +1405,64 @@ Run: `cd /Users/z/Z/TradeBot && python -m pytest tests/ -v --ignore=tests/test_c
 
 Expected: PASS — 所有测试通过（`test_cli.py` 可能需要适配新签名，暂时忽略）。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 移除 settings.yaml 和 settings_sim.yaml 中的 `models:` 段**
 
-Run: `cd /Users/z/Z/TradeBot && git add src/cli/app.py .gitignore && git commit -m "feat: integrate ModelManager into app startup, replace llm_router.resolve with runtime model override"`
+模型配置已迁移到 `config/models.json`（由 ModelManager 管理），YAML 中的 `models:` 段不再使用，需要移除。
+
+从 `config/settings.yaml` 中删除以下内容（第 17-27 行）：
+
+```yaml
+# 删除以下内容
+# === LLM Model Configuration ===
+models:
+  default: anthropic:claude-sonnet-4-20250514   # Fallback model for unspecified tasks
+  strong: anthropic:claude-opus-4-6             # High-capability model (complex analysis)
+  weak: anthropic:claude-haiku-4-5-20251001     # Fast/cheap model (simple tasks)
+  routing:                     # Which model tier to use for each task type
+    market_analysis: strong    # Market data analysis and interpretation
+    trade_decision: strong     # Final trading decision (buy/sell/hold)
+    news_summary: weak         # News article summarization (Phase 1b)
+    review: weak               # Post-trade review and memory updates (Phase 1b)
+```
+
+从 `config/settings_sim.yaml` 中删除以下内容（第 15-25 行）：
+
+```yaml
+# 删除以下内容
+# === LLM Model Configuration ===
+models:
+  default: anthropic:claude-sonnet-4-20250514   # Fallback model for unspecified tasks
+  strong: anthropic:claude-opus-4-6             # High-capability model (complex analysis)
+  weak: anthropic:claude-haiku-4-5-20251001     # Fast/cheap model (simple tasks)
+  routing:                     # Which model tier to use for each task type
+    market_analysis: strong    # Market data analysis and interpretation
+    trade_decision: strong     # Final trading decision (buy/sell/hold)
+    news_summary: weak         # News article summarization (Phase 1b)
+    review: weak               # Post-trade review and memory updates (Phase 1b)
+```
+
+- [ ] **Step 6: 修改 `main.py` 解析 `--model` CLI 参数**
+
+修改 `main.py` 为：
+
+```python
+# main.py
+
+import argparse
+import asyncio
+
+from src.cli.app import run
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="TradeBot")
+    parser.add_argument("--model", type=str, default=None, help="Model ID from models.json (skip interactive selection)")
+    args = parser.parse_args()
+    asyncio.run(run(model_id=args.model))
+```
+
+- [ ] **Step 7: 提交**
+
+Run: `cd /Users/z/Z/TradeBot && git add src/cli/app.py .gitignore config/settings.yaml config/settings_sim.yaml main.py && git commit -m "feat: integrate ModelManager into app startup, replace llm_router.resolve with runtime model override"`
 
 ---
 
@@ -1619,6 +1674,8 @@ def test_update_params_boundary_validation():
     with pytest.raises(ValueError):
         service.update_params(threshold_pct=3.0, window_minutes=0, cooldown_minutes=15)  # < 1
     with pytest.raises(ValueError):
+        service.update_params(threshold_pct=3.0, window_minutes=5, cooldown_minutes=0)  # < 1
+    with pytest.raises(ValueError):
         service.update_params(threshold_pct=3.0, window_minutes=5, cooldown_minutes=200)  # > 120
     with pytest.raises(ValueError):
         service.update_params(threshold_pct=55.0, window_minutes=5, cooldown_minutes=15)  # > 50
@@ -1728,8 +1785,8 @@ class PriceAlertService:
             raise ValueError(f"threshold_pct must be 0.5-50.0, got {threshold_pct}")
         if not (1 <= window_minutes <= 60):
             raise ValueError(f"window_minutes must be 1-60, got {window_minutes}")
-        if not (0 <= cooldown_minutes <= 120):
-            raise ValueError(f"cooldown_minutes must be 0-120, got {cooldown_minutes}")
+        if not (1 <= cooldown_minutes <= 120):
+            raise ValueError(f"cooldown_minutes must be 1-120, got {cooldown_minutes}")
 
         self._threshold_pct = threshold_pct
         self._window_ms = window_minutes * 60 * 1000
@@ -1929,7 +1986,7 @@ def test_okx_on_fill_registers_callback():
         assert exchange._fill_callback is callback
 
 
-def test_parse_fill_event_stop_loss():
+async def test_parse_fill_event_stop_loss():
     """_parse_fill_event 应正确解析止损成交数据。"""
     with patch("ccxt.async_support.okx") as mock_okx:
         mock_okx.return_value = MagicMock()
@@ -1954,7 +2011,7 @@ def test_parse_fill_event_stop_loss():
                 "pnl": "-12.50",
             },
         }
-        fill = exchange._parse_fill_event(order_data)
+        fill = await exchange._parse_fill_event(order_data)
         assert fill.order_id == "order-123"
         assert fill.symbol == "BTC/USDT:USDT"
         assert fill.side == "sell"
@@ -1967,7 +2024,7 @@ def test_parse_fill_event_stop_loss():
         assert fill.timestamp == 1712534400000
 
 
-def test_parse_fill_event_take_profit():
+async def test_parse_fill_event_take_profit():
     """_parse_fill_event 应正确解析止盈成交。"""
     with patch("ccxt.async_support.okx") as mock_okx:
         mock_okx.return_value = MagicMock()
@@ -1992,13 +2049,13 @@ def test_parse_fill_event_take_profit():
                 "pnl": "25.00",
             },
         }
-        fill = exchange._parse_fill_event(order_data)
+        fill = await exchange._parse_fill_event(order_data)
         assert fill.position_side == "long"
         assert fill.trigger_reason == "take_profit"
         assert fill.pnl == 25.00
 
 
-def test_parse_fill_event_infer_position_side():
+async def test_parse_fill_event_infer_position_side():
     """当 info.posSide 缺失时，应根据 side + type 推断 position_side。"""
     with patch("ccxt.async_support.okx") as mock_okx:
         mock_okx.return_value = MagicMock()
@@ -2021,17 +2078,17 @@ def test_parse_fill_event_infer_position_side():
             "timestamp": 1712534600000,
             "info": {},  # 无 posSide
         }
-        fill = exchange._parse_fill_event(order_data)
+        fill = await exchange._parse_fill_event(order_data)
         assert fill.position_side == "long"
 
         # buy + stop → short（空头止损）
         order_data["side"] = "buy"
         order_data["id"] = "order-790"
-        fill2 = exchange._parse_fill_event(order_data)
+        fill2 = await exchange._parse_fill_event(order_data)
         assert fill2.position_side == "short"
 
 
-def test_parse_fill_event_pnl_missing():
+async def test_parse_fill_event_pnl_missing():
     """当 info.pnl 缺失时 pnl 应为 None。"""
     with patch("ccxt.async_support.okx") as mock_okx:
         mock_okx.return_value = MagicMock()
@@ -2053,11 +2110,72 @@ def test_parse_fill_event_pnl_missing():
             "timestamp": 1712534600000,
             "info": {"posSide": "long"},  # 无 pnl
         }
-        fill = exchange._parse_fill_event(order_data)
+        fill = await exchange._parse_fill_event(order_data)
         assert fill.pnl is None
 
 
-def test_parse_fill_event_unknown_order_type():
+async def test_parse_fill_event_pnl_rest_fallback():
+    """当 info.pnl 缺失时，应通过 REST fetch_order 补查 pnl。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        order_data = {
+            "id": "order-rest-pnl",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "type": "stop",
+            "status": "closed",
+            "average": 58000.0,
+            "price": 58000.0,
+            "filled": 0.01,
+            "fee": {"cost": 0.29, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long"},  # 无 pnl
+        }
+        # Mock REST fetch_order 返回带 pnl 的数据
+        exchange._client.fetch_order = AsyncMock(return_value={
+            "info": {"pnl": "-3.50"},
+        })
+        fill = await exchange._parse_fill_event(order_data)
+        assert fill.pnl == -3.5
+        exchange._client.fetch_order.assert_called_once_with("order-rest-pnl", "BTC/USDT:USDT")
+
+
+async def test_parse_fill_event_pnl_rest_fallback_timeout():
+    """REST fetch_order 超时时 pnl 应为 None。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        order_data = {
+            "id": "order-timeout",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "type": "stop",
+            "status": "closed",
+            "average": 58000.0,
+            "price": 58000.0,
+            "filled": 0.01,
+            "fee": {"cost": 0.29, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long"},  # 无 pnl
+        }
+        # Mock REST fetch_order 超时
+        async def slow_fetch(*args):
+            await asyncio.sleep(10)
+        exchange._client.fetch_order = slow_fetch
+        fill = await exchange._parse_fill_event(order_data)
+        assert fill.pnl is None
+
+
+async def test_parse_fill_event_unknown_order_type():
     """未知 order_type 应设 trigger_reason 为 'unknown'。"""
     with patch("ccxt.async_support.okx") as mock_okx:
         mock_okx.return_value = MagicMock()
@@ -2079,7 +2197,7 @@ def test_parse_fill_event_unknown_order_type():
             "timestamp": 1712534600000,
             "info": {"posSide": "long"},
         }
-        fill = exchange._parse_fill_event(order_data)
+        fill = await exchange._parse_fill_event(order_data)
         assert fill.trigger_reason == "unknown"
 
 
@@ -2303,7 +2421,6 @@ _TRIGGER_REASON_MAP = {
     "take_profit": "take_profit",
     "take_profit_market": "take_profit",
     "market": "market",
-    "limit": "market",
 }
 
 # (side, order_type) → position_side 推断表
@@ -2404,6 +2521,8 @@ class OKXExchange(BaseExchange):
         except Exception:
             self._ws_connected = False
             logger.error("WebSocket connection failed, running in REST-only mode", exc_info=True)
+            from rich.console import Console
+            Console().print("[yellow]⚠ WebSocket connection failed, running in REST-only mode[/]")
 
     # --- watch_orders loop ---
 
@@ -2418,7 +2537,7 @@ class OKXExchange(BaseExchange):
                     filled = order_data.get("filled", 0) or 0
 
                     if status == "closed":
-                        fill_event = self._parse_fill_event(order_data)
+                        fill_event = await self._parse_fill_event(order_data)
                         if self._fill_callback:
                             await self._fill_callback(fill_event)
                     elif filled > 0 and status != "closed":
@@ -2466,7 +2585,7 @@ class OKXExchange(BaseExchange):
 
     # --- FillEvent 解析 ---
 
-    def _parse_fill_event(self, order_data: dict) -> FillEvent:
+    async def _parse_fill_event(self, order_data: dict) -> FillEvent:
         """从 watch_orders 返回的 order 数据构造 FillEvent。"""
         order_id = order_data["id"]
         symbol = order_data["symbol"]
@@ -2495,7 +2614,7 @@ class OKXExchange(BaseExchange):
         fee_info = order_data.get("fee", {})
         fee = float(fee_info.get("cost", 0) or 0) if fee_info else 0.0
 
-        # pnl
+        # pnl — 优先取 info.pnl，缺失则 REST 补查（超时 5s，失败则 None）
         pnl_raw = info.get("pnl")
         pnl: float | None = None
         if pnl_raw is not None and pnl_raw != "":
@@ -2503,6 +2622,17 @@ class OKXExchange(BaseExchange):
                 pnl = float(pnl_raw)
             except (ValueError, TypeError):
                 pnl = None
+        if pnl is None:
+            try:
+                fetched = await asyncio.wait_for(
+                    self._client.fetch_order(order_id, symbol),
+                    timeout=5.0,
+                )
+                pnl_fetched = fetched.get("info", {}).get("pnl")
+                if pnl_fetched is not None:
+                    pnl = float(pnl_fetched)
+            except Exception:
+                logger.warning("pnl fetch failed for order %s, setting pnl=None", order_id)
 
         # timestamp
         timestamp = order_data.get("timestamp", 0) or 0
@@ -3227,10 +3357,7 @@ Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/simulated.py t
         exchange.on_alert(handle_alert)
 
     # --- Start exchange (both simulated and OKX) ---
-    if settings.exchange.name == "simulated":
-        await exchange.start()
-    else:
-        await exchange.start()  # OKX: 启动 WebSocket watch_orders + watch_ticker
+    await exchange.start()  # SimulatedExchange: 恢复状态 + 撮合循环; OKXExchange: WebSocket loops
 
     # Show initial metrics (after start so simulated mode has restored state)
     positions = await exchange.fetch_positions(settings.trading.symbol)
@@ -3252,8 +3379,6 @@ Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/simulated.py t
     await exchange.close()
     console.print("[green]TradeBot stopped.[/]")
 ```
-
-注意：上面的代码简化了 `exchange.start()` 的分支 — 两种 exchange 都调用 `start()`（BaseExchange 默认空实现保证安全），但保留条件分支便于未来差异化处理。可以进一步简化为无条件调用 `await exchange.start()`。
 
 - [ ] **Step 2: 运行全部测试确保无回归**
 
