@@ -61,6 +61,10 @@ class ModelManager:
 
     def save_models(self, configs: list[ModelConfig]) -> None:
         """保存模型配置列表到 models.json，设置 0o600 权限。"""
+        ids = [c.id for c in configs]
+        if len(ids) != len(set(ids)):
+            dupes = [i for i in ids if ids.count(i) > 1]
+            raise ValueError(f"Duplicate model IDs: {set(dupes)}")
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         data = [asdict(c) for c in configs]
         with open(self._config_path, "w") as f:

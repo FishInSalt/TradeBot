@@ -5,6 +5,21 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 
+async def test_okx_start_fallback_to_rest_on_ws_failure():
+    """WebSocket 启动失败时应降级为 REST-only 模式。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        with patch.dict("sys.modules", {"ccxt.pro": None}):
+            await exchange.start()
+        assert exchange._ws_connected is False
+        assert exchange._running is False
+
+
 def test_okx_constructor_accepts_symbol():
     """OKXExchange 构造函数应接受 symbol 参数。"""
     with patch("ccxt.async_support.okx") as mock_okx:

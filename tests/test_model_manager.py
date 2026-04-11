@@ -180,7 +180,6 @@ def test_get_model_by_id_not_found(tmp_path: Path):
     assert found is None
 
 
-@pytest.mark.asyncio
 async def test_test_connectivity_mock():
     """test_connectivity 应调用 agent.run 并返回成功/失败。"""
     from src.services.model_manager import ModelManager
@@ -199,7 +198,6 @@ async def test_test_connectivity_mock():
         assert error is None
 
 
-@pytest.mark.asyncio
 async def test_test_connectivity_failure():
     """test_connectivity 失败时应返回错误信息。"""
     from src.services.model_manager import ModelManager
@@ -216,3 +214,18 @@ async def test_test_connectivity_failure():
         success, error = await manager.test_connectivity(MagicMock())
         assert success is False
         assert "auth failed" in error
+
+
+def test_save_models_duplicate_id_raises(tmp_path: Path):
+    """重复 ID 应抛出 ValueError。"""
+    from src.services.model_manager import ModelManager, ModelConfig
+    manager = ModelManager(config_path=tmp_path / "models.json")
+
+    configs = [
+        ModelConfig(id="claude", provider="anthropic", model="claude-opus-4-6",
+                    api_key="sk-1", base_url=None),
+        ModelConfig(id="claude", provider="anthropic", model="claude-sonnet-4-20250514",
+                    api_key="sk-2", base_url=None),
+    ]
+    with pytest.raises(ValueError, match="Duplicate model IDs"):
+        manager.save_models(configs)

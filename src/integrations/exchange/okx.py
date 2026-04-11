@@ -128,7 +128,8 @@ class OKXExchange(BaseExchange):
             self._orders_task = asyncio.create_task(self._watch_orders_loop())
             if self._alert_service:
                 self._ticker_task = asyncio.create_task(self._watch_ticker_loop())
-            logger.info("OKX WebSocket started (watch_orders + watch_ticker)")
+            loops = "watch_orders" + (" + watch_ticker" if self._alert_service else "")
+            logger.info("OKX WebSocket started (%s)", loops)
         except Exception:
             self._ws_connected = False
             logger.error("WebSocket connection failed, running in REST-only mode", exc_info=True)
@@ -381,6 +382,7 @@ class OKXExchange(BaseExchange):
         await self._client.cancel_order(order_id, symbol)
 
     async def close(self) -> None:
+        logger.info("OKX exchange closing")
         self._running = False
         for attr in ("_orders_task", "_ticker_task"):
             task = getattr(self, attr, None)
