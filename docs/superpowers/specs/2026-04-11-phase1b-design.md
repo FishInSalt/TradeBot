@@ -184,30 +184,36 @@ CLI 参数 `--model <id>` 支持无人值守启动（cron / systemd 等场景）
 根据 `provider`、`model`、`base_url`、`api_key` 字段构造 pydantic-ai 的 model 对象：
 
 ```python
-from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.groq import GroqModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.google import GoogleProvider
+from pydantic_ai.providers.groq import GroqProvider
+
+_PROVIDER_MAP = {
+    "anthropic": (AnthropicModel, AnthropicProvider),
+    "openai": (OpenAIChatModel, OpenAIProvider),
+    "google-gla": (GoogleModel, GoogleProvider),
+    "groq": (GroqModel, GroqProvider),
+}
 
 def create_model(config: ModelConfig) -> Model:
-    """返回 pydantic-ai Model 对象，统一使用直接构造，避免环境变量副作用。"""
-    _PROVIDER_MAP = {
-        "anthropic": AnthropicModel,
-        "openai": OpenAIModel,
-        "google-gla": GoogleModel,
-        "groq": GroqModel,
-    }
-    model_cls = _PROVIDER_MAP.get(config.provider)
-    if model_cls is None:
+    """返回 pydantic-ai Model 对象。通过 Provider 传入 api_key 和 base_url。"""
+    entry = _PROVIDER_MAP.get(config.provider)
+    if entry is None:
         raise ValueError(f"Unsupported provider: {config.provider}")
-
-    kwargs = {"api_key": config.api_key}
+    model_cls, provider_cls = entry
+    provider_kwargs = {"api_key": config.api_key}
     if config.base_url:
-        kwargs["base_url"] = config.base_url
-    return model_cls(config.model, **kwargs)
+        provider_kwargs["base_url"] = config.base_url
+    provider = provider_cls(**provider_kwargs)
+    return model_cls(config.model, provider=provider)
 ```
 
-支持的 provider：`anthropic`、`openai`、`google-gla`、`groq`。不支持的 provider 抛 ValueError。如需新增 provider，在 `_PROVIDER_MAP` 中添加映射即可。
+支持的 provider：`anthropic`、`openai`（使用 `OpenAIChatModel`）、`google-gla`、`groq`。不支持的 provider 抛 ValueError。每个 provider 通过对应的 Provider 对象传入 `api_key` 和 `base_url`，Model 构造函数不直接接受这些参数。如需新增 provider，在 `_PROVIDER_MAP` 中添加 `(ModelClass, ProviderClass)` 映射即可。
 
 ### 不做的事
 

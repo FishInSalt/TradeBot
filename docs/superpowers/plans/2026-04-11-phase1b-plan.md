@@ -781,27 +781,27 @@ def test_create_model_anthropic():
 
 
 def test_create_model_openai():
-    """create_model 应为 openai provider 返回 OpenAIModel。"""
+    """create_model 应为 openai provider 返回 OpenAIChatModel。"""
     from src.services.model_manager import ModelManager, ModelConfig
-    from pydantic_ai.models.openai import OpenAIModel
+    from pydantic_ai.models.openai import OpenAIChatModel
 
     manager = ModelManager(config_path=Path("/dev/null"))
     config = ModelConfig(id="gpt4", provider="openai", model="gpt-4o",
                          api_key="sk-test", base_url=None)
     model = manager.create_model(config)
-    assert isinstance(model, OpenAIModel)
+    assert isinstance(model, OpenAIChatModel)
 
 
 def test_create_model_openai_with_base_url():
     """create_model 应为 openai provider 传入 base_url。"""
     from src.services.model_manager import ModelManager, ModelConfig
-    from pydantic_ai.models.openai import OpenAIModel
+    from pydantic_ai.models.openai import OpenAIChatModel
 
     manager = ModelManager(config_path=Path("/dev/null"))
     config = ModelConfig(id="deepseek", provider="openai", model="deepseek/deepseek-chat",
                          api_key="sk-or-test", base_url="https://openrouter.ai/api/v1")
     model = manager.create_model(config)
-    assert isinstance(model, OpenAIModel)
+    assert isinstance(model, OpenAIChatModel)
 
 
 def test_create_model_google():
@@ -926,17 +926,21 @@ from typing import Any
 
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.groq import GroqModel
-from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.google import GoogleProvider
+from pydantic_ai.providers.groq import GroqProvider
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_MAP: dict[str, type] = {
-    "anthropic": AnthropicModel,
-    "openai": OpenAIModel,
-    "google-gla": GoogleModel,
-    "groq": GroqModel,
+_PROVIDER_MAP: dict[str, tuple[type, type]] = {
+    "anthropic": (AnthropicModel, AnthropicProvider),
+    "openai": (OpenAIChatModel, OpenAIProvider),
+    "google-gla": (GoogleModel, GoogleProvider),
+    "groq": (GroqModel, GroqProvider),
 }
 
 
@@ -979,15 +983,16 @@ class ModelManager:
         os.chmod(self._config_path, 0o600)
 
     def create_model(self, config: ModelConfig) -> Any:
-        """根据 ModelConfig 构造 pydantic-ai Model 对象。"""
-        model_cls = _PROVIDER_MAP.get(config.provider)
-        if model_cls is None:
+        """根据 ModelConfig 构造 pydantic-ai Model 对象。通过 Provider 传入 api_key 和 base_url。"""
+        entry = _PROVIDER_MAP.get(config.provider)
+        if entry is None:
             raise ValueError(f"Unsupported provider: {config.provider}")
-
-        kwargs: dict[str, Any] = {"api_key": config.api_key}
+        model_cls, provider_cls = entry
+        provider_kwargs: dict[str, Any] = {"api_key": config.api_key}
         if config.base_url:
-            kwargs["base_url"] = config.base_url
-        return model_cls(config.model, **kwargs)
+            provider_kwargs["base_url"] = config.base_url
+        provider = provider_cls(**provider_kwargs)
+        return model_cls(config.model, provider=provider)
 
     def get_model_by_id(self, model_id: str, models: list[ModelConfig]) -> ModelConfig | None:
         """按 id 查找模型配置。"""
@@ -1127,7 +1132,7 @@ async def run_agent_cycle(
                 trigger_type=trigger_type,
                 decision="completed",
                 reasoning=result.output[:500],
-                model_used=str(model) if model else str(agent.model),
+                model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
                 tokens_used=tokens,
             )
         )
@@ -2832,7 +2837,7 @@ exchange = OKXExchange(
 )
 ```
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/okx.py src/cli/app.py tests/test_okx_websocket.py && git commit -m "feat: add OKX WebSocket fill push via ccxt.pro watch_orders loop"`
 
