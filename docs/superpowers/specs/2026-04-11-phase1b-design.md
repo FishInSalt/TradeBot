@@ -403,6 +403,7 @@ from collections import deque
 class PriceAlertService:
     def __init__(self, symbol, window_minutes, threshold_pct, cooldown_minutes):
         self._symbol = symbol  # 绑定交易对（当前单 symbol 系统）
+        self._validate_params(threshold_pct, window_minutes, cooldown_minutes)  # 构造时也做边界校验
         self._window_ms = window_minutes * 60 * 1000
         self._threshold_pct = threshold_pct
         self._cooldown_ms = cooldown_minutes * 60 * 1000
