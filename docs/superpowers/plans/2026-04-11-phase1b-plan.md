@@ -485,7 +485,7 @@ Run: `cd /Users/z/Z/TradeBot && git add src/integrations/exchange/base.py tests/
 
 **概述:** 在 `config.py` 中新增 `AlertsConfig`，在 `Settings` 中添加 `alerts` 字段；将 `Settings.models` 改为 `Optional`（Phase 1b 用 ModelManager 替代，sub-agent 阶段再启用 routing）。更新 `settings.yaml` 和 `settings_sim.yaml` 添加 alerts 配置段。
 
-**注意：** 本 Task 将 `Settings.models` 改为 `Optional` 并默认 `ModelsConfig()`（不是 `None`），保持向后兼容。`settings.yaml` 中的 `models:` 段暂不移除（由 Task 5 统一处理），确保 Task 3 完成后 `app.py` 的 `settings.models.model_dump()` 不会崩溃。
+**注意：** 本 Task 将 `Settings.models` 改为 `Optional` 并默认 `None`。`settings.yaml` 中的 `models:` 段暂不移除（由 Task 5 统一处理），因此 `load_settings()` 仍会从 YAML 解析出 `ModelsConfig` 对象，`app.py` 的 `settings.models.model_dump()` 不会崩溃。
 
 **Files:**
 - Modify: `src/config.py`
@@ -619,7 +619,7 @@ class AlertsConfig(BaseModel):
 class Settings(BaseModel):
     exchange: ExchangeConfig = ExchangeConfig()
     trading: TradingConfig = TradingConfig()
-    models: ModelsConfig | None = ModelsConfig()  # 保持向后兼容，Task 5 移除 yaml 段后变为 None
+    models: ModelsConfig | None = None
     scheduler: SchedulerConfig = SchedulerConfig()
     llm_budget: LLMBudgetConfig = LLMBudgetConfig()
     database: DatabaseConfig = DatabaseConfig()
