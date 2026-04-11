@@ -19,7 +19,6 @@ from src.config import load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
-from src.services.llm_router import LLMRouter
 from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
@@ -87,6 +86,7 @@ async def run_agent_cycle(
     budget: TokenBudget,
     engine,
     context=None,
+    model=None,
 ):
     if budget.exhausted:
         logger.warning("Daily LLM token budget exhausted, skipping cycle")
@@ -99,7 +99,7 @@ async def run_agent_cycle(
         "Analyze the current market, check your positions, and decide what to do.\n"
         "Use your tools to gather data before making a decision."
     )
-    if context is not None and hasattr(context, "trigger_reason"):
+    if trigger_type == "conditional" and context is not None:
         msg = (
             f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
             f"— {context.symbol} {context.amount} @ {context.fill_price}"
@@ -107,16 +107,26 @@ async def run_agent_cycle(
         if context.pnl is not None:
             msg += f", PnL: {context.pnl:.2f} USDT"
         prompt += msg
+    elif trigger_type == "alert" and context is not None:
+        direction = "dropped" if context.change_pct < 0 else "surged"
+        prompt += (
+            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+        )
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":
         prompt += f"\n\nYour memories:\n{memory_context}"
 
     # LLM call with exponential backoff retry
+    run_kwargs = {"deps": deps}
+    if model is not None:
+        run_kwargs["model"] = model
+
     result = None
     for attempt in range(3):
         try:
-            result = await agent.run(prompt, deps=deps)
+            result = await agent.run(prompt, **run_kwargs)
             break
         except Exception as e:
             if attempt < 2:
@@ -138,7 +148,7 @@ async def run_agent_cycle(
                 trigger_type=trigger_type,
                 decision="completed",
                 reasoning=result.output[:500],
-                model_used=str(agent.model),
+                model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
                 tokens_used=tokens,
             )
         )
@@ -152,6 +162,7 @@ async def run_agent_cycle(
 async def run(
     settings_path: Path = Path("config/settings.yaml"),
     trader_path: Path = Path("config/trader.yaml"),
+    model_id: str | None = None,
 ):
     logging.basicConfig(
         level=logging.INFO,
@@ -159,7 +170,7 @@ async def run(
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
 
-    console.print("[bold green]TradeBot Phase 1a — Starting...[/]\n")
+    console.print("[bold green]TradeBot Phase 1b — Starting...[/]\n")
 
     settings = load_settings(settings_path)
     trader_config = load_trader_config(trader_path)
@@ -170,8 +181,71 @@ async def run(
         f"Persona: {trader_config.persona.risk_tolerance} / {trader_config.persona.trading_style}\n"
     )
 
-    # Resolve database path relative to project root (where config lives)
+    # --- Model selection via ModelManager ---
+    from src.services.model_manager import ModelManager
+
     project_root = settings_path.resolve().parent.parent
+    model_manager = ModelManager(config_path=project_root / "config" / "models.json")
+    existing_models = model_manager.load_models()
+
+    selected_model = None  # pydantic-ai Model object
+    selected_config = None
+
+    if model_id:
+        selected_config = model_manager.get_model_by_id(model_id, existing_models)
+        if selected_config is None:
+            console.print(f"[red]Model '{model_id}' not found in models.json[/]")
+            return
+        selected_model = model_manager.create_model(selected_config)
+        console.print(f"Model: {selected_config.id} ({selected_config.provider}:{selected_config.model})")
+    elif existing_models:
+        console.print("[bold]Available models:[/]")
+        for i, m in enumerate(existing_models):
+            console.print(f"  {i + 1}. {m.id} ({m.provider}:{m.model})")
+        console.print(f"  {len(existing_models) + 1}. Add new model")
+
+        choice = input(f"\nSelect model [1-{len(existing_models) + 1}]: ").strip()
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            idx = 0
+
+        if 0 <= idx < len(existing_models):
+            selected_config = existing_models[idx]
+            selected_model = model_manager.create_model(selected_config)
+        else:
+            selected_config, selected_model = await _interactive_add_model(
+                model_manager, existing_models
+            )
+    else:
+        console.print("[yellow]No models configured. Let's add one.[/]\n")
+        selected_config, selected_model = await _interactive_add_model(
+            model_manager, existing_models
+        )
+
+    if selected_model is None:
+        console.print("[red]No model selected. Exiting.[/]")
+        return
+
+    # 测试 API 连通性
+    console.print(f"\nTesting API connectivity for {selected_config.id}...")
+    success, error = await model_manager.test_connectivity(selected_model)
+    if success:
+        console.print("[green]API connection OK[/]")
+    else:
+        console.print(f"[red]API connection failed: {error}[/]")
+        skip = input("Skip test and continue anyway? [y/N]: ").strip().lower()
+        if skip != "y":
+            return
+
+    if selected_config not in existing_models:
+        existing_models.append(selected_config)
+        model_manager.save_models(existing_models)
+        console.print(f"[green]Model '{selected_config.id}' saved to models.json[/]")
+
+    console.print(f"Model: {selected_config.id} ({selected_config.provider}:{selected_config.model})\n")
+
+    # Resolve database path relative to project root (where config lives)
     data_dir = project_root / "data"
     data_dir.mkdir(exist_ok=True)
     db_url = settings.database.url
@@ -192,7 +266,7 @@ async def run(
                 name="default",
                 symbol=settings.trading.symbol,
                 persona_config=json.dumps(trader_config.persona.model_dump()),
-                model_config=json.dumps(settings.models.model_dump()),
+                model_config=json.dumps({"id": selected_config.id, "provider": selected_config.provider, "model": selected_config.model}),
                 initial_balance=settings.trading.initial_balance_usdt,
                 status="active",
             )
@@ -222,7 +296,6 @@ async def run(
         console.print(f"Exchange: {settings.exchange.name} (REAL account)")
     market_data = MarketDataService(exchange)
     technical = TechnicalAnalysisService()
-    llm_router = LLMRouter(settings.models)
     memory = MemoryService(engine, session_id=session_id)
     metrics_service = MetricsService(initial_balance=trading_session.initial_balance)
     budget = TokenBudget(daily_max=settings.llm_budget.daily_max_tokens)
@@ -231,8 +304,7 @@ async def run(
         timeout_seconds=settings.approval.timeout_seconds,
     )
 
-    model = llm_router.resolve("trade_decision")
-    agent = create_trader_agent(model=model, persona_config=trader_config.persona)
+    agent = create_trader_agent(model="placeholder", persona_config=trader_config.persona)
 
     deps = TradingDeps(
         symbol=settings.trading.symbol,
@@ -264,7 +336,7 @@ async def run(
         if shutdown_event.is_set():
             return
         try:
-            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context)
+            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context, model=selected_model)
         except Exception:
             logger.exception("Agent cycle failed")
         finally:
@@ -316,3 +388,36 @@ async def run(
     await scheduler_task
     await exchange.close()
     console.print("[green]TradeBot stopped.[/]")
+
+
+async def _interactive_add_model(model_manager, existing_models):
+    """交互式添加新模型。返回 (ModelConfig, pydantic-ai Model) 或 (None, None)。"""
+    from src.services.model_manager import ModelConfig
+
+    console.print("Supported providers: anthropic, openai, google-gla, groq")
+    provider = input("Provider: ").strip()
+    model_name = input("Model name (e.g. claude-opus-4-6, gpt-4o): ").strip()
+    api_key = input("API key: ").strip()
+    base_url_input = input("Base URL (press Enter for default): ").strip()
+    base_url = base_url_input if base_url_input else None
+    model_id = input("Friendly ID (e.g. claude-opus, gpt4o): ").strip()
+
+    if not all([provider, model_name, api_key, model_id]):
+        console.print("[red]All fields except base_url are required.[/]")
+        return None, None
+
+    config = ModelConfig(
+        id=model_id,
+        provider=provider,
+        model=model_name,
+        api_key=api_key,
+        base_url=base_url,
+    )
+
+    try:
+        model = model_manager.create_model(config)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        return None, None
+
+    return config, model

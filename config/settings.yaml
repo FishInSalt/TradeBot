@@ -14,17 +14,6 @@ trading:
   timeframe: 15m               # Candlestick interval for technical analysis (1m/5m/15m/1H/4H)
   initial_balance_usdt: 100.0  # Starting capital in USDT (used for metrics calculation)
 
-# === LLM Model Configuration ===
-models:
-  default: anthropic:claude-sonnet-4-20250514   # Fallback model for unspecified tasks
-  strong: anthropic:claude-opus-4-6             # High-capability model (complex analysis)
-  weak: anthropic:claude-haiku-4-5-20251001     # Fast/cheap model (simple tasks)
-  routing:                     # Which model tier to use for each task type
-    market_analysis: strong    # Market data analysis and interpretation
-    trade_decision: strong     # Final trading decision (buy/sell/hold)
-    news_summary: weak         # News article summarization (Phase 1b)
-    review: weak               # Post-trade review and memory updates (Phase 1b)
-
 # === Scheduler Configuration ===
 scheduler:
   interval_minutes: 15         # How often the agent wakes up to analyze the market
