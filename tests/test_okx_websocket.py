@@ -381,3 +381,142 @@ async def test_watch_orders_loop_error_recovery():
         with patch("asyncio.sleep", new_callable=AsyncMock):
             await exchange._watch_orders_loop()
         assert call_count == 2
+
+
+async def test_okx_set_alert_service():
+    """set_alert_service 应注入 PriceAlertService。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        mock_service = MagicMock()
+        exchange.set_alert_service(mock_service)
+        assert exchange._alert_service is mock_service
+
+
+async def test_okx_update_alert_params_delegates():
+    """update_alert_params 应委托给 PriceAlertService.update_params。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        mock_service = MagicMock()
+        exchange.set_alert_service(mock_service)
+        exchange.update_alert_params(2.0, 10, 30)
+        mock_service.update_params.assert_called_once_with(2.0, 10, 30)
+
+
+async def test_watch_ticker_loop_triggers_alert():
+    """_watch_ticker_loop 应在 PriceAlertService 返回 AlertInfo 时调用 alert callback。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        from src.services.price_alert import AlertInfo
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+
+        alert_callback = AsyncMock()
+        exchange.on_alert(alert_callback)
+
+        mock_alert = AlertInfo(
+            symbol="BTC/USDT:USDT",
+            current_price=57900.0,
+            reference_price=60000.0,
+            change_pct=-3.5,
+            window_minutes=5,
+            timestamp=1712534400000,
+        )
+        mock_service = MagicMock()
+        mock_service.check.side_effect = [mock_alert, None]
+        exchange.set_alert_service(mock_service)
+
+        exchange._running = True
+        mock_ws = AsyncMock()
+        call_count = 0
+
+        async def mock_watch_ticker(symbol):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "symbol": "BTC/USDT:USDT",
+                    "last": "57900",
+                    "bid": "57899",
+                    "ask": "57901",
+                    "high": "60000",
+                    "low": "57800",
+                    "baseVolume": "12345",
+                    "timestamp": 1712534400000,
+                }
+            exchange._running = False
+            return {
+                "symbol": "BTC/USDT:USDT",
+                "last": "57900",
+                "bid": "57899",
+                "ask": "57901",
+                "high": "60000",
+                "low": "57800",
+                "baseVolume": "12345",
+                "timestamp": 1712534401000,
+            }
+
+        mock_ws.watch_ticker = mock_watch_ticker
+        exchange._ws_client = mock_ws
+
+        await exchange._watch_ticker_loop()
+
+        alert_callback.assert_called_once()
+        alert_info = alert_callback.call_args[0][0]
+        assert alert_info.change_pct == -3.5
+
+
+async def test_watch_ticker_loop_no_alert_when_service_returns_none():
+    """当 PriceAlertService.check 返回 None 时不应调用 alert callback。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+
+        alert_callback = AsyncMock()
+        exchange.on_alert(alert_callback)
+
+        mock_service = MagicMock()
+        mock_service.check.return_value = None
+        exchange.set_alert_service(mock_service)
+
+        exchange._running = True
+        mock_ws = AsyncMock()
+        call_count = 0
+
+        async def mock_watch_ticker(symbol):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                exchange._running = False
+            return {
+                "symbol": "BTC/USDT:USDT",
+                "last": "60000",
+                "bid": "59999",
+                "ask": "60001",
+                "high": "60500",
+                "low": "59500",
+                "baseVolume": "12345",
+                "timestamp": 1712534400000 + call_count * 1000,
+            }
+
+        mock_ws.watch_ticker = mock_watch_ticker
+        exchange._ws_client = mock_ws
+
+        await exchange._watch_ticker_loop()
+        alert_callback.assert_not_called()
