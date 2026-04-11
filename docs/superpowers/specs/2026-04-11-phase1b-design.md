@@ -493,7 +493,7 @@ async def _watch_ticker_loop(self) -> None:
         except Exception:
             error_count += 1
             delay = min(5 * (2 ** (error_count - 1)), 60)
-            logger.error("watch_ticker error (retry in %ds)", delay, exc_info=True)
+            logger.warning("watch_ticker error (retry in %ds)", delay, exc_info=True)
             await asyncio.sleep(delay)
 ```
 

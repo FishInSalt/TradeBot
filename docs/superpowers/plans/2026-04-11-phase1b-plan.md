@@ -1211,6 +1211,12 @@ async def run(
         if skip != "y":
             return
 
+    # 连通性测试通过后，保存新添加的模型到 models.json
+    if selected_config not in existing_models:
+        existing_models.append(selected_config)
+        model_manager.save_models(existing_models)
+        console.print(f"[green]Model '{selected_config.id}' saved to models.json[/]")
+
     console.print(f"Model: {selected_config.id} ({selected_config.provider}:{selected_config.model})\n")
 
     # --- Database ---
@@ -1259,7 +1265,6 @@ async def run(
             api_key=settings.exchange.api_key,
             secret=settings.exchange.secret,
             password=settings.exchange.password,
-            symbol=settings.trading.symbol,
         )
         console.print(f"Exchange: {settings.exchange.name} (REAL account)")
     market_data = MarketDataService(exchange)
@@ -1299,64 +1304,13 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    handle_fill = None
+    # NOTE: fill handler, alert handler, and exchange.start() are NOT modified here.
+    # Existing Phase 1a code (on_tick, fill handler, scheduler, exchange.start) remains as-is.
+    # Task 11 will unify fill/alert handler registration for both exchange types.
 
-    async def on_tick(trigger_type: str, context=None):
-        if shutdown_event.is_set():
-            return
-        try:
-            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context, model=selected_model)
-        except Exception:
-            logger.exception("Agent cycle failed")
-        finally:
-            if handle_fill is not None:
-                for fill in exchange.drain_pending_fills():
-                    try:
-                        await handle_fill(fill)
-                    except Exception:
-                        logger.exception("Fill handler failed for order %s", fill.order_id)
-
-    interval = settings.scheduler.interval_minutes * 60
-    scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
-
-    # Register fill handler for simulated exchange
-    if settings.exchange.name == "simulated":
-        def _create_fill_handler(sched, eng, sid):
-            async def handle_fill(event: FillEvent):
-                try:
-                    await _record_action_from_fill(eng, sid, event)
-                except Exception:
-                    logger.warning("Failed to record fill event", exc_info=True)
-                finally:
-                    await sched.trigger("conditional", context=event)
-            return handle_fill
-
-        handle_fill = _create_fill_handler(scheduler, engine, session_id)
-        exchange.on_fill(handle_fill)
-
-    # Start exchange
-    if settings.exchange.name == "simulated":
-        await exchange.start()
-
-    # Show initial metrics
-    positions = await exchange.fetch_positions(settings.trading.symbol)
-    pos_str = f"{positions[0].side} {positions[0].contracts}" if positions else "none"
-    metrics = await metrics_service.compute(engine, session_id, current_position=pos_str)
-    display_metrics(metrics)
-
-    console.print(
-        f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min[/]"
-    )
-    console.print(f"[bold]LLM Budget: {settings.llm_budget.daily_max_tokens:,} tokens/day[/]")
-    console.print("[dim]Press Ctrl+C to stop[/]\n")
-
-    scheduler_task = asyncio.create_task(scheduler.start())
-    await shutdown_event.wait()
-
-    scheduler.stop()
-    await scheduler_task
-    await exchange.close()
-    console.print("[green]TradeBot stopped.[/]")
+    # ... (rest of run() unchanged from Phase 1a: on_tick, scheduler, fill handler,
+    #  exchange.start, metrics display, scheduler loop, shutdown — see existing app.py)
+    # Only change in on_tick: pass model=selected_model to run_agent_cycle
 
 
 async def _interactive_add_model(model_manager, existing_models):
@@ -1388,11 +1342,6 @@ async def _interactive_add_model(model_manager, existing_models):
     except ValueError as e:
         console.print(f"[red]{e}[/]")
         return None, None
-
-    # 保存到 models.json
-    existing_models.append(config)
-    model_manager.save_models(existing_models)
-    console.print(f"[green]Model '{model_id}' saved to models.json[/]")
 
     return config, model
 ```
@@ -1462,7 +1411,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 7: 提交**
 
-Run: `cd /Users/z/Z/TradeBot && git add src/cli/app.py .gitignore config/settings.yaml config/settings_sim.yaml main.py && git commit -m "feat: integrate ModelManager into app startup, replace llm_router.resolve with runtime model override"`
+Run: `cd /Users/z/Z/TradeBot && git add src/cli/app.py .gitignore config/settings.yaml config/settings_sim.yaml main.py && git commit -m "feat: integrate ModelManager into app startup (model selection + connectivity test only, fill/alert/start handled by Task 11)"`
 
 ---
 
@@ -1712,6 +1661,15 @@ class AlertInfo:
 
 
 class PriceAlertService:
+    @staticmethod
+    def _validate_params(threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+        if not (0.5 <= threshold_pct <= 50.0):
+            raise ValueError(f"threshold_pct must be 0.5-50.0, got {threshold_pct}")
+        if not (1 <= window_minutes <= 60):
+            raise ValueError(f"window_minutes must be 1-60, got {window_minutes}")
+        if not (1 <= cooldown_minutes <= 120):
+            raise ValueError(f"cooldown_minutes must be 1-120, got {cooldown_minutes}")
+
     def __init__(
         self,
         symbol: str,
@@ -1719,6 +1677,7 @@ class PriceAlertService:
         threshold_pct: float,
         cooldown_minutes: int,
     ):
+        self._validate_params(threshold_pct, window_minutes, cooldown_minutes)
         self._symbol = symbol
         self._window_ms = window_minutes * 60 * 1000
         self._window_minutes = window_minutes
@@ -1781,12 +1740,7 @@ class PriceAlertService:
         cooldown_minutes: int,
     ) -> None:
         """运行时更新参数。超出边界抛 ValueError。"""
-        if not (0.5 <= threshold_pct <= 50.0):
-            raise ValueError(f"threshold_pct must be 0.5-50.0, got {threshold_pct}")
-        if not (1 <= window_minutes <= 60):
-            raise ValueError(f"window_minutes must be 1-60, got {window_minutes}")
-        if not (1 <= cooldown_minutes <= 120):
-            raise ValueError(f"cooldown_minutes must be 1-120, got {cooldown_minutes}")
+        self._validate_params(threshold_pct, window_minutes, cooldown_minutes)
 
         self._threshold_pct = threshold_pct
         self._window_ms = window_minutes * 60 * 1000
@@ -2470,7 +2424,7 @@ def _retry(max_retries: int = 3, base_delay: float = 1.0):
 
 
 class OKXExchange(BaseExchange):
-    def __init__(self, api_key: str, secret: str, password: str, symbol: str = "BTC/USDT:USDT"):
+    def __init__(self, api_key: str, secret: str, password: str, symbol: str):
         self._client = ccxt.okx(
             {
                 "apiKey": api_key,
@@ -3181,7 +3135,8 @@ Expected: FAIL — `SimulatedExchange` 没有 `set_alert_service()`、`on_alert(
 同时在文件顶部的 import 中确保有 `Any`：
 
 ```python
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
 ```
 
 在类中添加三个方法（在 `on_fill` 方法之后、`drain_pending_fills` 之前）：
