@@ -299,7 +299,7 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
 
 def _generate_session_name(symbol: str, exchange_type: str) -> str:
     """Generate default session name: '{symbol_short} {exchange_display}'.
-    R2 will extend with #{N} counter from DB query."""
+    Used as fallback when no name_generator callback is provided."""
     symbol_short = symbol.split("/")[0]
     exchange_display = _EXCHANGE_DISPLAY.get(exchange_type, exchange_type)
     return f"{symbol_short} {exchange_display}"
@@ -353,6 +353,8 @@ async def run_wizard(
     config_dir: Path,
     console: Console,
     model_id: str | None = None,
+    name_generator: Any | None = None,  # async (symbol, exchange_type) -> str
+    existing_names: set[str] | None = None,  # for uniqueness check
 ) -> WizardResult | None:
     """Run the interactive configuration wizard. Returns None on Ctrl+C or cancel."""
     try:
@@ -373,8 +375,15 @@ async def run_wizard(
             data = {**exchange_data, **trading_data, **model_data, **risk_data, **persona_data}
 
             if _show_summary(data, console):
-                default_name = _generate_session_name(data["symbol"], data["exchange_type"])
-                name = Prompt.ask("Session name", default=default_name, console=console)
+                if name_generator is not None:
+                    default_name = await name_generator(data["symbol"], data["exchange_type"])
+                else:
+                    default_name = _generate_session_name(data["symbol"], data["exchange_type"])
+                while True:
+                    name = Prompt.ask("Session name", default=default_name, console=console)
+                    if existing_names is None or name not in existing_names:
+                        break
+                    console.print(f"[red]'{name}' already exists, please choose another[/]")
                 data["session_name"] = name
                 return WizardResult(**data)
 
