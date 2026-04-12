@@ -26,7 +26,7 @@
 | `main.py` | Modify | Add `--debug` flag |
 | `src/cli/app.py` | Modify | Replace `logging.basicConfig` + module-level `console`; wire `SessionConsole` through `run()` and `run_agent_cycle()` |
 | `.gitignore` | Modify | Add `logs/` |
-| `config/settings_sim.yaml` | Modify | Add `# DEPRECATED` header comment |
+| ~~`config/settings_sim.yaml`~~ | ~~Modify~~ | Deferred to R1 plan (file is only truly deprecated after wizard replaces YAML editing) |
 
 ---
 
@@ -584,22 +584,11 @@ Append to `.gitignore`:
 logs/
 ```
 
-- [ ] **Step 3: Add DEPRECATED comment to settings_sim.yaml**
-
-Prepend to `config/settings_sim.yaml` (before the first line):
-
-```yaml
-# DEPRECATED: This file is no longer read by TradeBot.
-# Defaults are provided by settings.yaml + the interactive wizard.
-# Kept for reference only.
-
-```
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add main.py .gitignore config/settings_sim.yaml
-git commit -m "feat(r5): add --debug flag, gitignore logs/, deprecate settings_sim.yaml"
+git add main.py .gitignore
+git commit -m "feat(r5): add --debug flag, gitignore logs/"
 ```
 
 ---
