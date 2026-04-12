@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from rich.console import Console
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from src.storage.database import init_db, get_session
 from src.storage.models import Session
@@ -142,4 +142,96 @@ async def test_restore_session_null_alert_config(tmp_path):
 
     assert result.alert_enabled is False
     assert result.alert_window_min is None
+    await engine.dispose()
+
+
+async def test_fix_residual_active_sessions(tmp_path):
+    """On startup, any session with status='active' gets set to 'paused'."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s1", name="active-one", status="active"))
+        db_sess.add(Session(id="s2", name="paused-one", status="paused"))
+        db_sess.add(Session(id="s3", name="active-two", status="active"))
+        await db_sess.commit()
+
+    from src.cli.session_manager import _fix_residual_active
+    async with engine.begin() as conn:
+        count = await _fix_residual_active(conn)
+    assert count == 2
+
+    async with get_session(engine) as db_sess:
+        for sid in ["s1", "s3"]:
+            result = await db_sess.execute(select(Session).where(Session.id == sid))
+            assert result.scalar_one().status == "paused"
+    await engine.dispose()
+
+
+async def test_list_sessions_ordered_by_last_active(tmp_path):
+    """Sessions listed in descending last_active_at order, only active/paused."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    now = datetime.now(timezone.utc)
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s1", name="Older", status="paused",
+            last_active_at=now - timedelta(days=3)))
+        db_sess.add(Session(id="s2", name="Newer", status="paused",
+            last_active_at=now - timedelta(hours=2)))
+        db_sess.add(Session(id="s3", name="Stopped", status="stopped",
+            last_active_at=now))
+        db_sess.add(Session(id="s4", name="No-active", status="paused",
+            last_active_at=None))
+        await db_sess.commit()
+
+    from src.cli.session_manager import _list_sessions
+    sessions = await _list_sessions(engine)
+    assert len(sessions) == 3
+    assert sessions[0].name == "Newer"
+    assert sessions[1].name == "Older"
+    assert sessions[2].name == "No-active"
+    await engine.dispose()
+
+
+async def test_get_position_summary_with_position(tmp_path):
+    """Sim session with open position shows 'side contracts symbol'."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+    from src.storage.models import SimPosition
+
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s1", name="test"))
+        await db_sess.commit()
+        db_sess.add(SimPosition(
+            session_id="s1", symbol="BTC/USDT:USDT", side="long",
+            contracts=0.5, entry_price=95000.0, leverage=3,
+        ))
+        await db_sess.commit()
+
+    from src.cli.session_manager import _get_position_summary
+    assert await _get_position_summary(engine, "s1", "simulated") == "long 0.5 BTC"
+    await engine.dispose()
+
+
+async def test_get_position_summary_no_position(tmp_path):
+    """Sim session without position shows em-dash."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s1", name="test"))
+        await db_sess.commit()
+
+    from src.cli.session_manager import _get_position_summary
+    assert await _get_position_summary(engine, "s1", "simulated") == "\u2014"
+    await engine.dispose()
+
+
+async def test_get_position_summary_real_exchange(tmp_path):
+    """Real exchange always shows em-dash (not connected)."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+    from src.cli.session_manager import _get_position_summary
+    assert await _get_position_summary(engine, "any-id", "okx") == "\u2014"
     await engine.dispose()

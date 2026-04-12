@@ -37,6 +37,41 @@ async def _migrate_session_table(conn) -> None:
             await conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {col} {defn}"))
 
 
+async def _fix_residual_active(conn) -> int:
+    """Set any 'active' sessions to 'paused'. Returns count of fixed sessions."""
+    result = await conn.execute(
+        text("UPDATE sessions SET status = 'paused' WHERE status = 'active'")
+    )
+    return result.rowcount
+
+
+async def _list_sessions(engine) -> list[Session]:
+    """Return active/paused sessions ordered by last_active_at DESC (NULLs last)."""
+    async with get_session(engine) as db_sess:
+        result = await db_sess.execute(
+            select(Session)
+            .where(Session.status.in_(["active", "paused"]))
+            .order_by(Session.last_active_at.desc().nulls_last())
+        )
+        return list(result.scalars().all())
+
+
+async def _get_position_summary(engine, session_id: str, exchange_type: str) -> str:
+    """Get position summary for session list display.
+    Sim: query SimPosition table. Real: return em-dash (exchange not connected)."""
+    if exchange_type != "simulated":
+        return "\u2014"
+    from src.storage.models import SimPosition
+    async with get_session(engine) as db_sess:
+        result = await db_sess.execute(
+            select(SimPosition).where(SimPosition.session_id == session_id)
+        )
+        pos = result.scalar_one_or_none()
+    if pos is None:
+        return "\u2014"
+    return f"{pos.side} {pos.contracts} {pos.symbol.split('/')[0]}"
+
+
 async def _restore_session(
     engine,
     session_id: str,
