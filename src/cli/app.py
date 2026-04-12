@@ -13,8 +13,8 @@ from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
 from src.cli.approval import ApprovalGate
 from src.cli.display import display_metrics
-from src.cli.logging_config import setup_system_logging, setup_session_logging
-from src.config import load_settings, load_trader_config
+from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging
+from src.config import ExchangeConfig, Settings, load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
@@ -23,6 +23,7 @@ from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
 from src.storage.models import DecisionLog, Session, TradeAction
 from src.integrations.exchange.base import FillEvent
+from src.cli.wizard import WizardResult, run_wizard
 
 logger = logging.getLogger(__name__)
 
@@ -159,160 +160,59 @@ async def run_agent_cycle(
     return result
 
 
-async def run(
-    settings_path: Path = Path("config/settings.yaml"),
-    trader_path: Path = Path("config/trader.yaml"),
-    model_id: str | None = None,
-    debug: bool = False,
+# --- Phase 5: Service construction ---
+
+_DEFAULT_PRECISION = {
+    "BTC/USDT:USDT": 3,
+    "ETH/USDT:USDT": 2,
+}
+
+
+def build_services(
+    result: WizardResult,
+    engine,
+    session_id: str,
+    sc: SessionConsole,
+    settings: Settings,
 ):
-    # Phase 1: System logging (before session_id is known)
-    log_dir = settings_path.resolve().parent.parent / "logs"
-    pre_console = setup_system_logging(debug, log_dir)
+    """Build exchange, deps, agent, budget from WizardResult."""
+    from src.services.price_alert import PriceAlertService
 
-    pre_console.print("[bold green]TradeBot Phase 1b — Starting...[/]\n")
-
-    settings = load_settings(settings_path)
-    trader_config = load_trader_config(trader_path)
-
-    pre_console.print(f"Symbol: {settings.trading.symbol} | Timeframe: {settings.trading.timeframe}")
-    pre_console.print(f"Approval: {'ON' if settings.approval.enabled else 'OFF'}")
-    pre_console.print(
-        f"Persona: {trader_config.persona.risk_tolerance} / {trader_config.persona.trading_style}\n"
-    )
-
-    # --- Model selection via ModelManager ---
-    from src.services.model_manager import ModelManager
-
-    project_root = settings_path.resolve().parent.parent
-    model_manager = ModelManager(config_path=project_root / "config" / "models.json")
-    existing_models = model_manager.load_models()
-
-    selected_model = None  # pydantic-ai Model object
-    selected_config = None
-
-    if model_id:
-        selected_config = model_manager.get_model_by_id(model_id, existing_models)
-        if selected_config is None:
-            pre_console.print(f"[red]Model '{model_id}' not found in models.json[/]")
-            return
-        selected_model = model_manager.create_model(selected_config)
-        pre_console.print(f"Model: {selected_config.id} ({selected_config.provider}:{selected_config.model})")
-    elif existing_models:
-        pre_console.print("[bold]Available models:[/]")
-        for i, m in enumerate(existing_models):
-            pre_console.print(f"  {i + 1}. {m.id} ({m.provider}:{m.model})")
-        pre_console.print(f"  {len(existing_models) + 1}. Add new model")
-
-        choice = input(f"\nSelect model [1-{len(existing_models) + 1}]: ").strip()
-        try:
-            idx = int(choice) - 1
-        except ValueError:
-            idx = 0
-
-        if 0 <= idx < len(existing_models):
-            selected_config = existing_models[idx]
-            selected_model = model_manager.create_model(selected_config)
-        else:
-            selected_config, selected_model = await _interactive_add_model(
-                model_manager, existing_models, pre_console
-            )
-    else:
-        pre_console.print("[yellow]No models configured. Let's add one.[/]\n")
-        selected_config, selected_model = await _interactive_add_model(
-            model_manager, existing_models, pre_console
-        )
-
-    if selected_model is None:
-        pre_console.print("[red]No model selected. Exiting.[/]")
-        return
-
-    # 测试 API 连通性
-    pre_console.print(f"\nTesting API connectivity for {selected_config.id}...")
-    success, error = await model_manager.test_connectivity(selected_model)
-    if success:
-        pre_console.print("[green]API connection OK[/]")
-    else:
-        pre_console.print(f"[red]API connection failed: {error}[/]")
-        skip = input("Skip test and continue anyway? [y/N]: ").strip().lower()
-        if skip != "y":
-            return
-
-    if selected_config not in existing_models:
-        existing_models.append(selected_config)
-        model_manager.save_models(existing_models)
-        pre_console.print(f"[green]Model '{selected_config.id}' saved to models.json[/]")
-
-    pre_console.print(f"Model: {selected_config.id} ({selected_config.provider}:{selected_config.model})\n")
-
-    # Resolve database path relative to project root (where config lives)
-    data_dir = project_root / "data"
-    data_dir.mkdir(exist_ok=True)
-    db_url = settings.database.url
-    if db_url.startswith("sqlite") and ":///" in db_url and not db_url.startswith("sqlite+aiosqlite:////"):
-        # Convert relative sqlite path to absolute based on project root
-        relative_path = db_url.split(":///", 1)[1]
-        absolute_path = project_root / relative_path
-        db_url = f"sqlite+aiosqlite:///{absolute_path}"
-    engine = await init_db(db_url)
-
-    # Get or create default session
-    async with get_session(engine) as db_sess:
-        stmt = select(Session).where(Session.name == "default")
-        result = await db_sess.execute(stmt)
-        trading_session = result.scalar_one_or_none()
-        if trading_session is None:
-            trading_session = Session(
-                name="default",
-                symbol=settings.trading.symbol,
-                persona_config=json.dumps(trader_config.persona.model_dump()),
-                model_config=json.dumps({"id": selected_config.id, "provider": selected_config.provider, "model": selected_config.model}),
-                initial_balance=settings.trading.initial_balance_usdt,
-                status="active",
-            )
-            db_sess.add(trading_session)
-            await db_sess.commit()
-            await db_sess.refresh(trading_session)
-            logger.info(f"Created session: {trading_session.id}")
-        else:
-            logger.info(f"Resumed session: {trading_session.id}")
-    session_id = trading_session.id
-
-    # Phase 2: Session logging (session_id now known)
-    sc = setup_session_logging(session_id, log_dir)
-
-    if settings.exchange.name == "simulated":
+    # Exchange
+    if result.exchange_type == "simulated":
         from src.integrations.exchange.simulated import SimulatedExchange
+        precision = {result.symbol: _DEFAULT_PRECISION.get(result.symbol, 3)}
+        config = ExchangeConfig(
+            name="simulated", fee_rate=result.fee_rate, precision=precision,
+        )
         exchange = SimulatedExchange(
-            config=settings.exchange,
-            db_engine=engine,
-            session_id=session_id,
-            symbol=settings.trading.symbol,
+            config=config, db_engine=engine,
+            session_id=session_id, symbol=result.symbol,
         )
         sc.print("Exchange: simulated (local matching)")
     else:
+        creds = result.api_credentials
         exchange = OKXExchange(
-            api_key=settings.exchange.api_key,
-            secret=settings.exchange.secret,
-            password=settings.exchange.password,
-            symbol=settings.trading.symbol,
+            api_key=creds["api_key"], secret=creds["secret"],
+            password=creds["password"], symbol=result.symbol,
         )
-        sc.print(f"Exchange: {settings.exchange.name} (REAL account)")
+        sc.print("Exchange: okx (REAL account)")
+
     market_data = MarketDataService(exchange)
     technical = TechnicalAnalysisService()
     memory = MemoryService(engine, session_id=session_id)
-    metrics_service = MetricsService(initial_balance=trading_session.initial_balance)
-    budget = TokenBudget(daily_max=settings.llm_budget.daily_max_tokens)
+    budget = TokenBudget(daily_max=result.token_budget)
     approval_gate = ApprovalGate(
-        enabled=settings.approval.enabled,
+        enabled=result.approval_enabled,
         timeout_seconds=settings.approval.timeout_seconds,
         console=sc,
     )
 
-    agent = create_trader_agent(model=selected_model, persona_config=trader_config.persona)
+    agent = create_trader_agent(model=result.model, persona_config=result.persona)
 
     deps = TradingDeps(
-        symbol=settings.trading.symbol,
-        timeframe=settings.trading.timeframe,
+        symbol=result.symbol,
+        timeframe=result.timeframe,
         market_data=market_data,
         exchange=exchange,
         technical=technical,
@@ -320,10 +220,117 @@ async def run(
         session_id=session_id,
         db_engine=engine,
         approval_gate=approval_gate,
-        approval_enabled=settings.approval.enabled,
+        approval_enabled=result.approval_enabled,
     )
 
-    # Graceful shutdown
+    # Alert service
+    if result.alert_enabled:
+        alert_service = PriceAlertService(
+            symbol=result.symbol,
+            window_minutes=result.alert_window_min,
+            threshold_pct=result.alert_threshold_pct,
+            cooldown_minutes=result.alert_cooldown_min,
+        )
+        exchange.set_alert_service(alert_service)
+        sc.print(
+            f"Alerts: ON ({result.alert_window_min}min / "
+            f"{result.alert_threshold_pct}% / cd {result.alert_cooldown_min}min)"
+        )
+    else:
+        sc.print("Alerts: OFF")
+
+    return exchange, deps, agent, budget
+
+
+async def run(
+    settings_path: Path = Path("config/settings.yaml"),
+    trader_path: Path = Path("config/trader.yaml"),
+    model_id: str | None = None,
+    debug: bool = False,
+):
+    # ── Phase 1: System logging ──
+    log_dir = settings_path.resolve().parent.parent / "logs"
+    pre_console = setup_system_logging(debug, log_dir)
+    pre_console.print("[bold green]TradeBot — Starting...[/]\n")
+
+    # ── Phase 2: Config + Database ──
+    settings = load_settings(settings_path)
+    trader_config = load_trader_config(trader_path)
+
+    project_root = settings_path.resolve().parent.parent
+    data_dir = project_root / "data"
+    data_dir.mkdir(exist_ok=True)
+    db_url = settings.database.url
+    if db_url.startswith("sqlite") and ":///" in db_url and not db_url.startswith("sqlite+aiosqlite:////"):
+        relative_path = db_url.split(":///", 1)[1]
+        absolute_path = project_root / relative_path
+        db_url = f"sqlite+aiosqlite:///{absolute_path}"
+    engine = await init_db(db_url)
+
+    # ── Phase 3: Configuration Wizard ──
+    from src.services.model_manager import ModelManager
+
+    config_dir = project_root / "config"
+    model_manager = ModelManager(config_path=config_dir / "models.json")
+
+    result = await run_wizard(
+        model_manager=model_manager,
+        defaults=settings,
+        trader_defaults=trader_config,
+        config_dir=config_dir,
+        console=pre_console,
+        model_id=model_id,
+    )
+    if result is None:
+        pre_console.print("Cancelled.")
+        return
+
+    # Create session (R2 will add select/restore with #{N} counter)
+    # R2 will also add exchange_type/timeframe/scheduler_interval_min/approval_enabled/
+    # alert_config/fee_rate/token_budget columns to Session table and populate them here.
+    # Until then, these WizardResult fields are not persisted — restart requires re-config.
+    # Session.name has unique=True — deduplicate by appending suffix
+    async with get_session(engine) as db_sess:
+        base_name = result.session_name
+        name = base_name
+        suffix = 2
+        while True:
+            existing = await db_sess.execute(
+                select(Session).where(Session.name == name)
+            )
+            if existing.scalar_one_or_none() is None:
+                break
+            name = f"{base_name} #{suffix}"
+            suffix += 1
+
+        trading_session = Session(
+            name=name,
+            symbol=result.symbol,
+            persona_config=json.dumps(result.persona.model_dump()),
+            model_config=json.dumps({
+                "id": result.model_config.id,
+                "provider": result.model_config.provider,
+                "model": result.model_config.model,
+            }),
+            initial_balance=result.initial_balance,
+            status="active",
+        )
+        db_sess.add(trading_session)
+        await db_sess.commit()
+        await db_sess.refresh(trading_session)
+        if name != base_name:
+            logger.info(f"Session name '{base_name}' taken, using '{name}'")
+    session_id = trading_session.id
+
+    # ── Phase 4: Session logging ──
+    sc = setup_session_logging(session_id, log_dir)
+
+    # ── Phase 5: Build services ──
+    exchange, deps, agent, budget = build_services(
+        result, engine, session_id, sc, settings,
+    )
+
+    # ── Phase 6: Main loop ──
     shutdown_event = asyncio.Event()
 
     def _signal_handler():
@@ -334,53 +341,19 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    # --- Price alert setup ---
-    from src.services.price_alert import PriceAlertService
-
-    alert_service = None
-    if settings.alerts.enabled:
-        sc.print("\n[bold]Price alert settings:[/]")
-        try:
-            window_input = input(f"  Window (minutes) [{settings.alerts.window_minutes}]: ").strip()
-            threshold_input = input(f"  Threshold (%) [{settings.alerts.threshold_pct}]: ").strip()
-            cooldown_input = input(f"  Cooldown (minutes) [{settings.alerts.cooldown_minutes}]: ").strip()
-            window = int(window_input) if window_input else settings.alerts.window_minutes
-            threshold = float(threshold_input) if threshold_input else settings.alerts.threshold_pct
-            cooldown = int(cooldown_input) if cooldown_input else settings.alerts.cooldown_minutes
-            alert_service = PriceAlertService(
-                symbol=settings.trading.symbol,
-                window_minutes=window,
-                threshold_pct=threshold,
-                cooldown_minutes=cooldown,
-            )
-            sc.print(f"  Price alerts: ON (threshold={threshold}%, window={window}min, cooldown={cooldown}min)")
-        except (ValueError, TypeError) as e:
-            sc.print(f"[yellow]Invalid alert settings ({e}), using defaults[/]")
-            alert_service = PriceAlertService(
-                symbol=settings.trading.symbol,
-                window_minutes=settings.alerts.window_minutes,
-                threshold_pct=settings.alerts.threshold_pct,
-                cooldown_minutes=settings.alerts.cooldown_minutes,
-            )
-            sc.print(
-                f"  Price alerts: ON (threshold={settings.alerts.threshold_pct}%, "
-                f"window={settings.alerts.window_minutes}min, cooldown={settings.alerts.cooldown_minutes}min)"
-            )
-        exchange.set_alert_service(alert_service)
-    else:
-        sc.print("Price alerts: OFF")
-
     handle_fill = None
 
     async def on_tick(trigger_type: str, context=None):
         if shutdown_event.is_set():
             return
         try:
-            await run_agent_cycle(agent, deps, trigger_type, budget, engine, context, model=selected_model, console=sc)
+            await run_agent_cycle(
+                agent, deps, trigger_type, budget, engine,
+                context, model=result.model, console=sc,
+            )
         except Exception:
             logger.exception("Agent cycle failed")
         finally:
-            # drain_pending_fills: SimulatedExchange 返回市价单 fill，OKX 返回 []（无害）
             if handle_fill is not None:
                 for fill in exchange.drain_pending_fills():
                     try:
@@ -388,43 +361,38 @@ async def run(
                     except Exception:
                         logger.exception("Fill handler failed for order %s", fill.order_id)
 
-    interval = settings.scheduler.interval_minutes * 60
+    interval = result.scheduler_interval_min * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
-    # --- Fill handler registration (unified for both exchange types) ---
     def _create_fill_handler(sched, eng, sid):
-        async def handle_fill(event: FillEvent):
+        async def handler(event: FillEvent):
             try:
                 await _record_action_from_fill(eng, sid, event)
             except Exception:
                 logger.warning("Failed to record fill event", exc_info=True)
             finally:
                 await sched.trigger("conditional", context=event)
-        return handle_fill
+        return handler
 
     handle_fill = _create_fill_handler(scheduler, engine, session_id)
     exchange.on_fill(handle_fill)
 
-    # --- Alert handler registration ---
-    if settings.alerts.enabled:
+    if result.alert_enabled:
         async def handle_alert(alert_info):
             await scheduler.trigger("alert", context=alert_info)
-
         exchange.on_alert(handle_alert)
 
-    # --- Start exchange (both simulated and OKX) ---
-    await exchange.start()  # SimulatedExchange: 恢复状态 + 撮合循环; OKXExchange: WebSocket loops
+    await exchange.start()
 
-    # Show initial metrics (after start so simulated mode has restored state)
-    positions = await exchange.fetch_positions(settings.trading.symbol)
+    # Initial metrics
+    metrics_service = MetricsService(initial_balance=result.initial_balance)
+    positions = await exchange.fetch_positions(result.symbol)
     pos_str = f"{positions[0].side} {positions[0].contracts}" if positions else "none"
     metrics = await metrics_service.compute(engine, session_id, current_position=pos_str)
     display_metrics(metrics, console=sc)
 
-    sc.print(
-        f"\n[bold]Scheduler: every {settings.scheduler.interval_minutes} min[/]"
-    )
-    sc.print(f"[bold]LLM Budget: {settings.llm_budget.daily_max_tokens:,} tokens/day[/]")
+    sc.print(f"\n[bold]Scheduler: every {result.scheduler_interval_min} min[/]")
+    sc.print(f"[bold]LLM Budget: {result.token_budget:,} tokens/day[/]")
     sc.print("[dim]Press Ctrl+C to stop[/]\n")
 
     scheduler_task = asyncio.create_task(scheduler.start())
@@ -435,36 +403,3 @@ async def run(
     await exchange.close()
     sc.close()
     pre_console.print("[green]TradeBot stopped.[/]")
-
-
-async def _interactive_add_model(model_manager, existing_models, console):
-    """交互式添加新模型。返回 (ModelConfig, pydantic-ai Model) 或 (None, None)。"""
-    from src.services.model_manager import ModelConfig
-
-    console.print("Supported providers: anthropic, openai, google-gla, groq")
-    provider = input("Provider: ").strip()
-    model_name = input("Model name (e.g. claude-opus-4-6, gpt-4o): ").strip()
-    api_key = input("API key: ").strip()
-    base_url_input = input("Base URL (press Enter for default): ").strip()
-    base_url = base_url_input if base_url_input else None
-    model_id = input("Friendly ID (e.g. claude-opus, gpt4o): ").strip()
-
-    if not all([provider, model_name, api_key, model_id]):
-        console.print("[red]All fields except base_url are required.[/]")
-        return None, None
-
-    config = ModelConfig(
-        id=model_id,
-        provider=provider,
-        model=model_name,
-        api_key=api_key,
-        base_url=base_url,
-    )
-
-    try:
-        model = model_manager.create_model(config)
-    except ValueError as e:
-        console.print(f"[red]{e}[/]")
-        return None, None
-
-    return config, model
