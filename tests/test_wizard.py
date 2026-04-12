@@ -52,6 +52,12 @@ def test_load_credentials_missing_file(tmp_path):
     assert _load_credentials(tmp_path) == {}
 
 
+def test_load_credentials_corrupted_json(tmp_path):
+    from src.cli.wizard import _load_credentials
+    (tmp_path / ".credentials").write_text("{invalid json")
+    assert _load_credentials(tmp_path) == {}
+
+
 def test_save_and_load_credentials(tmp_path):
     from src.cli.wizard import _load_credentials, _save_credentials
     creds = {"api_key": "k1", "secret": "s1", "password": "p1"}

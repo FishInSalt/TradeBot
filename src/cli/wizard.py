@@ -49,8 +49,11 @@ def _load_credentials(config_dir: Path) -> dict:
     path = config_dir / _CREDENTIALS_FILE
     if not path.exists():
         return {}
-    with open(path) as f:
-        return json.load(f)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return {}
 
 
 def _save_credentials(config_dir: Path, exchange: str, creds: dict) -> None:
