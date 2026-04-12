@@ -549,12 +549,11 @@ git commit -m "refactor(r5): okx.py remove redundant Console().print (logger.err
 
 ---
 
-### Task 6: Add --debug flag, update .gitignore, deprecate settings_sim.yaml
+### Task 6: Add --debug flag, update .gitignore
 
 **Files:**
 - Modify: `main.py`
 - Modify: `.gitignore`
-- Modify: `config/settings_sim.yaml`
 
 - [ ] **Step 1: Add --debug flag to main.py**
 
