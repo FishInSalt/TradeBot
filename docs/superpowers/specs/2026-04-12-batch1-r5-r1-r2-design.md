@@ -209,6 +209,7 @@ def setup_session_logging(session_id: str, log_dir: Path) -> SessionConsole:
 - `display.py` 的 `display_metrics()` 改为接受 `console` 参数；`log_trade()` 是死代码（未被调用），直接删除
 - `approval.py` 的 `ApprovalGate` 增加 `console` 参数（构造时传入），内部 `console.print()` 改为使用传入的实例（审批面板和超时警告是会话内容，需写入 session 日志）
 - `app.py`、`display.py`、`approval.py` 三处模块级 `console = Console()` 均删除
+- `run_main_loop()` 内的 `_signal_handler` (当前 app.py:327) 通过闭包捕获 `sc` 输出 shutdown 消息
 - `okx.py:138-139` 的临时 `Console().print()` 改为 `logger.warning()`（系统级告警，非会话内容）
 
 ### Known Limitation: 日志轮转
@@ -322,6 +323,7 @@ async def run_wizard(
 
 **Step 1: 交易所模式**
 - "模拟 / 实盘？" → `Prompt.ask(choices=["sim","real"], default="sim")` — 默认模拟，对新用户更安全
+- 选项到 `WizardResult.exchange_type` 的映射：`{"sim": "simulated", "real": "okx"}`（未来支持更多交易所时扩展此映射）
 - (sim) 手续费率 [0.05%], 初始余额 [100 USDT]
   - fee_rate/initial_balance 的 wizard 内部 fallback 常量：`0.0005` / `100.0`（当 YAML 值为 None 时使用）
 - (real) 交易所 [okx], API 凭证（`password=True` 隐藏输入）, 初始余额 [100 USDT]
@@ -403,6 +405,8 @@ Rich Table 汇总全部配置，用户确认或返回修改：
 新输入的凭证保存到 `config/.credentials`。`.credentials` 加入 `.gitignore`。
 
 这提供了从 `.env` 到 `.credentials` 的平滑迁移：首次运行向导时 `.env` 值会被预填并保存到 `.credentials`，后续启动直接读 `.credentials`。
+
+注意：`load_settings()` 仍会调用 `load_dotenv()` 将 `.env` 值加载到 `ExchangeConfig`，但在有向导的启动路径下这些值仅作为 fallback 预填，不直接用于 Exchange 构造。
 
 #### 模拟交易所精度处理
 
@@ -621,9 +625,13 @@ active/paused ──┴── 用户主动结束 → stopped（首版不实现 U
 
 ### Session 命名
 
-自动生成，用户可改：`"{symbol_short} {exchange_type} #{N}"` — 如 "BTC sim #1"
+自动生成，用户可改：`"{symbol_short} {exchange_display} #{N}"` — 如 "BTC sim #1"
 
-计数逻辑：`N = SELECT COUNT(*) FROM sessions WHERE name LIKE '{symbol_short} {exchange_type} %' + 1`。如果生成的名称已存在（如同名 stopped session），递增 N 直到唯一。最终用户可修改名称，若输入的名称冲突则提示重输。
+**辅助映射**：
+- `symbol_short`：`symbol.split("/")[0]` — 如 "BTC/USDT:USDT" → "BTC"，"1000PEPE/USDT:USDT" → "1000PEPE"
+- `exchange_display`：`{"simulated": "sim", "okx": "okx"}` — 短名用于显示和命名
+
+计数逻辑：`N = SELECT COUNT(*) FROM sessions WHERE name LIKE '{symbol_short} {exchange_display} %' ESCAPE '\' + 1`。如果生成的名称已存在（如同名 stopped session），递增 N 直到唯一。最终用户可修改名称，若输入的名称冲突则提示重输。
 
 ### 新模块 `src/cli/session_manager.py`
 
