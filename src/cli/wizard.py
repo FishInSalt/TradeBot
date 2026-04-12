@@ -61,3 +61,80 @@ def _save_credentials(config_dir: Path, exchange: str, creds: dict) -> None:
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     os.chmod(path, 0o600)
+
+
+def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> dict:
+    """Step 1: Exchange mode. Returns exchange_type, fee_rate, initial_balance, api_credentials."""
+    console.print("\n[bold]Step 1: Exchange[/]")
+    mode = Prompt.ask("  Mode", choices=["sim", "real"], default="sim", console=console)
+    exchange_type = "simulated" if mode == "sim" else "okx"
+
+    if exchange_type == "simulated":
+        fee = defaults.exchange.fee_rate if defaults.exchange.fee_rate is not None else 0.0005
+        default_fee_pct = fee * 100
+        fee_pct = FloatPrompt.ask("  Fee rate (%)", default=default_fee_pct, console=console)
+        balance = FloatPrompt.ask(
+            "  Initial balance (USDT)",
+            default=defaults.trading.initial_balance_usdt,
+            console=console,
+        )
+        return {
+            "exchange_type": "simulated",
+            "fee_rate": fee_pct / 100,
+            "initial_balance": balance,
+            "api_credentials": None,
+        }
+
+    # Real exchange — try saved credentials first
+    api_credentials = None
+    saved = _load_credentials(config_dir)
+    if "okx" in saved:
+        console.print("  [dim]Saved OKX credentials found[/]")
+        if Confirm.ask("  Use saved credentials?", default=True, console=console):
+            api_credentials = saved["okx"]
+
+    # Spec defines 3-tier priority: .credentials > .env > manual input.
+    # For .env tier, spec says "pre-fill as defaults". We intentionally simplify
+    # to confirm-or-reject (not per-field pre-fill) because Rich's Prompt displays
+    # default values in plain text even with password=True, which would leak secrets.
+    if api_credentials is None:
+        env_key = defaults.exchange.api_key
+        env_secret = defaults.exchange.secret
+        env_pass = defaults.exchange.password
+        if env_key and env_secret and env_pass:
+            console.print("  [dim]Credentials found in environment[/]")
+            if Confirm.ask("  Use environment credentials?", default=True, console=console):
+                api_credentials = {"api_key": env_key, "secret": env_secret, "password": env_pass}
+                _save_credentials(config_dir, "okx", api_credentials)
+
+    if api_credentials is None:
+        api_key = Prompt.ask("  API Key", console=console)
+        secret = Prompt.ask("  Secret", password=True, console=console)
+        password = Prompt.ask("  Password", password=True, console=console)
+        api_credentials = {"api_key": api_key, "secret": secret, "password": password}
+        _save_credentials(config_dir, "okx", api_credentials)
+
+    balance = FloatPrompt.ask(
+        "  Initial balance (USDT)",
+        default=defaults.trading.initial_balance_usdt,
+        console=console,
+    )
+    return {
+        "exchange_type": "okx",
+        "fee_rate": None,
+        "initial_balance": balance,
+        "api_credentials": api_credentials,
+    }
+
+
+def _step_trading_pair(defaults: Settings, console: Console) -> dict:
+    """Step 2: Trading pair. Returns symbol, timeframe."""
+    console.print("\n[bold]Step 2: Trading Pair[/]")
+    symbol = Prompt.ask("  Symbol", default=defaults.trading.symbol, console=console)
+    timeframe = Prompt.ask(
+        "  Timeframe",
+        choices=["1m", "5m", "15m", "1H", "4H"],
+        default=defaults.trading.timeframe,
+        console=console,
+    )
+    return {"symbol": symbol, "timeframe": timeframe}

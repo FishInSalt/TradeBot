@@ -75,3 +75,66 @@ def test_save_credentials_preserves_other_exchanges(tmp_path):
     loaded = _load_credentials(tmp_path)
     assert loaded["okx"]["api_key"] == "okx_key"
     assert loaded["binance"]["api_key"] == "bin_key"
+
+
+# --- Step 1: Exchange ---
+
+@patch("src.cli.wizard.FloatPrompt.ask", side_effect=[0.05, 100.0])
+@patch("src.cli.wizard.Prompt.ask", return_value="sim")
+def test_step_exchange_sim(mock_prompt, mock_float):
+    from src.cli.wizard import _step_exchange
+    result = _step_exchange(Settings(), Path("/tmp"), Console())
+    assert result["exchange_type"] == "simulated"
+    assert result["fee_rate"] == 0.0005  # 0.05% → 0.0005
+    assert result["initial_balance"] == 100.0
+    assert result["api_credentials"] is None
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", return_value=200.0)
+@patch("src.cli.wizard.Prompt.ask", side_effect=["real", "my_key", "my_secret", "my_pass"])
+def test_step_exchange_real_new_creds(mock_prompt, mock_float, tmp_path):
+    from src.cli.wizard import _step_exchange, _load_credentials
+    result = _step_exchange(Settings(), tmp_path, Console())
+    assert result["exchange_type"] == "okx"
+    assert result["api_credentials"]["api_key"] == "my_key"
+    assert result["initial_balance"] == 200.0
+    # Verify credentials were saved
+    saved = _load_credentials(tmp_path)
+    assert saved["okx"]["api_key"] == "my_key"
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", return_value=100.0)
+@patch("src.cli.wizard.Confirm.ask", return_value=True)
+@patch("src.cli.wizard.Prompt.ask", return_value="real")
+def test_step_exchange_real_reuse_saved(mock_prompt, mock_confirm, mock_float, tmp_path):
+    from src.cli.wizard import _save_credentials, _step_exchange
+    _save_credentials(tmp_path, "okx", {"api_key": "saved_k", "secret": "s", "password": "p"})
+    result = _step_exchange(Settings(), tmp_path, Console())
+    assert result["api_credentials"]["api_key"] == "saved_k"
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", return_value=100.0)
+@patch("src.cli.wizard.Confirm.ask", return_value=True)
+@patch("src.cli.wizard.Prompt.ask", return_value="real")
+def test_step_exchange_real_env_fallback(mock_prompt, mock_confirm, mock_float, tmp_path):
+    """Tier 2: no .credentials, Settings has env creds → confirm reuse."""
+    from src.cli.wizard import _step_exchange, _load_credentials
+    settings = Settings()
+    settings.exchange.api_key = "env_key"
+    settings.exchange.secret = "env_secret"
+    settings.exchange.password = "env_pass"
+    result = _step_exchange(settings, tmp_path, Console())
+    assert result["api_credentials"]["api_key"] == "env_key"
+    # Verify env creds were saved to .credentials for next time
+    saved = _load_credentials(tmp_path)
+    assert saved["okx"]["api_key"] == "env_key"
+
+
+# --- Step 2: Trading Pair ---
+
+@patch("src.cli.wizard.Prompt.ask", side_effect=["ETH/USDT:USDT", "1H"])
+def test_step_trading_pair_custom(mock_prompt):
+    from src.cli.wizard import _step_trading_pair
+    result = _step_trading_pair(Settings(), Console())
+    assert result["symbol"] == "ETH/USDT:USDT"
+    assert result["timeframe"] == "1H"
