@@ -52,9 +52,23 @@ git checkout -b feature/r5-log-separation
 # tests/test_logging_config.py
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+import pytest
+
 from src.cli.logging_config import SessionConsole
+
+
+@pytest.fixture(autouse=True)
+def _restore_root_logger():
+    """Restore root logger state after tests that call setup_system_logging."""
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    yield
+    root.handlers = original_handlers
+    root.setLevel(original_level)
 
 
 def test_session_console_writes_to_file(tmp_path: Path):
@@ -159,8 +173,6 @@ git commit -m "feat(r5): add SessionConsole with terminal + file dual-write"
 Append to `tests/test_logging_config.py`:
 
 ```python
-import logging
-
 from src.cli.logging_config import setup_system_logging, setup_session_logging
 
 
@@ -499,9 +511,9 @@ git commit -m "refactor(r5): ApprovalGate takes console param, remove global con
 **Files:**
 - Modify: `src/integrations/exchange/okx.py`
 
-- [ ] **Step 1: Replace Console().print with logger.warning**
+- [ ] **Step 1: Remove redundant Console().print**
 
-In `src/integrations/exchange/okx.py`, replace lines 136-139:
+In `src/integrations/exchange/okx.py`, replace lines 135-139:
 
 ```python
         except Exception:
@@ -517,8 +529,9 @@ with:
         except Exception:
             self._ws_connected = False
             logger.error("WebSocket connection failed, running in REST-only mode", exc_info=True)
-            logger.warning("WebSocket connection failed, running in REST-only mode")
 ```
+
+The `logger.error()` already writes to both `system.log` (all levels) and terminal (WARNING+) under the new logging config. Adding `logger.warning()` would duplicate the message. Just delete the `Console().print()` lines.
 
 - [ ] **Step 2: Run existing OKX tests to verify no regression**
 
@@ -529,7 +542,7 @@ Expected: All existing tests PASS
 
 ```bash
 git add src/integrations/exchange/okx.py
-git commit -m "refactor(r5): okx.py replace Console().print with logger.warning"
+git commit -m "refactor(r5): okx.py remove redundant Console().print (logger.error suffices)"
 ```
 
 ---
@@ -683,15 +696,30 @@ async def run(
     pre_console = setup_system_logging(debug, log_dir)
 ```
 
-- [ ] **Step 4: Replace all console.print calls in run() to use pre_console or sc**
+- [ ] **Step 4: Replace all console.print calls in run() and _interactive_add_model**
 
-There are ~29 `console.print(...)` calls in `run()`. They split into two groups:
+All `console.print(...)` calls in `run()` (28 places) and `_interactive_add_model()` (3 places) must be migrated. They split into two groups:
 
-**Before session_id is known (use `pre_console`)** — lines 173, 178-182, 200, 204, 221, 228, 231, 234, 236, 244, 246, 289, 297:
+**Before session_id is known (use `pre_console`)** — in `run()`:
+- L173 (banner), L178-182 (config summary), L197 (model not found error), L200 (model selected), L202-205 (model list + "Add new"), L221 (no models), L227-228 (no model exit), L231-234 (connectivity test), L236-237 (test failed), L244 (model saved), L246 (model info)
 Replace each `console.print(...)` with `pre_console.print(...)`.
 
-**After session_id is known (use `sc`)** — lines 339, 353-354, 356, 362-364, 368, 421-425:
+**Also in `_interactive_add_model()`** — L440, L449, L463:
+Add `console` parameter to function signature:
+```python
+async def _interactive_add_model(model_manager, existing_models, console):
+```
+Replace each `console.print(...)` inside to use the passed `console` parameter (it's already named `console`, so only the signature needs the parameter added).
+Update both call sites in `run()` (L217, L222) to pass `pre_console`:
+```python
+selected_config, selected_model = await _interactive_add_model(
+    model_manager, existing_models, pre_console
+)
+```
+
+**After session_id is known (use `sc`)** — in `run()`:
 Add `sc = setup_session_logging(session_id, log_dir)` after line 279 (where `session_id` is assigned).
+- L289 (Exchange: simulated), L297 (Exchange: real), L339-368 (alert config), L421-425 (scheduler/budget info)
 Replace each `console.print(...)` after that point with `sc.print(...)`.
 
 - [ ] **Step 5: Wire console through display_metrics and ApprovalGate**
