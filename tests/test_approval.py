@@ -1,3 +1,6 @@
+from rich.console import Console
+
+
 def test_format_decision():
     from src.cli.approval import format_decision_for_approval
 
@@ -15,7 +18,7 @@ def test_format_decision():
 def test_auto_approve_when_disabled():
     from src.cli.approval import ApprovalGate
 
-    gate = ApprovalGate(enabled=False, timeout_seconds=300)
+    gate = ApprovalGate(enabled=False, timeout_seconds=300, console=Console())
     result = gate.check_sync("open_long", "Bullish", 20.0, 3)
     assert result is True
 
@@ -24,7 +27,7 @@ def test_approval_accepted(monkeypatch):
     from src.cli.approval import ApprovalGate
 
     monkeypatch.setattr("builtins.input", lambda _: "y")
-    gate = ApprovalGate(enabled=True, timeout_seconds=300)
+    gate = ApprovalGate(enabled=True, timeout_seconds=300, console=Console())
     result = gate.check_sync("open_long", "Bullish trend", 20.0, 3)
     assert result is True
 
@@ -33,6 +36,6 @@ def test_approval_rejected(monkeypatch):
     from src.cli.approval import ApprovalGate
 
     monkeypatch.setattr("builtins.input", lambda _: "n")
-    gate = ApprovalGate(enabled=True, timeout_seconds=300)
+    gate = ApprovalGate(enabled=True, timeout_seconds=300, console=Console())
     result = gate.check_sync("open_long", "Weak signal", 20.0, 3)
     assert result is False

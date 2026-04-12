@@ -135,8 +135,6 @@ class OKXExchange(BaseExchange):
         except Exception:
             self._ws_connected = False
             logger.error("WebSocket connection failed, running in REST-only mode", exc_info=True)
-            from rich.console import Console
-            Console().print("[yellow]⚠ WebSocket connection failed, running in REST-only mode[/]")
 
     # --- watch_orders loop ---
 

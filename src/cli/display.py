@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from rich.console import Console
 from rich.panel import Panel
 
 from src.services.metrics import PerformanceMetrics
-
-console = Console()
 
 
 def format_metrics(metrics: PerformanceMetrics) -> str:
@@ -20,11 +17,6 @@ def format_metrics(metrics: PerformanceMetrics) -> str:
     )
 
 
-def display_metrics(metrics: PerformanceMetrics) -> None:
+def display_metrics(metrics: PerformanceMetrics, console) -> None:
     color = "green" if metrics.total_pnl >= 0 else "red"
     console.print(Panel(format_metrics(metrics), title="[bold]Performance[/]", border_style=color))
-
-
-def log_trade(action: str, reasoning: str, symbol: str) -> None:
-    color = "green" if "long" in action.lower() else "red" if "short" in action.lower() else "yellow"
-    console.print(f"[{color}][{symbol}] {action.upper()} — {reasoning}[/]")
