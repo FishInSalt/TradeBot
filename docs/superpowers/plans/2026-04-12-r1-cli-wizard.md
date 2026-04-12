@@ -40,10 +40,13 @@ import json
 import os
 import stat
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from rich.console import Console
 
 from src.config import PersonaConfig, Settings, TraderConfig
+from src.services.model_manager import ModelConfig
 
 
 # --- WizardResult ---
@@ -207,9 +210,6 @@ git commit -m "feat(r1): add WizardResult dataclass and credential helpers"
 Append to `tests/test_wizard.py`:
 
 ```python
-from unittest.mock import patch
-
-
 # --- Step 1: Exchange ---
 
 @patch("src.cli.wizard.FloatPrompt.ask", side_effect=[0.05, 100.0])
@@ -294,6 +294,10 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
         if Confirm.ask("  Use saved credentials?", default=True, console=console):
             api_credentials = saved["okx"]
 
+    # Spec defines 3-tier priority: .credentials > .env > manual input.
+    # For .env tier, spec says "pre-fill as defaults". We intentionally simplify
+    # to confirm-or-reject (not per-field pre-fill) because Rich's Prompt displays
+    # default values in plain text even with password=True, which would leak secrets.
     if api_credentials is None:
         env_key = defaults.exchange.api_key
         env_secret = defaults.exchange.secret
@@ -362,10 +366,6 @@ git commit -m "feat(r1): wizard steps 1-2 (exchange selection + trading pair)"
 Append to `tests/test_wizard.py`:
 
 ```python
-from unittest.mock import AsyncMock, MagicMock
-from src.services.model_manager import ModelConfig
-
-
 def _make_model_manager(models=None, test_ok=True):
     """Create a mock ModelManager with configurable behavior."""
     mm = MagicMock()
@@ -385,8 +385,7 @@ _SAMPLE_MODEL = ModelConfig(id="claude", provider="anthropic", model="claude-opu
 
 
 @pytest.mark.asyncio
-@patch("src.cli.wizard.Confirm.ask", return_value=True)
-async def test_step_model_with_flag(mock_confirm):
+async def test_step_model_with_flag():
     from src.cli.wizard import _step_model
     mm = _make_model_manager(models=[_SAMPLE_MODEL])
     result = await _step_model(mm, model_id="claude", console=Console())
@@ -394,9 +393,8 @@ async def test_step_model_with_flag(mock_confirm):
 
 
 @pytest.mark.asyncio
-@patch("src.cli.wizard.Confirm.ask", return_value=True)
 @patch("src.cli.wizard.IntPrompt.ask", return_value=1)
-async def test_step_model_select_existing(mock_int, mock_confirm):
+async def test_step_model_select_existing(mock_int):
     from src.cli.wizard import _step_model
     mm = _make_model_manager(models=[_SAMPLE_MODEL])
     result = await _step_model(mm, model_id=None, console=Console())
@@ -415,8 +413,7 @@ async def test_step_model_connectivity_fail_abort(mock_confirm):
 @pytest.mark.asyncio
 @patch("src.cli.wizard.Prompt.ask", side_effect=["openai", "gpt-4o", "sk-new", "", "gpt4o"])
 @patch("src.cli.wizard.IntPrompt.ask", return_value=2)
-@patch("src.cli.wizard.Confirm.ask", return_value=True)
-async def test_step_model_add_new(mock_confirm, mock_int, mock_prompt):
+async def test_step_model_add_new(mock_int, mock_prompt):
     from src.cli.wizard import _step_model
     mm = _make_model_manager(models=[_SAMPLE_MODEL])
     result = await _step_model(mm, model_id=None, console=Console())
@@ -505,6 +502,7 @@ async def _step_model(
             selected_config, selected_model = pair
 
     # Connectivity test
+    # TODO: on failure + user decline, loop back to selection instead of exiting wizard
     console.print(f"  Testing API for {selected_config.id}...")
     success, error = await model_manager.test_connectivity(selected_model)
     if success:
@@ -725,6 +723,7 @@ def test_show_summary_confirm(mock_confirm):
         "model_config": ModelConfig(id="test", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         "scheduler_interval_min": 15, "approval_enabled": False,
         "alert_enabled": True, "alert_window_min": 5, "alert_threshold_pct": 3.0, "alert_cooldown_min": 15,
+        "token_budget": 500000,
         "persona": PersonaConfig(),
     }
     assert _show_summary(data, Console()) is True
@@ -739,6 +738,7 @@ def test_show_summary_reject(mock_confirm):
         "model_config": ModelConfig(id="test", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         "scheduler_interval_min": 15, "approval_enabled": False,
         "alert_enabled": False, "alert_window_min": None, "alert_threshold_pct": None, "alert_cooldown_min": None,
+        "token_budget": 500000,
         "persona": PersonaConfig(),
     }
     assert _show_summary(data, Console()) is False
@@ -983,7 +983,7 @@ _DEFAULT_PRECISION = {
 }
 
 
-async def build_services(
+def build_services(
     result: WizardResult,
     engine,
     session_id: str,
@@ -1133,7 +1133,7 @@ async def run(
     sc = setup_session_logging(session_id, log_dir)
 
     # ── Phase 5: Build services ──
-    exchange, deps, agent, budget = await build_services(
+    exchange, deps, agent, budget = build_services(
         result, engine, session_id, sc, settings,
     )
 
