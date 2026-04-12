@@ -532,12 +532,55 @@ async def test_list_sessions_ordered_by_last_active(tmp_path):
     assert sessions[1].name == "Older"
     assert sessions[2].name == "No-active"
     await engine.dispose()
+
+
+async def test_get_position_summary_with_position(tmp_path):
+    """Sim session with open position shows 'side contracts symbol'."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+    from src.storage.models import SimPosition
+
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s1", name="test"))
+        await db_sess.commit()
+        db_sess.add(SimPosition(
+            session_id="s1", symbol="BTC/USDT:USDT", side="long",
+            contracts=0.5, entry_price=95000.0, leverage=3,
+        ))
+        await db_sess.commit()
+
+    from src.cli.session_manager import _get_position_summary
+    assert await _get_position_summary(engine, "s1", "simulated") == "long 0.5 BTC"
+    await engine.dispose()
+
+
+async def test_get_position_summary_no_position(tmp_path):
+    """Sim session without position shows '—'."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s1", name="test"))
+        await db_sess.commit()
+
+    from src.cli.session_manager import _get_position_summary
+    assert await _get_position_summary(engine, "s1", "simulated") == "—"
+    await engine.dispose()
+
+
+async def test_get_position_summary_real_exchange(tmp_path):
+    """Real exchange always shows '—' (not connected)."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+    from src.cli.session_manager import _get_position_summary
+    assert await _get_position_summary(engine, "any-id", "okx") == "—"
+    await engine.dispose()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_session_manager.py::test_fix_residual_active_sessions tests/test_session_manager.py::test_list_sessions_ordered_by_last_active -v`
-Expected: FAIL — cannot import `_fix_residual_active` / `_list_sessions`
+Run: `python -m pytest tests/test_session_manager.py::test_fix_residual_active_sessions tests/test_session_manager.py::test_list_sessions_ordered_by_last_active tests/test_session_manager.py::test_get_position_summary_with_position tests/test_session_manager.py::test_get_position_summary_no_position tests/test_session_manager.py::test_get_position_summary_real_exchange -v`
+Expected: FAIL — cannot import `_fix_residual_active` / `_list_sessions` / `_get_position_summary`
 
 - [ ] **Step 3: Implement `_fix_residual_active` and `_list_sessions`**
 
@@ -575,7 +618,7 @@ async def _get_position_summary(engine, session_id: str, exchange_type: str) -> 
         )
         pos = result.scalar_one_or_none()
     if pos is None:
-        return "���"
+        return "\u2014"
     return f"{pos.side} {pos.contracts} {pos.symbol.split('/')[0]}"
 ```
 
