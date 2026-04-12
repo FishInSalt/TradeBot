@@ -155,10 +155,17 @@ async def _restore_session(
             from src.cli.wizard import _save_credentials
             _save_credentials(config_dir, "okx", api_credentials)
 
-    # Update status to active
+    # Update status to active + persist model choice
+    new_model_config = json.dumps({
+        "id": selected_config.id,
+        "provider": selected_config.provider,
+        "model": selected_config.model,
+    })
     async with get_session(engine) as db_sess:
         await db_sess.execute(
-            update(Session).where(Session.id == session_id).values(status="active")
+            update(Session).where(Session.id == session_id).values(
+                status="active", model_config=new_model_config,
+            )
         )
         await db_sess.commit()
 
@@ -246,8 +253,10 @@ async def _generate_session_name_from_db(engine, symbol: str, exchange_type: str
     prefix = f"{symbol_short} {exchange_display}"
 
     async with get_session(engine) as db_sess:
+        # Escape LIKE wildcards in prefix, then match "{prefix} %"
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         result = await db_sess.execute(
-            select(Session).where(Session.name.like(f"{prefix} %"))
+            select(Session).where(Session.name.like(f"{escaped} %", escape="\\"))
         )
         existing_names = {s.name for s in result.scalars().all()}
 
