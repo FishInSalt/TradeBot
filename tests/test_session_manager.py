@@ -235,3 +235,78 @@ async def test_get_position_summary_real_exchange(tmp_path):
     from src.cli.session_manager import _get_position_summary
     assert await _get_position_summary(engine, "any-id", "okx") == "\u2014"
     await engine.dispose()
+
+
+async def test_create_session_from_wizard_result(tmp_path):
+    """WizardResult fields are correctly persisted to Session record."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    from src.config import PersonaConfig
+    from src.services.model_manager import ModelConfig
+    from src.cli.wizard import WizardResult
+
+    result = WizardResult(
+        exchange_type="simulated", fee_rate=0.001, initial_balance=500.0,
+        api_credentials=None, symbol="ETH/USDT:USDT", timeframe="1H",
+        model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(),
+        scheduler_interval_min=30, approval_enabled=False,
+        alert_enabled=True, alert_window_min=10, alert_threshold_pct=5.0, alert_cooldown_min=20,
+        token_budget=300000,
+        persona=PersonaConfig(risk_tolerance="aggressive"),
+        session_name="ETH sim #1",
+    )
+
+    from src.cli.session_manager import _create_session
+    session_id = await _create_session(engine, result)
+
+    async with get_session(engine) as db_sess:
+        row = await db_sess.execute(select(Session).where(Session.id == session_id))
+        s = row.scalar_one()
+
+    assert s.name == "ETH sim #1"
+    assert s.exchange_type == "simulated"
+    assert s.timeframe == "1H"
+    assert s.scheduler_interval_min == 30
+    assert s.approval_enabled is False
+    assert s.fee_rate == 0.001
+    assert s.token_budget == 300000
+    alert = json.loads(s.alert_config)
+    assert alert["enabled"] is True
+    assert alert["window"] == 10
+    assert s.status == "active"
+    await engine.dispose()
+
+
+async def test_create_session_name_dedup(tmp_path):
+    """Duplicate session names get suffix appended."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    from src.config import PersonaConfig
+    from src.services.model_manager import ModelConfig
+    from src.cli.wizard import WizardResult
+
+    base = WizardResult(
+        exchange_type="simulated", fee_rate=0.0005, initial_balance=100.0,
+        api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
+        model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(),
+        scheduler_interval_min=15, approval_enabled=True,
+        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None, alert_cooldown_min=None,
+        token_budget=500000,
+        persona=PersonaConfig(),
+        session_name="BTC sim",
+    )
+
+    from src.cli.session_manager import _create_session
+    id1 = await _create_session(engine, base)
+    id2 = await _create_session(engine, base)
+
+    async with get_session(engine) as db_sess:
+        r1 = await db_sess.execute(select(Session).where(Session.id == id1))
+        r2 = await db_sess.execute(select(Session).where(Session.id == id2))
+        assert r1.scalar_one().name == "BTC sim"
+        assert r2.scalar_one().name == "BTC sim #2"
+    await engine.dispose()

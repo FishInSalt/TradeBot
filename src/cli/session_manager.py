@@ -181,3 +181,55 @@ async def _restore_session(
         persona=persona,
         session_name=s.name,
     )
+
+
+async def _create_session(engine, result: WizardResult) -> str:
+    """Create a new Session record from WizardResult. Returns session_id.
+    Handles name deduplication by appending ' #N' suffix."""
+    async with get_session(engine) as db_sess:
+        # Name deduplication
+        base_name = result.session_name
+        name = base_name
+        suffix = 2
+        while True:
+            existing = await db_sess.execute(
+                select(Session).where(Session.name == name)
+            )
+            if existing.scalar_one_or_none() is None:
+                break
+            name = f"{base_name} #{suffix}"
+            suffix += 1
+
+        # Alert config JSON
+        alert_config = None
+        if result.alert_enabled:
+            alert_config = json.dumps({
+                "enabled": True,
+                "window": result.alert_window_min,
+                "threshold": result.alert_threshold_pct,
+                "cooldown": result.alert_cooldown_min,
+            })
+
+        trading_session = Session(
+            name=name,
+            symbol=result.symbol,
+            persona_config=json.dumps(result.persona.model_dump()),
+            model_config=json.dumps({
+                "id": result.model_config.id,
+                "provider": result.model_config.provider,
+                "model": result.model_config.model,
+            }),
+            initial_balance=result.initial_balance,
+            status="active",
+            exchange_type=result.exchange_type,
+            timeframe=result.timeframe,
+            scheduler_interval_min=result.scheduler_interval_min,
+            approval_enabled=result.approval_enabled,
+            alert_config=alert_config,
+            fee_rate=result.fee_rate,
+            token_budget=result.token_budget,
+        )
+        db_sess.add(trading_session)
+        await db_sess.commit()
+        await db_sess.refresh(trading_session)
+        return trading_session.id
