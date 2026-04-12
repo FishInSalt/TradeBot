@@ -172,3 +172,26 @@ async def test_sim_order_fields():
         assert order.fee == 0.0475
         assert order.trigger_price is None
     await engine.dispose()
+
+
+async def test_session_new_fields_have_defaults():
+    """New R2 fields have ORM defaults — Session(id=..., name=...) still works."""
+    from src.storage.models import Session
+    from src.storage.database import init_db, get_session
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with get_session(engine) as session:
+        s = Session(id="r2-test", name="r2-defaults")
+        session.add(s)
+        await session.commit()
+        await session.refresh(s)
+
+        assert s.exchange_type == "simulated"
+        assert s.timeframe == "15m"
+        assert s.scheduler_interval_min == 15
+        assert s.approval_enabled is True
+        assert s.alert_config is None
+        assert s.fee_rate is None
+        assert s.token_budget == 500000
+        assert s.last_active_at is None
+    await engine.dispose()

@@ -33,6 +33,15 @@ class Session(Base):
     status: Mapped[str] = mapped_column(String(20), default="active")              # active / paused / stopped
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+    # --- R2: Session management fields ---
+    exchange_type: Mapped[str] = mapped_column(String(20), default="simulated")
+    timeframe: Mapped[str] = mapped_column(String(10), default="15m")
+    scheduler_interval_min: Mapped[int] = mapped_column(Integer, default=15)
+    approval_enabled: Mapped[bool] = mapped_column(default=True)
+    alert_config: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON: {enabled, window, threshold, cooldown}
+    fee_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token_budget: Mapped[int] = mapped_column(Integer, default=500000)
+    last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TradeAction(Base):
