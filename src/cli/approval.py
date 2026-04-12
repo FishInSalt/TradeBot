@@ -4,11 +4,9 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from rich.console import Console
 from rich.panel import Panel
 
 logger = logging.getLogger(__name__)
-console = Console()
 _executor = ThreadPoolExecutor(max_workers=1)
 
 
@@ -27,9 +25,10 @@ def format_decision_for_approval(
 
 
 class ApprovalGate:
-    def __init__(self, enabled: bool = True, timeout_seconds: int = 300):
+    def __init__(self, enabled: bool = True, timeout_seconds: int = 300, console=None):
         self._enabled = enabled
         self._timeout = timeout_seconds
+        self._console = console
 
     def check_sync(
         self,
@@ -43,9 +42,10 @@ class ApprovalGate:
         text = format_decision_for_approval(
             action, description, position_pct, leverage
         )
-        console.print(
-            Panel(text, title="[bold yellow]Trade Approval Required[/]", border_style="yellow")
-        )
+        if self._console is not None:
+            self._console.print(
+                Panel(text, title="[bold yellow]Trade Approval Required[/]", border_style="yellow")
+            )
         response = input(f"Approve? (y/n, timeout {self._timeout}s): ").strip().lower()
         return response == "y"
 
@@ -72,5 +72,6 @@ class ApprovalGate:
             return result
         except asyncio.TimeoutError:
             logger.warning(f"Approval timed out after {self._timeout}s, skipping trade")
-            console.print("[yellow]Approval timed out — trade skipped[/]")
+            if self._console is not None:
+                self._console.print("[yellow]Approval timed out — trade skipped[/]")
             return False
