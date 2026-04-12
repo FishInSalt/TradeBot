@@ -59,3 +59,56 @@ def test_session_console_flush_on_print(tmp_path: Path):
     content = (tmp_path / "session_test-flush.log").read_text()
     assert "Flushed line" in content
     sc.close()
+
+
+from rich.logging import RichHandler
+
+from src.cli.logging_config import setup_system_logging, setup_session_logging
+
+
+def test_setup_system_logging_creates_log_dir(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    console = setup_system_logging(debug=False, log_dir=log_dir)
+    assert log_dir.exists()
+    assert (log_dir / "system.log").exists()
+    assert console is not None
+
+
+def test_setup_system_logging_writes_to_system_log(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    test_logger = logging.getLogger("test.system.write")
+    test_logger.info("system info message")
+
+    content = (log_dir / "system.log").read_text()
+    assert "system info message" in content
+
+
+def test_setup_system_logging_debug_mode(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=True, log_dir=log_dir)
+
+    root = logging.getLogger()
+    # In debug mode, the RichHandler (terminal) should accept DEBUG level
+    rich_handlers = [h for h in root.handlers if isinstance(h, RichHandler)]
+    assert any(h.level <= logging.DEBUG for h in rich_handlers)
+
+
+def test_setup_system_logging_non_debug_filters_info(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    root = logging.getLogger()
+    rich_handlers = [h for h in root.handlers if isinstance(h, RichHandler)]
+    assert any(h.level >= logging.WARNING for h in rich_handlers)
+
+
+def test_setup_session_logging_returns_session_console(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    sc = setup_session_logging(session_id="sid-001", log_dir=log_dir)
+    assert isinstance(sc, SessionConsole)
+    sc.print("test output")
+    sc.close()
+    assert (log_dir / "session_sid-001.log").exists()
