@@ -298,9 +298,16 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
         env_key = defaults.exchange.api_key
         env_secret = defaults.exchange.secret
         env_pass = defaults.exchange.password
-        api_key = Prompt.ask("  API Key", default=env_key or None, console=console)
-        secret = Prompt.ask("  Secret", default=env_secret or None, password=True, console=console)
-        password = Prompt.ask("  Password", default=env_pass or None, password=True, console=console)
+        if env_key and env_secret and env_pass:
+            console.print("  [dim]Credentials found in environment[/]")
+            if Confirm.ask("  Use environment credentials?", default=True, console=console):
+                api_credentials = {"api_key": env_key, "secret": env_secret, "password": env_pass}
+                _save_credentials(config_dir, "okx", api_credentials)
+
+    if api_credentials is None:
+        api_key = Prompt.ask("  API Key", console=console)
+        secret = Prompt.ask("  Secret", password=True, console=console)
+        password = Prompt.ask("  Password", password=True, console=console)
         api_credentials = {"api_key": api_key, "secret": secret, "password": password}
         _save_credentials(config_dir, "okx", api_credentials)
 
@@ -765,6 +772,7 @@ async def test_run_wizard_full_flow(tmp_path):
         500000,              # Step 4: budget
         3,                   # Step 5: leverage
     ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
+        False,               # Step 4: approval OFF (sim default)
         True,                # Step 4: alerts ON
         True,                # Summary: confirm
     ]):
@@ -780,6 +788,47 @@ async def test_run_wizard_full_flow(tmp_path):
     assert result.model_config.id == "claude"
     assert result.approval_enabled is False  # sim default
     assert result.persona.risk_tolerance == "moderate"
+
+
+@pytest.mark.asyncio
+async def test_run_wizard_reject_then_confirm(tmp_path):
+    """Summary rejected → re-run all steps → confirm second time."""
+    from src.cli.wizard import run_wizard
+
+    mm = _make_model_manager(models=[_SAMPLE_MODEL])
+
+    # Two full rounds of prompts: first rejected, second confirmed
+    with patch("src.cli.wizard.Prompt.ask", side_effect=[
+        # Round 1
+        "sim", "BTC/USDT:USDT", "15m", "moderate", "trend_following",
+        # Round 2
+        "sim", "ETH/USDT:USDT", "15m", "moderate", "trend_following",
+        "ETH sim",           # Session name (only reached on confirm)
+    ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
+        # Round 1
+        0.05, 100.0, 3.0, 30.0, 3.0, 6.0,
+        # Round 2
+        0.05, 200.0, 3.0, 30.0, 3.0, 6.0,
+    ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
+        # Round 1
+        1, 15, 5, 15, 500000, 3,
+        # Round 2
+        1, 15, 5, 15, 500000, 3,
+    ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
+        # Round 1
+        False, True, False,  # approval OFF, alerts ON, summary REJECT
+        # Round 2
+        False, True, True,   # approval OFF, alerts ON, summary CONFIRM
+    ]):
+        result = await run_wizard(
+            model_manager=mm, defaults=Settings(), trader_defaults=TraderConfig(),
+            config_dir=tmp_path, console=Console(),
+        )
+
+    assert result is not None
+    assert result.symbol == "ETH/USDT:USDT"  # second round values
+    assert result.initial_balance == 200.0
+    assert result.session_name == "ETH sim"
 
 
 @pytest.mark.asyncio
@@ -808,7 +857,8 @@ Add to `src/cli/wizard.py`:
 
 ```python
 def _generate_session_name(symbol: str, exchange_type: str) -> str:
-    """Generate default session name: '{symbol_short} {exchange_display}'."""
+    """Generate default session name: '{symbol_short} {exchange_display}'.
+    R2 will extend with #{N} counter from DB query."""
     symbol_short = symbol.split("/")[0]
     exchange_display = _EXCHANGE_DISPLAY.get(exchange_type, exchange_type)
     return f"{symbol_short} {exchange_display}"
@@ -839,8 +889,15 @@ def _show_summary(data: dict, console: Console) -> bool:
         alert_str = "OFF"
     table.add_row("Alerts", alert_str)
 
+    table.add_row("Budget", f"{data['token_budget']:,} tokens/day")
+
     p = data["persona"]
     table.add_row("Persona", f"{p.risk_tolerance} / {p.trading_style}")
+    table.add_row(
+        "Risk Params",
+        f"pos {p.max_position_pct:.0f}% / {p.preferred_leverage}x / "
+        f"SL {p.stop_loss_pct:.0f}% / TP {p.take_profit_pct:.0f}%",
+    )
 
     console.print()
     console.print(table)
@@ -888,7 +945,7 @@ async def run_wizard(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_wizard.py -v`
-Expected: 22 passed
+Expected: All wizard tests pass
 
 - [ ] **Step 5: Commit**
 
@@ -904,176 +961,20 @@ git commit -m "feat(r1): wizard summary, naming, and run_wizard orchestrator"
 **Files:**
 - Modify: `src/cli/app.py`
 
-This task replaces all scattered interaction in `run()` with the wizard call and extracts `build_services()`. No new tests — existing 203 tests must continue to pass.
+This task replaces all scattered interaction in `run()` with the wizard call and extracts `build_services()`. No new tests — existing tests must continue to pass. Done incrementally: add new code → rewrite run() → delete old code, with test runs between each.
 
-- [ ] **Step 1: Rewrite `src/cli/app.py`**
+- [ ] **Step 1: Add imports, `_DEFAULT_PRECISION`, and `build_services()` to app.py**
 
-The new file keeps `TokenBudget`, `_record_action_from_fill`, and `run_agent_cycle` unchanged. It adds `_DEFAULT_PRECISION` and `build_services()`, and rewrites `run()`. It removes `_interactive_add_model()`.
-
-Replace the entire file with:
+Add new imports at the top of `src/cli/app.py` (after existing imports):
 
 ```python
-from __future__ import annotations
-
-import asyncio
-import json
-import logging
-import signal
-import uuid
-from pathlib import Path
-
-from sqlalchemy import select
-
-from src.agent.memory import MemoryService
-from src.agent.trader import TradingDeps, create_trader_agent
-from src.cli.approval import ApprovalGate
-from src.cli.display import display_metrics
-from src.cli.logging_config import setup_session_logging, setup_system_logging
 from src.cli.wizard import WizardResult, run_wizard
-from src.config import ExchangeConfig, load_settings, load_trader_config
-from src.integrations.exchange.base import FillEvent
-from src.integrations.exchange.okx import OKXExchange
-from src.integrations.market_data import MarketDataService
-from src.scheduler.scheduler import Scheduler
-from src.services.metrics import MetricsService
-from src.services.technical import TechnicalAnalysisService
-from src.storage.database import get_session, init_db
-from src.storage.models import DecisionLog, Session, TradeAction
+from src.config import ExchangeConfig, load_settings, load_trader_config  # add ExchangeConfig
+```
 
-logger = logging.getLogger(__name__)
+Add `_DEFAULT_PRECISION` and `build_services()` after `run_agent_cycle()` (before `run()`, around line 160):
 
-
-class TokenBudget:
-    def __init__(self, daily_max: int):
-        self._daily_max = daily_max
-        self._used = 0
-        self._reset_date = self._today()
-
-    @staticmethod
-    def _today() -> str:
-        from datetime import date
-        return date.today().isoformat()
-
-    def _check_reset(self) -> None:
-        today = self._today()
-        if today != self._reset_date:
-            logger.info(f"New day ({today}), resetting token budget")
-            self._used = 0
-            self._reset_date = today
-
-    def record(self, tokens: int) -> None:
-        self._check_reset()
-        self._used += tokens
-
-    @property
-    def remaining(self) -> int:
-        self._check_reset()
-        return max(0, self._daily_max - self._used)
-
-    @property
-    def exhausted(self) -> bool:
-        self._check_reset()
-        return self._used >= self._daily_max
-
-
-async def _record_action_from_fill(engine, session_id, event: FillEvent):
-    """将 FillEvent 记录为 TradeAction。"""
-    async with get_session(engine) as session:
-        session.add(TradeAction(
-            session_id=session_id,
-            action="order_filled",
-            order_id=event.order_id,
-            symbol=event.symbol,
-            side=event.position_side,
-            trigger_reason=event.trigger_reason,
-            price=event.fill_price,
-            pnl=event.pnl,
-            reasoning=f"(exchange: {event.trigger_reason} order filled @ {event.fill_price:.2f})",
-        ))
-        await session.commit()
-
-
-async def run_agent_cycle(
-    agent,
-    deps: TradingDeps,
-    trigger_type: str,
-    budget: TokenBudget,
-    engine,
-    context=None,
-    model=None,
-    console=None,
-):
-    if budget.exhausted:
-        logger.warning("Daily LLM token budget exhausted, skipping cycle")
-        return None
-
-    cycle_id = str(uuid.uuid4())[:8]
-    prompt = (
-        f"You have been woken up by a {trigger_type} trigger.\n"
-        f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"
-        "Analyze the current market, check your positions, and decide what to do.\n"
-        "Use your tools to gather data before making a decision."
-    )
-    if trigger_type == "conditional" and context is not None:
-        msg = (
-            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
-            f"— {context.symbol} {context.amount} @ {context.fill_price}"
-        )
-        if context.pnl is not None:
-            msg += f", PnL: {context.pnl:.2f} USDT"
-        prompt += msg
-    elif trigger_type == "alert" and context is not None:
-        direction = "dropped" if context.change_pct < 0 else "surged"
-        prompt += (
-            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
-            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
-        )
-
-    memory_context = await deps.memory.format_for_prompt()
-    if memory_context != "No relevant memories.":
-        prompt += f"\n\nYour memories:\n{memory_context}"
-
-    run_kwargs = {"deps": deps}
-    if model is not None:
-        run_kwargs["model"] = model
-
-    result = None
-    for attempt in range(3):
-        try:
-            result = await agent.run(prompt, **run_kwargs)
-            break
-        except Exception as e:
-            if attempt < 2:
-                delay = 2 ** attempt
-                logger.warning(f"LLM call attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
-                await asyncio.sleep(delay)
-            else:
-                logger.error(f"LLM call failed after 3 attempts: {e}")
-                return None
-
-    tokens = result.usage().total_tokens if result.usage() else 0
-    budget.record(tokens)
-
-    async with get_session(engine) as session:
-        session.add(
-            DecisionLog(
-                session_id=deps.session_id,
-                cycle_id=cycle_id,
-                trigger_type=trigger_type,
-                decision="completed",
-                reasoning=result.output[:500],
-                model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
-                tokens_used=tokens,
-            )
-        )
-        await session.commit()
-
-    logger.info(f"Cycle {cycle_id}: {tokens} tokens ({budget.remaining} remaining)")
-    if console is not None:
-        console.print(f"\n[bold cyan]Agent:[/]\n{result.output}\n")
-    return result
-
-
+```python
 # --- Phase 5: Service construction ---
 
 _DEFAULT_PRECISION = {
@@ -1154,10 +1055,18 @@ async def build_services(
         sc.print("Alerts: OFF")
 
     return exchange, deps, agent, budget
+```
 
+- [ ] **Step 2: Run tests — additive only, nothing should break**
 
-# --- Main entry point ---
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: All existing tests pass (build_services is new code, not yet called)
 
+- [ ] **Step 3: Rewrite `run()` to use wizard**
+
+Replace the entire `run()` function (lines 162-437) and delete `_interactive_add_model()` (lines 440-470). The new `run()`:
+
+```python
 async def run(
     settings_path: Path = Path("config/settings.yaml"),
     trader_path: Path = Path("config/trader.yaml"),
@@ -1303,12 +1212,12 @@ async def run(
     pre_console.print("[green]TradeBot stopped.[/]")
 ```
 
-- [ ] **Step 2: Run all tests to verify nothing is broken**
+- [ ] **Step 4: Run all tests to verify nothing is broken**
 
 Run: `.venv/bin/python -m pytest tests/ -v`
-Expected: All 203 existing tests + 22 wizard tests pass (225 total)
+Expected: All existing tests + wizard tests pass
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/cli/app.py
@@ -1369,7 +1278,7 @@ git commit -m "chore(r1): gitignore credentials file, deprecate settings_sim.yam
 | Step 5: Persona (risk/style/leverage/SL/TP) | Task 4 |
 | Summary table + confirmation | Task 5 |
 | Session name generation | Task 5 |
-| `run_wizard()` orchestrator with Ctrl+C + re-run on reject | Task 5 |
+| `run_wizard()` orchestrator with Ctrl+C + re-run on reject | Task 5 (incl. reject→reconfigure test) |
 | Credential read priority (.credentials > .env > manual) | Task 2 |
 | Delete `_interactive_add_model()` from app.py | Task 6 |
 | Delete scattered `input()` calls from `run()` | Task 6 |
