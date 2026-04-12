@@ -1,3 +1,7 @@
+# DEPRECATED — This file is no longer read by TradeBot.
+# The interactive wizard (R1) now handles all configuration.
+# Kept as reference for simulated-mode defaults.
+
 # === Exchange Configuration ===
 exchange:
   name: simulated               # Use local simulated exchange (no real API calls for trading)
