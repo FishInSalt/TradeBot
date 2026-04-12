@@ -64,6 +64,13 @@ def test_session_console_flush_on_print(tmp_path: Path):
 
 
 
+def test_session_console_double_close(tmp_path: Path):
+    sc = SessionConsole(session_id="test-dblclose", log_dir=tmp_path)
+    sc.print("before close")
+    sc.close()
+    sc.close()  # must not raise
+
+
 def test_setup_system_logging_creates_log_dir(tmp_path: Path):
     log_dir = tmp_path / "logs"
     console = setup_system_logging(debug=False, log_dir=log_dir)
