@@ -246,6 +246,23 @@ def test_step_exchange_real_reuse_saved(mock_prompt, mock_confirm, mock_float, t
     assert result["api_credentials"]["api_key"] == "saved_k"
 
 
+@patch("src.cli.wizard.FloatPrompt.ask", return_value=100.0)
+@patch("src.cli.wizard.Confirm.ask", return_value=True)
+@patch("src.cli.wizard.Prompt.ask", return_value="real")
+def test_step_exchange_real_env_fallback(mock_prompt, mock_confirm, mock_float, tmp_path):
+    """Tier 2: no .credentials, Settings has env creds → confirm reuse."""
+    from src.cli.wizard import _step_exchange, _load_credentials
+    settings = Settings()
+    settings.exchange.api_key = "env_key"
+    settings.exchange.secret = "env_secret"
+    settings.exchange.password = "env_pass"
+    result = _step_exchange(settings, tmp_path, Console())
+    assert result["api_credentials"]["api_key"] == "env_key"
+    # Verify env creds were saved to .credentials for next time
+    saved = _load_credentials(tmp_path)
+    assert saved["okx"]["api_key"] == "env_key"
+
+
 # --- Step 2: Trading Pair ---
 
 @patch("src.cli.wizard.Prompt.ask", side_effect=["ETH/USDT:USDT", "1H"])
@@ -1160,6 +1177,9 @@ async def run(
         return
 
     # Create session (R2 will add select/restore with #{N} counter)
+    # R2 will also add exchange_type/timeframe/scheduler_interval_min/approval_enabled/
+    # alert_config/fee_rate/token_budget columns to Session table and populate them here.
+    # Until then, these WizardResult fields are not persisted — restart requires re-config.
     # Session.name has unique=True — deduplicate by appending suffix
     async with get_session(engine) as db_sess:
         base_name = result.session_name
