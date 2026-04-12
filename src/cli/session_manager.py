@@ -255,3 +255,139 @@ async def _generate_session_name_from_db(engine, symbol: str, exchange_type: str
     while f"{prefix} #{n}" in existing_names:
         n += 1
     return f"{prefix} #{n}"
+
+
+async def _display_session_list(sessions: list[Session], engine, console: Console) -> None:
+    """Display session list as Rich Table with position summary."""
+    table = Table(title="TradeBot Sessions", border_style="blue")
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Name", style="bold")
+    table.add_column("Mode")
+    table.add_column("Status")
+    table.add_column("Position")
+    table.add_column("Last Active")
+
+    for i, s in enumerate(sessions, 1):
+        mode = _EXCHANGE_DISPLAY.get(s.exchange_type, s.exchange_type)
+        if s.status == "active":
+            status = "[green]\u25b6 active[/]"
+        else:
+            status = "[yellow]\u23f8 paused[/]"
+
+        position = await _get_position_summary(engine, s.id, s.exchange_type)
+
+        if s.last_active_at:
+            last_active = s.last_active_at
+            if last_active.tzinfo is None:
+                last_active = last_active.replace(tzinfo=timezone.utc)
+            delta = datetime.now(timezone.utc) - last_active
+            if delta < timedelta(minutes=1):
+                active_str = "just now"
+            elif delta < timedelta(hours=1):
+                active_str = f"{int(delta.total_seconds() / 60)} min ago"
+            elif delta < timedelta(days=1):
+                active_str = f"{int(delta.total_seconds() / 3600)} hours ago"
+            else:
+                active_str = f"{delta.days} days ago"
+        else:
+            active_str = "\u2014"
+
+        table.add_row(str(i), s.name, mode, status, position, active_str)
+
+    table.add_row(
+        str(len(sessions) + 1), "[green]+ New Session[/]", "", "", "", "",
+    )
+    console.print(table)
+
+
+def _make_name_generator(engine):
+    """Create an async name_generator callback bound to the DB engine."""
+    async def _gen(symbol: str, exchange_type: str) -> str:
+        return await _generate_session_name_from_db(engine, symbol, exchange_type)
+    return _gen
+
+
+async def select_or_create_session(
+    engine,
+    settings: Settings,
+    trader_config: TraderConfig,
+    model_manager: ModelManager,
+    model_id: str | None,
+    console: Console,
+    config_dir: Path,
+) -> tuple[WizardResult, str]:
+    """Entry point for session management.
+    Returns (WizardResult, session_id). Calls sys.exit(0) on wizard cancel."""
+    # Fix residual active sessions from unclean shutdown
+    async with engine.begin() as conn:
+        await _migrate_session_table(conn)
+        fixed = await _fix_residual_active(conn)
+    if fixed:
+        console.print(f"[dim]Fixed {fixed} residual active session(s)[/]")
+
+    sessions = await _list_sessions(engine)
+    name_gen = _make_name_generator(engine)
+
+    # Pre-fetch all session names for uniqueness check in wizard
+    async with get_session(engine) as db_sess:
+        all_sessions = await db_sess.execute(select(Session))
+        all_names = {s.name for s in all_sessions.scalars().all()}
+
+    if not sessions:
+        # No history — go straight to wizard
+        result = await run_wizard(
+            model_manager=model_manager,
+            defaults=settings,
+            trader_defaults=trader_config,
+            config_dir=config_dir,
+            console=console,
+            model_id=model_id,
+            name_generator=name_gen,
+            existing_names=all_names,
+        )
+        if result is None:
+            console.print("Cancelled.")
+            sys.exit(0)
+        session_id = await _create_session(engine, result)
+        return result, session_id
+
+    # Show session list and let user choose
+    await _display_session_list(sessions, engine, console)
+    new_option = len(sessions) + 1
+    choice = IntPrompt.ask(
+        "Select session", default=1, console=console,
+    )
+
+    if choice == new_option:
+        # New session
+        result = await run_wizard(
+            model_manager=model_manager,
+            defaults=settings,
+            trader_defaults=trader_config,
+            config_dir=config_dir,
+            console=console,
+            model_id=model_id,
+            name_generator=name_gen,
+            existing_names=all_names,
+        )
+        if result is None:
+            console.print("Cancelled.")
+            sys.exit(0)
+        session_id = await _create_session(engine, result)
+        return result, session_id
+
+    # Restore existing session
+    idx = choice - 1
+    if idx < 0 or idx >= len(sessions):
+        console.print("[red]Invalid selection[/]")
+        sys.exit(1)
+
+    selected = sessions[idx]
+    console.print(f'\nRestoring "[bold]{selected.name}[/]"...')
+    result = await _restore_session(
+        engine, selected.id, model_manager, model_id, console, config_dir,
+    )
+    if result is None:
+        console.print("Cancelled.")
+        sys.exit(0)
+    return result, selected.id
