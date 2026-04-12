@@ -360,12 +360,13 @@ async def _restore_session(
     saved_model_cfg = json.loads(s.model_config) if s.model_config else None
     saved_model_id = saved_model_cfg.get("id") if saved_model_cfg else None
 
+    all_models = model_manager.load_models()
     selected_config = None
     selected_model = None
 
     # --model flag takes priority
     if model_id:
-        selected_config = model_manager.get_model_by_id(model_id, model_manager.load_models())
+        selected_config = model_manager.get_model_by_id(model_id, all_models)
         if selected_config is None:
             console.print(f"[yellow]Model '{model_id}' not found, entering selection...[/]")
         else:
@@ -373,7 +374,7 @@ async def _restore_session(
 
     # No --model flag or --model not found — try session's saved model
     if selected_model is None and saved_model_id:
-        selected_config = model_manager.get_model_by_id(saved_model_id, model_manager.load_models())
+        selected_config = model_manager.get_model_by_id(saved_model_id, all_models)
         if selected_config:
             if Confirm.ask(
                 f"  Continue with model [bold]{selected_config.id}[/]?",
@@ -807,7 +808,11 @@ git commit -m "feat(r2): implement session creation with field persistence and n
 - Test: `tests/test_session_manager.py`
 - Test: `tests/test_wizard.py`
 
-The wizard's `_generate_session_name()` produces "BTC sim" without `#{N}` counter. The DB-aware name generator lives in `session_manager.py` but can't be called from wizard without coupling wizard to the DB. Fix: add an async `name_generator` callback to `run_wizard`. When provided, wizard calls it instead of its internal `_generate_session_name`. `select_or_create_session` passes a lambda that calls `_generate_session_name_from_db`.
+Two issues with session naming:
+
+1. **No DB counter**: The wizard's `_generate_session_name()` produces "BTC sim" without `#{N}` counter. Fix: add an async `name_generator` callback to `run_wizard`. When provided, wizard calls it instead of its internal `_generate_session_name`. `select_or_create_session` passes a lambda that calls `_generate_session_name_from_db`.
+
+2. **No conflict re-prompt**: Spec says "若输入的名称冲突则提示重输" but `_create_session` silently appends suffix. Fix: add `existing_names: set[str] | None` to `run_wizard`. Wizard loops on `Prompt.ask` until name is unique. `_create_session` dedup stays as safety net.
 
 - [ ] **Step 1: Write test for `_generate_session_name_from_db`**
 
@@ -882,7 +887,7 @@ async def _generate_session_name_from_db(engine, symbol: str, exchange_type: str
 Run: `python -m pytest tests/test_session_manager.py::test_generate_session_name_counter -v`
 Expected: PASS
 
-- [ ] **Step 5: Write test for wizard `name_generator` callback**
+- [ ] **Step 5: Write tests for wizard `name_generator` and `existing_names`**
 
 Append to `tests/test_wizard.py`:
 
@@ -965,6 +970,48 @@ async def test_run_wizard_without_name_generator_uses_internal():
 
     assert result is not None
     assert result.session_name == "BTC sim"
+
+
+async def test_run_wizard_existing_names_conflict_reprompts():
+    """When user enters a name that exists, wizard re-prompts until unique."""
+    from src.cli.wizard import run_wizard
+
+    # First call returns conflicting name, second call returns unique name
+    prompt_returns = iter(["BTC sim #1", "BTC sim #2"])
+
+    with patch("src.cli.wizard._step_exchange", return_value={
+            "exchange_type": "simulated", "fee_rate": 0.0005,
+            "initial_balance": 100.0, "api_credentials": None,
+        }), \
+         patch("src.cli.wizard._step_trading_pair", return_value={
+            "symbol": "BTC/USDT:USDT", "timeframe": "15m",
+        }), \
+         patch("src.cli.wizard._step_model", new_callable=AsyncMock, return_value={
+            "model_config": ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+            "model": MagicMock(),
+        }), \
+         patch("src.cli.wizard._step_risk_scheduling", return_value={
+            "scheduler_interval_min": 15, "approval_enabled": True,
+            "alert_enabled": False, "alert_window_min": None,
+            "alert_threshold_pct": None, "alert_cooldown_min": None,
+            "token_budget": 500000,
+        }), \
+         patch("src.cli.wizard._step_persona", return_value={
+            "persona": PersonaConfig(),
+        }), \
+         patch("src.cli.wizard._show_summary", return_value=True), \
+         patch("src.cli.wizard.Prompt.ask", side_effect=lambda *a, **kw: next(prompt_returns)):
+        result = await run_wizard(
+            model_manager=MagicMock(),
+            defaults=Settings(),
+            trader_defaults=TraderConfig(),
+            config_dir=Path("/tmp"),
+            console=Console(),
+            existing_names={"BTC sim #1"},
+        )
+
+    assert result is not None
+    assert result.session_name == "BTC sim #2"
 ```
 
 - [ ] **Step 6: Run wizard tests to verify they fail**
@@ -987,14 +1034,17 @@ async def run_wizard(
     console: Console,
     model_id: str | None = None,
     name_generator: Any | None = None,  # async (symbol, exchange_type) -> str
+    existing_names: set[str] | None = None,  # for uniqueness check
 ) -> WizardResult | None:
 ```
 
-Update the name generation section (inside `if _show_summary(data, console):` block, lines 376-378):
+Update the name generation + prompt section (inside `if _show_summary(data, console):` block, lines 376-378):
 
 Replace:
 ```python
                 default_name = _generate_session_name(data["symbol"], data["exchange_type"])
+                name = Prompt.ask("Session name", default=default_name, console=console)
+                data["session_name"] = name
 ```
 
 With:
@@ -1003,6 +1053,12 @@ With:
                     default_name = await name_generator(data["symbol"], data["exchange_type"])
                 else:
                     default_name = _generate_session_name(data["symbol"], data["exchange_type"])
+                while True:
+                    name = Prompt.ask("Session name", default=default_name, console=console)
+                    if existing_names is None or name not in existing_names:
+                        break
+                    console.print(f"[red]'{name}' already exists, please choose another[/]")
+                data["session_name"] = name
 ```
 
 - [ ] **Step 8: Run all wizard + session_manager tests**
@@ -1197,6 +1253,11 @@ async def select_or_create_session(
     sessions = await _list_sessions(engine)
     name_gen = _make_name_generator(engine)
 
+    # Pre-fetch all session names for uniqueness check in wizard
+    async with get_session(engine) as db_sess:
+        all_sessions = await db_sess.execute(select(Session))
+        all_names = {s.name for s in all_sessions.scalars().all()}
+
     if not sessions:
         # No history — go straight to wizard
         result = await run_wizard(
@@ -1207,6 +1268,7 @@ async def select_or_create_session(
             console=console,
             model_id=model_id,
             name_generator=name_gen,
+            existing_names=all_names,
         )
         if result is None:
             console.print("Cancelled.")
@@ -1231,6 +1293,7 @@ async def select_or_create_session(
             console=console,
             model_id=model_id,
             name_generator=name_gen,
+            existing_names=all_names,
         )
         if result is None:
             console.print("Cancelled.")
@@ -1321,7 +1384,7 @@ Add new imports needed for lifecycle management (Step 3/4):
 - Add `from sqlalchemy import update as sql_update`
 - Keep `Session` in `from src.storage.models import` (needed for lifecycle updates)
 
-Updated imports block:
+Updated imports block (complete — includes all imports needed by Step 3/4 lifecycle code):
 
 ```python
 from __future__ import annotations
@@ -1354,15 +1417,7 @@ from src.cli.wizard import WizardResult
 
 - [ ] **Step 3: Add session lifecycle — shutdown sets paused + last_active_at update**
 
-First, add lifecycle-related imports to `src/cli/app.py` imports block. Add these two lines to the imports section:
-
-```python
-from datetime import datetime, timezone
-from sqlalchemy import update as sql_update
-from src.storage.models import DecisionLog, Session, TradeAction
-```
-
-Note: `Session` was removed in Step 2 — re-add it here alongside the new `sql_update` import. Also add `datetime`/`timezone` (previously only used indirectly).
+All necessary imports (`datetime`, `sql_update`, `Session`) are already included in Step 2's imports block above.
 
 In `src/cli/app.py`, update the shutdown section (after `await scheduler_task`) to set session status to "paused":
 
