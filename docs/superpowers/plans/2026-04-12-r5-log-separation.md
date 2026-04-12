@@ -173,6 +173,8 @@ git commit -m "feat(r5): add SessionConsole with terminal + file dual-write"
 Append to `tests/test_logging_config.py`:
 
 ```python
+from rich.logging import RichHandler
+
 from src.cli.logging_config import setup_system_logging, setup_session_logging
 
 
