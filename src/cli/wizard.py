@@ -108,7 +108,7 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
                 _save_credentials(config_dir, "okx", api_credentials)
 
     if api_credentials is None:
-        api_key = Prompt.ask("  API Key", console=console)
+        api_key = Prompt.ask("  API Key", password=True, console=console)
         secret = Prompt.ask("  Secret", password=True, console=console)
         password = Prompt.ask("  Password", password=True, console=console)
         api_credentials = {"api_key": api_key, "secret": secret, "password": password}
