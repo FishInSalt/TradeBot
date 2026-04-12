@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import signal
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
@@ -23,7 +23,7 @@ from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
 from src.storage.models import DecisionLog, Session, TradeAction
 from src.integrations.exchange.base import FillEvent
-from src.cli.wizard import WizardResult, run_wizard
+from src.cli.wizard import WizardResult
 
 logger = logging.getLogger(__name__)
 
@@ -267,60 +267,22 @@ async def run(
         db_url = f"sqlite+aiosqlite:///{absolute_path}"
     engine = await init_db(db_url)
 
-    # ── Phase 3: Configuration Wizard ──
+    # ── Phase 3: Session select / wizard ──
+    from src.cli.session_manager import select_or_create_session
     from src.services.model_manager import ModelManager
 
     config_dir = project_root / "config"
     model_manager = ModelManager(config_path=config_dir / "models.json")
 
-    result = await run_wizard(
+    result, session_id = await select_or_create_session(
+        engine=engine,
+        settings=settings,
+        trader_config=trader_config,
         model_manager=model_manager,
-        defaults=settings,
-        trader_defaults=trader_config,
-        config_dir=config_dir,
-        console=pre_console,
         model_id=model_id,
+        console=pre_console,
+        config_dir=config_dir,
     )
-    if result is None:
-        pre_console.print("Cancelled.")
-        return
-
-    # Create session (R2 will add select/restore with #{N} counter)
-    # R2 will also add exchange_type/timeframe/scheduler_interval_min/approval_enabled/
-    # alert_config/fee_rate/token_budget columns to Session table and populate them here.
-    # Until then, these WizardResult fields are not persisted — restart requires re-config.
-    # Session.name has unique=True — deduplicate by appending suffix
-    async with get_session(engine) as db_sess:
-        base_name = result.session_name
-        name = base_name
-        suffix = 2
-        while True:
-            existing = await db_sess.execute(
-                select(Session).where(Session.name == name)
-            )
-            if existing.scalar_one_or_none() is None:
-                break
-            name = f"{base_name} #{suffix}"
-            suffix += 1
-
-        trading_session = Session(
-            name=name,
-            symbol=result.symbol,
-            persona_config=json.dumps(result.persona.model_dump()),
-            model_config=json.dumps({
-                "id": result.model_config.id,
-                "provider": result.model_config.provider,
-                "model": result.model_config.model,
-            }),
-            initial_balance=result.initial_balance,
-            status="active",
-        )
-        db_sess.add(trading_session)
-        await db_sess.commit()
-        await db_sess.refresh(trading_session)
-        if name != base_name:
-            logger.info(f"Session name '{base_name}' taken, using '{name}'")
-    session_id = trading_session.id
 
     # ── Phase 4: Session logging ──
     sc = setup_session_logging(session_id, log_dir)
@@ -354,6 +316,18 @@ async def run(
         except Exception:
             logger.exception("Agent cycle failed")
         finally:
+            # Update last_active_at
+            try:
+                async with get_session(engine) as db_sess:
+                    await db_sess.execute(
+                        sql_update(Session).where(Session.id == session_id).values(
+                            last_active_at=datetime.now(timezone.utc)
+                        )
+                    )
+                    await db_sess.commit()
+            except Exception:
+                logger.warning("Failed to update last_active_at", exc_info=True)
+            # Process pending fills
             if handle_fill is not None:
                 for fill in exchange.drain_pending_fills():
                     try:
@@ -401,5 +375,13 @@ async def run(
     scheduler.stop()
     await scheduler_task
     await exchange.close()
+
+    # Update session status to paused on graceful shutdown
+    async with get_session(engine) as db_sess:
+        await db_sess.execute(
+            sql_update(Session).where(Session.id == session_id).values(status="paused")
+        )
+        await db_sess.commit()
+
     sc.close()
     pre_console.print("[green]TradeBot stopped.[/]")
