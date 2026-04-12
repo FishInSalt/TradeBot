@@ -227,3 +227,68 @@ async def _step_model(
         console.print(f"  [green]Saved '{selected_config.id}' to models.json[/]")
 
     return {"model_config": selected_config, "model": selected_model}
+
+
+def _step_risk_scheduling(defaults: Settings, exchange_type: str, console: Console) -> dict:
+    """Step 4: Risk & scheduling config."""
+    console.print("\n[bold]Step 4: Risk & Scheduling[/]")
+    interval = IntPrompt.ask(
+        "  Wake interval (min)", default=defaults.scheduler.interval_minutes, console=console,
+    )
+    # Approval: sim defaults OFF, real defaults ON
+    approval_default = exchange_type != "simulated"
+    approval = Confirm.ask("  Approval gate", default=approval_default, console=console)
+    alert_enabled = Confirm.ask("  Price alerts", default=defaults.alerts.enabled, console=console)
+
+    alert_window = None
+    alert_threshold = None
+    alert_cooldown = None
+    if alert_enabled:
+        alert_window = IntPrompt.ask(
+            "    Window (min)", default=defaults.alerts.window_minutes, console=console,
+        )
+        alert_threshold = FloatPrompt.ask(
+            "    Threshold (%)", default=defaults.alerts.threshold_pct, console=console,
+        )
+        alert_cooldown = IntPrompt.ask(
+            "    Cooldown (min)", default=defaults.alerts.cooldown_minutes, console=console,
+        )
+    budget = IntPrompt.ask(
+        "  Token budget (daily)", default=defaults.llm_budget.daily_max_tokens, console=console,
+    )
+    return {
+        "scheduler_interval_min": interval,
+        "approval_enabled": approval,
+        "alert_enabled": alert_enabled,
+        "alert_window_min": alert_window,
+        "alert_threshold_pct": alert_threshold,
+        "alert_cooldown_min": alert_cooldown,
+        "token_budget": budget,
+    }
+
+
+def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
+    """Step 5: Persona configuration."""
+    console.print("\n[bold]Step 5: Persona[/]")
+    p = trader_defaults.persona
+    risk = Prompt.ask(
+        "  Risk tolerance", choices=["conservative", "moderate", "aggressive"],
+        default=p.risk_tolerance, console=console,
+    )
+    style = Prompt.ask(
+        "  Trading style", choices=["trend_following", "swing", "breakout"],
+        default=p.trading_style, console=console,
+    )
+    max_pos = FloatPrompt.ask("  Max position (%)", default=p.max_position_pct, console=console)
+    leverage = IntPrompt.ask("  Leverage", default=p.preferred_leverage, console=console)
+    stop_loss = FloatPrompt.ask("  Stop loss (%)", default=p.stop_loss_pct, console=console)
+    take_profit = FloatPrompt.ask("  Take profit (%)", default=p.take_profit_pct, console=console)
+    persona = PersonaConfig(
+        risk_tolerance=risk,
+        trading_style=style,
+        max_position_pct=max_pos,
+        preferred_leverage=leverage,
+        stop_loss_pct=stop_loss,
+        take_profit_pct=take_profit,
+    )
+    return {"persona": persona}

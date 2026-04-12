@@ -196,3 +196,60 @@ async def test_step_model_add_new(mock_int, mock_prompt):
     assert result is not None
     assert result["model_config"].id == "gpt4o"
     mm.save_models.assert_called_once()
+
+
+# --- Step 4: Risk & Scheduling ---
+
+@patch("src.cli.wizard.IntPrompt.ask", side_effect=[15, 5, 15, 500000])
+@patch("src.cli.wizard.FloatPrompt.ask", return_value=3.0)
+@patch("src.cli.wizard.Confirm.ask", side_effect=[False, True])  # approval OFF, alerts ON
+def test_step_risk_sim_defaults(mock_confirm, mock_float, mock_int):
+    from src.cli.wizard import _step_risk_scheduling
+    result = _step_risk_scheduling(Settings(), "simulated", Console())
+    assert result["scheduler_interval_min"] == 15
+    assert result["approval_enabled"] is False
+    assert result["alert_enabled"] is True
+    assert result["alert_window_min"] == 5
+    assert result["alert_threshold_pct"] == 3.0
+    assert result["token_budget"] == 500000
+
+
+@patch("src.cli.wizard.IntPrompt.ask", side_effect=[30, 500000])
+@patch("src.cli.wizard.Confirm.ask", side_effect=[True, False])  # approval ON, alerts OFF
+def test_step_risk_alerts_off(mock_confirm, mock_int):
+    from src.cli.wizard import _step_risk_scheduling
+    result = _step_risk_scheduling(Settings(), "okx", Console())
+    assert result["approval_enabled"] is True
+    assert result["alert_enabled"] is False
+    assert result["alert_window_min"] is None
+
+
+# --- Step 5: Persona ---
+
+@patch("src.cli.wizard.FloatPrompt.ask", side_effect=[30.0, 3.0, 6.0])
+@patch("src.cli.wizard.IntPrompt.ask", return_value=3)
+@patch("src.cli.wizard.Prompt.ask", side_effect=["moderate", "trend_following"])
+def test_step_persona_defaults(mock_prompt, mock_int, mock_float):
+    from src.cli.wizard import _step_persona
+    result = _step_persona(TraderConfig(), Console())
+    p = result["persona"]
+    assert p.risk_tolerance == "moderate"
+    assert p.trading_style == "trend_following"
+    assert p.max_position_pct == 30.0
+    assert p.preferred_leverage == 3
+    assert p.stop_loss_pct == 3.0
+    assert p.take_profit_pct == 6.0
+    # position_sizing uses default, not exposed in wizard
+    assert p.position_sizing == "percentage"
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", side_effect=[50.0, 5.0, 10.0])
+@patch("src.cli.wizard.IntPrompt.ask", return_value=10)
+@patch("src.cli.wizard.Prompt.ask", side_effect=["aggressive", "breakout"])
+def test_step_persona_custom(mock_prompt, mock_int, mock_float):
+    from src.cli.wizard import _step_persona
+    result = _step_persona(TraderConfig(), Console())
+    p = result["persona"]
+    assert p.risk_tolerance == "aggressive"
+    assert p.trading_style == "breakout"
+    assert p.preferred_leverage == 10
