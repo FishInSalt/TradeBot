@@ -253,3 +253,146 @@ def test_step_persona_custom(mock_prompt, mock_int, mock_float):
     assert p.risk_tolerance == "aggressive"
     assert p.trading_style == "breakout"
     assert p.preferred_leverage == 10
+
+
+# --- Session naming ---
+
+def test_generate_session_name():
+    from src.cli.wizard import _generate_session_name
+    assert _generate_session_name("BTC/USDT:USDT", "simulated") == "BTC sim"
+    assert _generate_session_name("ETH/USDT:USDT", "okx") == "ETH okx"
+    assert _generate_session_name("1000PEPE/USDT:USDT", "simulated") == "1000PEPE sim"
+
+
+# --- Summary ---
+
+@patch("src.cli.wizard.Confirm.ask", return_value=True)
+def test_show_summary_confirm(mock_confirm):
+    from src.cli.wizard import _show_summary
+    data = {
+        "exchange_type": "simulated", "fee_rate": 0.0005, "initial_balance": 100.0,
+        "symbol": "BTC/USDT:USDT", "timeframe": "15m",
+        "model_config": ModelConfig(id="test", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        "scheduler_interval_min": 15, "approval_enabled": False,
+        "alert_enabled": True, "alert_window_min": 5, "alert_threshold_pct": 3.0, "alert_cooldown_min": 15,
+        "token_budget": 500000,
+        "persona": PersonaConfig(),
+    }
+    assert _show_summary(data, Console()) is True
+
+
+@patch("src.cli.wizard.Confirm.ask", return_value=False)
+def test_show_summary_reject(mock_confirm):
+    from src.cli.wizard import _show_summary
+    data = {
+        "exchange_type": "simulated", "fee_rate": 0.0005, "initial_balance": 100.0,
+        "symbol": "BTC/USDT:USDT", "timeframe": "15m",
+        "model_config": ModelConfig(id="test", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        "scheduler_interval_min": 15, "approval_enabled": False,
+        "alert_enabled": False, "alert_window_min": None, "alert_threshold_pct": None, "alert_cooldown_min": None,
+        "token_budget": 500000,
+        "persona": PersonaConfig(),
+    }
+    assert _show_summary(data, Console()) is False
+
+
+# --- Full wizard flow ---
+
+@pytest.mark.asyncio
+async def test_run_wizard_full_flow(tmp_path):
+    from src.cli.wizard import run_wizard
+
+    mm = _make_model_manager(models=[_SAMPLE_MODEL])
+    defaults = Settings()
+    trader = TraderConfig()
+
+    with patch("src.cli.wizard.Prompt.ask", side_effect=[
+        "sim",               # Step 1: mode
+        "BTC/USDT:USDT",    # Step 2: symbol
+        "15m",               # Step 2: timeframe
+        "moderate",          # Step 5: risk tolerance
+        "trend_following",   # Step 5: trading style
+        "BTC sim",           # Session name
+    ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
+        0.05, 100.0,        # Step 1: fee_rate, balance
+        3.0,                 # Step 4: threshold
+        30.0, 3.0, 6.0,     # Step 5: max_pos, stop_loss, take_profit
+    ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
+        1,                   # Step 3: select model #1
+        15,                  # Step 4: interval
+        5, 15,               # Step 4: alert window, cooldown
+        500000,              # Step 4: budget
+        3,                   # Step 5: leverage
+    ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
+        False,               # Step 4: approval OFF (sim default)
+        True,                # Step 4: alerts ON
+        True,                # Summary: confirm
+    ]):
+        result = await run_wizard(
+            model_manager=mm, defaults=defaults, trader_defaults=trader,
+            config_dir=tmp_path, console=Console(),
+        )
+
+    assert result is not None
+    assert result.exchange_type == "simulated"
+    assert result.symbol == "BTC/USDT:USDT"
+    assert result.session_name == "BTC sim"
+    assert result.model_config.id == "claude"
+    assert result.approval_enabled is False  # sim default
+    assert result.persona.risk_tolerance == "moderate"
+
+
+@pytest.mark.asyncio
+async def test_run_wizard_reject_then_confirm(tmp_path):
+    """Summary rejected -> re-run all steps -> confirm second time."""
+    from src.cli.wizard import run_wizard
+
+    mm = _make_model_manager(models=[_SAMPLE_MODEL])
+
+    # Two full rounds of prompts: first rejected, second confirmed
+    with patch("src.cli.wizard.Prompt.ask", side_effect=[
+        # Round 1
+        "sim", "BTC/USDT:USDT", "15m", "moderate", "trend_following",
+        # Round 2
+        "sim", "ETH/USDT:USDT", "15m", "moderate", "trend_following",
+        "ETH sim",           # Session name (only reached on confirm)
+    ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
+        # Round 1
+        0.05, 100.0, 3.0, 30.0, 3.0, 6.0,
+        # Round 2
+        0.05, 200.0, 3.0, 30.0, 3.0, 6.0,
+    ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
+        # Round 1
+        1, 15, 5, 15, 500000, 3,
+        # Round 2
+        1, 15, 5, 15, 500000, 3,
+    ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
+        # Round 1
+        False, True, False,  # approval OFF, alerts ON, summary REJECT
+        # Round 2
+        False, True, True,   # approval OFF, alerts ON, summary CONFIRM
+    ]):
+        result = await run_wizard(
+            model_manager=mm, defaults=Settings(), trader_defaults=TraderConfig(),
+            config_dir=tmp_path, console=Console(),
+        )
+
+    assert result is not None
+    assert result.symbol == "ETH/USDT:USDT"  # second round values
+    assert result.initial_balance == 200.0
+    assert result.session_name == "ETH sim"
+
+
+@pytest.mark.asyncio
+async def test_run_wizard_ctrl_c(tmp_path):
+    from src.cli.wizard import run_wizard
+
+    mm = _make_model_manager()
+
+    with patch("src.cli.wizard.Prompt.ask", side_effect=KeyboardInterrupt):
+        result = await run_wizard(
+            model_manager=mm, defaults=Settings(), trader_defaults=TraderConfig(),
+            config_dir=tmp_path, console=Console(),
+        )
+
+    assert result is None

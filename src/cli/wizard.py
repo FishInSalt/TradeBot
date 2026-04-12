@@ -292,3 +292,90 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
         take_profit_pct=take_profit,
     )
     return {"persona": persona}
+
+
+def _generate_session_name(symbol: str, exchange_type: str) -> str:
+    """Generate default session name: '{symbol_short} {exchange_display}'.
+    R2 will extend with #{N} counter from DB query."""
+    symbol_short = symbol.split("/")[0]
+    exchange_display = _EXCHANGE_DISPLAY.get(exchange_type, exchange_type)
+    return f"{symbol_short} {exchange_display}"
+
+
+def _show_summary(data: dict, console: Console) -> bool:
+    """Show configuration summary. Returns True if user confirms."""
+    table = Table(show_header=False, border_style="blue", pad_edge=False)
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+
+    ex = data["exchange_type"]
+    if ex == "simulated":
+        ex += f" (fee: {data['fee_rate'] * 100:.2f}%)"
+    table.add_row("Exchange", ex)
+    table.add_row("Balance", f"{data['initial_balance']:.0f} USDT")
+    table.add_row("Trading", f"{data['symbol']} / {data['timeframe']}")
+    table.add_row("Model", f"{data['model_config'].id} ({data['model_config'].provider})")
+    table.add_row("Scheduler", f"{data['scheduler_interval_min']} min")
+    table.add_row("Approval", "ON" if data["approval_enabled"] else "OFF")
+
+    if data["alert_enabled"]:
+        alert_str = (
+            f"ON ({data['alert_window_min']}min / {data['alert_threshold_pct']}% "
+            f"/ cd {data['alert_cooldown_min']}min)"
+        )
+    else:
+        alert_str = "OFF"
+    table.add_row("Alerts", alert_str)
+
+    table.add_row("Budget", f"{data['token_budget']:,} tokens/day")
+
+    p = data["persona"]
+    table.add_row("Persona", f"{p.risk_tolerance} / {p.trading_style}")
+    table.add_row(
+        "Risk Params",
+        f"pos {p.max_position_pct:.0f}% / {p.preferred_leverage}x / "
+        f"SL {p.stop_loss_pct:.0f}% / TP {p.take_profit_pct:.0f}%",
+    )
+
+    console.print()
+    console.print(table)
+    console.print()
+    return Confirm.ask("Confirm?", default=True, console=console)
+
+
+async def run_wizard(
+    model_manager: ModelManager,
+    defaults: Settings,
+    trader_defaults: TraderConfig,
+    config_dir: Path,
+    console: Console,
+    model_id: str | None = None,
+) -> WizardResult | None:
+    """Run the interactive configuration wizard. Returns None on Ctrl+C or cancel."""
+    try:
+        console.print("[bold]Configuration Wizard[/]")
+
+        while True:
+            exchange_data = _step_exchange(defaults, config_dir, console)
+            trading_data = _step_trading_pair(defaults, console)
+            model_data = await _step_model(model_manager, model_id, console)
+            if model_data is None:
+                console.print("[yellow]Model selection cancelled. Let's try again...[/]\n")
+                continue
+            risk_data = _step_risk_scheduling(
+                defaults, exchange_data["exchange_type"], console,
+            )
+            persona_data = _step_persona(trader_defaults, console)
+
+            data = {**exchange_data, **trading_data, **model_data, **risk_data, **persona_data}
+
+            if _show_summary(data, console):
+                default_name = _generate_session_name(data["symbol"], data["exchange_type"])
+                name = Prompt.ask("Session name", default=default_name, console=console)
+                data["session_name"] = name
+                return WizardResult(**data)
+
+            console.print("[yellow]Let's reconfigure...[/]\n")
+
+    except KeyboardInterrupt:
+        return None
