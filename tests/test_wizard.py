@@ -442,3 +442,127 @@ def test_build_services_sim_path():
     assert deps.approval_enabled is False
     assert budget.remaining == 500000
     MockSim.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_wizard_uses_name_generator_callback():
+    """When name_generator is provided, wizard uses it instead of internal _generate_session_name."""
+    from src.cli.wizard import run_wizard, WizardResult
+
+    async def mock_name_gen(symbol: str, exchange_type: str) -> str:
+        return f"{symbol.split('/')[0]} sim #42"
+
+    with patch("src.cli.wizard._step_exchange", return_value={
+            "exchange_type": "simulated", "fee_rate": 0.0005,
+            "initial_balance": 100.0, "api_credentials": None,
+        }), \
+         patch("src.cli.wizard._step_trading_pair", return_value={
+            "symbol": "BTC/USDT:USDT", "timeframe": "15m",
+        }), \
+         patch("src.cli.wizard._step_model", new_callable=AsyncMock, return_value={
+            "model_config": ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+            "model": MagicMock(),
+        }), \
+         patch("src.cli.wizard._step_risk_scheduling", return_value={
+            "scheduler_interval_min": 15, "approval_enabled": True,
+            "alert_enabled": False, "alert_window_min": None,
+            "alert_threshold_pct": None, "alert_cooldown_min": None,
+            "token_budget": 500000,
+        }), \
+         patch("src.cli.wizard._step_persona", return_value={
+            "persona": PersonaConfig(),
+        }), \
+         patch("src.cli.wizard._show_summary", return_value=True), \
+         patch("src.cli.wizard.Prompt.ask", return_value="BTC sim #42"):
+        result = await run_wizard(
+            model_manager=MagicMock(),
+            defaults=Settings(),
+            trader_defaults=TraderConfig(),
+            config_dir=Path("/tmp"),
+            console=Console(),
+            name_generator=mock_name_gen,
+        )
+
+    assert result is not None
+    assert result.session_name == "BTC sim #42"
+
+
+@pytest.mark.asyncio
+async def test_run_wizard_without_name_generator_uses_internal():
+    """Without name_generator, wizard uses its internal _generate_session_name."""
+    from src.cli.wizard import run_wizard
+
+    with patch("src.cli.wizard._step_exchange", return_value={
+            "exchange_type": "simulated", "fee_rate": 0.0005,
+            "initial_balance": 100.0, "api_credentials": None,
+        }), \
+         patch("src.cli.wizard._step_trading_pair", return_value={
+            "symbol": "BTC/USDT:USDT", "timeframe": "15m",
+        }), \
+         patch("src.cli.wizard._step_model", new_callable=AsyncMock, return_value={
+            "model_config": ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+            "model": MagicMock(),
+        }), \
+         patch("src.cli.wizard._step_risk_scheduling", return_value={
+            "scheduler_interval_min": 15, "approval_enabled": True,
+            "alert_enabled": False, "alert_window_min": None,
+            "alert_threshold_pct": None, "alert_cooldown_min": None,
+            "token_budget": 500000,
+        }), \
+         patch("src.cli.wizard._step_persona", return_value={
+            "persona": PersonaConfig(),
+        }), \
+         patch("src.cli.wizard._show_summary", return_value=True), \
+         patch("src.cli.wizard.Prompt.ask", return_value="BTC sim"):
+        result = await run_wizard(
+            model_manager=MagicMock(),
+            defaults=Settings(),
+            trader_defaults=TraderConfig(),
+            config_dir=Path("/tmp"),
+            console=Console(),
+        )
+
+    assert result is not None
+    assert result.session_name == "BTC sim"
+
+
+@pytest.mark.asyncio
+async def test_run_wizard_existing_names_conflict_reprompts():
+    """When user enters a name that exists, wizard re-prompts until unique."""
+    from src.cli.wizard import run_wizard
+
+    prompt_returns = iter(["BTC sim #1", "BTC sim #2"])
+
+    with patch("src.cli.wizard._step_exchange", return_value={
+            "exchange_type": "simulated", "fee_rate": 0.0005,
+            "initial_balance": 100.0, "api_credentials": None,
+        }), \
+         patch("src.cli.wizard._step_trading_pair", return_value={
+            "symbol": "BTC/USDT:USDT", "timeframe": "15m",
+        }), \
+         patch("src.cli.wizard._step_model", new_callable=AsyncMock, return_value={
+            "model_config": ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+            "model": MagicMock(),
+        }), \
+         patch("src.cli.wizard._step_risk_scheduling", return_value={
+            "scheduler_interval_min": 15, "approval_enabled": True,
+            "alert_enabled": False, "alert_window_min": None,
+            "alert_threshold_pct": None, "alert_cooldown_min": None,
+            "token_budget": 500000,
+        }), \
+         patch("src.cli.wizard._step_persona", return_value={
+            "persona": PersonaConfig(),
+        }), \
+         patch("src.cli.wizard._show_summary", return_value=True), \
+         patch("src.cli.wizard.Prompt.ask", side_effect=lambda *a, **kw: next(prompt_returns)):
+        result = await run_wizard(
+            model_manager=MagicMock(),
+            defaults=Settings(),
+            trader_defaults=TraderConfig(),
+            config_dir=Path("/tmp"),
+            console=Console(),
+            existing_names={"BTC sim #1"},
+        )
+
+    assert result is not None
+    assert result.session_name == "BTC sim #2"

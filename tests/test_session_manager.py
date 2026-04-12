@@ -310,3 +310,29 @@ async def test_create_session_name_dedup(tmp_path):
         assert r1.scalar_one().name == "BTC sim"
         assert r2.scalar_one().name == "BTC sim #2"
     await engine.dispose()
+
+
+async def test_generate_session_name_counter(tmp_path):
+    """Session name generator produces #{N} suffix based on existing sessions."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    from src.cli.session_manager import _generate_session_name_from_db
+
+    name1 = await _generate_session_name_from_db(engine, "BTC/USDT:USDT", "simulated")
+    assert name1 == "BTC sim #1"
+
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s1", name="BTC sim #1"))
+        await db_sess.commit()
+
+    name2 = await _generate_session_name_from_db(engine, "BTC/USDT:USDT", "simulated")
+    assert name2 == "BTC sim #2"
+
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(id="s2", name="BTC sim #2"))
+        await db_sess.commit()
+
+    name3 = await _generate_session_name_from_db(engine, "BTC/USDT:USDT", "simulated")
+    assert name3 == "BTC sim #3"
+    await engine.dispose()

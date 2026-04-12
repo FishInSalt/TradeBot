@@ -233,3 +233,25 @@ async def _create_session(engine, result: WizardResult) -> str:
         await db_sess.commit()
         await db_sess.refresh(trading_session)
         return trading_session.id
+
+
+_EXCHANGE_DISPLAY = {"simulated": "sim", "okx": "okx"}
+
+
+async def _generate_session_name_from_db(engine, symbol: str, exchange_type: str) -> str:
+    """Generate session name with #{N} counter from DB.
+    Pattern: '{symbol_short} {exchange_display} #{N}'"""
+    symbol_short = symbol.split("/")[0]
+    exchange_display = _EXCHANGE_DISPLAY.get(exchange_type, exchange_type)
+    prefix = f"{symbol_short} {exchange_display}"
+
+    async with get_session(engine) as db_sess:
+        result = await db_sess.execute(
+            select(Session).where(Session.name.like(f"{prefix} %"))
+        )
+        existing_names = {s.name for s in result.scalars().all()}
+
+    n = 1
+    while f"{prefix} #{n}" in existing_names:
+        n += 1
+    return f"{prefix} #{n}"
