@@ -273,7 +273,8 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
     exchange_type = "simulated" if mode == "sim" else "okx"
 
     if exchange_type == "simulated":
-        default_fee_pct = (defaults.exchange.fee_rate or 0.0005) * 100
+        fee = defaults.exchange.fee_rate if defaults.exchange.fee_rate is not None else 0.0005
+        default_fee_pct = fee * 100
         fee_pct = FloatPrompt.ask("  Fee rate (%)", default=default_fee_pct, console=console)
         balance = FloatPrompt.ask(
             "  Initial balance (USDT)",
@@ -970,8 +971,9 @@ This task replaces all scattered interaction in `run()` with the wizard call and
 Add new imports at the top of `src/cli/app.py` (after existing imports):
 
 ```python
+from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging  # add SessionConsole
 from src.cli.wizard import WizardResult, run_wizard
-from src.config import ExchangeConfig, load_settings, load_trader_config  # add ExchangeConfig
+from src.config import ExchangeConfig, Settings, load_settings, load_trader_config  # add ExchangeConfig, Settings
 ```
 
 Add `_DEFAULT_PRECISION` and `build_services()` after `run_agent_cycle()` (before `run()`, around line 160):
@@ -989,8 +991,8 @@ def build_services(
     result: WizardResult,
     engine,
     session_id: str,
-    sc,
-    settings,
+    sc: SessionConsole,
+    settings: Settings,
 ):
     """Build exchange, deps, agent, budget from WizardResult."""
     from src.services.price_alert import PriceAlertService
@@ -1100,7 +1102,7 @@ def test_build_services_sim_path():
     assert deps.symbol == "BTC/USDT:USDT"
     assert deps.timeframe == "15m"
     assert deps.approval_enabled is False
-    assert budget._daily_max == 500000
+    assert budget.remaining == 500000
     MockSim.assert_called_once()
 ```
 
@@ -1169,7 +1171,7 @@ async def run(
             )
             if existing.scalar_one_or_none() is None:
                 break
-            name = f"{base_name} ({suffix})"
+            name = f"{base_name} #{suffix}"
             suffix += 1
 
         trading_session = Session(
