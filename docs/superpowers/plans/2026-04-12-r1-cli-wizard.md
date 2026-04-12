@@ -188,7 +188,7 @@ def _save_credentials(config_dir: Path, exchange: str, creds: dict) -> None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_wizard.py -v`
-Expected: 5 passed
+Expected: All wizard tests pass
 
 - [ ] **Step 5: Commit**
 
@@ -363,7 +363,7 @@ def _step_trading_pair(defaults: Settings, console: Console) -> dict:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_wizard.py -v`
-Expected: 9 passed
+Expected: All wizard tests pass
 
 - [ ] **Step 5: Commit**
 
@@ -543,7 +543,7 @@ async def _step_model(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_wizard.py -v`
-Expected: 13 passed
+Expected: All wizard tests pass
 
 - [ ] **Step 5: Commit**
 
@@ -700,7 +700,7 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_wizard.py -v`
-Expected: 17 passed
+Expected: All wizard tests pass
 
 - [ ] **Step 5: Commit**
 
