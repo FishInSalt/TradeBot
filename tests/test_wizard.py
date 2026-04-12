@@ -396,3 +396,43 @@ async def test_run_wizard_ctrl_c(tmp_path):
         )
 
     assert result is None
+
+
+# --- build_services smoke test ---
+
+def test_build_services_sim_path():
+    """Verify sim path returns correct types and wires deps correctly."""
+    from unittest.mock import MagicMock, patch
+    from src.cli.wizard import WizardResult
+    from src.cli.app import build_services
+
+    result = WizardResult(
+        exchange_type="simulated", fee_rate=0.0005, initial_balance=100.0,
+        api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
+        model_config=ModelConfig(id="t", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(), scheduler_interval_min=15, approval_enabled=False,
+        alert_enabled=True, alert_window_min=5, alert_threshold_pct=3.0,
+        alert_cooldown_min=15, token_budget=500000, persona=PersonaConfig(),
+        session_name="test",
+    )
+    mock_engine = MagicMock()
+    mock_sc = MagicMock()
+    mock_settings = MagicMock()
+    mock_settings.approval.timeout_seconds = 300
+
+    with patch("src.integrations.exchange.simulated.SimulatedExchange") as MockSim, \
+         patch("src.cli.app.MarketDataService"), \
+         patch("src.cli.app.MemoryService"), \
+         patch("src.cli.app.create_trader_agent") as mock_agent, \
+         patch("src.services.price_alert.PriceAlertService"):
+        MockSim.return_value = MagicMock()
+        mock_agent.return_value = MagicMock()
+        exchange, deps, agent, budget = build_services(
+            result, mock_engine, "sid", mock_sc, mock_settings,
+        )
+
+    assert deps.symbol == "BTC/USDT:USDT"
+    assert deps.timeframe == "15m"
+    assert deps.approval_enabled is False
+    assert budget.remaining == 500000
+    MockSim.assert_called_once()
