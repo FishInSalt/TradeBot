@@ -138,3 +138,92 @@ def _step_trading_pair(defaults: Settings, console: Console) -> dict:
         console=console,
     )
     return {"symbol": symbol, "timeframe": timeframe}
+
+
+def _add_new_model(model_manager: ModelManager, console: Console) -> tuple[ModelConfig, Any] | None:
+    """Interactive add-new-model sub-flow."""
+    console.print("  Supported providers: anthropic, openai, google-gla, groq")
+    provider = Prompt.ask("  Provider", console=console)
+    model_name = Prompt.ask("  Model name (e.g. claude-opus-4-6, gpt-4o)", console=console)
+    api_key = Prompt.ask("  API key", password=True, console=console)
+    base_url = Prompt.ask("  Base URL (Enter for default)", default="", console=console) or None
+    model_id = Prompt.ask("  Friendly ID (e.g. claude-opus, gpt4o)", console=console)
+
+    if not all([provider, model_name, api_key, model_id]):
+        console.print("  [red]All fields except Base URL are required.[/]")
+        return None
+
+    config = ModelConfig(
+        id=model_id, provider=provider, model=model_name,
+        api_key=api_key, base_url=base_url,
+    )
+    try:
+        model = model_manager.create_model(config)
+    except ValueError as e:
+        console.print(f"  [red]{e}[/]")
+        return None
+    return config, model
+
+
+async def _step_model(
+    model_manager: ModelManager,
+    model_id: str | None,
+    console: Console,
+) -> dict | None:
+    """Step 3: Model selection. Returns dict with model_config + model, or None on cancel."""
+    console.print("\n[bold]Step 3: Model[/]")
+    existing = model_manager.load_models()
+    selected_config = None
+    selected_model = None
+
+    # --model flag shortcut
+    if model_id:
+        selected_config = model_manager.get_model_by_id(model_id, existing)
+        if selected_config is None:
+            console.print(f"  [yellow]Model '{model_id}' not found, entering selection...[/]")
+        else:
+            selected_model = model_manager.create_model(selected_config)
+
+    # Interactive selection if needed
+    if selected_model is None:
+        if existing:
+            console.print("  Available models:")
+            for i, m in enumerate(existing):
+                console.print(f"    {i + 1}. {m.id} ({m.provider}:{m.model})")
+            console.print(f"    {len(existing) + 1}. + Add new model")
+
+            choice = IntPrompt.ask("  Select", default=1, console=console)
+            idx = choice - 1
+            if 0 <= idx < len(existing):
+                selected_config = existing[idx]
+                selected_model = model_manager.create_model(selected_config)
+            else:
+                pair = _add_new_model(model_manager, console)
+                if pair is None:
+                    return None
+                selected_config, selected_model = pair
+        else:
+            console.print("  [yellow]No models configured. Let's add one.[/]")
+            pair = _add_new_model(model_manager, console)
+            if pair is None:
+                return None
+            selected_config, selected_model = pair
+
+    # Connectivity test
+    # TODO: on failure + user decline, loop back to selection instead of exiting wizard
+    console.print(f"  Testing API for {selected_config.id}...")
+    success, error = await model_manager.test_connectivity(selected_model)
+    if success:
+        console.print("  [green]OK[/]")
+    else:
+        console.print(f"  [red]Failed: {error}[/]")
+        if not Confirm.ask("  Continue anyway?", default=False, console=console):
+            return None
+
+    # Save new model if not already in list
+    if selected_config not in existing:
+        existing.append(selected_config)
+        model_manager.save_models(existing)
+        console.print(f"  [green]Saved '{selected_config.id}' to models.json[/]")
+
+    return {"model_config": selected_config, "model": selected_model}

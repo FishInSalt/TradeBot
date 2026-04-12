@@ -138,3 +138,61 @@ def test_step_trading_pair_custom(mock_prompt):
     result = _step_trading_pair(Settings(), Console())
     assert result["symbol"] == "ETH/USDT:USDT"
     assert result["timeframe"] == "1H"
+
+
+# --- Step 3: Model ---
+
+def _make_model_manager(models=None, test_ok=True):
+    """Create a mock ModelManager with configurable behavior."""
+    mm = MagicMock()
+    models = models or []
+    mm.load_models.return_value = models
+    mm.get_model_by_id.side_effect = lambda mid, ms: next((m for m in ms if m.id == mid), None)
+    mm.create_model.return_value = MagicMock(name="mock_pydantic_model")
+    mm.save_models.return_value = None
+
+    async def _test(*a, **kw):
+        return (True, None) if test_ok else (False, "Connection refused")
+    mm.test_connectivity = _test
+    return mm
+
+
+_SAMPLE_MODEL = ModelConfig(id="claude", provider="anthropic", model="claude-opus-4-6", api_key="sk-x", base_url=None)
+
+
+@pytest.mark.asyncio
+async def test_step_model_with_flag():
+    from src.cli.wizard import _step_model
+    mm = _make_model_manager(models=[_SAMPLE_MODEL])
+    result = await _step_model(mm, model_id="claude", console=Console())
+    assert result["model_config"].id == "claude"
+
+
+@pytest.mark.asyncio
+@patch("src.cli.wizard.IntPrompt.ask", return_value=1)
+async def test_step_model_select_existing(mock_int):
+    from src.cli.wizard import _step_model
+    mm = _make_model_manager(models=[_SAMPLE_MODEL])
+    result = await _step_model(mm, model_id=None, console=Console())
+    assert result["model_config"].id == "claude"
+
+
+@pytest.mark.asyncio
+@patch("src.cli.wizard.Confirm.ask", return_value=False)
+async def test_step_model_connectivity_fail_abort(mock_confirm):
+    from src.cli.wizard import _step_model
+    mm = _make_model_manager(models=[_SAMPLE_MODEL], test_ok=False)
+    result = await _step_model(mm, model_id="claude", console=Console())
+    assert result is None
+
+
+@pytest.mark.asyncio
+@patch("src.cli.wizard.Prompt.ask", side_effect=["openai", "gpt-4o", "sk-new", "", "gpt4o"])
+@patch("src.cli.wizard.IntPrompt.ask", return_value=2)
+async def test_step_model_add_new(mock_int, mock_prompt):
+    from src.cli.wizard import _step_model
+    mm = _make_model_manager(models=[_SAMPLE_MODEL])
+    result = await _step_model(mm, model_id=None, console=Console())
+    assert result is not None
+    assert result["model_config"].id == "gpt4o"
+    mm.save_models.assert_called_once()
