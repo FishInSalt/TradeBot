@@ -354,9 +354,13 @@ async def select_or_create_session(
     # Show session list and let user choose
     await _display_session_list(sessions, engine, console)
     new_option = len(sessions) + 1
-    choice = IntPrompt.ask(
-        "Select session", default=1, console=console,
-    )
+    while True:
+        choice = IntPrompt.ask(
+            "Select session", default=1, console=console,
+        )
+        if 1 <= choice <= new_option:
+            break
+        console.print(f"[red]Please enter a number between 1 and {new_option}[/]")
 
     if choice == new_option:
         # New session
@@ -377,12 +381,7 @@ async def select_or_create_session(
         return result, session_id
 
     # Restore existing session
-    idx = choice - 1
-    if idx < 0 or idx >= len(sessions):
-        console.print("[red]Invalid selection[/]")
-        sys.exit(1)
-
-    selected = sessions[idx]
+    selected = sessions[choice - 1]
     console.print(f'\nRestoring "[bold]{selected.name}[/]"...')
     result = await _restore_session(
         engine, selected.id, model_manager, model_id, console, config_dir,
