@@ -18,7 +18,7 @@
 |------|--------|---------------|
 | `src/cli/wizard.py` | Create | WizardResult dataclass, 5 wizard steps, credential I/O, summary, `run_wizard()` orchestrator |
 | `tests/test_wizard.py` | Create | Tests for credential helpers, each wizard step, full wizard flow |
-| `src/cli/app.py` | Modify | Delete scattered interaction (lines 183-245, 337-372, 440-470), call wizard, extract `build_services()` |
+| `src/cli/app.py` | Modify | Delete scattered interaction (model selection, alert config, `_interactive_add_model`), call wizard, extract `build_services()` |
 | `.gitignore` | Modify | Add `config/.credentials` |
 | `config/settings_sim.yaml` | Modify | Add DEPRECATED header comment |
 
@@ -273,7 +273,8 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
     exchange_type = "simulated" if mode == "sim" else "okx"
 
     if exchange_type == "simulated":
-        fee_pct = FloatPrompt.ask("  Fee rate (%)", default=0.05, console=console)
+        default_fee_pct = (defaults.exchange.fee_rate or 0.0005) * 100
+        fee_pct = FloatPrompt.ask("  Fee rate (%)", default=default_fee_pct, console=console)
         balance = FloatPrompt.ask(
             "  Initial balance (USDT)",
             default=defaults.trading.initial_balance_usdt,
@@ -922,7 +923,8 @@ async def run_wizard(
             trading_data = _step_trading_pair(defaults, console)
             model_data = await _step_model(model_manager, model_id, console)
             if model_data is None:
-                return None
+                console.print("[yellow]Model selection cancelled. Let's try again...[/]\n")
+                continue
             risk_data = _step_risk_scheduling(
                 defaults, exchange_data["exchange_type"], console,
             )
@@ -1057,14 +1059,59 @@ def build_services(
     return exchange, deps, agent, budget
 ```
 
-- [ ] **Step 2: Run tests — additive only, nothing should break**
+- [ ] **Step 2: Write smoke test for build_services (sim path)**
+
+Append to `tests/test_wizard.py`:
+
+```python
+# --- build_services smoke test ---
+
+def test_build_services_sim_path():
+    """Verify sim path returns correct types and wires deps correctly."""
+    from unittest.mock import MagicMock, patch
+    from src.cli.wizard import WizardResult
+    from src.cli.app import build_services
+
+    result = WizardResult(
+        exchange_type="simulated", fee_rate=0.0005, initial_balance=100.0,
+        api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
+        model_config=ModelConfig(id="t", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(), scheduler_interval_min=15, approval_enabled=False,
+        alert_enabled=True, alert_window_min=5, alert_threshold_pct=3.0,
+        alert_cooldown_min=15, token_budget=500000, persona=PersonaConfig(),
+        session_name="test",
+    )
+    mock_engine = MagicMock()
+    mock_sc = MagicMock()
+    mock_settings = MagicMock()
+    mock_settings.approval.timeout_seconds = 300
+
+    with patch("src.integrations.exchange.simulated.SimulatedExchange") as MockSim, \
+         patch("src.cli.app.MarketDataService"), \
+         patch("src.cli.app.MemoryService"), \
+         patch("src.cli.app.create_trader_agent") as mock_agent, \
+         patch("src.services.price_alert.PriceAlertService"):
+        MockSim.return_value = MagicMock()
+        mock_agent.return_value = MagicMock()
+        exchange, deps, agent, budget = build_services(
+            result, mock_engine, "sid", mock_sc, mock_settings,
+        )
+
+    assert deps.symbol == "BTC/USDT:USDT"
+    assert deps.timeframe == "15m"
+    assert deps.approval_enabled is False
+    assert budget._daily_max == 500000
+    MockSim.assert_called_once()
+```
+
+- [ ] **Step 3: Run tests — additive only, nothing should break**
 
 Run: `.venv/bin/python -m pytest tests/ -v`
-Expected: All existing tests pass (build_services is new code, not yet called)
+Expected: All existing tests pass + build_services smoke test passes
 
-- [ ] **Step 3: Rewrite `run()` to use wizard**
+- [ ] **Step 4: Rewrite `run()` to use wizard**
 
-Replace the entire `run()` function (lines 162-437) and delete `_interactive_add_model()` (lines 440-470). The new `run()`:
+Replace the entire `run()` function and delete `_interactive_add_model()`. The new `run()`:
 
 ```python
 async def run(
@@ -1110,10 +1157,23 @@ async def run(
         pre_console.print("Cancelled.")
         return
 
-    # Create session (R2 will add select/restore)
+    # Create session (R2 will add select/restore with #{N} counter)
+    # Session.name has unique=True — deduplicate by appending suffix
     async with get_session(engine) as db_sess:
+        base_name = result.session_name
+        name = base_name
+        suffix = 2
+        while True:
+            existing = await db_sess.execute(
+                select(Session).where(Session.name == name)
+            )
+            if existing.scalar_one_or_none() is None:
+                break
+            name = f"{base_name} ({suffix})"
+            suffix += 1
+
         trading_session = Session(
-            name=result.session_name,
+            name=name,
             symbol=result.symbol,
             persona_config=json.dumps(result.persona.model_dump()),
             model_config=json.dumps({
@@ -1127,6 +1187,8 @@ async def run(
         db_sess.add(trading_session)
         await db_sess.commit()
         await db_sess.refresh(trading_session)
+        if name != base_name:
+            logger.info(f"Session name '{base_name}' taken, using '{name}'")
     session_id = trading_session.id
 
     # ── Phase 4: Session logging ──
@@ -1212,15 +1274,15 @@ async def run(
     pre_console.print("[green]TradeBot stopped.[/]")
 ```
 
-- [ ] **Step 4: Run all tests to verify nothing is broken**
+- [ ] **Step 5: Run all tests to verify nothing is broken**
 
 Run: `.venv/bin/python -m pytest tests/ -v`
 Expected: All existing tests + wizard tests pass
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/cli/app.py
+git add src/cli/app.py tests/test_wizard.py
 git commit -m "refactor(r1): wire wizard into app.py, extract build_services, delete scattered interaction"
 ```
 
