@@ -30,8 +30,10 @@ def setup_system_logging(debug: bool, log_dir: Path) -> Console:
     """Phase 1 — Create log_dir, configure root logger, return temporary Console."""
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clear any existing handlers (important for test isolation)
+    # Close and clear any existing handlers (important for test isolation)
     root = logging.getLogger()
+    for h in root.handlers:
+        h.close()
     root.handlers.clear()
 
     # System log file — all levels

@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from src.cli.logging_config import SessionConsole
+from rich.logging import RichHandler
+
+from src.cli.logging_config import SessionConsole, setup_system_logging, setup_session_logging
 
 
 @pytest.fixture(autouse=True)
@@ -60,10 +62,6 @@ def test_session_console_flush_on_print(tmp_path: Path):
     assert "Flushed line" in content
     sc.close()
 
-
-from rich.logging import RichHandler
-
-from src.cli.logging_config import setup_system_logging, setup_session_logging
 
 
 def test_setup_system_logging_creates_log_dir(tmp_path: Path):
