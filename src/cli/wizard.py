@@ -299,7 +299,7 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
 
 def _generate_session_name(symbol: str, exchange_type: str) -> str:
     """Generate default session name: '{symbol_short} {exchange_display}'.
-    R2 will extend with #{N} counter from DB query."""
+    Used as fallback when no name_generator callback is provided."""
     symbol_short = symbol.split("/")[0]
     exchange_display = _EXCHANGE_DISPLAY.get(exchange_type, exchange_type)
     return f"{symbol_short} {exchange_display}"
