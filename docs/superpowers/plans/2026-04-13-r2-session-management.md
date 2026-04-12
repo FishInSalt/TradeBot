@@ -1173,11 +1173,67 @@ async def test_select_or_create_with_history_restore(tmp_path):
         r = await db_sess.execute(select(Session).where(Session.id == "existing-1"))
         assert r.scalar_one().status == "active"
     await engine.dispose()
+
+
+async def test_select_or_create_with_history_new_session(tmp_path):
+    """With existing sessions, user selects 'New Session' → wizard flow."""
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    from src.config import PersonaConfig, Settings, TraderConfig
+    from src.services.model_manager import ModelConfig
+    from src.cli.wizard import WizardResult
+
+    # Pre-existing session
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(
+            id="existing-1", name="BTC sim #1", status="paused",
+            symbol="BTC/USDT:USDT",
+            persona_config=json.dumps(PersonaConfig().model_dump()),
+            model_config=json.dumps({"id": "m1", "provider": "openai", "model": "gpt-4o"}),
+            last_active_at=datetime.now(timezone.utc),
+        ))
+        await db_sess.commit()
+
+    mock_result = WizardResult(
+        exchange_type="simulated", fee_rate=0.0005, initial_balance=100.0,
+        api_credentials=None, symbol="ETH/USDT:USDT", timeframe="5m",
+        model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(),
+        scheduler_interval_min=15, approval_enabled=True,
+        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None, alert_cooldown_min=None,
+        token_budget=500000,
+        persona=PersonaConfig(),
+        session_name="ETH sim #1",
+    )
+
+    from src.cli.session_manager import select_or_create_session
+
+    # User selects option 2 (New Session, since there's 1 existing)
+    with patch("src.cli.session_manager.run_wizard", new_callable=AsyncMock, return_value=mock_result), \
+         patch("src.cli.session_manager.IntPrompt.ask", return_value=2), \
+         patch("src.cli.session_manager._generate_session_name_from_db", new_callable=AsyncMock, return_value="ETH sim #1"):
+        result, session_id = await select_or_create_session(
+            engine=engine, settings=Settings(), trader_config=TraderConfig(),
+            model_manager=MagicMock(), model_id=None,
+            console=Console(), config_dir=Path(str(tmp_path)),
+        )
+
+    assert result.symbol == "ETH/USDT:USDT"
+    assert session_id != "existing-1"  # new session, not the existing one
+
+    # Verify new session was created in DB
+    async with get_session(engine) as db_sess:
+        r = await db_sess.execute(select(Session).where(Session.id == session_id))
+        s = r.scalar_one()
+        assert s.name == "ETH sim #1"
+        assert s.status == "active"
+    await engine.dispose()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m pytest tests/test_session_manager.py::test_select_or_create_no_history_runs_wizard tests/test_session_manager.py::test_select_or_create_with_history_restore -v`
+Run: `python -m pytest tests/test_session_manager.py::test_select_or_create_no_history_runs_wizard tests/test_session_manager.py::test_select_or_create_with_history_restore tests/test_session_manager.py::test_select_or_create_with_history_new_session -v`
 Expected: FAIL — cannot import `select_or_create_session`
 
 - [ ] **Step 3: Implement `select_or_create_session`**
