@@ -193,14 +193,15 @@ cooldown 的删除涉及整个调用链，需同步修改：
 |------|------|
 | `src/services/price_alert.py` | 删 cooldown 参数/状态/检查，`check()` 加 `_ticks.clear()` |
 | `src/config.py` | `AlertsConfig` 删 `cooldown_minutes`，改 window=60, threshold=5.0 |
-| `src/cli/wizard.py` | Step 4 删 cooldown 提示；`WizardResult` 删 `alert_cooldown_min` |
+| `src/cli/wizard.py` | Step 4 删 cooldown 提示；`_show_summary` 删 cooldown 显示；`WizardResult` 删 `alert_cooldown_min` |
 | `src/agent/tools_execution.py` | `set_price_alert` 删 cooldown 参数；`window_minutes` 验证范围从 1-60 扩展到 1-240 |
 | `src/agent/trader.py` | tool 注册删 cooldown 参数 |
 | `src/integrations/exchange/base.py` | `update_alert_params` 删 cooldown |
 | `src/integrations/exchange/simulated.py` | 同上 |
 | `src/integrations/exchange/okx.py` | 同上 |
 | `src/cli/session_manager.py` | `_create_session` alert_config JSON 删 cooldown；`_restore_session` 删 cooldown 读取 |
-| `src/cli/app.py` | `build_services` 删 cooldown 传参 |
+| `src/cli/app.py` | `build_services` 删 cooldown 传参；`build_services` 中 alert 显示信息删 cooldown |
+| `src/storage/models.py` | 更新 `alert_config` 字段注释（删除 cooldown 描述） |
 
 ### 旧 session 兼容
 
@@ -211,6 +212,9 @@ cooldown 的删除涉及整个调用链，需同步修改：
 - 删除：cooldown 相关测试（blocks same direction, allows opposite, expires）
 - 新增：触发后 window 重置测试（触发→清空→重新积累→再触发）
 - 更新：所有调用 `PriceAlertService()` 的地方删 cooldown 参数
+- `tests/test_config.py`：删除 `AlertsConfig.cooldown_minutes` 相关断言
+- `tests/test_tools.py`：删除 `test_set_price_alert_cooldown_out_of_range`；更新其他 `set_price_alert` 测试删 cooldown 参数；`window_minutes` 边界值从 70（旧范围 1-60 的越界值）改为 250（新范围 1-240 的越界值）
+- `tests/test_price_alert.py`：`test_update_params_boundary_validation` 中 `window_minutes` 越界断言同步更新
 
 ---
 
@@ -269,7 +273,7 @@ class Scheduler:
         await self._run_cycle("scheduled", None)
         while self._running:
             # 取一次性间隔，用完即重置
-            interval = self._next_interval or self._interval
+            interval = self._next_interval if self._next_interval is not None else self._interval
             self._next_interval = None
             await self._interruptible_sleep(interval)
             # ... drain events, run cycles ...
@@ -333,7 +337,7 @@ async def set_next_wake(deps: TradingDeps, minutes: int, reasoning: str) -> str:
 | `src/scheduler/scheduler.py` | 新增 `_next_interval` + `set_next_interval()` |
 | `src/agent/trader.py` | 新增 `set_next_wake` tool 注册 |
 | `src/agent/tools_execution.py` | 新增 `set_next_wake` 实现 |
-| `src/agent/trader.py` | 系统 prompt 新增建议 |
+| `src/agent/persona.py` | `generate_system_prompt` 新增 `set_next_wake` 建议性引导 |
 | `src/cli/app.py` | Phase 6 注入 `deps.set_next_wake_fn` |
 
 ### 测试
@@ -438,16 +442,20 @@ class BaseExchange:
 
 ```python
 async def _process_tick(self, ticker):
-    # ... 现有：liquidation, conditional orders ...
+    alert_info = None
+    level_alerts = []
 
-    # 3. 百分比 alert (R3)
-    if self._alert_service:
-        alert_info = self._alert_service.check(ticker.last, ticker.timestamp)
+    async with self._lock:
+        # ... 现有：liquidation, conditional orders ...
 
-    # 4. 价位 alert (R7) ← 新增
-    level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
+        # 3. 百分比 alert (R3)
+        if self._alert_service:
+            alert_info = self._alert_service.check(ticker.last, ticker.timestamp)
 
-    # Notify outside lock
+        # 4. 价位 alert (R7) ← 新增，lock 内执行（修改 _price_level_alerts 列表）
+        level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
+
+    # Notify outside lock（回调可能触发 scheduler.trigger，不能持有 lock）
     if alert_info and self._alert_callback:
         await self._alert_callback(alert_info)
     for la in level_alerts:                    # ← 新增
@@ -489,13 +497,26 @@ elif trigger_type == "alert" and context is not None:
 ### 新 Agent Tool
 
 ```python
-set_price_alert_level(price: float, direction: str, reasoning: str) -> str
+add_price_level_alert(price: float, direction: str, reasoning: str) -> str
 ```
 
 - `direction`：`"above"` 或 `"below"`
 - 调用 `deps.exchange.add_price_level_alert(...)`
 - 返回确认信息含 alert_id
-- Agent 可设定多个价位 alert
+- Agent 可设定多个价位 alert（上限 20 个，超出时返回提示）
+
+### 即时触发防护
+
+Tool 不阻止可能立即触发的 alert（Agent 可能有意确认突破），但在返回信息中警告：
+
+```python
+if (direction == "above" and current_price >= price) or \
+   (direction == "below" and current_price <= price):
+    return f"Alert set (id={alert_id}), but WARNING: current price ({current_price}) " \
+           f"already {'above' if direction == 'above' else 'below'} {price}, may trigger immediately"
+```
+
+`add_price_level_alert` 需接收 `current_price` 参数（从 tool 层传入），或由 Exchange 内部获取最新 ticker 价格。
 
 ### 首版不提供取消 tool
 
@@ -521,8 +542,9 @@ Exchange 层有 `remove_price_level_alert(alert_id)` 方法，但首版不暴露
 | `src/integrations/exchange/base.py` | 新增 `__init__` + `PriceLevelAlertInfo` + 3 个方法；R3: `update_alert_params` 删 cooldown |
 | `src/integrations/exchange/simulated.py` | `__init__` 加 `super().__init__()`；`_process_tick` 新增价位检查；R3: `update_alert_params` 删 cooldown |
 | `src/integrations/exchange/okx.py` | `__init__` 加 `super().__init__()`；`_watch_ticker_loop` 新增价位检查；R3: `update_alert_params` 删 cooldown |
-| `src/agent/tools_execution.py` | 新增 `set_price_alert_level` |
-| `src/agent/trader.py` | tool 注册 + prompt 建议 |
+| `src/agent/tools_execution.py` | 新增 `add_price_level_alert` |
+| `src/agent/trader.py` | tool 注册 |
+| `src/agent/persona.py` | `generate_system_prompt` 新增 `add_price_level_alert` 建议性引导 |
 | `src/cli/app.py` | `run_agent_cycle` prompt 分支 + `PriceLevelAlertInfo` import |
 
 ### 测试
@@ -576,11 +598,12 @@ PR #3: R4 动态唤醒间隔
 |------|------|------|
 | `src/services/price_alert.py` | R3 | 重写 check()，删 cooldown |
 | `src/config.py` | R3 | AlertsConfig 删 cooldown，改默认值 |
-| `src/cli/wizard.py` | R3 | Step 4 删 cooldown 提示，WizardResult 删字段 |
+| `src/cli/wizard.py` | R3 | Step 4 删 cooldown 提示；`_show_summary` 删 cooldown 显示；WizardResult 删字段 |
 | `src/cli/session_manager.py` | R3 | alert_config JSON 删 cooldown |
-| `src/cli/app.py` | R3+R4+R7 | build_services 删 cooldown；run_agent_cycle prompt 分支；Phase 6 注入 wake setter |
-| `src/agent/tools_execution.py` | R3+R4+R7 | set_price_alert 删 cooldown + window 范围扩展到 1-240；新增 set_next_wake；新增 set_price_alert_level |
-| `src/agent/trader.py` | R3+R4+R7 | tool 注册更新；系统 prompt 新增建议 |
+| `src/cli/app.py` | R3+R4+R7 | build_services 删 cooldown + alert 显示信息删 cooldown；run_agent_cycle prompt 分支；Phase 6 注入 wake setter |
+| `src/agent/tools_execution.py` | R3+R4+R7 | set_price_alert 删 cooldown + window 范围扩展到 1-240；新增 set_next_wake；新增 add_price_level_alert |
+| `src/agent/trader.py` | R3+R4+R7 | tool 注册更新 |
+| `src/agent/persona.py` | R4+R7 | `generate_system_prompt` 新增 set_next_wake + add_price_level_alert 建议 |
 | `src/integrations/exchange/base.py` | R3+R7 | 新增 `__init__`；update_alert_params 删 cooldown；新增 PriceLevelAlertInfo + 3 方法 |
 | `src/integrations/exchange/simulated.py` | R3+R7 | `__init__` 加 `super().__init__()`；update_alert_params 删 cooldown；_process_tick 新增价位检查 |
 | `src/integrations/exchange/okx.py` | R3+R7 | `__init__` 加 `super().__init__()`；update_alert_params 删 cooldown；_watch_ticker_loop 新增价位检查 |
@@ -596,12 +619,14 @@ PR #3: R4 动态唤醒间隔
 | `tests/test_wizard.py` | 更新：删 cooldown 相关 mock/断言 |
 | `tests/test_session_manager.py` | 更新：alert_config 不含 cooldown |
 | `tests/test_trader_agent.py` | 更新：新增 tool 注册检查 |
+| `tests/test_config.py` | 更新：删 AlertsConfig.cooldown_minutes 断言 |
+| `tests/test_tools.py` | 更新：删 cooldown 测试；window_minutes 边界值 70→250 |
 
 ### 不改动
 
 | 文件 | 原因 |
 |------|------|
-| `src/storage/models.py` | Session 表无新字段 |
+| `src/storage/models.py` | Session 表无新字段（仅更新 alert_config 注释） |
 | `src/storage/database.py` | 无变化 |
 | `src/cli/logging_config.py` | 无变化 |
 | `src/cli/display.py` | 无变化 |
