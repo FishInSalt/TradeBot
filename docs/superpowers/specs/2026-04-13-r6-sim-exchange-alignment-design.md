@@ -116,6 +116,7 @@ R6 是 Phase 2（产品化）的前置条件。如果模拟和实盘行为不一
 | 市价单失败/拒绝模拟 | 真实交易所可能拒绝订单（余额不足、风控限制等），SimExchange 当前在 `create_order` 阶段做余额预检，不模拟提交后被拒的场景 |
 | 网络延迟模拟 | 撮合延迟已通过"下一个 tick"自然产生，不额外模拟网络抖动或超时 |
 | OKXExchange 侧改动 | OKX 已是异步行为，`create_order` 已透传 ccxt（含 limit）。本次改动集中在 SimExchange 侧 |
+| 限价单 price improvement | 限价单以指定价格成交（`fill_price = trigger_price`），即使市场价更优也不以更优价成交。简化账务逻辑（冻结金额 = 实际扣款，无退差）。真实交易所会给 price improvement，但首版不模拟 |
 | set_leverage 检查 pending orders | pending market/limit 订单存在时，Agent 调用 `set_leverage` 可成功（因 `_positions` 为空），但填充时 `_leverage[symbol]` 会被订单的 leverage 回写覆盖。功能不会出错（D12/D14 的填充时杠杆检查兜底），但 Agent 可能对杠杆状态产生短暂困惑。首版不修复——Agent 极少在 pending 期间改杠杆，后续可在 `set_leverage` 中加 pending 检查 |
 
 ### 关键设计决策汇总
@@ -136,7 +137,7 @@ R6 是 Phase 2（产品化）的前置条件。如果模拟和实盘行为不一
 | D12 | 限价单填充时杠杆校验 | `_execute_limit_fill` 检查 pos.leverage != order.leverage 则取消 | pending 期间 set_leverage 或其他订单可能改变杠杆，必须在填充时二次检查 |
 | D13 | place_limit_order 不检查 pending market | 允许 market + limit 共存 | 市价即时入场 + 限价低位加仓是有效策略；方向冲突由填充时二次检查兜底 |
 | D14 | _fill_market_open/close 防御性检查 | 与 `_execute_limit_fill` 对称：反向仓位/杠杆不一致/仓位不存在均返回 None | 引擎层应自洽，不依赖外部工具层或撮合顺序的保证 |
-| D15 | 平仓填充使用 pnl_cap=True | 与清算一致 | 异步化多一个 tick 窗口，价格可能穿过清算价，需要同一安全阀防止 free_usdt 断言失败 |
+| D15 | 平仓市价单填充使用 pnl_cap=True | 与清算一致 | 异步化多一个 tick 窗口，价格可能穿过清算价，需要同一安全阀防止 free_usdt 断言失败。注：stop/TP 的 `_execute_fill` 不需要 pnl_cap（触发和成交在同一 tick，bid/ask 价差风险可忽略） |
 | D16 | _persist_state 中 market fill 不走 INSERT | filled → UPDATE "closed"，cancelled → UPDATE "cancelled" | pending 订单在 create_order 时已 INSERT，填充时重复 INSERT 会触发唯一约束冲突。new_orders 仅用于 liquidation |
 
 ---
@@ -330,7 +331,7 @@ class _PendingOrder:
     position_side: str
     order_type: str          # "market" | "limit" | "stop" | "take_profit"
     amount: float
-    trigger_price: float | None   # 改为 Optional：market 单为 None
+    trigger_price: float | None   # stop/TP: 触发价；limit: 成交价；market: None
     frozen_margin: float = 0.0    # 新增：市价/限价单冻结的保证金+手续费
     leverage: int = 1             # 新增：下单时的杠杆（撮合时需要）
 ```
@@ -964,9 +965,16 @@ if cancelled_order_ids:
         )
 ```
 
+**执行顺序与 step 3b 的交互**：step 3a-bis 在 step 3b 之前执行，将取消的订单从 status="open" 改为 "cancelled"。step 3b 的 `WHERE status="open"` 自然不会再匹配到这些记录。但为了逻辑清晰（不依赖隐含的执行顺序），step 3b 的 `exclude_ids` 应显式包含 `cancelled_order_ids`：
+
+```python
+# step 3b: cancel orphaned pending orders in DB
+exclude_ids = pending_ids + filled_ids + (cancelled_order_ids or [])
+```
+
 **关键约束**：`new_orders`（step 3c INSERT）仅用于 liquidation orders（创建即关闭，无 pending 阶段）。pending market/limit 订单在 `create_order` 时已 INSERT，填充时通过 `filled_order_ids`（step 3a UPDATE → "closed"）或 `cancelled_order_ids`（step 3a-bis UPDATE → "cancelled"）处理，不能重复 INSERT。
 
-`_persist_state` 中 upsert balance（line 650-664）需写入 `frozen_usdt`：
+`_persist_state` 中 upsert balance（line 650-664）需写入 `frozen_usdt`（INSERT 和 UPDATE 两侧都要）：
 
 ```python
 stmt = sqlite_insert(SimBalance).values(
@@ -975,6 +983,15 @@ stmt = sqlite_insert(SimBalance).values(
     used_usdt=self._used_usdt,
     frozen_usdt=self._frozen_usdt,  # 新增
     updated_at=now,
+)
+stmt = stmt.on_conflict_do_update(
+    index_elements=["session_id"],
+    set_={
+        "free_usdt": stmt.excluded.free_usdt,
+        "used_usdt": stmt.excluded.used_usdt,
+        "frozen_usdt": stmt.excluded.frozen_usdt,  # 新增 — 缺少会导致 frozen 不被持久化
+        "updated_at": now,
+    },
 )
 ```
 
@@ -1159,7 +1176,7 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | `src/integrations/exchange/okx.py` | 无改动（`create_order` 已透传 ccxt，limit 自动支持） |
 | **Agent Tools** | |
 | `src/agent/tools_execution.py` | `open_position` 新增 pending 检查；`close_position` 新增 pending 检查；新增 `place_limit_order` |
-| `src/agent/trader.py` | 注册 `place_limit_order` tool |
+| `src/agent/trader.py` | 注册 `place_limit_order` tool；`get_open_orders` 返回值格式化区分 PENDING/LIMIT/STOP |
 | `src/agent/persona.py` | 系统 prompt 新增限价单引导 |
 | **App** | |
 | `src/cli/app.py` | 删除 `on_tick` finally 中的 `drain_pending_fills` 逻辑 |
@@ -1181,6 +1198,7 @@ PR #1: 市价单异步化 + drain_pending_fills 清理
   BaseExchange: 删除 drain_pending_fills
   app.py: 删除 on_tick finally drain 逻辑
   models.py: SimOrder/SimBalance 新增字段
+  trader.py: get_open_orders 返回值格式化（区分 PENDING/LIMIT/STOP）
   适配全部受影响测试 + 新增市价单异步测试
 
 PR #2: 重复下单防护
