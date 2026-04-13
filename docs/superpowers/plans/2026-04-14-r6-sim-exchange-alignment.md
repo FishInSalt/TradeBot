@@ -657,9 +657,8 @@ Add after `_execute_market_order` method (or replace it — see step 5):
         self._frozen_usdt -= order.frozen_margin
         self._free_usdt += order.frozen_margin
 
-        # Cancel orphaned orders if position fully closed
-        if order.symbol not in self._positions:
-            self._cancel_orphaned_orders()
+        # NOTE: orphan cleanup is NOT done here — _process_tick step 3 handles it
+        # uniformly after all fills in the tick are resolved.
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         logger.info(
@@ -801,12 +800,51 @@ Replace the entire `_process_tick` method:
                 await self._alert_callback(la)
 ```
 
-- [ ] **Step 2: Run the market fill tests**
+- [ ] **Step 2: Update _persist_state signature to accept cancelled_order_ids**
+
+`_process_tick` now passes `cancelled_order_ids` to `_persist_state`. The signature must be updated in this task to keep the code runnable. Full `_persist_state` body rewrite happens in Task 7; here we only add the parameter and the minimal handling (step 3a-bis).
+
+Update the `_persist_state` signature and add the cancelled orders UPDATE:
+
+```python
+    async def _persist_state(
+        self,
+        new_orders: list[tuple[Order, str]] | None = None,
+        filled_order_ids: list[str] | None = None,
+        cancelled_order_ids: list[str] | None = None,  # NEW
+        fill_events: list[FillEvent] | None = None,
+    ) -> None:
+```
+
+And inside the method body, after step 3a (update filled orders), add step 3a-bis:
+
+```python
+            # 3a-bis. Update cancelled orders → "cancelled"
+            if cancelled_order_ids:
+                for oid in cancelled_order_ids:
+                    await session.execute(
+                        update(SimOrder)
+                        .where(SimOrder.order_id == oid)
+                        .values(status="cancelled")
+                    )
+```
+
+Also update step 3b to exclude cancelled_order_ids:
+
+```python
+            # 3b. Cancel orphaned pending orders in DB
+            pending_ids = [o.id for o in self._pending_orders]
+            filled_ids = filled_order_ids or []
+            cancelled_ids = cancelled_order_ids or []
+            exclude_ids = pending_ids + filled_ids + cancelled_ids
+```
+
+- [ ] **Step 3: Run the market fill tests**
 
 Run: `python -m pytest tests/test_simulated_exchange.py::test_market_order_fills_on_next_tick tests/test_simulated_exchange.py::test_market_close_fills_on_next_tick tests/test_simulated_exchange.py::test_frozen_balance_diff_refund tests/test_simulated_exchange.py::test_frozen_extreme_clamp tests/test_simulated_exchange.py::test_fill_market_close_position_gone tests/test_simulated_exchange.py::test_fill_market_close_clamps_amount -v`
-Expected: PASS (may need _persist_state signature update first — see next task)
+Expected: PASS
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/integrations/exchange/simulated.py
@@ -815,7 +853,7 @@ git commit -m "feat(r6): update _process_tick with step 0 market order matching"
 
 ---
 
-### Task 7: Update _cancel_orphaned_orders, _persist_state, _restore_state
+### Task 7: Update _cancel_orphaned_orders, _persist_state body, _restore_state
 
 **Files:**
 - Modify: `src/integrations/exchange/simulated.py`
@@ -922,14 +960,13 @@ Replace the method at `simulated.py:342-347`:
 Run: `python -m pytest tests/test_simulated_exchange.py::test_orphan_cleanup_preserves_market_open tests/test_simulated_exchange.py::test_orphan_cleanup_removes_market_close tests/test_simulated_exchange.py::test_orphan_cleanup_unfreezes_margin -v`
 Expected: PASS
 
-- [ ] **Step 5: Update _persist_state signature and add cancelled_order_ids handling**
+- [ ] **Step 5: Rewrite _persist_state body with frozen_usdt and frozen_margin/leverage support**
 
-Update `_persist_state` signature and body. Key changes:
-1. Add `cancelled_order_ids` parameter
-2. Add `frozen_usdt` to balance upsert (both INSERT and ON CONFLICT)
-3. Add `frozen_margin`/`leverage` to pending order upsert (step 3d)
-4. Add step 3a-bis for cancelled orders
-5. Add cancelled_order_ids to exclude_ids in step 3b
+The signature and `cancelled_order_ids` handling were already added in Task 6 step 2. This step rewrites the full method body with remaining changes:
+1. Add `frozen_usdt` to balance upsert (both INSERT and ON CONFLICT)
+2. Add `frozen_margin`/`leverage` to pending order upsert (step 3d)
+
+Note: Task 4→Task 7 之间，`_persist_state` 的 step 3d upsert 尚未写入 `frozen_margin`/`leverage` 字段。由于测试使用 `db_engine=None` 不走持久化路径，此空窗期对测试无影响。
 
 ```python
     async def _persist_state(
@@ -1347,7 +1384,26 @@ async def test_market_buy_opens_long():
 
 - [ ] **Step 5: Adapt leverage-with-position tests**
 
-**`test_add_position_leverage_mismatch`:** buy → tick → change leverage setting → second buy should still fail (now at `create_order` balance check, since market orders check leverage at fill time — but the test may need restructuring if the error now happens at fill instead of create).
+**`test_add_position_leverage_mismatch`:** Semantic change — leverage check moved from `create_order` to `_fill_market_open`. Old test expects `create_order` to raise `ValueError`; new behavior: `create_order` succeeds, fill silently cancels (returns None). Rewrite:
+
+```python
+async def test_add_position_leverage_mismatch():
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fills, creates position at 3x
+
+    ex._leverage["BTC/USDT:USDT"] = 5  # change setting
+    order2 = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert order2.status == "open"  # create succeeds (no longer raises)
+    frozen_before = ex._frozen_usdt
+
+    await ex._process_tick(_tick())  # fill → cancelled due to leverage mismatch
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert positions[0].contracts == 0.001  # unchanged — second order was cancelled
+    assert ex._frozen_usdt == 0.0  # margin unfrozen
+```
 
 **`test_set_leverage_rejects_with_position`:** buy → tick → set_leverage should reject.
 
@@ -1406,7 +1462,7 @@ These tests need two ticks because the entry price is now the tick price (not su
 
 - [ ] **Step 11: Fix test_market_order_unknown_type**
 
-`"limit"` is now valid, so change test to use truly unknown type:
+PR #3 will make `"limit"` a valid type, so use `"foobar"` now for forward compatibility:
 ```python
 async def test_market_order_unknown_type():
     ex = _make_exchange()
@@ -1416,7 +1472,10 @@ async def test_market_order_unknown_type():
 
 - [ ] **Step 12: Adapt persistence tests (require DB — if they exist)**
 
-**`test_persist_and_restore`:** open → **tick** → persist → restore → check.
+**`test_persist_and_restore`:** open → **tick** → persist → restore → check. Additionally, extend assertions to verify new fields survive the cycle:
+- After restore: `_frozen_usdt` should be 0 (position was filled, no pending orders)
+- If test creates a pending order before persist: verify `frozen_margin` and `leverage` survive restore
+
 **`test_fetch_closed_orders_from_db`:** open → **tick** → check DB.
 
 **Tests that should NOT be modified** (per spec — no market order involvement):
@@ -2230,22 +2289,18 @@ git commit -m "feat(r6): update persona prompt — async fill guidance + limit o
 
 ---
 
-### Task 20: Persistence tests (market + limit)
+### Task 20: Field correctness + frozen buffer tests
 
 **Files:**
 - Modify: `tests/test_simulated_exchange.py`
 
-- [ ] **Step 1: Write persistence tests**
+- [ ] **Step 1: Write in-memory field correctness tests**
 
-These tests require a real DB engine. Check existing persistence test patterns (e.g., `test_persist_and_restore`) and follow the same setup.
+These verify that `_PendingOrder` fields are correctly populated by `create_order`. Real persist → restore cycle is covered by Task 11 step 12's adaptation of the existing `test_persist_and_restore` (which uses a DB engine and should be extended to assert `frozen_margin`, `leverage`, and `frozen_usdt` after restore).
 
 ```python
-async def test_pending_market_order_persisted_and_restored():
-    """Market order pending state survives persist → restore cycle."""
-    # This test requires db_engine — follow pattern from test_persist_and_restore
-    # If existing test uses a real db, follow that pattern
-    # Otherwise, test the in-memory fields directly
-    from src.integrations.exchange.simulated import _PendingOrder
+async def test_pending_market_order_fields():
+    """Market order creates _PendingOrder with correct frozen_margin/leverage/trigger_price."""
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
@@ -2258,8 +2313,8 @@ async def test_pending_market_order_persisted_and_restored():
     assert po.trigger_price is None
 
 
-async def test_limit_order_persisted_and_restored():
-    """Limit order pending state has correct fields."""
+async def test_pending_limit_order_fields():
+    """Limit order creates _PendingOrder with correct frozen_margin/leverage/trigger_price."""
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=90000.0)
@@ -2272,9 +2327,9 @@ async def test_limit_order_persisted_and_restored():
     assert po.trigger_price == 90000.0
 ```
 
-- [ ] **Step 2: Run persistence tests**
+- [ ] **Step 2: Run field tests**
 
-Run: `python -m pytest tests/test_simulated_exchange.py::test_pending_market_order_persisted_and_restored tests/test_simulated_exchange.py::test_limit_order_persisted_and_restored -v`
+Run: `python -m pytest tests/test_simulated_exchange.py::test_pending_market_order_fields tests/test_simulated_exchange.py::test_pending_limit_order_fields -v`
 Expected: PASS
 
 - [ ] **Step 3: Write frozen buffer coverage test**
@@ -2298,7 +2353,7 @@ async def test_frozen_buffer_covers_price_movement():
 
 - [ ] **Step 4: Run and commit**
 
-Run: `python -m pytest tests/test_simulated_exchange.py -k "persisted or buffer_covers" -v`
+Run: `python -m pytest tests/test_simulated_exchange.py -k "pending_market_order_fields or pending_limit_order_fields or buffer_covers" -v`
 Expected: PASS
 
 ```bash
