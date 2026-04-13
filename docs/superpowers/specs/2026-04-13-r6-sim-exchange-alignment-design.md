@@ -382,8 +382,10 @@ async def _process_tick(self, ticker: Ticker) -> None:
         market_orders = [o for o in self._pending_orders if o.order_type == "market"]
         for order in market_orders:
             fill = self._execute_market_fill(order, ticker)
-            triggered.append(fill)
             filled_order_ids.append(order.id)
+            if fill is None:
+                continue  # 因冲突取消，已解冻
+            triggered.append(fill)
             new_orders.append((Order(
                 id=order.id, symbol=order.symbol,
                 side=order.side, order_type="market",
