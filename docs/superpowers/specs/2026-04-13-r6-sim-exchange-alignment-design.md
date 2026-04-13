@@ -137,6 +137,7 @@ R6 是 Phase 2（产品化）的前置条件。如果模拟和实盘行为不一
 | D13 | place_limit_order 不检查 pending market | 允许 market + limit 共存 | 市价即时入场 + 限价低位加仓是有效策略；方向冲突由填充时二次检查兜底 |
 | D14 | _fill_market_open/close 防御性检查 | 与 `_execute_limit_fill` 对称：反向仓位/杠杆不一致/仓位不存在均返回 None | 引擎层应自洽，不依赖外部工具层或撮合顺序的保证 |
 | D15 | 平仓填充使用 pnl_cap=True | 与清算一致 | 异步化多一个 tick 窗口，价格可能穿过清算价，需要同一安全阀防止 free_usdt 断言失败 |
+| D16 | _persist_state 中 market fill 不走 INSERT | filled → UPDATE "closed"，cancelled → UPDATE "cancelled" | pending 订单在 create_order 时已 INSERT，填充时重复 INSERT 会触发唯一约束冲突。new_orders 仅用于 liquidation |
 
 ---
 
@@ -352,7 +353,8 @@ def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEven
 - 防御性检查（与 `_execute_limit_fill` 对称）：
   - 反向仓位：已有仓位且方向不同 → 取消并解冻，返回 None
   - 杠杆不一致：已有仓位且杠杆不同 → 取消并解冻，返回 None
-- 用当前 tick 价格计算实际 margin/fee
+- 成交价：`buy → ticker.ask`（买入按卖方出价），`sell → ticker.bid`（卖出按买方出价）——与现有 `_open_market_order` 一致
+- 用成交价计算实际 margin/fee
 - 解冻 `_frozen_usdt`，扣 `_used_usdt`，退差额到 `_free_usdt`（含 clamp 兜底）
 - 创建或合并 `_positions[symbol]`
 - 同步 `self._leverage[symbol] = order.leverage`（与 `_restore_state` 保持一致）
@@ -361,7 +363,8 @@ def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEven
 **平仓撮合** (`_fill_market_close`) — 返回 `FillEvent | None`：
 - 检查仓位是否存在（防御性：若仓位已在同一 tick 被清算删除，取消并解冻，返回 None）
 - `actual_amount = min(order.amount, pos.contracts)` — 防御性 clamping，与现有 `_close_market_order` 一致
-- 用当前 tick 价格计算 PnL（调用 `_close_position_core(pnl_cap=True)` — 使用 pnl_cap 防止极端价格间隙导致 `free_usdt` 触发 RuntimeError 断言。异步化多了一个 tick 的时间窗口，价格可能穿过清算价，与清算使用同一安全阀）
+- 成交价：long 仓位平仓 `ticker.bid`，short 仓位平仓 `ticker.ask`——与现有 `_close_market_order` 一致
+- 用成交价计算 PnL（调用 `_close_position_core(pnl_cap=True)` — 使用 pnl_cap 防止极端价格间隙导致 `free_usdt` 触发 RuntimeError 断言。异步化多了一个 tick 的时间窗口，价格可能穿过清算价，与清算使用同一安全阀）
 - 解冻 `_frozen_usdt`（退全额，因为平仓不占用新保证金）
 - 返回 FillEvent(trigger_reason="market", pnl=实际PnL)
 
@@ -375,29 +378,27 @@ async def _process_tick(self, ticker: Ticker) -> None:
     self._latest_price = ticker.last
 
     triggered: list[FillEvent] = []
-    filled_order_ids: list[str] = []
-    new_orders: list[tuple[Order, str]] = []
+    filled_order_ids: list[str] = []      # 成功成交 → step 3a UPDATE to "closed"
+    cancelled_order_ids: list[str] = []   # 因冲突取消 → step 3a-bis UPDATE to "cancelled"
+    new_orders: list[tuple[Order, str]] = []  # 仅 liquidation（创建即关闭，无 pending 阶段）
     alert_info = None
     level_alerts = []
 
     async with self._lock:
         # 0. 撮合 pending 市价单（新增）
+        #    注意：pending market 在 create_order 时已 INSERT 到 DB（status="open"），
+        #    填充时仅需 UPDATE（step 3a），不能再 INSERT（step 3c 会唯一约束冲突）。
         market_orders = [o for o in self._pending_orders if o.order_type == "market"]
         for order in market_orders:
             fill = self._execute_market_fill(order, ticker)
-            filled_order_ids.append(order.id)
             if fill is None:
-                continue  # 因冲突取消，已解冻
+                cancelled_order_ids.append(order.id)  # 取消 → "cancelled"
+                continue
+            filled_order_ids.append(order.id)  # 成交 → "closed"
             triggered.append(fill)
-            new_orders.append((Order(
-                id=order.id, symbol=order.symbol,
-                side=order.side, order_type="market",
-                amount=fill.amount, price=fill.fill_price,
-                status="closed", fee=fill.fee,
-            ), fill.position_side))
 
         # 1. 清算检查（现有）
-        # ...
+        # ...（liquidation orders 加入 new_orders — 它们没有 pending 阶段，需要 INSERT）
 
         # 2. 条件单 + 限价单撮合（现有 + 新增）
         # ...
@@ -661,10 +662,10 @@ if order_type == "limit":
 ```python
 def _should_trigger(self, order: _PendingOrder, ticker: Ticker) -> bool:
     if order.order_type == "limit":
-        # Buy limit: 卖方出价 ≤ 限定价 → 可以买入
+        # Buy limit (开仓 long): 卖方出价 ≤ 限定价 → 可以买入
         if order.side == "buy":
             return ticker.ask <= order.trigger_price
-        # Sell limit: 买方出价 ≥ 限定价 → 可以卖出
+        # Sell limit (开仓 short, 首版仅限开仓 D4): 买方出价 ≥ 限定价 → 可以卖出
         else:
             return ticker.bid >= order.trigger_price
     elif order.order_type == "stop":
@@ -744,22 +745,23 @@ def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent
 ```python
 async with self._lock:
     # 0. 撮合 pending 市价单
+    #    pending market 已在 DB 中（create_order 时 INSERT），填充走 UPDATE 路径，不走 INSERT。
     market_orders = [o for o in self._pending_orders if o.order_type == "market"]
     for order in market_orders:
         fill = self._execute_market_fill(order, ticker)
-        filled_order_ids.append(order.id)
         if fill is None:
-            # 因冲突取消（仓位已消失/反向/杠杆不一致），已解冻
+            cancelled_order_ids.append(order.id)  # → UPDATE status="cancelled"
             continue
+        filled_order_ids.append(order.id)  # → UPDATE status="closed"
         triggered.append(fill)
-        new_orders.append((Order(..., status="closed"), fill.position_side))
 
     # 1. 清算检查
-    # ...（现有，不变）
+    # ...（现有，不变。liquidation orders 加入 new_orders → INSERT，它们无 pending 阶段）
 
     # 2. 条件单 + 限价单撮合
+    processed = set(filled_order_ids + cancelled_order_ids)
     non_market = [o for o in self._pending_orders
-                  if o.order_type != "market" and o.id not in filled_order_ids]
+                  if o.order_type != "market" and o.id not in processed]
     for order in non_market:
         if self._should_trigger(order, ticker):
             if order.order_type in ("stop", "take_profit"):
@@ -769,21 +771,22 @@ async with self._lock:
             elif order.order_type == "limit":
                 fill = self._execute_limit_fill(order, ticker)
                 if fill is None:
-                    # 因冲突被取消（反向仓位/杠杆不一致），仅需从 pending 中移除
-                    filled_order_ids.append(order.id)
+                    cancelled_order_ids.append(order.id)  # → UPDATE status="cancelled"
                     continue
             triggered.append(fill)
-            filled_order_ids.append(order.id)
+            filled_order_ids.append(order.id)  # → UPDATE status="closed"
 
-    # 3. 统一清理（所有 fill 类型共用，与现有逻辑结构一致）
-    if triggered or filled_order_ids:
-        for fid in filled_order_ids:
-            self._remove_order_by_id(fid)
+    # 3. 统一清理
+    all_resolved = filled_order_ids + cancelled_order_ids
+    if triggered or all_resolved:
+        for oid in all_resolved:
+            self._remove_order_by_id(oid)
         self._cancel_orphaned_orders()  # 使用 _is_close_order_static
         if self._db_engine:
             await self._persist_state(
-                new_orders=new_orders,
-                filled_order_ids=filled_order_ids,
+                new_orders=new_orders,           # 仅 liquidation INSERT
+                filled_order_ids=filled_order_ids,   # UPDATE → "closed"
+                cancelled_order_ids=cancelled_order_ids,  # UPDATE → "cancelled"
                 fill_events=triggered,
             )
 
@@ -800,7 +803,7 @@ async with self._lock:
 限价单应支持取消（Agent 可能改变策略），复用现有的 `cancel_order` 方法。取消时需解冻保证金：
 
 ```python
-async def cancel_order(self, order_id: str, symbol: str | None = None) -> None:
+async def cancel_order(self, order_id: str, symbol: str) -> None:  # 签名不变
     async with self._lock:
         order = None
         for o in self._pending_orders:
@@ -935,6 +938,33 @@ stmt = sqlite_insert(SimOrder).values(
     leverage=pending.leverage,            # 新增
 )
 ```
+
+`_persist_state` 签名新增 `cancelled_order_ids` 参数：
+
+```python
+async def _persist_state(
+    self,
+    new_orders: list[tuple[Order, str]] | None = None,
+    filled_order_ids: list[str] | None = None,
+    cancelled_order_ids: list[str] | None = None,  # 新增
+    fill_events: list[FillEvent] | None = None,
+) -> None:
+```
+
+新增步骤 3a-bis：UPDATE 被取消的订单为 status="cancelled"：
+
+```python
+# 3a-bis. 标记取消的订单
+if cancelled_order_ids:
+    for oid in cancelled_order_ids:
+        await session.execute(
+            update(SimOrder)
+            .where(SimOrder.order_id == oid)
+            .values(status="cancelled")
+        )
+```
+
+**关键约束**：`new_orders`（step 3c INSERT）仅用于 liquidation orders（创建即关闭，无 pending 阶段）。pending market/limit 订单在 `create_order` 时已 INSERT，填充时通过 `filled_order_ids`（step 3a UPDATE → "closed"）或 `cancelled_order_ids`（step 3a-bis UPDATE → "cancelled"）处理，不能重复 INSERT。
 
 `_persist_state` 中 upsert balance（line 650-664）需写入 `frozen_usdt`：
 
@@ -1178,11 +1208,11 @@ PR #1 改动最大但最核心（不完成则 PR #2/#3 无意义）。PR #2 和 
 
 ### 旧 session 兼容
 
-系统尚未投入生产使用，不存在需要迁移的用户数据。DB schema 变更（`SimOrder` 新增 `frozen_margin`/`leverage`，`SimBalance` 新增 `frozen_usdt`）通过 SQLAlchemy 的 `default=0.0` / `default=1` 处理，旧记录读取时回退到默认值，无需 DB migration。
+系统尚未投入生产使用，不存在需要迁移的用户数据。
 
-如有残留的旧 session 恢复：
-- `_restore_state` 读取 `frozen_margin=0.0`、`leverage=1`——旧的 pending 条件单（stop/take_profit）本来就没有冻结保证金，行为不变
-- `_restore_state` 读取 `frozen_usdt=0.0`——旧 session 没有 pending 市价单/限价单，余额计算不受影响
+**旧 DB 文件不兼容，需删除重建。** DB schema 新增了列（`SimOrder.frozen_margin`/`leverage`，`SimBalance.frozen_usdt`），SQLAlchemy 的 `default=` 仅在 Python 侧创建新记录时生效，不会自动为旧表添加列。旧 DB 的 `_restore_state` 读取时 ORM 映射会因列不存在而报错。
+
+由于系统未投入生产，直接删除旧 DB 文件重建即可（`init_db` 会根据新 model 创建表）。
 
 ### Agent prompt 兼容
 
@@ -1192,6 +1222,19 @@ PR #1 改动最大但最核心（不完成则 PR #2/#3 无意义）。PR #2 和 
 - 主要风险：Agent 可能仍尝试在同一 cycle 设止损 → tool 返回 "No open position"，Agent 需学习等待 fill callback
 
 这是**预期行为变化**，不需要特殊处理——Agent 在 fill callback 唤醒后的下一个 cycle 会看到仓位并设止损。
+
+### fetch_open_orders 行为变化
+
+当前市价单同步执行（status="closed"），不会出现在 `fetch_open_orders` 中。异步化后，pending market/limit 订单以 status="open" 存在，**会出现在 `fetch_open_orders` 结果中**。
+
+Agent 行为影响：
+- Agent 调用 `get_open_orders` 会看到 pending market orders（以前只能看到 stop/take_profit）
+- 需要在 persona prompt 或 tool description 中引导 Agent 区分"等待成交的市价/限价单"和"可管理的条件单"
+
+建议在 `get_open_orders` tool 的返回值格式化中标注订单类型，例如：
+- `"[PENDING] market buy 0.01 BTC (awaiting fill)"`
+- `"[LIMIT] buy 0.01 BTC @ 58000 (awaiting price)"`
+- `"[STOP] sell 0.01 BTC @ 55000 (conditional)"`
 
 ### 测试回归风险
 
