@@ -453,7 +453,7 @@ Expected: PASS
 
 - [ ] **Step 5: Delete old synchronous market methods**
 
-> **WARNING**: After this step and until Task 6 is complete, the full test suite will fail. Market orders become pending but `_process_tick` doesn't call the new fill methods yet. Only run targeted tests (as specified in each step) during this window. Also do not run the real application with a DB until Task 7 is complete — `_persist_state` does not yet write `frozen_margin`/`leverage` fields, so a crash-restart would lose frozen state.
+> **WARNING**: After this step and until Task 6 is complete, the full test suite will fail. Market orders become pending but `_process_tick` doesn't call the new fill methods yet. Only run targeted tests (as specified in each step) during this window. All tests must use `db_engine=None` (the `_make_exchange` helper already does this). Do not run the real application with a DB until Task 7 is complete — `_persist_state` does not yet write `frozen_margin`/`leverage` fields, so a crash-restart would lose frozen state.
 
 The following methods are now dead code — replaced by the pending+fill pattern:
 - `_execute_market_order` (simulated.py:185-199)
@@ -497,11 +497,21 @@ async def test_frozen_balance_diff_refund():
 
 
 async def test_frozen_extreme_clamp():
-    """Extreme price movement: free_usdt clamped to 0, shortfall absorbed as slippage cost."""
-    ex = _make_exchange(initial_balance=35.0)  # just enough for 3x leverage
+    """Extreme price movement: free_usdt clamped to 0, shortfall absorbed as slippage cost.
+
+    Math: initial=32, ask@submit=95010, leverage=3
+      frozen = (95010*0.001/3 + 95010*0.001*0.0005) * 1.002 ≈ 31.78
+      free_after_freeze = 32 - 31.78 = 0.22
+    Tick ask=97000:
+      actual_cost = 97000*0.001/3 + 97000*0.001*0.0005 ≈ 32.38
+      diff = 31.78 - 32.38 = -0.60
+      free = 0.22 + (-0.60) = -0.38 → clamped to 0 (shortfall = 0.38 lost as slippage)
+    """
+    ex = _make_exchange(initial_balance=32.0)  # tight: just barely covers frozen
     ex._leverage["BTC/USDT:USDT"] = 3
-    total_before = 35.0
+    total_before = 32.0
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert ex._free_usdt < 1.0  # confirm tight margin
 
     # Tick with MUCH HIGHER ask → actual cost > frozen → clamp
     tick = Ticker(symbol="BTC/USDT:USDT", last=97000.0, bid=96990.0, ask=97000.0,
@@ -510,9 +520,9 @@ async def test_frozen_extreme_clamp():
 
     assert ex._frozen_usdt == 0.0
     assert ex._free_usdt == 0.0  # clamped to zero
-    # total_usdt may be slightly less than initial (shortfall = unrecoverable slippage)
+    # total_usdt shrinks by the shortfall (~0.38 USDT slippage loss)
     balance = await ex.fetch_balance()
-    assert balance.total_usdt <= total_before
+    assert balance.total_usdt < total_before
     # used_usdt should equal actual_margin only (no phantom shortfall residue)
     actual_margin = (97000.0 * 0.001) / 3
     assert ex._used_usdt == pytest.approx(actual_margin)
@@ -585,13 +595,16 @@ Add where the deleted `_execute_market_order` was (around line 185, after `creat
         position_side = "long" if order.side == "buy" else "short"
 
         # Defensive: reverse position conflict
+        # Known limitation: cancellation is silent — Agent receives no fill callback
+        # and must infer from fetch_positions that the order didn't fill. A cancelled
+        # event could be added in a future iteration to improve Agent awareness.
         if pos is not None and pos.side != position_side:
             logger.warning(f"Market open {order.id} cancelled: conflicts with {pos.side} position")
             self._frozen_usdt -= order.frozen_margin
             self._free_usdt += order.frozen_margin
             return None
 
-        # Defensive: leverage mismatch
+        # Defensive: leverage mismatch (same silent cancellation limitation as above)
         if pos is not None and pos.leverage != order.leverage:
             logger.warning(
                 f"Market open {order.id} cancelled: leverage mismatch "
@@ -612,12 +625,11 @@ Add where the deleted `_execute_market_order` was (around line 185, after `creat
         self._frozen_usdt -= order.frozen_margin
         self._used_usdt += actual_margin
         self._free_usdt += diff
-        # Clamp: extreme price movement may cause free < 0.
-        # We absorb the shortfall as unrecoverable slippage cost (total_usdt shrinks).
-        # NOT added to _used_usdt — that would create a phantom balance that
-        # _close_position_core never releases (it only releases actual_margin).
-        # NOTE: design doc D9 uses `_used_usdt += shortfall` ("追加保证金语义"),
-        # but this causes a cumulative accounting leak. Plan deviates here.
+        # DESIGN DEVIATION from D9: design doc uses `_used_usdt += shortfall`
+        # ("追加保证金语义"), but _close_position_core only releases actual_margin,
+        # so the shortfall would permanently inflate _used_usdt across trades.
+        # Instead: absorb shortfall as unrecoverable slippage cost (total_usdt shrinks
+        # by the shortfall amount). This only fires when price moves >0.2% in one tick.
         if self._free_usdt < 0:
             self._free_usdt = 0.0
 
@@ -822,7 +834,7 @@ Replace the entire `_process_tick` method:
 
 - [ ] **Step 2: Update _persist_state signature to accept cancelled_order_ids**
 
-`_process_tick` now passes `cancelled_order_ids` to `_persist_state`. The signature must be updated in this task to keep the code runnable. Full `_persist_state` body rewrite happens in Task 7; here we only add the parameter and the minimal handling (step 3a-bis).
+`_process_tick` now passes `cancelled_order_ids` to `_persist_state`. The signature must be updated in this task to keep the code runnable. **This is a temporary/minimal change — Task 7 Step 5 will fully rewrite `_persist_state` with frozen_usdt, frozen_margin/leverage support.** Here we only add the parameter and step 3a-bis.
 
 Update the `_persist_state` signature and add the cancelled orders UPDATE:
 
@@ -1988,6 +2000,8 @@ Update `_should_trigger` method:
 ```python
     def _should_trigger(self, order: _PendingOrder, ticker: Ticker) -> bool:
         if order.order_type == "limit":
+            # First version: limit orders are open-only (D4).
+            # buy limit = open long; sell limit = open short.
             if order.side == "buy":
                 return ticker.ask <= order.trigger_price
             else:
