@@ -501,15 +501,18 @@ if deps.exchange.has_pending_market_order(deps.symbol, side=order_side):
 - **无仓位时**：使用当前 `_leverage[symbol]` 设置
 - **有仓位时**：强制使用仓位杠杆，忽略 `_leverage[symbol]`。若 Agent 先 `set_leverage(20)` 再下限价单，但当前有 10x 仓位，限价单以 10x 执行
 
-`place_limit_order` tool 层**不调用 `set_leverage`**，直接读取当前值。若有仓位则使用仓位杠杆：
+`place_limit_order` tool 接受 `leverage` 参数，行为分两种情况：
+- **有仓位时**：忽略参数，强制使用仓位杠杆（与 `_open_market_order` 的 leverage mismatch 检查一致）
+- **无仓位时**：调用 `set_leverage(leverage)` 设置杠杆后再下单（与 `open_position` 行为一致）
 
 ```python
 # place_limit_order tool:
 positions = await deps.exchange.fetch_positions(deps.symbol)
 if positions:
-    leverage = positions[0].leverage  # 强制与仓位一致
+    actual_leverage = positions[0].leverage  # 强制匹配，忽略参数
 else:
-    leverage = ...  # 使用 tool 参数或当前设置
+    await deps.exchange.set_leverage(deps.symbol, leverage)
+    actual_leverage = leverage
 ```
 
 ### 反向仓位校验
@@ -684,33 +687,33 @@ async def place_limit_order(
     side: str,
     price: float,
     position_pct: float,
+    leverage: int,
     reasoning: str,
 ) -> str:
-    """Place a limit order at a specific price. Leverage follows current position or setting."""
+    """Place a limit order at a specific price."""
     if side not in ("long", "short"):
         return "side must be 'long' or 'short'"
 
-    # 杠杆：有仓位时强制与仓位一致，无仓位时使用当前设置
+    # 杠杆：有仓位时强制与仓位一致，无仓位时使用 Agent 指定的值
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if positions:
-        leverage = positions[0].leverage
+        actual_leverage = positions[0].leverage  # 强制匹配，忽略 leverage 参数
     else:
-        balance_info = await deps.exchange.fetch_balance()
-        leverage = ...  # 从当前 exchange._leverage 获取，具体实现时通过 deps 传递
+        await deps.exchange.set_leverage(deps.symbol, leverage)
+        actual_leverage = leverage
 
     balance = await deps.exchange.fetch_balance()
     usdt_amount = balance.free_usdt * (position_pct / 100.0)
-    raw_quantity = (usdt_amount * leverage) / price
+    raw_quantity = (usdt_amount * actual_leverage) / price
     quantity = deps.exchange.amount_to_precision(deps.symbol, raw_quantity)
     if quantity <= 0:
         return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
 
-    action_desc = f"Limit {side} {position_pct}% at {price:.2f}, {leverage}x leverage"
-    approved = await _check_approval(deps, f"limit_{side}", action_desc, position_pct, leverage)
+    action_desc = f"Limit {side} {position_pct}% at {price:.2f}, {actual_leverage}x leverage"
+    approved = await _check_approval(deps, f"limit_{side}", action_desc, position_pct, actual_leverage)
     if not approved:
         return "Limit order rejected by human approval."
 
-    # 不调用 set_leverage — 引擎层 create_order("limit") 内部读取当前杠杆
     order_side = "buy" if side == "long" else "sell"
     order = await deps.exchange.create_order(
         symbol=deps.symbol, side=order_side, order_type="limit",
@@ -722,7 +725,7 @@ async def place_limit_order(
         side=side, price=price, reasoning=reasoning,
     )
 
-    return f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, {leverage}x | ID: {order.id}"
+    return f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, {actual_leverage}x | ID: {order.id}"
 ```
 
 ### OKX 侧
