@@ -198,3 +198,36 @@ async def set_price_alert(
         f"Price alert updated: threshold={threshold_pct}%, "
         f"window={window_minutes}min"
     )
+
+
+async def add_price_level_alert(
+    deps: TradingDeps,
+    price: float,
+    direction: str,
+    reasoning: str,
+) -> str:
+    """Set a one-shot price level alert. direction: 'above' or 'below'."""
+    if direction not in ("above", "below"):
+        return f"Invalid direction: must be 'above' or 'below', got '{direction}'"
+
+    alert_id = deps.exchange.add_price_level_alert(price, direction, deps.symbol, reasoning)
+    if alert_id is None:
+        return "Price level alert limit reached (max 20). Remove or wait for existing alerts to trigger."
+
+    await _record_action(
+        deps, action="add_price_level_alert", price=price,
+        reasoning=f"{direction} {price} | {reasoning}",
+    )
+
+    # Immediate trigger warning
+    latest = deps.exchange._latest_price
+    if latest is not None:
+        if (direction == "above" and latest >= price) or \
+           (direction == "below" and latest <= price):
+            return (
+                f"Alert set (id={alert_id}), but WARNING: current price ({latest:.2f}) "
+                f"already {'above' if direction == 'above' else 'below'} {price:.2f}, "
+                f"may trigger immediately"
+            )
+
+    return f"Price level alert set: {direction} {price:.2f} (id={alert_id})"

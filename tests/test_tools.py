@@ -273,3 +273,41 @@ async def test_set_price_alert_window_out_of_range(deps):
     result = await set_price_alert(deps, 3.0, 250, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
+
+
+async def test_add_price_level_alert_success(deps):
+    """add_price_level_alert should call exchange and return confirmation."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock(return_value="abc123")
+    deps.exchange._latest_price = None
+    result = await add_price_level_alert(deps, 58000.0, "below", reasoning="support level")
+    assert "abc123" in result
+    assert "below" in result
+    deps.exchange.add_price_level_alert.assert_called_once_with(58000.0, "below", deps.symbol, "support level")
+
+
+async def test_add_price_level_alert_invalid_direction(deps):
+    """Invalid direction should return error without calling exchange."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock()
+    result = await add_price_level_alert(deps, 58000.0, "sideways", reasoning="test")
+    assert "invalid" in result.lower()
+    deps.exchange.add_price_level_alert.assert_not_called()
+
+
+async def test_add_price_level_alert_limit_reached(deps):
+    """When exchange returns None (limit), tool returns limit message."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock(return_value=None)
+    result = await add_price_level_alert(deps, 58000.0, "below", reasoning="test")
+    assert "limit" in result.lower()
+
+
+async def test_add_price_level_alert_immediate_warning(deps):
+    """When current price already past target, return warning."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock(return_value="abc123")
+    deps.exchange._latest_price = 57000.0  # already below 58000
+    result = await add_price_level_alert(deps, 58000.0, "below", reasoning="support")
+    assert "warning" in result.lower()
+    assert "immediately" in result.lower()

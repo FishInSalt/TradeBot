@@ -403,11 +403,13 @@ class SimulatedExchange(BaseExchange):
     async def _process_tick(self, ticker: Ticker) -> None:
         """Process a single tick -- check liquidations, conditional orders, and price alerts."""
         self._latest_ticker = ticker
+        self._latest_price = ticker.last
 
         triggered: list[FillEvent] = []
         filled_order_ids: list[str] = []
         new_orders: list[tuple[Order, str]] = []
         alert_info = None
+        level_alerts = []
 
         async with self._lock:
             # 1. Liquidation check (must be before conditional orders)
@@ -456,6 +458,9 @@ class SimulatedExchange(BaseExchange):
             if self._alert_service:
                 alert_info = self._alert_service.check(ticker.last, ticker.timestamp)
 
+            # 4. Price level alert check (R7)
+            level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
+
         # Notify outside lock
         for fill in triggered:
             if self._fill_callback:
@@ -464,6 +469,10 @@ class SimulatedExchange(BaseExchange):
         # Alert callback outside lock
         if alert_info and self._alert_callback:
             await self._alert_callback(alert_info)
+
+        for la in level_alerts:
+            if self._alert_callback:
+                await self._alert_callback(la)
 
     # --- Order query methods ---
 

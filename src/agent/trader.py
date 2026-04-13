@@ -133,6 +133,18 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
 
+    @agent.tool
+    async def add_price_level_alert(
+        ctx: RunContext[TradingDeps],
+        price: float,
+        direction: str,
+        reasoning: str,
+    ) -> str:
+        """Set a one-shot price level alert. direction: 'above' (breakout) or 'below' (breakdown). Triggers once then auto-removes. Always provide reasoning."""
+        from src.agent.tools_execution import add_price_level_alert as _impl
+
+        return await _impl(ctx.deps, price, direction, reasoning=reasoning)
+
     # === Memory Tools ===
 
     @agent.tool

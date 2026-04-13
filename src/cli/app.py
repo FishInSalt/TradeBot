@@ -22,7 +22,7 @@ from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
 from src.storage.models import DecisionLog, Session, TradeAction
-from src.integrations.exchange.base import FillEvent
+from src.integrations.exchange.base import FillEvent, PriceLevelAlertInfo
 from src.cli.wizard import WizardResult
 
 logger = logging.getLogger(__name__)
@@ -108,11 +108,18 @@ async def run_agent_cycle(
             msg += f", PnL: {context.pnl:.2f} USDT"
         prompt += msg
     elif trigger_type == "alert" and context is not None:
-        direction = "dropped" if context.change_pct < 0 else "surged"
-        prompt += (
-            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
-            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
-        )
+        if isinstance(context, PriceLevelAlertInfo):
+            prompt += (
+                f"\n\nPRICE LEVEL: {context.symbol} reached {context.current_price:.2f} "
+                f"(your alert: {context.direction} {context.target_price:.2f} "
+                f"— {context.reasoning})"
+            )
+        else:
+            direction = "dropped" if context.change_pct < 0 else "surged"
+            prompt += (
+                f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+                f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+            )
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":

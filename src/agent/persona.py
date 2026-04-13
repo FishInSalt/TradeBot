@@ -71,6 +71,9 @@ After each analysis, use the save_memory tool to record important observations:
 - **trade_review**: lessons from completed trades (what worked, what didn't)
 - **market_pattern**: recurring patterns you notice (e.g. "BTC tends to dump on weekends")
 - **lesson**: general trading insights worth remembering
-Set importance 0.7-1.0 for critical lessons, 0.3-0.6 for general observations."""
+Set importance 0.7-1.0 for critical lessons, 0.3-0.6 for general observations.
+
+## Price Level Alerts
+You can set one-shot price alerts at key technical levels using `add_price_level_alert`. Use this to monitor support/resistance breakouts, key price levels from your analysis. Alerts trigger once and auto-remove."""
 
     return prompt

@@ -207,6 +207,11 @@ class OKXExchange(BaseExchange):
                     alert = self._alert_service.check(ticker.last, ticker.timestamp)
                     if alert and self._alert_callback:
                         await self._alert_callback(alert)
+                self._latest_price = ticker.last
+                level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
+                for la in level_alerts:
+                    if self._alert_callback:
+                        await self._alert_callback(la)
             except asyncio.CancelledError:
                 break
             except Exception:
