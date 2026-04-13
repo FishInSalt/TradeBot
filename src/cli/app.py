@@ -22,7 +22,7 @@ from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
 from src.storage.models import DecisionLog, Session, TradeAction
-from src.integrations.exchange.base import FillEvent
+from src.integrations.exchange.base import FillEvent, PriceLevelAlertInfo
 from src.cli.wizard import WizardResult
 
 logger = logging.getLogger(__name__)
@@ -108,11 +108,18 @@ async def run_agent_cycle(
             msg += f", PnL: {context.pnl:.2f} USDT"
         prompt += msg
     elif trigger_type == "alert" and context is not None:
-        direction = "dropped" if context.change_pct < 0 else "surged"
-        prompt += (
-            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
-            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
-        )
+        if isinstance(context, PriceLevelAlertInfo):
+            prompt += (
+                f"\n\nPRICE LEVEL: {context.symbol} reached {context.current_price:.2f} "
+                f"(your alert: {context.direction} {context.target_price:.2f} "
+                f"— {context.reasoning})"
+            )
+        else:
+            direction = "dropped" if context.change_pct < 0 else "surged"
+            prompt += (
+                f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+                f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+            )
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":
@@ -229,12 +236,11 @@ def build_services(
             symbol=result.symbol,
             window_minutes=result.alert_window_min,
             threshold_pct=result.alert_threshold_pct,
-            cooldown_minutes=result.alert_cooldown_min,
         )
         exchange.set_alert_service(alert_service)
         sc.print(
             f"Alerts: ON ({result.alert_window_min}min / "
-            f"{result.alert_threshold_pct}% / cd {result.alert_cooldown_min}min)"
+            f"{result.alert_threshold_pct}%)"
         )
     else:
         sc.print("Alerts: OFF")
@@ -338,6 +344,12 @@ async def run(
     interval = result.scheduler_interval_min * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
+    # R4: dynamic wake interval
+    max_wake = min(max(4 * result.scheduler_interval_min, 60), 180)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = max_wake
+    deps.set_next_wake_fn = lambda minutes: scheduler.set_next_interval(minutes * 60)
+
     def _create_fill_handler(sched, eng, sid):
         async def handler(event: FillEvent):
             try:
@@ -351,10 +363,9 @@ async def run(
     handle_fill = _create_fill_handler(scheduler, engine, session_id)
     exchange.on_fill(handle_fill)
 
-    if result.alert_enabled:
-        async def handle_alert(alert_info):
-            await scheduler.trigger("alert", context=alert_info)
-        exchange.on_alert(handle_alert)
+    async def handle_alert(alert_info):
+        await scheduler.trigger("alert", context=alert_info)
+    exchange.on_alert(handle_alert)
 
     await exchange.start()
 

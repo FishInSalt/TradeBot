@@ -46,6 +46,7 @@ class _PendingOrder:
 
 class SimulatedExchange(BaseExchange):
     def __init__(self, config: Any, db_engine: Any, session_id: str, symbol: str):
+        super().__init__()
         self._config = config
         self._db_engine = db_engine
         self._session_id = session_id
@@ -402,11 +403,13 @@ class SimulatedExchange(BaseExchange):
     async def _process_tick(self, ticker: Ticker) -> None:
         """Process a single tick -- check liquidations, conditional orders, and price alerts."""
         self._latest_ticker = ticker
+        self._latest_price = ticker.last
 
         triggered: list[FillEvent] = []
         filled_order_ids: list[str] = []
         new_orders: list[tuple[Order, str]] = []
         alert_info = None
+        level_alerts = []
 
         async with self._lock:
             # 1. Liquidation check (must be before conditional orders)
@@ -455,6 +458,9 @@ class SimulatedExchange(BaseExchange):
             if self._alert_service:
                 alert_info = self._alert_service.check(ticker.last, ticker.timestamp)
 
+            # 4. Price level alert check (R7)
+            level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
+
         # Notify outside lock
         for fill in triggered:
             if self._fill_callback:
@@ -463,6 +469,10 @@ class SimulatedExchange(BaseExchange):
         # Alert callback outside lock
         if alert_info and self._alert_callback:
             await self._alert_callback(alert_info)
+
+        for la in level_alerts:
+            if self._alert_callback:
+                await self._alert_callback(la)
 
     # --- Order query methods ---
 
@@ -560,9 +570,9 @@ class SimulatedExchange(BaseExchange):
     def set_alert_service(self, service: Any) -> None:
         self._alert_service = service
 
-    def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+    def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
         if self._alert_service:
-            self._alert_service.update_params(threshold_pct, window_minutes, cooldown_minutes)
+            self._alert_service.update_params(threshold_pct, window_minutes)
 
     def drain_pending_fills(self) -> list[FillEvent]:
         fills = self._pending_fills.copy()
@@ -769,6 +779,7 @@ class SimulatedExchange(BaseExchange):
             base_volume=float(seed_ticker["baseVolume"]),
             timestamp=seed_ticker["timestamp"],
         )
+        self._latest_price = self._latest_ticker.last
 
         self._running = True
         self._matching_task = asyncio.create_task(self._matching_loop())

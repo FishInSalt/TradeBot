@@ -28,6 +28,11 @@ class Scheduler:
         self._cycle_running = False
         self._pending_events: deque[_TriggerEvent] = deque()
         self._wake_event = asyncio.Event()
+        self._next_interval: float | None = None
+
+    def set_next_interval(self, seconds: float) -> None:
+        """Set a one-shot interval override for the next sleep."""
+        self._next_interval = seconds
 
     async def trigger(self, trigger_type: str, context: Any | None = None) -> None:
         self._pending_events.append(_TriggerEvent(trigger_type, context))
@@ -40,7 +45,9 @@ class Scheduler:
         await self._run_cycle("scheduled", None)
 
         while self._running:
-            await self._interruptible_sleep(self._interval)
+            interval = self._next_interval if self._next_interval is not None else self._interval
+            self._next_interval = None
+            await self._interruptible_sleep(interval)
             if not self._running:
                 break
 

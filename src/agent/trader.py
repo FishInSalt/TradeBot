@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic_ai import Agent, RunContext
@@ -24,6 +25,9 @@ class TradingDeps:
     db_engine: object | None = None  # AsyncEngine, typed as object to avoid circular import
     approval_gate: object | None = None  # ApprovalGate instance
     approval_enabled: bool = True
+    wake_min_minutes: int = 1
+    wake_max_minutes: int = 60
+    set_next_wake_fn: Callable[[int], None] | None = None
 
 
 def create_trader_agent(
@@ -126,13 +130,35 @@ def create_trader_agent(
         ctx: RunContext[TradingDeps],
         threshold_pct: float,
         window_minutes: int,
-        cooldown_minutes: int,
         reasoning: str,
     ) -> str:
-        """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-60, cooldown_minutes: 1-120. Always provide reasoning."""
+        """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-240. Always provide reasoning."""
         from src.agent.tools_execution import set_price_alert as _impl
 
-        return await _impl(ctx.deps, threshold_pct, window_minutes, cooldown_minutes, reasoning=reasoning)
+        return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
+
+    @agent.tool
+    async def add_price_level_alert(
+        ctx: RunContext[TradingDeps],
+        price: float,
+        direction: str,
+        reasoning: str,
+    ) -> str:
+        """Set a one-shot price level alert. direction: 'above' (breakout) or 'below' (breakdown). Triggers once then auto-removes. Always provide reasoning."""
+        from src.agent.tools_execution import add_price_level_alert as _impl
+
+        return await _impl(ctx.deps, price, direction, reasoning=reasoning)
+
+    @agent.tool
+    async def set_next_wake(
+        ctx: RunContext[TradingDeps],
+        minutes: int,
+        reasoning: str,
+    ) -> str:
+        """Set how soon you want to check the market again (minutes). One-shot: only affects the next wake, then reverts to default. Always provide reasoning."""
+        from src.agent.tools_execution import set_next_wake as _impl
+
+        return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
     # === Memory Tools ===
 

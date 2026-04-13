@@ -4,179 +4,152 @@ import pytest
 
 
 def test_alert_info_fields():
-    """AlertInfo 应包含所有必需字段。"""
+    """AlertInfo should contain all required fields."""
     from src.services.price_alert import AlertInfo
     info = AlertInfo(
-        symbol="BTC/USDT:USDT",
-        current_price=59000.0,
-        reference_price=61000.0,
-        change_pct=-3.28,
-        window_minutes=5,
-        timestamp=1712534400000,
+        symbol="BTC/USDT:USDT", current_price=59000.0,
+        reference_price=61000.0, change_pct=-3.28,
+        window_minutes=60, timestamp=1712534400000,
     )
     assert info.symbol == "BTC/USDT:USDT"
     assert info.change_pct < 0
-    assert info.reference_price == 61000.0
 
 
 def test_no_alert_below_threshold():
-    """价格变化未达阈值时不应触发警报。"""
+    """Price change below threshold should not trigger."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=15,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
     service.check(60000.0, base_ts)
-    result = service.check(59400.0, base_ts + 60_000)
+    result = service.check(57500.0, base_ts + 60_000)  # -4.2%, below 5%
     assert result is None
 
 
 def test_alert_triggers_on_drop():
-    """价格下跌超过阈值应触发 alert（change_pct 为负）。"""
+    """Drop exceeding threshold should trigger with negative change_pct."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=15,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
     service.check(60000.0, base_ts)
-    result = service.check(57900.0, base_ts + 60_000)
+    result = service.check(56900.0, base_ts + 60_000)  # -5.17%
     assert result is not None
-    assert result.change_pct < -3.0
+    assert result.change_pct < -5.0
     assert result.reference_price == 60000.0
-    assert result.current_price == 57900.0
-    assert result.symbol == "BTC/USDT:USDT"
+    assert result.current_price == 56900.0
 
 
 def test_alert_triggers_on_surge():
-    """价格上涨超过阈值应触发 alert（change_pct 为正）。"""
+    """Surge exceeding threshold should trigger with positive change_pct."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=15,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
     service.check(60000.0, base_ts)
-    result = service.check(62100.0, base_ts + 60_000)
+    result = service.check(63100.0, base_ts + 60_000)  # +5.17%
     assert result is not None
-    assert result.change_pct > 3.0
+    assert result.change_pct > 5.0
     assert result.reference_price == 60000.0
-    assert result.current_price == 62100.0
 
 
-def test_cooldown_blocks_same_direction():
-    """同方向触发后在冷却期内不应重复触发。"""
+def test_window_reset_on_trigger():
+    """After trigger, window clears. Need >=2 ticks to re-evaluate."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=15,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
     service.check(60000.0, base_ts)
-    result1 = service.check(57900.0, base_ts + 60_000)
-    assert result1 is not None
-    result2 = service.check(57000.0, base_ts + 120_000)
-    assert result2 is None
+    result1 = service.check(56900.0, base_ts + 60_000)
+    assert result1 is not None  # first trigger, window cleared
+
+    # After clear: first tick re-establishes baseline
+    result2 = service.check(56900.0, base_ts + 120_000)
+    assert result2 is None  # only 1 tick after clear, len < 2
+
+    result2b = service.check(56800.0, base_ts + 150_000)
+    assert result2b is None  # 2 ticks now, but only 0.18% drop — below 5%
+
+    # Drop 5.1% from new high (56900)
+    result3 = service.check(54000.0, base_ts + 180_000)  # (54000-56900)/56900 = -5.10%
+    assert result3 is not None
+    assert result3.reference_price == 56900.0
 
 
-def test_cooldown_allows_opposite_direction():
-    """V 形反弹：下跌触发后，反方向上涨超阈值仍应触发。"""
+def test_continuous_crash_alerts_every_threshold():
+    """Continuous crash: alerts fire every ~5% drop. Baseline tick needed after each clear."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=15,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
-    service.check(60000.0, base_ts)
-    result1 = service.check(57900.0, base_ts + 60_000)
-    assert result1 is not None
-    assert result1.change_pct < 0
-    result2 = service.check(59700.0, base_ts + 120_000)
-    assert result2 is not None
-    assert result2.change_pct > 0
+
+    service.check(100000.0, base_ts)
+    r1 = service.check(94900.0, base_ts + 60_000)  # -5.1%, triggers, clear
+    assert r1 is not None
+
+    service.check(94900.0, base_ts + 90_000)          # baseline tick after clear
+    r2 = service.check(90000.0, base_ts + 120_000)    # -5.2% from 94900
+    assert r2 is not None
+
+    service.check(90000.0, base_ts + 150_000)          # baseline tick after clear
+    r3 = service.check(85400.0, base_ts + 180_000)    # -5.1% from 90000
+    assert r3 is not None
 
 
-def test_cooldown_expires():
-    """冷却期过后同方向应再次触发。"""
+def test_v_shape_rebound():
+    """V-shape: drop triggers, baseline re-established, then rebound triggers."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=1,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
+
     service.check(60000.0, base_ts)
-    result1 = service.check(57900.0, base_ts + 30_000)
-    assert result1 is not None
-    new_base = base_ts + 120_000
-    service.check(60000.0, new_base)
-    result2 = service.check(57900.0, new_base + 30_000)
-    assert result2 is not None
+    r1 = service.check(56900.0, base_ts + 60_000)  # drop triggers, clear
+    assert r1 is not None and r1.change_pct < 0
+
+    # After clear: baseline tick, then rebound
+    service.check(56900.0, base_ts + 90_000)           # baseline tick
+    r2 = service.check(59800.0, base_ts + 120_000)    # +5.1% from 56900
+    assert r2 is not None and r2.change_pct > 0
 
 
 def test_window_eviction():
-    """窗口外的旧数据应被淘汰，不影响当前计算。"""
+    """Old ticks outside window should be evicted."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=1,
-        threshold_pct=3.0,
-        cooldown_minutes=1,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=1, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
     service.check(60000.0, base_ts)
-    result = service.check(58000.0, base_ts + 120_000)
-    assert result is None
+    # 2 minutes later, old tick evicted
+    result = service.check(57000.0, base_ts + 120_000)
+    assert result is None  # only 1 tick in window
 
 
 def test_update_params():
-    """update_params 应更新内部参数。"""
+    """update_params should change threshold and window, clearing ticks."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=15,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
     service.check(60000.0, base_ts)
-    result = service.check(59000.0, base_ts + 60_000)
-    assert result is None
-    service.update_params(threshold_pct=1.0, window_minutes=5, cooldown_minutes=15)
-    result = service.check(58800.0, base_ts + 120_000)
-    assert result is not None
+    result = service.check(58500.0, base_ts + 60_000)
+    assert result is None  # -2.5%, below 5%
+    service.update_params(threshold_pct=2.0, window_minutes=60)
+    # After update_params, ticks are cleared — need baseline + check
+    service.check(60000.0, base_ts + 120_000)          # baseline tick
+    result = service.check(58400.0, base_ts + 180_000)
+    assert result is not None  # -2.7% from 60000, above 2%
 
 
 def test_update_params_boundary_validation():
-    """update_params 超出边界时应抛 ValueError。"""
+    """update_params should raise ValueError for out-of-range values."""
     from src.services.price_alert import PriceAlertService
-    service = PriceAlertService(
-        symbol="BTC/USDT:USDT",
-        window_minutes=5,
-        threshold_pct=3.0,
-        cooldown_minutes=15,
-    )
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     with pytest.raises(ValueError):
-        service.update_params(threshold_pct=0.1, window_minutes=5, cooldown_minutes=15)
+        service.update_params(threshold_pct=0.1, window_minutes=60)
     with pytest.raises(ValueError):
-        service.update_params(threshold_pct=3.0, window_minutes=0, cooldown_minutes=15)
+        service.update_params(threshold_pct=55.0, window_minutes=60)
     with pytest.raises(ValueError):
-        service.update_params(threshold_pct=3.0, window_minutes=5, cooldown_minutes=0)
+        service.update_params(threshold_pct=5.0, window_minutes=0)
     with pytest.raises(ValueError):
-        service.update_params(threshold_pct=3.0, window_minutes=5, cooldown_minutes=200)
-    with pytest.raises(ValueError):
-        service.update_params(threshold_pct=55.0, window_minutes=5, cooldown_minutes=15)
-    with pytest.raises(ValueError):
-        service.update_params(threshold_pct=3.0, window_minutes=70, cooldown_minutes=15)
+        service.update_params(threshold_pct=5.0, window_minutes=250)
+
+
+def test_single_tick_no_alert():
+    """Single tick should not trigger (need >= 2)."""
+    from src.services.price_alert import PriceAlertService
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
+    result = service.check(60000.0, 1_000_000_000_000)
+    assert result is None

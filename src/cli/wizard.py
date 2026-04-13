@@ -37,7 +37,6 @@ class WizardResult:
     alert_enabled: bool
     alert_window_min: int | None
     alert_threshold_pct: float | None
-    alert_cooldown_min: int | None
     token_budget: int
     # Persona
     persona: PersonaConfig
@@ -245,16 +244,12 @@ def _step_risk_scheduling(defaults: Settings, exchange_type: str, console: Conso
 
     alert_window = None
     alert_threshold = None
-    alert_cooldown = None
     if alert_enabled:
         alert_window = IntPrompt.ask(
             "    Window (min)", default=defaults.alerts.window_minutes, console=console,
         )
         alert_threshold = FloatPrompt.ask(
             "    Threshold (%)", default=defaults.alerts.threshold_pct, console=console,
-        )
-        alert_cooldown = IntPrompt.ask(
-            "    Cooldown (min)", default=defaults.alerts.cooldown_minutes, console=console,
         )
     budget = IntPrompt.ask(
         "  Token budget (daily)", default=defaults.llm_budget.daily_max_tokens, console=console,
@@ -265,7 +260,6 @@ def _step_risk_scheduling(defaults: Settings, exchange_type: str, console: Conso
         "alert_enabled": alert_enabled,
         "alert_window_min": alert_window,
         "alert_threshold_pct": alert_threshold,
-        "alert_cooldown_min": alert_cooldown,
         "token_budget": budget,
     }
 
@@ -323,8 +317,7 @@ def _show_summary(data: dict, console: Console) -> bool:
 
     if data["alert_enabled"]:
         alert_str = (
-            f"ON ({data['alert_window_min']}min / {data['alert_threshold_pct']}% "
-            f"/ cd {data['alert_cooldown_min']}min)"
+            f"ON ({data['alert_window_min']}min / {data['alert_threshold_pct']}%)"
         )
     else:
         alert_str = "OFF"

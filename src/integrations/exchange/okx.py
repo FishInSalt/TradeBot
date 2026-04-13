@@ -77,6 +77,7 @@ def _retry(max_retries: int = 3, base_delay: float = 1.0):
 
 class OKXExchange(BaseExchange):
     def __init__(self, api_key: str, secret: str, password: str, symbol: str):
+        super().__init__()
         self._client = ccxt.okx(
             {
                 "apiKey": api_key,
@@ -109,9 +110,9 @@ class OKXExchange(BaseExchange):
     def set_alert_service(self, service: Any) -> None:
         self._alert_service = service
 
-    def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+    def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
         if self._alert_service:
-            self._alert_service.update_params(threshold_pct, window_minutes, cooldown_minutes)
+            self._alert_service.update_params(threshold_pct, window_minutes)
 
     # --- WebSocket lifecycle ---
 
@@ -128,9 +129,8 @@ class OKXExchange(BaseExchange):
             self._running = True
             self._ws_connected = True
             self._orders_task = asyncio.create_task(self._watch_orders_loop())
-            if self._alert_service:
-                self._ticker_task = asyncio.create_task(self._watch_ticker_loop())
-            loops = "watch_orders" + (" + watch_ticker" if self._alert_service else "")
+            self._ticker_task = asyncio.create_task(self._watch_ticker_loop())
+            loops = "watch_orders + watch_ticker"
             logger.info("OKX WebSocket started (%s)", loops)
         except Exception:
             self._ws_connected = False
@@ -206,6 +206,11 @@ class OKXExchange(BaseExchange):
                     alert = self._alert_service.check(ticker.last, ticker.timestamp)
                     if alert and self._alert_callback:
                         await self._alert_callback(alert)
+                self._latest_price = ticker.last
+                level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
+                for la in level_alerts:
+                    if self._alert_callback:
+                        await self._alert_callback(la)
             except asyncio.CancelledError:
                 break
             except Exception:

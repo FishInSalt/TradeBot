@@ -91,9 +91,8 @@ def test_alerts_config_defaults():
     from src.config import AlertsConfig
     config = AlertsConfig()
     assert config.enabled is True
-    assert config.window_minutes == 5
-    assert config.threshold_pct == 3.0
-    assert config.cooldown_minutes == 15
+    assert config.window_minutes == 60
+    assert config.threshold_pct == 5.0
 
 
 def test_settings_with_alerts(tmp_path: Path):
@@ -106,14 +105,12 @@ alerts:
   enabled: true
   window_minutes: 10
   threshold_pct: 5.0
-  cooldown_minutes: 30
 """)
     from src.config import load_settings
     settings = load_settings(settings_file, env_overrides={})
     assert settings.alerts.enabled is True
     assert settings.alerts.window_minutes == 10
     assert settings.alerts.threshold_pct == 5.0
-    assert settings.alerts.cooldown_minutes == 30
 
 
 def test_settings_without_alerts(tmp_path: Path):
@@ -126,7 +123,7 @@ exchange:
     from src.config import load_settings
     settings = load_settings(settings_file, env_overrides={})
     assert settings.alerts.enabled is True
-    assert settings.alerts.window_minutes == 5
+    assert settings.alerts.window_minutes == 60
 
 
 def test_settings_alerts_disabled(tmp_path: Path):

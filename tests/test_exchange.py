@@ -350,4 +350,4 @@ def test_base_exchange_update_alert_params_default_noop():
         async def cancel_order(self, order_id, symbol): ...
 
     ex = DummyExchange()
-    ex.update_alert_params(3.0, 5, 15)  # 不应抛异常
+    ex.update_alert_params(3.0, 5)  # 不应抛异常

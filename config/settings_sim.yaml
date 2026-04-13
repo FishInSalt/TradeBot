@@ -36,6 +36,5 @@ approval:
 # === Price Alert Configuration ===
 alerts:
   enabled: true                  # If true, agent is woken on significant price moves
-  window_minutes: 5              # Sliding window size for volatility detection
-  threshold_pct: 3.0             # Minimum % change to trigger alert
-  cooldown_minutes: 15           # Cooldown per direction after alert fires
+  window_minutes: 60             # Sliding window size for volatility detection
+  threshold_pct: 5.0             # Minimum % change to trigger alert

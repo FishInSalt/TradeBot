@@ -238,16 +238,16 @@ async def test_set_price_alert_valid(deps):
     """set_price_alert 参数合法时应调用 exchange.update_alert_params。"""
     from src.agent.tools_execution import set_price_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 2.0, 5, 10, reasoning="high volatility")
+    result = await set_price_alert(deps, 2.0, 5, reasoning="high volatility")
     assert "updated" in result.lower() or "set" in result.lower()
-    deps.exchange.update_alert_params.assert_called_once_with(2.0, 5, 10)
+    deps.exchange.update_alert_params.assert_called_once_with(2.0, 5)
 
 
 async def test_set_price_alert_threshold_too_low(deps):
     """threshold_pct < 0.5 时应返回错误，不调用 update。"""
     from src.agent.tools_execution import set_price_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 0.1, 5, 10, reasoning="test")
+    result = await set_price_alert(deps, 0.1, 5, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
 
@@ -256,24 +256,100 @@ async def test_set_price_alert_threshold_too_high(deps):
     """threshold_pct > 50 时应返回错误。"""
     from src.agent.tools_execution import set_price_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 55.0, 5, 10, reasoning="test")
+    result = await set_price_alert(deps, 55.0, 5, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
 
 
 async def test_set_price_alert_window_out_of_range(deps):
-    """window_minutes 超出 1-60 范围时应返回错误。"""
+    """window_minutes 超出 1-240 范围时应返回错误。"""
     from src.agent.tools_execution import set_price_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 3.0, 0, 10, reasoning="test")
+    # Lower bound
+    result = await set_price_alert(deps, 3.0, 0, reasoning="test")
+    assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
+    deps.exchange.update_alert_params.assert_not_called()
+    # Upper bound
+    result = await set_price_alert(deps, 3.0, 250, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
 
 
-async def test_set_price_alert_cooldown_out_of_range(deps):
-    """cooldown_minutes 超出 1-120 范围时应返回错误。"""
-    from src.agent.tools_execution import set_price_alert
-    deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 3.0, 5, 200, reasoning="test")
-    assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
-    deps.exchange.update_alert_params.assert_not_called()
+async def test_add_price_level_alert_success(deps):
+    """add_price_level_alert should call exchange and return confirmation."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock(return_value="abc123")
+    deps.exchange._latest_price = None
+    result = await add_price_level_alert(deps, 58000.0, "below", reasoning="support level")
+    assert "abc123" in result
+    assert "below" in result
+    deps.exchange.add_price_level_alert.assert_called_once_with(58000.0, "below", deps.symbol, "support level")
+
+
+async def test_add_price_level_alert_invalid_direction(deps):
+    """Invalid direction should return error without calling exchange."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock()
+    result = await add_price_level_alert(deps, 58000.0, "sideways", reasoning="test")
+    assert "invalid" in result.lower()
+    deps.exchange.add_price_level_alert.assert_not_called()
+
+
+async def test_add_price_level_alert_limit_reached(deps):
+    """When exchange returns None (limit), tool returns limit message."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock(return_value=None)
+    result = await add_price_level_alert(deps, 58000.0, "below", reasoning="test")
+    assert "limit" in result.lower()
+
+
+async def test_add_price_level_alert_immediate_warning(deps):
+    """When current price already past target, return warning."""
+    from src.agent.tools_execution import add_price_level_alert
+    deps.exchange.add_price_level_alert = MagicMock(return_value="abc123")
+    deps.exchange._latest_price = 57000.0  # already below 58000
+    result = await add_price_level_alert(deps, 58000.0, "below", reasoning="support")
+    assert "warning" in result.lower()
+    assert "immediately" in result.lower()
+
+
+async def test_set_next_wake_success(deps):
+    """set_next_wake should call setter and return confirmation."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 10, reasoning="checking position")
+    deps.set_next_wake_fn.assert_called_once_with(10)
+    assert "10 min" in result
+
+
+async def test_set_next_wake_clamps_to_max(deps):
+    """Minutes above max should be clamped."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 120, reasoning="test")
+    deps.set_next_wake_fn.assert_called_once_with(60)
+    assert "clamped" in result.lower()
+    assert "60 min" in result
+
+
+async def test_set_next_wake_clamps_to_min(deps):
+    """Minutes below min should be clamped."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 0, reasoning="test")
+    deps.set_next_wake_fn.assert_called_once_with(1)
+    assert "clamped" in result.lower()
+
+
+async def test_set_next_wake_not_available(deps):
+    """When set_next_wake_fn is None, return not-available message."""
+    from src.agent.tools_execution import set_next_wake
+    deps.set_next_wake_fn = None
+    result = await set_next_wake(deps, 10, reasoning="test")
+    assert "not available" in result.lower()

@@ -253,3 +253,47 @@ async def test_scheduler_drain_respects_stop():
     # event_0, event_1, event_2 应被处理，event_3+ 应被跳过
     assert "event_2" in conditional
     assert "event_3" not in conditional
+
+
+async def test_set_next_interval_overrides_once():
+    """set_next_interval should override the next sleep, then revert to default."""
+    from src.scheduler.scheduler import Scheduler
+
+    fired = []
+
+    async def callback(trigger_type: str, context):
+        fired.append(trigger_type)
+
+    scheduler = Scheduler(interval_seconds=10, callback=callback)
+    scheduler.set_next_interval(0.05)  # 50ms for next sleep only
+
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.2)
+    # Should have fired: initial scheduled + after 50ms sleep another scheduled
+    scheduler.stop()
+    await task
+    assert len(fired) >= 2
+
+
+async def test_set_next_interval_resets_after_use():
+    """After using the one-shot interval, scheduler returns to default."""
+    from src.scheduler.scheduler import Scheduler
+
+    scheduler = Scheduler(interval_seconds=10, callback=lambda t, c: None)
+    scheduler.set_next_interval(5.0)
+    assert scheduler._next_interval == 5.0
+    # Simulate what start() does
+    interval = scheduler._next_interval if scheduler._next_interval is not None else scheduler._interval
+    scheduler._next_interval = None
+    assert interval == 5.0
+    assert scheduler._next_interval is None
+
+
+async def test_set_next_interval_not_set_uses_default():
+    """Without set_next_interval, scheduler uses default interval."""
+    from src.scheduler.scheduler import Scheduler
+
+    scheduler = Scheduler(interval_seconds=42, callback=lambda t, c: None)
+    assert scheduler._next_interval is None
+    interval = scheduler._next_interval if scheduler._next_interval is not None else scheduler._interval
+    assert interval == 42

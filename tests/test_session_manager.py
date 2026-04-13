@@ -60,7 +60,7 @@ async def test_restore_session_builds_wizard_result(tmp_path):
     persona = PersonaConfig(risk_tolerance="aggressive", trading_style="breakout")
     model_cfg = ModelConfig(id="test-model", provider="openai", model="gpt-4o",
                             api_key="k", base_url=None)
-    alert_cfg = json.dumps({"enabled": True, "window": 5, "threshold": 3.0, "cooldown": 15})
+    alert_cfg = json.dumps({"enabled": True, "window": 5, "threshold": 3.0})
 
     async with get_session(engine) as db_sess:
         s = Session(
@@ -252,7 +252,7 @@ async def test_create_session_from_wizard_result(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=30, approval_enabled=False,
-        alert_enabled=True, alert_window_min=10, alert_threshold_pct=5.0, alert_cooldown_min=20,
+        alert_enabled=True, alert_window_min=10, alert_threshold_pct=5.0,
         token_budget=300000,
         persona=PersonaConfig(risk_tolerance="aggressive"),
         session_name="ETH sim #1",
@@ -294,7 +294,7 @@ async def test_create_session_name_dedup(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=15, approval_enabled=True,
-        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None, alert_cooldown_min=None,
+        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
         token_budget=500000,
         persona=PersonaConfig(),
         session_name="BTC sim",
@@ -353,7 +353,7 @@ async def test_select_or_create_no_history_runs_wizard(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=15, approval_enabled=True,
-        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None, alert_cooldown_min=None,
+        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
         token_budget=500000,
         persona=PersonaConfig(),
         session_name="BTC sim #1",
@@ -449,7 +449,7 @@ async def test_select_or_create_with_history_new_session(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=15, approval_enabled=True,
-        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None, alert_cooldown_min=None,
+        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
         token_budget=500000,
         persona=PersonaConfig(),
         session_name="ETH sim #1",
