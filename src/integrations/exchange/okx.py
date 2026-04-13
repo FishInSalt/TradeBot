@@ -129,9 +129,8 @@ class OKXExchange(BaseExchange):
             self._running = True
             self._ws_connected = True
             self._orders_task = asyncio.create_task(self._watch_orders_loop())
-            if self._alert_service:
-                self._ticker_task = asyncio.create_task(self._watch_ticker_loop())
-            loops = "watch_orders" + (" + watch_ticker" if self._alert_service else "")
+            self._ticker_task = asyncio.create_task(self._watch_ticker_loop())
+            loops = "watch_orders + watch_ticker"
             logger.info("OKX WebSocket started (%s)", loops)
         except Exception:
             self._ws_connected = False

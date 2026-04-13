@@ -119,7 +119,7 @@ def test_window_eviction():
 
 
 def test_update_params():
-    """update_params should change threshold and window."""
+    """update_params should change threshold and window, clearing ticks."""
     from src.services.price_alert import PriceAlertService
     service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     base_ts = 1_000_000_000_000
@@ -127,7 +127,9 @@ def test_update_params():
     result = service.check(58500.0, base_ts + 60_000)
     assert result is None  # -2.5%, below 5%
     service.update_params(threshold_pct=2.0, window_minutes=60)
-    result = service.check(58400.0, base_ts + 120_000)
+    # After update_params, ticks are cleared — need baseline + check
+    service.check(60000.0, base_ts + 120_000)          # baseline tick
+    result = service.check(58400.0, base_ts + 180_000)
     assert result is not None  # -2.7% from 60000, above 2%
 
 

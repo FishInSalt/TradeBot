@@ -363,10 +363,9 @@ async def run(
     handle_fill = _create_fill_handler(scheduler, engine, session_id)
     exchange.on_fill(handle_fill)
 
-    if result.alert_enabled:
-        async def handle_alert(alert_info):
-            await scheduler.trigger("alert", context=alert_info)
-        exchange.on_alert(handle_alert)
+    async def handle_alert(alert_info):
+        await scheduler.trigger("alert", context=alert_info)
+    exchange.on_alert(handle_alert)
 
     await exchange.start()
 

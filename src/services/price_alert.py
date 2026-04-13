@@ -77,3 +77,4 @@ class PriceAlertService:
         self._threshold_pct = threshold_pct
         self._window_ms = window_minutes * 60 * 1000
         self._window_minutes = window_minutes
+        self._ticks.clear()

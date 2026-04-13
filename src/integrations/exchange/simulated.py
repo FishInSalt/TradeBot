@@ -779,6 +779,7 @@ class SimulatedExchange(BaseExchange):
             base_volume=float(seed_ticker["baseVolume"]),
             timestamp=seed_ticker["timestamp"],
         )
+        self._latest_price = self._latest_ticker.last
 
         self._running = True
         self._matching_task = asyncio.create_task(self._matching_loop())
