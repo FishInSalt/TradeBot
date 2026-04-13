@@ -1204,7 +1204,7 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | **Storage** | |
 | `src/storage/models.py` | `SimOrder` 新增 `frozen_margin`/`leverage`；`SimBalance` 新增 `frozen_usdt` |
 | **Tests** | |
-| `tests/test_simulated_exchange.py` | 23 个测试插入 tick 撮合步骤（含 2 个清算测试拆分双 tick）；2 个测试重写语义；新增 28 个测试 |
+| `tests/test_simulated_exchange.py` | 23 个测试插入 tick 撮合步骤（含 2 个清算测试拆分双 tick）；2 个测试重写语义；新增 29 个测试 |
 | `tests/test_exchange.py` | 删除 `test_base_exchange_drain_pending_fills` |
 
 ### persona.py 引导内容草案
