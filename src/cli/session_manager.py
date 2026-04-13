@@ -130,13 +130,11 @@ async def _restore_session(
     alert_enabled = False
     alert_window = None
     alert_threshold = None
-    alert_cooldown = None
     if s.alert_config:
         alert_data = json.loads(s.alert_config)
         alert_enabled = alert_data.get("enabled", False)
         alert_window = alert_data.get("window")
         alert_threshold = alert_data.get("threshold")
-        alert_cooldown = alert_data.get("cooldown")
 
     # Credentials for real exchange
     api_credentials = None
@@ -183,7 +181,6 @@ async def _restore_session(
         alert_enabled=alert_enabled,
         alert_window_min=alert_window,
         alert_threshold_pct=alert_threshold,
-        alert_cooldown_min=alert_cooldown,
         token_budget=s.token_budget,
         persona=persona,
         session_name=s.name,
@@ -214,7 +211,6 @@ async def _create_session(engine, result: WizardResult) -> str:
                 "enabled": True,
                 "window": result.alert_window_min,
                 "threshold": result.alert_threshold_pct,
-                "cooldown": result.alert_cooldown_min,
             })
 
         trading_session = Session(

@@ -178,26 +178,23 @@ async def set_price_alert(
     deps: TradingDeps,
     threshold_pct: float,
     window_minutes: int,
-    cooldown_minutes: int,
     reasoning: str,
 ) -> str:
-    """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-60, cooldown_minutes: 1-120."""
+    """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-240."""
     # 参数边界验证
     if not (0.5 <= threshold_pct <= 50.0):
         return f"Invalid threshold_pct: must be 0.5-50.0, got {threshold_pct}"
-    if not (1 <= window_minutes <= 60):
-        return f"Invalid window_minutes: must be 1-60, got {window_minutes}"
-    if not (1 <= cooldown_minutes <= 120):
-        return f"Invalid cooldown_minutes: must be 1-120, got {cooldown_minutes}"
+    if not (1 <= window_minutes <= 240):
+        return f"Invalid window_minutes: must be 1-240, got {window_minutes}"
 
-    deps.exchange.update_alert_params(threshold_pct, window_minutes, cooldown_minutes)
+    deps.exchange.update_alert_params(threshold_pct, window_minutes)
 
     await _record_action(
         deps, action="set_price_alert",
-        reasoning=f"threshold={threshold_pct}%, window={window_minutes}min, cooldown={cooldown_minutes}min | {reasoning}",
+        reasoning=f"threshold={threshold_pct}%, window={window_minutes}min | {reasoning}",
     )
 
     return (
         f"Price alert updated: threshold={threshold_pct}%, "
-        f"window={window_minutes}min, cooldown={cooldown_minutes}min"
+        f"window={window_minutes}min"
     )

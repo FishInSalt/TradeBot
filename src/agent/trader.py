@@ -126,13 +126,12 @@ def create_trader_agent(
         ctx: RunContext[TradingDeps],
         threshold_pct: float,
         window_minutes: int,
-        cooldown_minutes: int,
         reasoning: str,
     ) -> str:
-        """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-60, cooldown_minutes: 1-120. Always provide reasoning."""
+        """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-240. Always provide reasoning."""
         from src.agent.tools_execution import set_price_alert as _impl
 
-        return await _impl(ctx.deps, threshold_pct, window_minutes, cooldown_minutes, reasoning=reasoning)
+        return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
 
     # === Memory Tools ===
 

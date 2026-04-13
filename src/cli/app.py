@@ -229,12 +229,11 @@ def build_services(
             symbol=result.symbol,
             window_minutes=result.alert_window_min,
             threshold_pct=result.alert_threshold_pct,
-            cooldown_minutes=result.alert_cooldown_min,
         )
         exchange.set_alert_service(alert_service)
         sc.print(
             f"Alerts: ON ({result.alert_window_min}min / "
-            f"{result.alert_threshold_pct}% / cd {result.alert_cooldown_min}min)"
+            f"{result.alert_threshold_pct}%)"
         )
     else:
         sc.print("Alerts: OFF")

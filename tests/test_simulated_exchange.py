@@ -673,8 +673,8 @@ async def test_simulated_exchange_update_alert_params():
 
     mock_service = MagicMock()
     exchange.set_alert_service(mock_service)
-    exchange.update_alert_params(2.0, 10, 30)
-    mock_service.update_params.assert_called_once_with(2.0, 10, 30)
+    exchange.update_alert_params(2.0, 10)
+    mock_service.update_params.assert_called_once_with(2.0, 10)
 
 
 async def test_simulated_exchange_alert_callback_outside_lock():

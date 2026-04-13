@@ -109,9 +109,9 @@ class OKXExchange(BaseExchange):
     def set_alert_service(self, service: Any) -> None:
         self._alert_service = service
 
-    def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+    def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
         if self._alert_service:
-            self._alert_service.update_params(threshold_pct, window_minutes, cooldown_minutes)
+            self._alert_service.update_params(threshold_pct, window_minutes)
 
     # --- WebSocket lifecycle ---
 

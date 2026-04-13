@@ -99,7 +99,7 @@ class BaseExchange(ABC):
         """注入 PriceAlertService。默认空实现。"""
         pass
 
-    def update_alert_params(self, threshold_pct: float, window_minutes: int, cooldown_minutes: int) -> None:
+    def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
         """更新价格预警参数。默认空实现。"""
         pass
 

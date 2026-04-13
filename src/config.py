@@ -57,9 +57,8 @@ class ApprovalConfig(BaseModel):
 
 class AlertsConfig(BaseModel):
     enabled: bool = True
-    window_minutes: int = 5
-    threshold_pct: float = 3.0
-    cooldown_minutes: int = 15
+    window_minutes: int = 60
+    threshold_pct: float = 5.0
 
 
 class Settings(BaseModel):
