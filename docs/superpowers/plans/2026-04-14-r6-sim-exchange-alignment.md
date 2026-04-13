@@ -4,7 +4,7 @@
 
 **Goal:** Align SimulatedExchange behavior with OKXExchange: async market orders, unified fill path, limit order support, duplicate order prevention.
 
-**Architecture:** Market orders become pending on submission (like OKX), matched on next tick. New `_frozen_usdt` tracks escrowed margin. Limit orders share the pending/match pattern. `drain_pending_fills` removed; all fills flow through `_fill_callback`. Tool layer guards against duplicate market orders.
+**Architecture:** Market orders become pending on submission (like OKX), matched on next tick. New `_frozen_usdt` tracks escrowed margin. Limit orders share the pending/match pattern. `drain_pending_fills` removed; all fills flow through `_fill_callback`. Tool layer guards against duplicate market orders. **Design deviation:** D9 shortfall handling changed from `_used_usdt += shortfall` to clamp-only (`free=0`) — prevents cumulative accounting leak in `_close_position_core` (see Task 5 Step 3 for details).
 
 **Tech Stack:** Python 3.12+, asyncio, pytest + pytest-asyncio, SQLAlchemy async (aiosqlite), pydantic-ai
 
@@ -523,10 +523,11 @@ async def test_frozen_extreme_clamp():
     # used_usdt = actual_margin only (no phantom residue in _used_usdt)
     actual_margin = (97000.0 * 0.001) / 3
     assert ex._used_usdt == pytest.approx(actual_margin)
-    # NOTE: clamp inflates total_usdt by ~shortfall (phantom value from raising
-    # free from -0.38 to 0 without a corresponding deduction). This is the known
-    # trade-off of not tracking shortfall in _used_usdt (which would leak cumulatively).
-    # We do NOT assert total < total_before — it's actually slightly above.
+    # Clamp inflates total_usdt by ~shortfall (phantom value from raising free
+    # from -0.38 to 0 without a corresponding deduction). Known trade-off of not
+    # tracking shortfall in _used_usdt (which would leak cumulatively).
+    balance = await ex.fetch_balance()
+    assert balance.total_usdt > total_before  # phantom value: total inflated, not shrunk
 
 
 async def test_fill_market_close_position_gone():
@@ -1489,11 +1490,68 @@ Pattern: `market order → tick@normal(fills open) → set conditional → tick@
 
 - [ ] **Step 10: Adapt liquidation tests that need dual-tick**
 
-These tests need two ticks because the entry price is now the tick price (not submit price):
+These tests need two ticks because the entry price is now the tick price (not submit price). The liquidation price calculation depends on entry_price, which changes from the submit-time ask/bid to the fill-time ask/bid.
 
-**`test_liquidation_short`:** sell → **tick@normal(opens short at tick.bid)** → tick@extreme_high(triggers liquidation).
+**`test_liquidation_short`:**
 
-**`test_force_liquidate_fill_event_has_pnl`:** same pattern. Also remove `drain_pending_fills()` calls — use `_fill_callback` instead.
+```python
+async def test_liquidation_short():
+    """Short position should be liquidated when ask rises above liquidation price."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+
+    fill_events = []
+    async def on_fill(event):
+        fill_events.append(event)
+    ex.on_fill(on_fill)
+
+    # Tick 1: normal price → fills the short (entry = tick.bid = 94990)
+    await ex._process_tick(_tick())
+    assert len(fill_events) == 1
+    assert fill_events[0].trigger_reason == "market"
+
+    # Tick 2: price surges above liquidation price
+    tick2 = Ticker(
+        symbol="BTC/USDT:USDT", last=120000.0, bid=119990.0, ask=120010.0,
+        high=121000.0, low=94000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(tick2)
+
+    assert len(fill_events) == 2
+    assert fill_events[1].trigger_reason == "liquidation"
+    assert fill_events[1].position_side == "short"
+    balance = await ex.fetch_balance()
+    assert balance.free_usdt >= 0.0
+```
+
+**`test_force_liquidate_fill_event_has_pnl`:** same dual-tick pattern, remove `drain_pending_fills()`:
+
+```python
+async def test_force_liquidate_fill_event_has_pnl():
+    """Liquidation FillEvent should include pnl."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # Tick 1: normal price → fills the long (entry = tick.ask = 95010)
+    await ex._process_tick(_tick())
+    assert len(fills) == 1
+
+    # Tick 2: price crashes below liquidation
+    liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 80000.0, 80010.0,
+                        96000.0, 79000.0, 1000.0, 1712534500000)
+    await ex._process_tick(liq_ticker)
+
+    liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fills) == 1
+    assert liq_fills[0].pnl is not None
+```
 
 - [ ] **Step 11: Fix test_market_order_unknown_type**
 
@@ -1959,7 +2017,10 @@ async def test_limit_fill_cancelled_on_reverse_position():
     await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=94000.0)
     frozen = ex._frozen_usdt
 
-    # Manually create a short position (simulating another order filled first)
+    # Manually create a short position (simulating another order filled first).
+    # NOTE: manual insert doesn't adjust balance — this is intentional to isolate
+    # the limit cancellation logic. In production, the short position's margin
+    # would have been deducted via _fill_market_open.
     ex._positions["BTC/USDT:USDT"] = _Position(
         side="short", contracts=0.001, entry_price=96000.0, leverage=3,
     )
@@ -1968,9 +2029,9 @@ async def test_limit_fill_cancelled_on_reverse_position():
                   high=96000.0, low=93000.0, base_volume=1000.0, timestamp=1712534402000)
     await ex._process_tick(tick)
 
-    # Limit order should be cancelled, margin unfrozen
+    # Limit order cancelled → frozen margin fully returned to free
     assert ex._frozen_usdt == 0.0
-    assert ex._free_usdt == pytest.approx(100.0 - (96000.0 * 0.001 / 3))  # only short margin used
+    assert ex._free_usdt == pytest.approx(100.0)  # all frozen returned
 
 
 async def test_limit_fill_cancelled_on_leverage_mismatch():
