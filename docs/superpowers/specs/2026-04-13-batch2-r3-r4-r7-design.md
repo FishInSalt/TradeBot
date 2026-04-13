@@ -63,12 +63,14 @@ def check(self, price: float, timestamp: int) -> AlertInfo | None:
         return None
 
     prices = [p for p, _ in self._ticks]
-    high, low = max(prices), min(prices)
+    high = max(prices)
+    low = min(prices)
 
-    drop_pct = (price - high) / high * 100    # 负值
-    rise_pct = (price - low) / low * 100      # 正值
+    drop_pct = (price - high) / high * 100 if high > 0 else 0.0    # 负值
+    rise_pct = (price - low) / low * 100 if low > 0 else 0.0       # 正值
 
-    if abs(drop_pct) >= self._threshold_pct:
+    # 保留现有优先级：取绝对值更大的方向
+    if abs(drop_pct) >= abs(rise_pct) and abs(drop_pct) >= self._threshold_pct:
         self._ticks.clear()                   # ← 重置
         return AlertInfo(symbol=..., change_pct=drop_pct, reference_price=high, ...)
 
@@ -91,6 +93,16 @@ def check(self, price: float, timestamp: int) -> AlertInfo | None:
 | `window_minutes` | 5 | 60 |
 | `threshold_pct` | 3.0 | 5.0 |
 | `cooldown_minutes` | 15 | **删除** |
+
+### 参数验证范围变更
+
+`_validate_params` 同步更新：
+
+| 参数 | 旧范围 | 新范围 |
+|------|--------|--------|
+| `window_minutes` | 1-60 | 1-240（默认 60，允许更长窗口） |
+| `threshold_pct` | 0.5-50.0 | 0.5-50.0（不变） |
+| `cooldown_minutes` | 1-120 | **删除** |
 
 ### 构造函数变更
 
