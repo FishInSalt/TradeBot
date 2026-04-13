@@ -203,6 +203,7 @@ cooldown 的删除涉及整个调用链，需同步修改：
 | `src/cli/app.py` | `build_services` 删 cooldown 传参；`build_services` 中 alert 显示信息删 cooldown |
 | `src/storage/models.py` | 更新 `alert_config` 字段注释（删除 cooldown 描述） |
 | `config/settings.yaml` | 删除 `cooldown_minutes`，更新 `window_minutes: 60`、`threshold_pct: 5.0` |
+| `config/settings_sim.yaml` | 同步更新 alert 参数（该文件已标记 DEPRECATED 且不被读取，仅作为参考保持准确） |
 
 ### 旧 session 兼容
 
@@ -279,6 +280,8 @@ class Scheduler:
             await self._interruptible_sleep(interval)
             # ... drain events, run cycles ...
 ```
+
+**Sleep 被打断时的行为**：`_next_interval` 在进入 sleep 前被消费并重置为 None。如果 sleep 在第 30s 被 event 打断，已消费的 interval 不会被恢复——打断意味着有新事件需要处理，Agent 在新 cycle 中有机会重新设定间隔。
 
 ### 新 Agent Tool
 
@@ -439,7 +442,18 @@ class BaseExchange:
 
     def _check_price_levels(self, current_price: float,
                              timestamp: int) -> list[PriceLevelAlertInfo]:
-        """检查触发的价位 alerts，触发的从列表移除（一次性消耗），返回触发列表。"""
+        """检查触发的价位 alerts，触发的从列表移除（一次性消耗），返回触发列表。
+        采用"收集+重建"模式避免迭代中修改列表："""
+        triggered = []
+        remaining = []
+        for alert in self._price_level_alerts:
+            if (alert["direction"] == "above" and current_price >= alert["price"]) or \
+               (alert["direction"] == "below" and current_price <= alert["price"]):
+                triggered.append(PriceLevelAlertInfo(...))
+            else:
+                remaining.append(alert)
+        self._price_level_alerts = remaining
+        return triggered
 ```
 
 注意：
@@ -530,7 +544,7 @@ if (direction == "above" and current_price >= price) or \
            f"already {'above' if direction == 'above' else 'below'} {price}, may trigger immediately"
 ```
 
-`add_price_level_alert` 需接收 `current_price` 参数（从 tool 层传入），或由 Exchange 内部获取最新 ticker 价格。
+`add_price_level_alert` 使用 `self._latest_price` 做检查。如果 `_latest_price is None`（尚未收到第一个 ticker），跳过即时触发警告，正常添加 alert。
 
 ### 首版不提供取消 tool
 
@@ -545,7 +559,9 @@ Exchange 层有 `remove_price_level_alert(alert_id)` 方法，但首版不暴露
 
 极端场景（闪崩同时击穿多个价位 + 触发百分比告警）可能在一个 tick 内产生 N+1 个 `scheduler.trigger("alert", ...)` 事件，每个独立触发一次 Agent cycle。
 
-这是**预期行为**——每个 alert 代表独立的市场信号，Agent 应逐一处理。保护机制：
+这是**预期行为**——每个 alert 代表独立的市场信号，Agent 应逐一处理。同 tick 的多个 alert 按顺序处理（Scheduler drain 逐个执行），后续 cycle 的 Agent 能看到前序 cycle 的操作结果（如已平仓），这是优势而非问题。
+
+保护机制：
 - Scheduler 安全阀：单次 drain 最多处理 10 个事件
 - `TokenBudget`：日级 token 上限（默认 500k），预算耗尽时跳过 cycle
 
@@ -623,6 +639,7 @@ PR #3: R4 动态唤醒间隔
 | `src/integrations/exchange/okx.py` | R3+R7 | `__init__` 加 `super().__init__()`；update_alert_params 删 cooldown；_watch_ticker_loop 新增价位检查 + `_latest_price` 存储 |
 | `src/scheduler/scheduler.py` | R4 | 新增 _next_interval + set_next_interval() |
 | `config/settings.yaml` | R3 | 删 cooldown_minutes，更新 window=60, threshold=5.0 |
+| `config/settings_sim.yaml` | R3 | 同步更新 alert 参数（DEPRECATED，仅参考） |
 
 ### 测试文件
 
