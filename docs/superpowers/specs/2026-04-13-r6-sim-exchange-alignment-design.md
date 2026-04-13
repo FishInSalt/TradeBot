@@ -1072,7 +1072,7 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | **Storage** | |
 | `src/storage/models.py` | `SimOrder` 新增 `frozen_margin`/`leverage`；`SimBalance` 新增 `frozen_usdt` |
 | **Tests** | |
-| `tests/test_simulated_exchange.py` | 22 个测试插入 tick 撮合步骤（含 2 个清算测试拆分双 tick）；2 个测试重写语义；新增 27 个测试 |
+| `tests/test_simulated_exchange.py` | 24 个测试插入 tick 撮合步骤（含 2 个清算测试拆分双 tick）；2 个测试重写语义；新增 27 个测试 |
 | `tests/test_exchange.py` | 删除 `test_base_exchange_drain_pending_fills` |
 
 ---
