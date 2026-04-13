@@ -93,12 +93,42 @@ SimulatedExchange 与 OKXExchange 存在两个关键行为差异，违背了"模
 
 **后果**：真实交易员常用限价单在关键价位建仓（如"在 58000 挂买单"），Agent 无法使用这一基础能力。
 
+### 为什么现在做
+
+R6 是 Phase 2（产品化）的前置条件。如果模拟和实盘行为不一致，用户在模拟中验证通过的策略上线后可能直接失败（如开仓后立即设止损在实盘上不生效），造成资金风险。在产品化之前修复引擎对齐是最低成本的时机——后续改动的测试兼容负担只会更大。
+
 ### 设计目标
 
-Agent 在模拟和实盘上的行为模式完全一致：
-1. 开仓后都要等 fill 通知再设止损
-2. 限价单在两种环境都可用
-3. 所有 fill 走统一的异步回调路径
+| # | 目标 | 可验收标准 |
+|---|------|-----------|
+| G1 | 市价单时序对齐 | SimExchange 市价单异步成交：`create_order("market")` 返回 `status="open"`，仓位在下一个 tick 撮合后才可见，fill 通过 `_fill_callback` 通知 |
+| G2 | Fill 路径统一 | 删除 `drain_pending_fills` 机制，所有 fill（市价/条件/清算）走 `_fill_callback` → `scheduler.trigger("conditional")` 同一路径 |
+| G3 | 限价单支持 | SimExchange 和 OKX 均支持 `create_order("limit")`，Agent 有 `place_limit_order` 工具 |
+| G4 | 重复下单防护 | pending 市价单未成交时，Agent 再次调用 `open_position`/`close_position` 被拒绝并收到提示 |
+| G5 | 现有测试全部通过 | 适配后的测试套件 `pytest` 全绿 |
+
+### 非目标（首版不做）
+
+| 项目 | 理由 |
+|------|------|
+| 部分成交 (partial fill) | SimExchange 和 Agent tool 层均假设全量成交，与 stop/take_profit 一致。引入 partial fill 需要订单状态机和仓位合并逻辑的大幅改造，ROI 不高 |
+| 限价平仓单 | `take_profit` 条件单已覆盖"到目标价平仓"场景。限价平仓的差异（锁定价格但可能不完全成交）在全量成交简化下无实质区别。后续可扩展 |
+| 市价单失败/拒绝模拟 | 真实交易所可能拒绝订单（余额不足、风控限制等），SimExchange 当前在 `create_order` 阶段做余额预检，不模拟提交后被拒的场景 |
+| 网络延迟模拟 | 撮合延迟已通过"下一个 tick"自然产生，不额外模拟网络抖动或超时 |
+| OKXExchange 侧改动 | OKX 已是异步行为，`create_order` 已透传 ccxt（含 limit）。本次改动集中在 SimExchange 侧 |
+
+### 关键设计决策汇总
+
+| # | 决策 | 选择 | 核心理由 |
+|---|------|------|---------|
+| D1 | 市价单异步化方案 | 延迟状态更新（非延迟通知） | 语义一致：`create_order` = 提交，`_process_tick` = 撮合。避免"状态已变但 Agent 不知道"的半异步矛盾 |
+| D2 | 开仓/平仓冻结逻辑 | 区分处理：开仓冻结 margin+fee，平仓仅冻结 fee | 全仓开仓后 `free_usdt ≈ 0`，统一冻结 margin+fee 会导致平仓死局 |
+| D3 | 重复下单防护层 | Tool 层拒绝（非 Exchange 层异常） | Tool 返回提示比异常更友好，Agent 可理解原因；OKX 不阻止重复下单，Exchange 层不应添加 OKX 不存在的限制 |
+| D4 | 限价单首版范围 | 仅开仓 | `take_profit` 已覆盖限价平仓主要场景；减少首版复杂度 |
+| D5 | 限价单杠杆 | 有仓位时强制匹配仓位杠杆，无仓位时 Agent 指定 | 与 `_open_market_order` 的 leverage mismatch 检查一致 |
+| D6 | 限价单反向仓位 | 引擎层拒绝 | SimExchange 不支持双向持仓（one-way mode），与 OKX 设置一致 |
+| D7 | _cancel_orphaned_orders | 保留 market/limit 开仓单，仅清理平仓方向孤儿单 | 开仓单在仓位建立前存在，不应因止损/清算触发而被误删 |
+| D8 | drain_pending_fills | 删除 | 市价单异步化后所有 fill 走 `_fill_callback`，`_pending_fills` 队列不再需要 |
 
 ---
 
@@ -991,3 +1021,32 @@ PR #3: 限价单
 ```
 
 PR #1 改动最大但最核心（不完成则 PR #2/#3 无意义）。PR #2 和 PR #3 可并行开发。
+
+---
+
+## 风险与迁移
+
+### 旧 session 兼容
+
+系统尚未投入生产使用，不存在需要迁移的用户数据。DB schema 变更（`SimOrder` 新增 `frozen_margin`/`leverage`，`SimBalance` 新增 `frozen_usdt`）通过 SQLAlchemy 的 `default=0.0` / `default=1` 处理，旧记录读取时回退到默认值，无需 DB migration。
+
+如有残留的旧 session 恢复：
+- `_restore_state` 读取 `frozen_margin=0.0`、`leverage=1`——旧的 pending 条件单（stop/take_profit）本来就没有冻结保证金，行为不变
+- `_restore_state` 读取 `frozen_usdt=0.0`——旧 session 没有 pending 市价单/限价单，余额计算不受影响
+
+### Agent prompt 兼容
+
+市价单行为变化对 Agent 的影响：
+- Agent 系统 prompt 中已有 "You will be notified when filled" 引导
+- `open_position` 返回值已包含 "You will be notified when filled"
+- 主要风险：Agent 可能仍尝试在同一 cycle 设止损 → tool 返回 "No open position"，Agent 需学习等待 fill callback
+
+这是**预期行为变化**，不需要特殊处理——Agent 在 fill callback 唤醒后的下一个 cycle 会看到仓位并设止损。
+
+### 测试回归风险
+
+本次改动涉及 15 个测试的模式变更（插入 tick 撮合步骤）。风险点：
+- 测试适配不完整导致误判"通过"（如忘记在某个 assert 前插入 tick）
+- 新增的 `_frozen_usdt` 账务逻辑在边界场景（如连续开仓+平仓+限价单交叉）可能出现精度累积误差
+
+缓解措施：PR #1 必须在所有现有测试通过后才能合并；新增测试覆盖 frozen 账务的完整生命周期。
