@@ -117,6 +117,7 @@ R6 是 Phase 2（产品化）的前置条件。如果模拟和实盘行为不一
 | 网络延迟模拟 | 撮合延迟已通过"下一个 tick"自然产生，不额外模拟网络抖动或超时 |
 | OKXExchange 侧改动 | OKX 已是异步行为，`create_order` 已透传 ccxt（含 limit）。本次改动集中在 SimExchange 侧 |
 | 限价单 price improvement | 限价单以指定价格成交（`fill_price = trigger_price`），即使市场价更优也不以更优价成交。简化账务逻辑（冻结金额 = 实际扣款，无退差）。真实交易所会给 price improvement，但首版不模拟 |
+| OKX 侧重复下单防护 | `has_pending_market_order` 在 BaseExchange 返回 False，OKX 上 Agent 的重复下单检查不生效。OKX fill callback 亚秒级，重复窗口极小。已知的 Sim/OKX 行为差异，后续可在 OKX 侧维护 pending 状态实现对称防护 |
 | set_leverage 检查 pending orders | pending market/limit 订单存在时，Agent 调用 `set_leverage` 可成功（因 `_positions` 为空），但填充时 `_leverage[symbol]` 会被订单的 leverage 回写覆盖。功能不会出错（D12/D14 的填充时杠杆检查兜底），但 Agent 可能对杠杆状态产生短暂困惑。首版不修复——Agent 极少在 pending 期间改杠杆，后续可在 `set_leverage` 中加 pending 检查 |
 
 ### 关键设计决策汇总
@@ -275,6 +276,8 @@ self._frozen_usdt += frozen
 
 **边界情况：`_free_usdt = 0` 时 `frozen = 0`**——全仓开仓后无可用余额，平仓时完全不冻结手续费。这是正确行为：撮合时 `_close_position_core` 释放保证金后再扣 fee，fee 由释放的保证金覆盖。
 
+**设计备注**：在当前单 symbol 单仓位架构下，`frozen = 0`（永远不冻结平仓手续费）会产生完全相同的净会计效果——因为 fill 前不可能有其他操作消耗这部分余额。此处保留 `min(estimated_fee, free)` 的冻结逻辑是为未来多 symbol 预留（多仓位可能在 fill 间隙交叉消耗余额）。
+
 平仓撮合时，fee 从释放的保证金中扣除：
 
 ```python
@@ -334,6 +337,7 @@ class _PendingOrder:
     order_type: str          # "market" | "limit" | "stop" | "take_profit"
     amount: float
     trigger_price: float | None   # stop/TP: 触发价；limit: 成交价；market: None
+                                   # 技术债务：字段名对 limit/market 语义不准确，后续可重构为 price 或拆分
     frozen_margin: float = 0.0    # 新增：市价/限价单冻结的保证金+手续费
     leverage: int = 1             # 新增：下单时的杠杆（撮合时需要）
 ```
@@ -402,6 +406,10 @@ async def _process_tick(self, ticker: Ticker) -> None:
 
         # 1. 清算检查（现有）
         # ...（liquidation orders 加入 new_orders — 它们没有 pending 阶段，需要 INSERT）
+        #
+        # Edge case: "开仓即清算" — 如果 market buy 在 step 0 创建了仓位，但当前 tick
+        # 价格已穿过清算价，step 1 会立即清算。Agent 在同一 tick 收到两个 FillEvent
+        # （开仓 + 清算）。这是预期行为，与真实交易所一致。
 
         # 2. 条件单 + 限价单撮合（现有 + 新增）
         # ...
@@ -780,6 +788,9 @@ async with self._lock:
             filled_order_ids.append(order.id)  # → UPDATE status="closed"
 
     # 3. 统一清理
+    #    注意：liquidation 的 order_id 是新生成的 UUID，不在 _pending_orders 中，
+    #    _remove_order_by_id 对它是 no-op。清算导致的孤儿 stop/TP 单由
+    #    _cancel_orphaned_orders 负责清理（检查 symbol 是否仍有仓位）。
     all_resolved = filled_order_ids + cancelled_order_ids
     if triggered or all_resolved:
         for oid in all_resolved:
@@ -1168,6 +1179,8 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | `test_limit_fill_cancelled_on_leverage_mismatch` | 限价单填充时仓位杠杆不一致 → 取消并解冻 |
 | `test_fill_market_close_position_gone` | 平仓市价单填充时仓位已被清算 → 取消并解冻 |
 | `test_fill_market_close_clamps_amount` | 平仓填充 amount 大于仓位 contracts → clamped |
+| **端到端场景测试** | |
+| `test_e2e_open_then_stop_after_fill` | 核心价值场景：open_position → 同 cycle 无法 set_stop_loss → tick 撮合 → fill_callback 触发 → 新 cycle set_stop_loss 成功 |
 
 ---
 
