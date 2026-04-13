@@ -37,6 +37,8 @@
 
 ### Task 1: DB Schema — Add frozen_margin/leverage to SimOrder, frozen_usdt to SimBalance
 
+> **DB Migration:** New columns are added to existing tables. SQLAlchemy `create_all()` does not ALTER existing tables. Since the system is not in production, **delete the existing SQLite DB file** (`data/*.db`) before running. `init_db()` will recreate tables with the new schema. No Alembic migration needed.
+
 **Files:**
 - Modify: `src/storage/models.py:125-145`
 
@@ -451,7 +453,7 @@ Expected: PASS
 
 - [ ] **Step 5: Delete old synchronous market methods**
 
-> **WARNING**: After this step and until Task 6 is complete, the full test suite will fail. Market orders become pending but `_process_tick` doesn't call the new fill methods yet. Only run targeted tests (as specified in each step) during this window.
+> **WARNING**: After this step and until Task 6 is complete, the full test suite will fail. Market orders become pending but `_process_tick` doesn't call the new fill methods yet. Only run targeted tests (as specified in each step) during this window. Also do not run the real application with a DB until Task 7 is complete — `_persist_state` does not yet write `frozen_margin`/`leverage` fields, so a crash-restart would lose frozen state.
 
 The following methods are now dead code — replaced by the pending+fill pattern:
 - `_execute_market_order` (simulated.py:185-199)
@@ -495,9 +497,10 @@ async def test_frozen_balance_diff_refund():
 
 
 async def test_frozen_extreme_clamp():
-    """Extreme price movement: free_usdt clamped to 0, shortfall added to used_usdt."""
+    """Extreme price movement: free_usdt clamped to 0, shortfall absorbed as slippage cost."""
     ex = _make_exchange(initial_balance=35.0)  # just enough for 3x leverage
     ex._leverage["BTC/USDT:USDT"] = 3
+    total_before = 35.0
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
 
     # Tick with MUCH HIGHER ask → actual cost > frozen → clamp
@@ -506,7 +509,13 @@ async def test_frozen_extreme_clamp():
     await ex._process_tick(tick)
 
     assert ex._frozen_usdt == 0.0
-    assert ex._free_usdt >= 0.0  # clamped, not negative
+    assert ex._free_usdt == 0.0  # clamped to zero
+    # total_usdt may be slightly less than initial (shortfall = unrecoverable slippage)
+    balance = await ex.fetch_balance()
+    assert balance.total_usdt <= total_before
+    # used_usdt should equal actual_margin only (no phantom shortfall residue)
+    actual_margin = (97000.0 * 0.001) / 3
+    assert ex._used_usdt == pytest.approx(actual_margin)
 
 
 async def test_fill_market_close_position_gone():
@@ -567,7 +576,7 @@ Expected: FAIL (fill methods don't exist yet)
 
 - [ ] **Step 3: Implement _fill_market_open**
 
-Add after `_execute_market_order` method (or replace it — see step 5):
+Add where the deleted `_execute_market_order` was (around line 185, after `create_order`):
 
 ```python
     def _fill_market_open(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
@@ -603,11 +612,14 @@ Add after `_execute_market_order` method (or replace it — see step 5):
         self._frozen_usdt -= order.frozen_margin
         self._used_usdt += actual_margin
         self._free_usdt += diff
-        # Clamp: extreme price movement may cause free < 0
+        # Clamp: extreme price movement may cause free < 0.
+        # We absorb the shortfall as unrecoverable slippage cost (total_usdt shrinks).
+        # NOT added to _used_usdt — that would create a phantom balance that
+        # _close_position_core never releases (it only releases actual_margin).
+        # NOTE: design doc D9 uses `_used_usdt += shortfall` ("追加保证金语义"),
+        # but this causes a cumulative accounting leak. Plan deviates here.
         if self._free_usdt < 0:
-            shortfall = -self._free_usdt
             self._free_usdt = 0.0
-            self._used_usdt += shortfall  # additional margin semantics
 
         self._free_usdt = round(self._free_usdt, 8)
         self._used_usdt = round(self._used_usdt, 8)
@@ -655,6 +667,8 @@ Add after `_execute_market_order` method (or replace it — see step 5):
         # default pnl_cap=False). Async adds one tick of price exposure — the fill price may
         # have moved past the liquidation price. pnl_cap prevents free_usdt from going negative
         # in that scenario, matching the safety valve already used by _force_liquidate.
+        # Trade-off: in extreme single-tick gaps, this makes simulation slightly optimistic
+        # (real exchange would have liquidated first, not capped the loss).
         pnl, fee, _ = self._close_position_core(
             order.symbol, pos.side, actual_amount, fill_price, pnl_cap=True,
         )
