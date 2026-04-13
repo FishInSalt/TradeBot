@@ -134,6 +134,8 @@ R6 是 Phase 2（产品化）的前置条件。如果模拟和实盘行为不一
 | D11 | cancel_order 拒绝市价单 | 市价单不可取消 | 与真实交易所一致——市价单已进入撮合队列，下个 tick 必然成交 |
 | D12 | 限价单填充时杠杆校验 | `_execute_limit_fill` 检查 pos.leverage != order.leverage 则取消 | pending 期间 set_leverage 或其他订单可能改变杠杆，必须在填充时二次检查 |
 | D13 | place_limit_order 不检查 pending market | 允许 market + limit 共存 | 市价即时入场 + 限价低位加仓是有效策略；方向冲突由填充时二次检查兜底 |
+| D14 | _fill_market_open/close 防御性检查 | 与 `_execute_limit_fill` 对称：反向仓位/杠杆不一致/仓位不存在均返回 None | 引擎层应自洽，不依赖外部工具层或撮合顺序的保证 |
+| D15 | 平仓填充使用 pnl_cap=True | 与清算一致 | 异步化多一个 tick 窗口，价格可能穿过清算价，需要同一安全阀防止 free_usdt 断言失败 |
 
 ---
 
@@ -334,25 +336,29 @@ class _PendingOrder:
 新增 `_execute_market_fill()` 方法，处理 pending 市价单的撮合：
 
 ```python
-def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent:
-    """撮合 pending 市价单。使用静态方向判断（仓位可能已在同一 tick 内变化）。"""
+def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+    """撮合 pending 市价单。返回 None 表示因冲突取消（解冻保证金）。
+    使用静态方向判断（仓位可能已在同一 tick 内变化）。"""
     if self._is_close_order_static(order):
         return self._fill_market_close(order, ticker)
     else:
         return self._fill_market_open(order, ticker)
 ```
 
-**开仓撮合** (`_fill_market_open`)：
+**开仓撮合** (`_fill_market_open`) — 返回 `FillEvent | None`：
+- 防御性检查（与 `_execute_limit_fill` 对称）：
+  - 反向仓位：已有仓位且方向不同 → 取消并解冻，返回 None
+  - 杠杆不一致：已有仓位且杠杆不同 → 取消并解冻，返回 None
 - 用当前 tick 价格计算实际 margin/fee
 - 解冻 `_frozen_usdt`，扣 `_used_usdt`，退差额到 `_free_usdt`（含 clamp 兜底）
 - 创建或合并 `_positions[symbol]`
 - 同步 `self._leverage[symbol] = order.leverage`（与 `_restore_state` 保持一致）
 - 返回 FillEvent(trigger_reason="market", pnl=None)
 
-**平仓撮合** (`_fill_market_close`)：
-- 检查仓位是否存在（防御性：若仓位已在同一 tick 被清算删除，取消并解冻）
+**平仓撮合** (`_fill_market_close`) — 返回 `FillEvent | None`：
+- 检查仓位是否存在（防御性：若仓位已在同一 tick 被清算删除，取消并解冻，返回 None）
 - `actual_amount = min(order.amount, pos.contracts)` — 防御性 clamping，与现有 `_close_market_order` 一致
-- 用当前 tick 价格计算 PnL（调用 `_close_position_core()` 复用现有平仓逻辑）
+- 用当前 tick 价格计算 PnL（调用 `_close_position_core(pnl_cap=True)` — 使用 pnl_cap 防止极端价格间隙导致 `free_usdt` 触发 RuntimeError 断言。异步化多了一个 tick 的时间窗口，价格可能穿过清算价，与清算使用同一安全阀）
 - 解冻 `_frozen_usdt`（退全额，因为平仓不占用新保证金）
 - 返回 FillEvent(trigger_reason="market", pnl=实际PnL)
 
@@ -419,7 +425,11 @@ def _cancel_orphaned_orders(self) -> None:
     - market/limit 开仓方向: 保留（开仓单不依赖现有仓位）
     - market close (平仓方向): 仓位不存在则删（仓位已被清算/止损平掉）
 
-    注意：必须使用 _is_close_order_static 判断方向，因为调用时仓位可能已被删除。
+    注意：
+    - 必须使用 _is_close_order_static 判断方向，因为调用时仓位可能已被删除。
+    - 限价开仓单在清算后存活是预期行为——与真实交易所一致（限价单是独立的交易
+      意图，不因清算自动取消）。Agent 在清算 FillEvent 回调唤醒后可通过
+      fetch_open_orders 看到仍存活的限价单并决定是否取消。
     """
     remaining = []
     for o in self._pending_orders:
@@ -732,8 +742,11 @@ async with self._lock:
     market_orders = [o for o in self._pending_orders if o.order_type == "market"]
     for order in market_orders:
         fill = self._execute_market_fill(order, ticker)
-        triggered.append(fill)
         filled_order_ids.append(order.id)
+        if fill is None:
+            # 因冲突取消（仓位已消失/反向/杠杆不一致），已解冻
+            continue
+        triggered.append(fill)
         new_orders.append((Order(..., status="closed"), fill.position_side))
 
     # 1. 清算检查
@@ -1177,7 +1190,7 @@ PR #1 改动最大但最核心（不完成则 PR #2/#3 无意义）。PR #2 和 
 
 ### 测试回归风险
 
-本次改动涉及 15 个测试的模式变更（插入 tick 撮合步骤）。风险点：
+本次改动涉及 26 个测试的模式变更（24 个插入 tick 撮合步骤 + 2 个语义重写）。风险点：
 - 测试适配不完整导致误判"通过"（如忘记在某个 assert 前插入 tick）
 - 新增的 `_frozen_usdt` 账务逻辑在边界场景（如连续开仓+平仓+限价单交叉）可能出现精度累积误差
 
