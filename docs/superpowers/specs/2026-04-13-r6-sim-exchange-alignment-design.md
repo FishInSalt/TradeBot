@@ -713,6 +713,7 @@ def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent
             side=position_side, contracts=order.amount,
             entry_price=fill_price, leverage=leverage,
         )
+    self._leverage[order.symbol] = leverage  # 与 _fill_market_open / _restore_state 保持对称
 
     return FillEvent(
         order_id=order.id, symbol=order.symbol, side=order.side,
