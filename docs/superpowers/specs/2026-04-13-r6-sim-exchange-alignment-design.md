@@ -127,8 +127,11 @@ R6 是 Phase 2（产品化）的前置条件。如果模拟和实盘行为不一
 | D4 | 限价单首版范围 | 仅开仓 | `take_profit` 已覆盖限价平仓主要场景；减少首版复杂度 |
 | D5 | 限价单杠杆 | 有仓位时强制匹配仓位杠杆，无仓位时 Agent 指定 | 与 `_open_market_order` 的 leverage mismatch 检查一致 |
 | D6 | 限价单反向仓位 | 引擎层拒绝 | SimExchange 不支持双向持仓（one-way mode），与 OKX 设置一致 |
-| D7 | _cancel_orphaned_orders | 保留 market/limit 开仓单，仅清理平仓方向孤儿单 | 开仓单在仓位建立前存在，不应因止损/清算触发而被误删 |
+| D7 | _cancel_orphaned_orders | 用 `_is_close_order_static`（基于订单字段）判断方向，保留开仓单，清理平仓孤儿单并解冻 | 调用时仓位已被删除，`_is_close_order`（基于 `_positions`）会误判；开仓单不应因止损/清算而被误删 |
 | D8 | drain_pending_fills | 删除 | 市价单异步化后所有 fill 走 `_fill_callback`，`_pending_fills` 队列不再需要 |
+| D9 | 开仓冻结缓冲 | frozen *= 1.002 + 撮合时 clamp 兜底 | 全仓+价格不利可能导致 `_free_usdt < 0`，0.2% 缓冲覆盖正常波动，极端场景用追加保证金语义兜底 |
+| D10 | 限价单撮合时反向仓位检查 | `_execute_limit_fill` 返回 None 取消订单并解冻 | 创建时无冲突，但 pending 期间 market 单先成交建了反向仓位，填充时必须二次检查 |
+| D11 | cancel_order 拒绝市价单 | 市价单不可取消 | 与真实交易所一致——市价单已进入撮合队列，下个 tick 必然成交 |
 
 ---
 
@@ -205,13 +208,28 @@ estimated_price = ticker.ask if side == "buy" else ticker.bid
 leverage = self._leverage.get(symbol, 1)
 estimated_margin = (estimated_price * amount) / leverage
 estimated_fee = estimated_price * amount * self._fee_rate
-frozen = estimated_margin + estimated_fee
+frozen = (estimated_margin + estimated_fee) * 1.002  # 0.2% 缓冲，防止撮合时价格不利导致 _free_usdt 为负
 
 if self._free_usdt < frozen:
     raise ValueError(f"Insufficient balance: need {frozen:.2f}, have {self._free_usdt:.2f}")
 
 self._free_usdt -= frozen
 self._frozen_usdt += frozen
+```
+
+**为什么加 0.2% 缓冲**：市价单在下一个 tick 撮合，成交价可能高于提交时的 ask（价格不利方向移动）。如果 Agent 使用 100% free_usdt 开仓且不加缓冲，实际 cost > frozen 会导致 `_free_usdt` 变为负数。0.2% 缓冲覆盖了 tick 间的正常价格波动（BTC 秒级波动通常远小于 0.2%）。极端行情下仍可能穿透缓冲，`_fill_market_open` 中需做兜底 clamp：
+
+```python
+# _fill_market_open 中：
+diff = order.frozen_margin - actual_cost
+self._frozen_usdt -= order.frozen_margin
+self._used_usdt += actual_margin
+self._free_usdt += diff
+# 兜底：极端情况下 free 可能微量为负，clamp 到 0
+if self._free_usdt < 0:
+    shortfall = -self._free_usdt
+    self._free_usdt = 0.0
+    self._used_usdt += shortfall  # 追加保证金语义
 ```
 
 开仓撮合时以实际成交价重新计算，差额退还或追扣：
@@ -259,16 +277,33 @@ self._free_usdt += frozen  # 退还冻结的 fee 预估（实际 fee 已在 _clo
 
 #### 判断开仓/平仓
 
-复用现有 `_execute_market_order` 中的判断逻辑（`simulated.py:190-194`）：
+需要两个版本的判断方法：
+
+**动态版本**（`create_order` 时使用，依赖当前仓位状态）：
 
 ```python
 def _is_close_order(self, symbol: str, side: str) -> bool:
+    """判断这笔市价单是否为平仓。create_order 时调用，此时仓位状态可用。"""
     pos = self._positions.get(symbol)
     return (
         (pos is not None and pos.side == "long" and side == "sell") or
         (pos is not None and pos.side == "short" and side == "buy")
     )
 ```
+
+**静态版本**（`_cancel_orphaned_orders` 和其他仓位已删除场景使用，依赖订单自身字段）：
+
+```python
+@staticmethod
+def _is_close_order_static(o: _PendingOrder) -> bool:
+    """判断 pending order 是否为平仓方向。不依赖当前仓位状态。"""
+    return (
+        (o.position_side == "long" and o.side == "sell") or
+        (o.position_side == "short" and o.side == "buy")
+    )
+```
+
+`_cancel_orphaned_orders` 和 `_execute_market_fill` 的路由必须使用静态版本——因为仓位可能已在同一 tick 内被清算/止损删除。
 
 ### _PendingOrder 扩展
 
@@ -294,9 +329,8 @@ class _PendingOrder:
 
 ```python
 def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent:
-    """撮合 pending 市价单。与 _execute_fill 类似但处理开仓/平仓两种情况。"""
-    is_close = self._is_close_order(order)
-    if is_close:
+    """撮合 pending 市价单。使用静态方向判断（仓位可能已在同一 tick 内变化）。"""
+    if self._is_close_order_static(order):
         return self._fill_market_close(order, ticker)
     else:
         return self._fill_market_open(order, ticker)
@@ -374,18 +408,18 @@ def _cancel_orphaned_orders(self) -> None:
 def _cancel_orphaned_orders(self) -> None:
     """Remove pending orders that lost their raison d'être.
     - stop/take_profit: 仓位不存在则删（平仓单失去目标）
-    - market/limit: 保留（开仓单不依赖现有仓位）
+    - market/limit 开仓方向: 保留（开仓单不依赖现有仓位）
     - market close (平仓方向): 仓位不存在则删（仓位已被清算/止损平掉）
+
+    注意：必须使用 _is_close_order_static 判断方向，因为调用时仓位可能已被删除。
     """
     remaining = []
     for o in self._pending_orders:
         if o.order_type in ("stop", "take_profit"):
             if o.symbol in self._positions:
                 remaining.append(o)
-            else:
-                # 条件单无冻结，直接丢弃
-                pass
-        elif o.order_type == "market" and self._is_close_order(o.symbol, o.side):
+            # else: 条件单无冻结，直接丢弃
+        elif o.order_type == "market" and self._is_close_order_static(o):
             if o.symbol in self._positions:
                 remaining.append(o)
             else:
@@ -619,8 +653,21 @@ def _should_trigger(self, order: _PendingOrder, ticker: Ticker) -> bool:
 限价单成交时的处理与市价单开仓撮合类似（`_fill_market_open`），但成交价使用限价而非市场价：
 
 ```python
-def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent:
-    """限价单撮合。成交价 = 限价（price improvement 首版不考虑）。"""
+def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+    """限价单撮合。成交价 = 限价（price improvement 首版不考虑）。
+    返回 None 表示因反向仓位冲突而取消（解冻保证金）。"""
+    # 撮合时二次检查反向仓位（创建时可能无仓位，但之后 market 单先成交建了反向仓位）
+    pos = self._positions.get(order.symbol)
+    position_side = "long" if order.side == "buy" else "short"
+    if pos is not None and pos.side != position_side:
+        # 冲突：取消订单，解冻保证金
+        logger.warning(
+            f"Limit order {order.id} cancelled: conflicts with existing {pos.side} position"
+        )
+        self._frozen_usdt -= order.frozen_margin
+        self._free_usdt += order.frozen_margin
+        return None
+
     fill_price = order.trigger_price  # 限价单以限定价成交
     leverage = order.leverage
     actual_margin = (fill_price * order.amount) / leverage
@@ -681,6 +728,10 @@ async with self._lock:
                 fill = self._execute_fill(order, ticker)
             elif order.order_type == "limit":
                 fill = self._execute_limit_fill(order, ticker)
+                if fill is None:
+                    # 因反向仓位冲突被取消，仅需从 pending 中移除
+                    filled_order_ids.append(order.id)
+                    continue
             triggered.append(fill)
             filled_order_ids.append(order.id)
 ```
@@ -700,7 +751,11 @@ async def cancel_order(self, order_id: str, symbol: str | None = None) -> None:
         if order is None:
             raise ValueError(f"Order {order_id} not found")
 
-        # 解冻保证金（市价单和限价单都有冻结）
+        # 真实交易所不允许取消市价单（已进入撮合队列，下个 tick 必然成交）
+        if order.order_type == "market":
+            raise ValueError("Cannot cancel market orders")
+
+        # 解冻保证金（限价单有冻结）
         if order.frozen_margin > 0:
             self._frozen_usdt -= order.frozen_margin
             self._free_usdt += order.frozen_margin
@@ -846,7 +901,20 @@ if bal:
 SimExchange 新增内部状态：
 
 ```python
+# __init__ 中：
 self._frozen_usdt: float = 0.0   # 市价单/限价单冻结的保证金
+```
+
+**`_init_state`（`simulated.py:584-589`）也必须重置 `_frozen_usdt`**，否则新 session 可能继承旧值：
+
+```python
+async def _init_state(self, initial_balance: float) -> None:
+    self._free_usdt = initial_balance
+    self._used_usdt = 0.0
+    self._frozen_usdt = 0.0    # 新增
+    self._positions = {}
+    self._pending_orders = []
+    self._leverage = {}
 ```
 
 `fetch_balance` 中的语义：
@@ -908,17 +976,31 @@ class SimBalance(Base):
 | `test_market_order_queues_fill_event` | 删除或重写：不再有 `_pending_fills`。改为验证 `_process_tick` 后 `_fill_callback` 被调用 |
 | `test_market_order_unknown_type` | 现在 "limit" 不再是 unknown type。改为测试真正的 unknown type（如 "foobar"） |
 
+### test_simulated_exchange.py — 需插入 tick 的"条件单/清算"测试
+
+以下测试虽然包含 `_process_tick` 调用，但模式是 `market → stop/take_profit → tick`，异步化后 `stop`/`take_profit` 创建时仓位不存在（市价单还在 pending），条件单创建会失败。需要在 market 和 conditional 之间插入一个 tick 先撮合市价单：
+
+| 测试名 | 改法 |
+|--------|------|
+| `test_should_trigger_stop_long` | market buy → **tick（撮合开仓）** → set stop → tick（触发止损） |
+| `test_should_trigger_stop_short` | 同上（sell 方向） |
+| `test_should_trigger_take_profit_long` | market buy → **tick** → set take_profit → tick（触发止盈） |
+| `test_should_trigger_take_profit_short` | 同上（sell 方向） |
+| `test_no_trigger_when_price_above_stop` | market buy → **tick** → set stop → tick（不触发） |
+| `test_liquidation_triggers_before_stop` | market buy → **tick** → set stop → tick（清算优先于止损） |
+| `test_fill_event_carries_pnl_on_stop` | market buy → **tick** → set stop → tick（检查 fill PnL） |
+
+以下清算测试有额外问题：异步化后市价单在 tick 时撮合，入场价变为 tick 价格。需要拆分为两个 tick（正常价格 tick 撮合开仓 + 极端价格 tick 触发清算）：
+
+| 测试名 | 改法 |
+|--------|------|
+| `test_liquidation_short` | market sell → **tick@正常价（撮合开仓）** → tick@极端价（触发清算） |
+| `test_force_liquidate_fill_event_has_pnl` | 同上；另外删除 `drain_pending_fills()` 调用，改为检查 `_fill_callback` |
+
 ### test_simulated_exchange.py — 不受影响的测试
 
-以下测试已经使用 `_process_tick` 或不涉及市价单，无需修改：
+以下测试不涉及市价单，无需修改：
 
-- `test_should_trigger_stop_long/short`（已有 tick 撮合）
-- `test_should_trigger_take_profit_long/short`（已有 tick 撮合）
-- `test_no_trigger_when_price_above_stop`（已有 tick 撮合）
-- `test_liquidation_triggers_before_stop`（已有 tick 撮合）
-- `test_liquidation_short`（已有 tick 撮合）
-- `test_fill_event_carries_pnl_on_stop`（已有 tick 撮合）
-- `test_force_liquidate_fill_event_has_pnl`（已有 tick 撮合）
 - 所有 `test_fetch_balance_*`（不涉及市价单）
 - 所有 `test_set_leverage_*`（除 `rejects_with_position`）
 - 所有 `test_amount_to_precision*`
@@ -964,6 +1046,10 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | `test_fetch_balance_total_includes_frozen` | `total_usdt = free + used + frozen + unrealized` |
 | `test_limit_order_reverse_position_rejected` | 有 long 仓位时，limit sell 被拒绝 |
 | `test_limit_order_leverage_matches_position` | 有仓位时限价单强制使用仓位杠杆 |
+| `test_limit_fill_cancelled_on_reverse_position` | 限价买单填充时发现已有 short 仓位 → 取消并解冻 |
+| `test_cancel_market_order_rejected` | `cancel_order` 拒绝取消市价单 |
+| `test_frozen_buffer_covers_price_movement` | 冻结含 0.2% 缓冲，撮合后 free_usdt ≥ 0 |
+| `test_frozen_extreme_clamp` | 极端价格不利时 free_usdt clamp 到 0，差额追加到 used_usdt |
 
 ---
 
@@ -986,7 +1072,7 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | **Storage** | |
 | `src/storage/models.py` | `SimOrder` 新增 `frozen_margin`/`leverage`；`SimBalance` 新增 `frozen_usdt` |
 | **Tests** | |
-| `tests/test_simulated_exchange.py` | 15 个测试插入 tick 撮合步骤；2 个测试重写语义；新增 23 个测试 |
+| `tests/test_simulated_exchange.py` | 22 个测试插入 tick 撮合步骤（含 2 个清算测试拆分双 tick）；2 个测试重写语义；新增 27 个测试 |
 | `tests/test_exchange.py` | 删除 `test_base_exchange_drain_pending_fills` |
 
 ---
