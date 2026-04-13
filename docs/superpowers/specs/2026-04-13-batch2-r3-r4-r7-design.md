@@ -9,7 +9,30 @@
 
 ## 项目背景
 
-参见 `docs/superpowers/specs/2026-04-12-batch1-r5-r1-r2-design.md` 的项目背景章节。
+### TradeBot 是什么
+
+TradeBot 是一个 AI 驱动的加密货币合约交易机器人。核心理念：LLM Agent 扮演交易员角色，自主分析市场、做出交易决策、管理仓位。
+
+用户启动后，Agent 按固定间隔（如 15 分钟）被唤醒，或被价格波动/订单成交等事件打断唤醒。每次唤醒时，Agent 通过 tool 调用获取市场数据、查看持仓、回顾历史，然后决定操作（开仓/平仓/设止损/观望）。
+
+### 技术栈
+
+| 组件 | 技术 |
+|------|------|
+| 语言 | Python 3.12+, asyncio |
+| LLM 框架 | pydantic-ai（Agent + tool 定义） |
+| 交易所接口 | ccxt / ccxt.pro（REST + WebSocket） |
+| 数据库 | SQLite + SQLAlchemy async（aiosqlite） |
+| 终端 UI | Rich（表格、面板、彩色输出、交互 prompt） |
+| 测试 | pytest + pytest-asyncio，248 个测试 |
+
+### 项目阶段
+
+- **Phase 1a** (已完成) — 最小 agent 循环：单模型、REST 轮询、定时唤醒、模拟交易所
+- **Phase 1b** (已完成) — 事件驱动闭环：多模型选择、WebSocket fill 推送、价格告警、Scheduler 事件队列化
+- **Batch 1** (已完成, PR #5 R1, PR #6 R2) — 基础设施改造：日志分离、CLI 配置向导、Session 管理
+- **当前 (Batch 2)** — Agent 自主性增强（本文档）
+- **Phase 2** (规划中) — 产品化：Web UI、多会话并行、多交易对
 
 ### 当前架构（Batch 1 完成后）
 
@@ -23,13 +46,36 @@ main.py → src/cli/app.py::run()
   └── Phase 6: run_main_loop()              ← scheduler + event handlers
 ```
 
+### 当前告警与调度数据流
+
+```
+Exchange (ticker WebSocket)
+  │
+  ├─→ PriceAlertService.check(price, ts)  ← 每个 tick 调用
+  │     └─ 达到阈值 → AlertInfo
+  │           └─→ _alert_callback(AlertInfo)
+  │                 └─→ scheduler.trigger("alert", AlertInfo)
+  │                       └─→ on_tick("alert", AlertInfo)
+  │                             └─→ run_agent_cycle(prompt 含 alert 信息)
+  │
+  ├─→ 条件单撮合 → FillEvent
+  │     └─→ _fill_callback(FillEvent)
+  │           └─→ scheduler.trigger("conditional", FillEvent)
+  │
+  └─→ Scheduler._interruptible_sleep(固定间隔)
+        └─ 超时 → on_tick("scheduled", None)
+              └─→ run_agent_cycle(常规唤醒)
+```
+
+Agent 在 cycle 中可调用 `set_price_alert` tool 动态修改 PriceAlertService 的阈值和窗口参数。
+
 ### 本批需求
 
-| 编号 | 需求 | 类别 |
-|------|------|------|
-| R3 | 百分比告警重设计（触发后重置） | Agent 自主性 |
-| R4 | 动态唤醒间隔（Agent 控制看盘节奏） | Agent 自主性 |
-| R7 | 价位级别 Alert（Agent 设定关注价位） | Agent 自主性 |
+| 编号 | 需求 | 类别 | 核心问题 |
+|------|------|------|---------|
+| R3 | 百分比告警重设计 | Agent 自主性 | 冷却期丢弃持续波动，Agent 错失反应窗口 |
+| R4 | 动态唤醒间隔 | Agent 自主性 | 固定轮询不符合交易员行为，浪费 token |
+| R7 | 价位级别 Alert | Agent 自主性 | 无法设定具体价位提醒（支撑/阻力位） |
 
 三者接口相对独立，可并行实施。实施顺序建议 R3 → R7 → R4（R3 改告警基础设施，R7 在其上新增，R4 独立于告警）。
 
@@ -50,7 +96,22 @@ main.py → src/cli/app.py::run()
 4. 达到阈值时，检查方向冷却（`_last_alert_ts`），冷却期内同方向不触发
 5. 触发后记录方向冷却时间戳
 
-**问题**：持续单边行情中，第一次 alert 后冷却期内的后续波动被丢弃。
+**问题**：持续单边行情中（如 BTC 连续暴跌），第一次 alert 触发后进入冷却期，期间的后续波动被静默丢弃，Agent 错失反应窗口。
+
+### 设计选型
+
+触发后如何"重置"有两种方案：
+
+| 方案 | 描述 | 分析 |
+|------|------|------|
+| A. 清空 window | 触发后 `_ticks.clear()`，从零积累 | 语义清晰：每次 alert = "从上次 alert 后又波动了 N%"。连续暴跌时每跌 5% 通知一次 |
+| B. 重置基线价 | 保留 window 数据，但将当前价设为新参考点 | 实现更复杂，window 语义模糊（保留了旧数据但不用于计算） |
+
+**选择方案 A**。理由：
+- 语义最清晰，代码改动最小（一行 `_ticks.clear()`）
+- 连续暴跌场景：100k → 95k (alert) → 90.25k (alert) → 85.7k (alert)，每次 5% 通知
+- V 形反弹：跌 5% alert 后清空，反弹 5% 再 alert
+- 高阈值 (5%) + 长窗口 (1h) 天然防止区间震荡中刷 alert，不需要冷却机制
 
 ### 新逻辑
 
@@ -153,11 +214,39 @@ cooldown 的删除涉及整个调用链，需同步修改：
 
 ### 目标
 
-Agent 每次 cycle 可通过 tool 设定下次唤醒时间，未调用时回到兜底间隔。
+Agent 每次 cycle 可通过 tool 设定下次唤醒时间，未调用时回到兜底间隔。模拟真实交易员根据市况调整看盘频率的行为。
 
 ### 现状
 
-`Scheduler` 使用固定 `interval_seconds`，`_interruptible_sleep` 每次等待相同时长。Agent 无法控制唤醒节奏。
+`Scheduler` 构造时接收固定 `interval_seconds`，`start()` 循环中 `_interruptible_sleep` 每次等待相同时长。Agent 无法控制唤醒节奏。
+
+真实交易员会根据市况调整看盘频率：
+- 有仓位 + 波动加剧 → 频繁查看（几分钟一次）
+- 无仓位 + 市场平静 → 拉长间隔（半小时到一小时）
+- 刚止损出场 → 中等间隔观望
+
+当前固定轮询（如 15min）在市场平静时浪费 LLM token，在波动剧烈时又反应太慢。
+
+注意：fill event 和 price alert 已能通过 `scheduler.trigger()` 打断 sleep 立即唤醒 Agent。动态间隔只影响 scheduled trigger（无事件时的定时轮询）。
+
+### 设计选型
+
+间隔生效方式有两种：
+
+| 方案 | 描述 | 分析 |
+|------|------|------|
+| A. 一次性 | 只影响下一次唤醒，之后回到兜底 | 更安全：Agent 异常时自动回到默认。每次 cycle 都有机会重新判断 |
+| B. 持续生效 | 设了 5min 后一直用 5min | Agent 某次设了极端值后，需要主动调回。异常时可能卡在极端值 |
+
+**选择方案 A**。理由：Agent 不调用时自动回到用户配置的兜底间隔，不会卡在极端值。符合"每次 cycle 都是独立决策"的 Agent 行为模式。
+
+间隔范围：
+
+| 参数 | 值 | 理由 |
+|------|-----|------|
+| 最小值 | 1 min | 低于 1 分钟意义不大（LLM 调用+数据获取本身需要时间） |
+| 最大值 | `min(max(4 × scheduler_interval_min, 60), 180)` min | 随用户配置缩放，硬顶 3 小时 |
+| 兜底值 | wizard 配置的 `scheduler_interval_min` | 不引入额外参数，复用现有配置 |
 
 ### Scheduler 改造
 
@@ -254,7 +343,42 @@ async def set_next_wake(deps: TradingDeps, minutes: int, reasoning: str) -> str:
 
 ### 目标
 
-Agent 通过 tool 在关键价位设定提醒（如"BTC 跌破 58000 通知我"），触发后一次性消耗。
+Agent 通过 tool 在关键价位设定提醒（如"BTC 跌破 58000 通知我"），触发后一次性消耗。赋予 Agent 真实交易员在关键支撑/阻力位设价格提醒的能力。
+
+### 现状
+
+Agent 当前只能通过 `set_price_alert` tool 调整百分比波动告警的参数（阈值/窗口），无法设定"到某个具体价位提醒我"。真实交易员常用的操作是在关键技术位设提醒（如"BTC 跌破前低 58000 通知我"、"ETH 突破压力位 4200 通知我"），当前工具集不支持。
+
+### 与 R3（百分比波动告警）的关系
+
+| 维度 | R3 百分比告警 | R7 价位告警 |
+|------|-------------|------------|
+| 设定者 | 系统自动（用户配置参数） | Agent 主动设定 |
+| 触发条件 | 时间窗口内波动超阈值 | 价格到达具体价位 |
+| 持续性 | 持续监控，触发后重置继续 | 一次性，触发后消耗 |
+| 定位 | 安全网：捕获 Agent 没预见的异常波动 | 策略工具：体现 Agent 的技术分析判断 |
+
+两者互补，都通过 `scheduler.trigger("alert", context)` 唤醒 Agent，prompt 中根据 context 类型区分来源。
+
+### 设计选型
+
+**存储方式**：
+
+| 方案 | 分析 |
+|------|------|
+| A. 仅内存 | 重启后丢失，Agent 下次 cycle 重新设定。符合交易员行为：价格提醒基于当时分析，有时效性 |
+| B. 持久化到 DB | 重启后恢复。但旧的价位提醒可能已过时，强行恢复可能误导 Agent |
+
+**选择方案 A**。理由：价位 alert 基于 Agent 当时的市场分析（支撑/阻力位判断），有时效性。重启后市场格局可能已变，Agent 应重新分析后设定新的关注价位，而非恢复旧的。
+
+**回调路径**：
+
+| 方案 | 分析 |
+|------|------|
+| A. 复用 `on_alert` | 与百分比 alert 走同一回调，简单，Agent 通过 prompt 内容区分来源 |
+| B. 独立 `on_price_level_alert` | 分开注册，增加接口但分离更清晰 |
+
+**选择方案 A**。理由：真实世界里交易员收到提醒时不区分渠道（都是手机震一下），区分来源是在看到提醒内容时。同一回调 + 不同 prompt 格式即可。
 
 ### 新 Dataclass
 
