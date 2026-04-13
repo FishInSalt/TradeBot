@@ -77,6 +77,7 @@ def _retry(max_retries: int = 3, base_delay: float = 1.0):
 
 class OKXExchange(BaseExchange):
     def __init__(self, api_key: str, secret: str, password: str, symbol: str):
+        super().__init__()
         self._client = ccxt.okx(
             {
                 "apiKey": api_key,

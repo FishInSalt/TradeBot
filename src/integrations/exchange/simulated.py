@@ -46,6 +46,7 @@ class _PendingOrder:
 
 class SimulatedExchange(BaseExchange):
     def __init__(self, config: Any, db_engine: Any, session_id: str, symbol: str):
+        super().__init__()
         self._config = config
         self._db_engine = db_engine
         self._session_id = session_id
