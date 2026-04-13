@@ -163,10 +163,14 @@ _process_tick(ticker)
 
 ### 余额冻结机制
 
-市价单不再同步扣款，但需要防止超额下单（两笔市价单同时提交，余额只够一笔）：
+市价单不再同步扣款，但需要防止超额下单。**开仓和平仓的冻结逻辑不同**：
+
+#### 开仓市价单冻结
+
+开仓需要新保证金，从 `_free_usdt` 冻结 estimated_margin + fee：
 
 ```python
-# create_order("market") 时：
+# create_order("market") — 开仓：
 estimated_price = ticker.ask if side == "buy" else ticker.bid
 leverage = self._leverage.get(symbol, 1)
 estimated_margin = (estimated_price * amount) / leverage
@@ -180,10 +184,10 @@ self._free_usdt -= frozen
 self._frozen_usdt += frozen
 ```
 
-撮合时以实际成交价重新计算，差额退还或追扣：
+开仓撮合时以实际成交价重新计算，差额退还或追扣：
 
 ```python
-# _process_tick 撮合时：
+# _process_tick 开仓撮合时：
 actual_margin = (fill_price * amount) / leverage
 actual_fee = fill_price * amount * self._fee_rate
 actual_cost = actual_margin + actual_fee
@@ -192,6 +196,48 @@ diff = frozen - actual_cost
 self._frozen_usdt -= frozen
 self._used_usdt += actual_margin
 self._free_usdt += diff  # 正数=退还，负数=追扣
+```
+
+#### 平仓市价单冻结
+
+平仓不需要新保证金（保证金已在 `_used_usdt` 中），仅冻结预估手续费。若 `_free_usdt` 不足以覆盖手续费，允许从平仓收回的保证金中扣除（即冻结 0，fee 在撮合时从释放的保证金中扣）：
+
+```python
+# create_order("market") — 平仓：
+estimated_price = ticker.bid if pos.side == "long" else ticker.ask
+estimated_fee = estimated_price * amount * self._fee_rate
+frozen = min(estimated_fee, self._free_usdt)  # 尽量冻结 fee，不足则冻结可用余额
+
+self._free_usdt -= frozen
+self._frozen_usdt += frozen
+```
+
+平仓撮合时，fee 从释放的保证金中扣除：
+
+```python
+# _process_tick 平仓撮合时：
+pnl, fee, released_margin = self._close_position_core(symbol, pos.side, amount, fill_price)
+# close_position_core 已处理 _used_usdt 和 _free_usdt 的释放
+# 仅需解冻 frozen 部分
+self._frozen_usdt -= frozen
+self._free_usdt += frozen  # 退还冻结的 fee 预估（实际 fee 已在 _close_position_core 中扣除）
+```
+
+#### 为什么区分开仓/平仓
+
+全仓开仓后 `_free_usdt ≈ 0`、`_used_usdt ≈ 全部资金`。如果平仓也冻结 margin + fee，会因 `_free_usdt` 不足被拒绝，Agent 陷入无法平仓的死局。真实交易所中平仓不需要追加保证金，SimExchange 应保持一致。
+
+#### 判断开仓/平仓
+
+复用现有 `_execute_market_order` 中的判断逻辑（`simulated.py:190-194`）：
+
+```python
+def _is_close_order(self, symbol: str, side: str) -> bool:
+    pos = self._positions.get(symbol)
+    return (
+        (pos is not None and pos.side == "long" and side == "sell") or
+        (pos is not None and pos.side == "short" and side == "buy")
+    )
 ```
 
 ### _PendingOrder 扩展
@@ -276,6 +322,53 @@ async def _process_tick(self, ticker: Ticker) -> None:
 
 **为什么市价单在清算检查之前？** 真实交易所中市价单提交后会立即排入撮合队列，优先级高于条件单检查。先撮合市价单、更新仓位，再检查清算和条件单，符合真实顺序。
 
+### _cancel_orphaned_orders 改造
+
+当前逻辑（`simulated.py:342-347`）删除"symbol 无仓位"的所有 pending orders：
+
+```python
+def _cancel_orphaned_orders(self) -> None:
+    self._pending_orders = [
+        o for o in self._pending_orders
+        if o.symbol in self._positions
+    ]
+```
+
+**问题**：market/limit 开仓单在仓位建立**之前**存在。如果止损触发导致仓位关闭，会误删 pending market buy / pending limit buy，且冻结保证金不会被解冻——余额泄露。
+
+同理，如果仓位被清算，pending market close 也会成为孤儿单，需要解冻处理。
+
+**改造后**：
+
+```python
+def _cancel_orphaned_orders(self) -> None:
+    """Remove pending orders that lost their raison d'être.
+    - stop/take_profit: 仓位不存在则删（平仓单失去目标）
+    - market/limit: 保留（开仓单不依赖现有仓位）
+    - market close (平仓方向): 仓位不存在则删（仓位已被清算/止损平掉）
+    """
+    remaining = []
+    for o in self._pending_orders:
+        if o.order_type in ("stop", "take_profit"):
+            if o.symbol in self._positions:
+                remaining.append(o)
+            else:
+                # 条件单无冻结，直接丢弃
+                pass
+        elif o.order_type == "market" and self._is_close_order(o.symbol, o.side):
+            if o.symbol in self._positions:
+                remaining.append(o)
+            else:
+                # 平仓市价单的目标仓位已消失（被清算），解冻保证金
+                if o.frozen_margin > 0:
+                    self._frozen_usdt -= o.frozen_margin
+                    self._free_usdt += o.frozen_margin
+        else:
+            # market open / limit: 保留
+            remaining.append(o)
+    self._pending_orders = remaining
+```
+
 ### create_order 返回值变更
 
 | 字段 | 旧值 | 新值 |
@@ -348,7 +441,13 @@ def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool
 
 ```python
 def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool:
-    """Check for pending market orders. Default: False (real exchanges handle this server-side)."""
+    """Check for pending market orders. Default: False.
+
+    Real exchanges (OKX) don't track pending state client-side — orders are
+    submitted and confirmed asynchronously via WebSocket. This method exists
+    for SimExchange where we deliberately prevent duplicate orders from
+    LLM agents that can't visually confirm "order in progress" state.
+    """
     return False
 ```
 
@@ -391,7 +490,42 @@ if deps.exchange.has_pending_market_order(deps.symbol, side=order_side):
 
 限价单行为与条件单（stop/take_profit）类似：提交后 pending，价格到达时撮合。区别在于：
 - 条件单是**平仓**操作，必须有已有仓位
-- 限价单是**开仓**操作，不需要已有仓位
+- 限价单是**开仓**操作（首版），不需要已有仓位
+
+**首版限制：限价单仅用于开仓。** 真实交易中限价单也可用于平仓（如"在 70000 挂卖单止盈"），但当前 `take_profit` 条件单已覆盖大部分限价平仓场景（价格到达 → 市价成交）。两者语义差异（take_profit 保证成交但可能滑点 vs limit sell 锁定价格但可能不完全成交）在首版全量成交的简化下无实质区别。后续可扩展 limit 支持平仓方向。
+
+### 杠杆约束
+
+限价单的杠杆必须与现有仓位一致（若有仓位）。这与 `_open_market_order` 中的 leverage mismatch 检查（`simulated.py:219-224`）保持一致：
+
+- **无仓位时**：使用当前 `_leverage[symbol]` 设置
+- **有仓位时**：强制使用仓位杠杆，忽略 `_leverage[symbol]`。若 Agent 先 `set_leverage(20)` 再下限价单，但当前有 10x 仓位，限价单以 10x 执行
+
+`place_limit_order` tool 层**不调用 `set_leverage`**，直接读取当前值。若有仓位则使用仓位杠杆：
+
+```python
+# place_limit_order tool:
+positions = await deps.exchange.fetch_positions(deps.symbol)
+if positions:
+    leverage = positions[0].leverage  # 强制与仓位一致
+else:
+    leverage = ...  # 使用 tool 参数或当前设置
+```
+
+### 反向仓位校验
+
+引擎层必须拒绝与现有仓位方向相反的限价开仓单。例如已有 long 仓位时，`create_order("limit", side="sell")` 应被拒绝——SimExchange 不支持双向持仓（与 OKX 的 one-way mode 一致）：
+
+```python
+# create_order("limit") 中新增校验：
+pos = self._positions.get(symbol)
+position_side = "long" if side == "buy" else "short"
+if pos is not None and pos.side != position_side:
+    raise ValueError(
+        f"Cannot open {position_side} limit order: existing {pos.side} position. "
+        f"Close position first."
+    )
+```
 
 ### SimExchange create_order 扩展
 
@@ -550,12 +684,19 @@ async def place_limit_order(
     side: str,
     price: float,
     position_pct: float,
-    leverage: int,
     reasoning: str,
 ) -> str:
-    """Place a limit order at a specific price."""
+    """Place a limit order at a specific price. Leverage follows current position or setting."""
     if side not in ("long", "short"):
         return "side must be 'long' or 'short'"
+
+    # 杠杆：有仓位时强制与仓位一致，无仓位时使用当前设置
+    positions = await deps.exchange.fetch_positions(deps.symbol)
+    if positions:
+        leverage = positions[0].leverage
+    else:
+        balance_info = await deps.exchange.fetch_balance()
+        leverage = ...  # 从当前 exchange._leverage 获取，具体实现时通过 deps 传递
 
     balance = await deps.exchange.fetch_balance()
     usdt_amount = balance.free_usdt * (position_pct / 100.0)
@@ -569,7 +710,7 @@ async def place_limit_order(
     if not approved:
         return "Limit order rejected by human approval."
 
-    await deps.exchange.set_leverage(deps.symbol, leverage)
+    # 不调用 set_leverage — 引擎层 create_order("limit") 内部读取当前杠杆
     order_side = "buy" if side == "long" else "sell"
     order = await deps.exchange.create_order(
         symbol=deps.symbol, side=order_side, order_type="limit",
@@ -621,7 +762,51 @@ class SimOrder(Base):
     leverage: Mapped[int] = mapped_column(Integer, default=1)              # 新增
 ```
 
-`_restore_state` 恢复 pending 市价单/限价单时需读取这两个字段。
+`_restore_state` 恢复 pending 市价单/限价单时需读取这两个字段：
+
+```python
+# _restore_state 更新（line 618-628）：
+for o in result.scalars().all():
+    self._pending_orders.append(_PendingOrder(
+        id=o.order_id, symbol=o.symbol, side=o.side,
+        position_side=o.position_side, order_type=o.order_type,
+        amount=o.amount, trigger_price=o.trigger_price,
+        frozen_margin=o.frozen_margin,   # 新增
+        leverage=o.leverage,             # 新增
+    ))
+```
+
+`_persist_state` 中 upsert pending orders（line 730-741）需写入新字段：
+
+```python
+# 步骤 3d: upsert pending orders
+stmt = sqlite_insert(SimOrder).values(
+    # ... 现有字段 ...
+    frozen_margin=pending.frozen_margin,  # 新增
+    leverage=pending.leverage,            # 新增
+)
+```
+
+`_persist_state` 中 upsert balance（line 650-664）需写入 `frozen_usdt`：
+
+```python
+stmt = sqlite_insert(SimBalance).values(
+    session_id=self._session_id,
+    free_usdt=self._free_usdt,
+    used_usdt=self._used_usdt,
+    frozen_usdt=self._frozen_usdt,  # 新增
+    updated_at=now,
+)
+```
+
+`_restore_state` 恢复 balance 时需读取 `frozen_usdt`：
+
+```python
+if bal:
+    self._free_usdt = bal.free_usdt
+    self._used_usdt = bal.used_usdt
+    self._frozen_usdt = bal.frozen_usdt  # 新增
+```
 
 ### _frozen_usdt 新增属性
 
@@ -634,9 +819,19 @@ self._frozen_usdt: float = 0.0   # 市价单/限价单冻结的保证金
 `fetch_balance` 中的语义：
 - `free_usdt`：可用余额（已扣除冻结）
 - `used_usdt`：已占用保证金（已成交仓位）
-- `frozen_usdt`：挂单冻结（pending market/limit 订单）
+- `frozen_usdt`：挂单冻结（pending market/limit 订单），内部状态
 
-注：`_frozen_usdt` 仅为内部账务追踪，不影响 Balance dataclass（Agent 看到的 `free_usdt` 已经扣除冻结）。
+**`fetch_balance` 的 `total_usdt` 必须包含 `_frozen_usdt`**，否则资产总额凭空缩水：
+
+```python
+# 当前（错误，引入 frozen 后）:
+total_usdt = self._free_usdt + self._used_usdt + unrealized
+
+# 修正后:
+total_usdt = self._free_usdt + self._used_usdt + self._frozen_usdt + unrealized
+```
+
+Balance dataclass 本身不新增字段（Agent 不需要知道冻结细节），`_frozen_usdt` 仅影响 `total_usdt` 的计算。
 
 持久化：`_frozen_usdt` 需存入 `SimBalance` 表。
 
@@ -729,6 +924,13 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | `test_has_pending_market_order` | `has_pending_market_order` 查询逻辑 |
 | `test_pending_market_order_persisted_and_restored` | 市价单 pending 状态跨重启恢复 |
 | `test_limit_order_persisted_and_restored` | 限价单 pending 状态跨重启恢复 |
+| `test_close_market_order_minimal_freeze` | 全仓开仓后平仓不因余额不足被拒绝（平仓仅冻结 fee） |
+| `test_orphan_cleanup_preserves_market_open` | 止损平仓后，pending market/limit 开仓单不被误删 |
+| `test_orphan_cleanup_removes_market_close` | 清算后，pending market close 被清理且保证金解冻 |
+| `test_orphan_cleanup_unfreezes_margin` | 孤儿单清理时冻结保证金正确退还 |
+| `test_fetch_balance_total_includes_frozen` | `total_usdt = free + used + frozen + unrealized` |
+| `test_limit_order_reverse_position_rejected` | 有 long 仓位时，limit sell 被拒绝 |
+| `test_limit_order_leverage_matches_position` | 有仓位时限价单强制使用仓位杠杆 |
 
 ---
 
@@ -737,7 +939,7 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | 文件 | 改动 |
 |------|------|
 | **SimExchange 引擎** | |
-| `src/integrations/exchange/simulated.py` | 核心改造：`create_order` 市价单→pending；新增 `_frozen_usdt`；新增 limit 支持；`_process_tick` 新增市价/限价撮合；新增 `_execute_market_fill`/`_execute_limit_fill`/`_fill_market_open`/`_fill_market_close`；新增 `has_pending_market_order`；`cancel_order` 解冻保证金；`_PendingOrder` 扩展 `frozen_margin`/`leverage`；删除 `_pending_fills`/`drain_pending_fills`；`_restore_state`/`_persist_state` 适配新字段 |
+| `src/integrations/exchange/simulated.py` | 核心改造：`create_order` 市价单→pending（区分开仓/平仓冻结逻辑）；新增 `_frozen_usdt`；新增 limit 支持（含反向仓位校验）；`_process_tick` 新增市价/限价撮合；新增 `_execute_market_fill`/`_execute_limit_fill`/`_fill_market_open`/`_fill_market_close`/`_is_close_order`；新增 `has_pending_market_order`；`_cancel_orphaned_orders` 改造（保留 market/limit 开仓单，解冻孤儿单冻结保证金）；`cancel_order` 解冻保证金；`_PendingOrder` 扩展 `frozen_margin`/`leverage`；`fetch_balance` total 包含 frozen；删除 `_pending_fills`/`drain_pending_fills`；`_restore_state`/`_persist_state` 适配新字段 |
 | **Exchange 基类** | |
 | `src/integrations/exchange/base.py` | 删除 `drain_pending_fills`；新增 `has_pending_market_order` 默认实现 |
 | **OKX** | |
@@ -751,7 +953,7 @@ Agent tool 测试使用 **mock exchange**（`AsyncMock`），不走 SimExchange 
 | **Storage** | |
 | `src/storage/models.py` | `SimOrder` 新增 `frozen_margin`/`leverage`；`SimBalance` 新增 `frozen_usdt` |
 | **Tests** | |
-| `tests/test_simulated_exchange.py` | 15 个测试插入 tick 撮合步骤；2 个测试重写语义；新增 14 个测试 |
+| `tests/test_simulated_exchange.py` | 15 个测试插入 tick 撮合步骤；2 个测试重写语义；新增 23 个测试 |
 | `tests/test_exchange.py` | 删除 `test_base_exchange_drain_pending_fills` |
 
 ---
