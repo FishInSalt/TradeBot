@@ -344,6 +344,12 @@ async def run(
     interval = result.scheduler_interval_min * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
+    # R4: dynamic wake interval
+    max_wake = min(max(4 * result.scheduler_interval_min, 60), 180)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = max_wake
+    deps.set_next_wake_fn = lambda minutes: scheduler.set_next_interval(minutes * 60)
+
     def _create_fill_handler(sched, eng, sid):
         async def handler(event: FillEvent):
             try:

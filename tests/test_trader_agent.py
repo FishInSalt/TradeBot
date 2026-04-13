@@ -34,6 +34,7 @@ def test_trader_agent_has_all_tools():
     # 记忆类
     assert "save_memory" in tool_names
     assert "add_price_level_alert" in tool_names
+    assert "set_next_wake" in tool_names
     # 旧名称不存在
     assert "get_trade_history" not in tool_names
 

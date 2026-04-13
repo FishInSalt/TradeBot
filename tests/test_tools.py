@@ -311,3 +311,45 @@ async def test_add_price_level_alert_immediate_warning(deps):
     result = await add_price_level_alert(deps, 58000.0, "below", reasoning="support")
     assert "warning" in result.lower()
     assert "immediately" in result.lower()
+
+
+async def test_set_next_wake_success(deps):
+    """set_next_wake should call setter and return confirmation."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 10, reasoning="checking position")
+    deps.set_next_wake_fn.assert_called_once_with(10)
+    assert "10 min" in result
+
+
+async def test_set_next_wake_clamps_to_max(deps):
+    """Minutes above max should be clamped."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 120, reasoning="test")
+    deps.set_next_wake_fn.assert_called_once_with(60)
+    assert "clamped" in result.lower()
+    assert "60 min" in result
+
+
+async def test_set_next_wake_clamps_to_min(deps):
+    """Minutes below min should be clamped."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 0, reasoning="test")
+    deps.set_next_wake_fn.assert_called_once_with(1)
+    assert "clamped" in result.lower()
+
+
+async def test_set_next_wake_not_available(deps):
+    """When set_next_wake_fn is None, return not-available message."""
+    from src.agent.tools_execution import set_next_wake
+    deps.set_next_wake_fn = None
+    result = await set_next_wake(deps, 10, reasoning="test")
+    assert "not available" in result.lower()

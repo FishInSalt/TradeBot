@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic_ai import Agent, RunContext
@@ -24,6 +25,9 @@ class TradingDeps:
     db_engine: object | None = None  # AsyncEngine, typed as object to avoid circular import
     approval_gate: object | None = None  # ApprovalGate instance
     approval_enabled: bool = True
+    wake_min_minutes: int = 1
+    wake_max_minutes: int = 60
+    set_next_wake_fn: Callable[[int], None] | None = None
 
 
 def create_trader_agent(
@@ -144,6 +148,17 @@ def create_trader_agent(
         from src.agent.tools_execution import add_price_level_alert as _impl
 
         return await _impl(ctx.deps, price, direction, reasoning=reasoning)
+
+    @agent.tool
+    async def set_next_wake(
+        ctx: RunContext[TradingDeps],
+        minutes: int,
+        reasoning: str,
+    ) -> str:
+        """Set how soon you want to check the market again (minutes). One-shot: only affects the next wake, then reverts to default. Always provide reasoning."""
+        from src.agent.tools_execution import set_next_wake as _impl
+
+        return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
     # === Memory Tools ===
 

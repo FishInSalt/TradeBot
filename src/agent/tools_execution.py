@@ -231,3 +231,24 @@ async def add_price_level_alert(
             )
 
     return f"Price level alert set: {direction} {price:.2f} (id={alert_id})"
+
+
+async def set_next_wake(
+    deps: TradingDeps,
+    minutes: int,
+    reasoning: str,
+) -> str:
+    """Set the next wake interval (one-shot). Clamped to configured min/max."""
+    if deps.set_next_wake_fn is None:
+        return "Dynamic wake not available"
+    clamped = max(deps.wake_min_minutes, min(minutes, deps.wake_max_minutes))
+    deps.set_next_wake_fn(clamped)
+
+    await _record_action(
+        deps, action="set_next_wake",
+        reasoning=f"interval={clamped}min | {reasoning}",
+    )
+
+    if clamped != minutes:
+        return f"Next wake set to {clamped} min (clamped from {minutes}). Reason: {reasoning}"
+    return f"Next wake set to {clamped} min. Reason: {reasoning}"

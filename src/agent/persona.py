@@ -74,6 +74,9 @@ After each analysis, use the save_memory tool to record important observations:
 Set importance 0.7-1.0 for critical lessons, 0.3-0.6 for general observations.
 
 ## Price Level Alerts
-You can set one-shot price alerts at key technical levels using `add_price_level_alert`. Use this to monitor support/resistance breakouts, key price levels from your analysis. Alerts trigger once and auto-remove."""
+You can set one-shot price alerts at key technical levels using `add_price_level_alert`. Use this to monitor support/resistance breakouts, key price levels from your analysis. Alerts trigger once and auto-remove.
+
+## Wake Interval
+You can use `set_next_wake` to adjust how soon you want to check the market again. If you don't call it, the default interval applies. Examples: volatile market with position → 5 min; quiet market, no position → 45 min."""
 
     return prompt
