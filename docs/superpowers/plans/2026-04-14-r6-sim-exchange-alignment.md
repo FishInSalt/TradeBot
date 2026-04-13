@@ -520,12 +520,13 @@ async def test_frozen_extreme_clamp():
 
     assert ex._frozen_usdt == 0.0
     assert ex._free_usdt == 0.0  # clamped to zero
-    # total_usdt shrinks by the shortfall (~0.38 USDT slippage loss)
-    balance = await ex.fetch_balance()
-    assert balance.total_usdt < total_before
-    # used_usdt should equal actual_margin only (no phantom shortfall residue)
+    # used_usdt = actual_margin only (no phantom residue in _used_usdt)
     actual_margin = (97000.0 * 0.001) / 3
     assert ex._used_usdt == pytest.approx(actual_margin)
+    # NOTE: clamp inflates total_usdt by ~shortfall (phantom value from raising
+    # free from -0.38 to 0 without a corresponding deduction). This is the known
+    # trade-off of not tracking shortfall in _used_usdt (which would leak cumulatively).
+    # We do NOT assert total < total_before — it's actually slightly above.
 
 
 async def test_fill_market_close_position_gone():
@@ -628,8 +629,10 @@ Add where the deleted `_execute_market_order` was (around line 185, after `creat
         # DESIGN DEVIATION from D9: design doc uses `_used_usdt += shortfall`
         # ("追加保证金语义"), but _close_position_core only releases actual_margin,
         # so the shortfall would permanently inflate _used_usdt across trades.
-        # Instead: absorb shortfall as unrecoverable slippage cost (total_usdt shrinks
-        # by the shortfall amount). This only fires when price moves >0.2% in one tick.
+        # Instead: clamp free to 0 without adjusting used. Trade-off: total_usdt
+        # temporarily inflates by the shortfall (phantom value from clamping free
+        # upward without a corresponding deduction). This only fires when price
+        # moves >0.2% in one tick; the phantom is small (<0.5% of position size).
         if self._free_usdt < 0:
             self._free_usdt = 0.0
 
@@ -1299,7 +1302,7 @@ Remove the test that verifies `drain_pending_fills` returns empty list.
 - [ ] **Step 5: Run tests**
 
 Run: `python -m pytest tests/test_exchange.py tests/test_simulated_exchange.py -v`
-Expected: All PASS (some existing tests may still reference `_pending_fills` or `drain_pending_fills` — fix in Task 11)
+Expected: Tests not referencing `_pending_fills` or `drain_pending_fills` should PASS. Tests that still use these deleted APIs will FAIL — they are fixed in Task 11.
 
 - [ ] **Step 6: Commit**
 
@@ -1704,7 +1707,9 @@ async def test_open_position_allows_when_no_pending(deps):
 
 
 async def test_close_position_rejects_when_pending(deps):
-    """close_position returns rejection message when close order is pending."""
+    """close_position returns rejection message when close order is pending.
+    NOTE: depends on deps fixture returning a non-empty position list (test_tools.py:49-51),
+    otherwise close_position returns 'No positions' before reaching the pending check."""
     from src.agent.tools_execution import close_position
     deps.exchange.has_pending_market_order = MagicMock(return_value=True)
     result = await close_position(deps, reasoning="test")
@@ -2181,17 +2186,11 @@ Expected: FAIL
 
             self._remove_order_by_id(order_id)
             if self._db_engine:
-                from sqlalchemy import update
-                from src.storage.database import get_session
-                from src.storage.models import SimOrder
-                async with get_session(self._db_engine) as session:
-                    await session.execute(
-                        update(SimOrder)
-                        .where(SimOrder.order_id == order_id)
-                        .where(SimOrder.status == "open")
-                        .values(status="cancelled")
-                    )
-                    await session.commit()
+                # Use _persist_state (not inline SQL) to atomically persist both
+                # the order cancellation AND the updated balance (frozen_usdt/free_usdt).
+                # Inline SQL would only update order status — a crash before the next
+                # _persist_state call would leave frozen_usdt inflated in the DB.
+                await self._persist_state()
         logger.info(f"Order cancelled: {order_id}")
 ```
 
