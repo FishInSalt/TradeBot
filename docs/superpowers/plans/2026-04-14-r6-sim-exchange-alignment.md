@@ -12,7 +12,7 @@
 
 **Branch:** `feature/r6-sim-exchange-alignment`
 
-**PR structure:** 3 PRs (PR #1 core async, PR #2 duplicate guard, PR #3 limit orders). PR #2/#3 depend on PR #1 but are independent of each other.
+**PR structure:** All tasks commit to `feature/r6-sim-exchange-alignment`, merged as a single PR. The plan uses "PR #1/#2/#3" as logical groupings for readability — PR description will label commit ranges by group. Design doc's 3-PR split is for multi-reviewer scenarios; single-developer workflow doesn't benefit from the overhead.
 
 ---
 
@@ -451,6 +451,8 @@ Expected: PASS
 
 - [ ] **Step 5: Delete old synchronous market methods**
 
+> **WARNING**: After this step and until Task 6 is complete, the full test suite will fail. Market orders become pending but `_process_tick` doesn't call the new fill methods yet. Only run targeted tests (as specified in each step) during this window.
+
 The following methods are now dead code — replaced by the pending+fill pattern:
 - `_execute_market_order` (simulated.py:185-199)
 - `_open_market_order` (simulated.py:201-251)
@@ -649,6 +651,10 @@ Add after `_execute_market_order` method (or replace it — see step 5):
         actual_amount = min(order.amount, pos.contracts)
         fill_price = ticker.bid if pos.side == "long" else ticker.ask
         position_side = pos.side
+        # D15: pnl_cap=True is a BEHAVIOR CHANGE from the old _close_market_order (which used
+        # default pnl_cap=False). Async adds one tick of price exposure — the fill price may
+        # have moved past the liquidation price. pnl_cap prevents free_usdt from going negative
+        # in that scenario, matching the safety valve already used by _force_liquidate.
         pnl, fee, _ = self._close_position_core(
             order.symbol, pos.side, actual_amount, fill_price, pnl_cap=True,
         )
@@ -1646,37 +1652,54 @@ git commit -m "feat(r6): add has_pending_market_order to BaseExchange and SimExc
 - Modify: `src/agent/tools_execution.py:49-85` (open_position)
 - Modify: `src/agent/tools_execution.py:88-112` (close_position)
 
-- [ ] **Step 1: Write tests**
+- [ ] **Step 1: Write tool-layer tests in tests/test_tools.py**
+
+These test the actual `open_position`/`close_position` functions with a mock exchange that returns `has_pending_market_order=True`, verifying the tool returns a rejection message (not just that the query method works).
 
 ```python
-# tests/test_tools.py or tests/test_simulated_exchange.py — choose based on existing patterns
-async def test_duplicate_open_rejected():
-    """open_position rejects when a market order is already pending."""
-    ex = _make_exchange(initial_balance=100.0)
-    ex._leverage["BTC/USDT:USDT"] = 3
-    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
-    assert ex.has_pending_market_order("BTC/USDT:USDT") is True
+# tests/test_tools.py — add these tests
 
-    # Second open should be prevented at tool level
-    # (We test has_pending_market_order directly since tool tests use mocks)
+async def test_open_position_rejects_when_pending(deps):
+    """open_position returns rejection message when market order is pending."""
+    from src.agent.tools_execution import open_position
+    deps.exchange.has_pending_market_order = MagicMock(return_value=True)
+    result = await open_position(deps, "long", 20.0, 3, reasoning="test")
+    assert "already pending" in result.lower()
+    # create_order should NOT have been called
+    deps.exchange.create_order.assert_not_called()
 
 
-async def test_duplicate_close_rejected():
-    """close_position rejects when a close market order is already pending."""
-    from src.integrations.exchange.simulated import _Position
-    ex = _make_exchange(initial_balance=100.0)
-    ex._leverage["BTC/USDT:USDT"] = 3
-    ex._positions["BTC/USDT:USDT"] = _Position(
-        side="long", contracts=0.001, entry_price=95010.0, leverage=3,
-    )
-    margin = 95010.0 * 0.001 / 3
-    ex._used_usdt = margin
-    ex._free_usdt = 100.0 - margin
-    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
-    assert ex.has_pending_market_order("BTC/USDT:USDT", side="sell") is True
+async def test_open_position_allows_when_no_pending(deps):
+    """open_position proceeds normally when no market order is pending."""
+    from src.agent.tools_execution import open_position
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    result = await open_position(deps, "long", 20.0, 3, reasoning="test")
+    assert "submitted" in result.lower()
+
+
+async def test_close_position_rejects_when_pending(deps):
+    """close_position returns rejection message when close order is pending."""
+    from src.agent.tools_execution import close_position
+    deps.exchange.has_pending_market_order = MagicMock(return_value=True)
+    result = await close_position(deps, reasoning="test")
+    assert "already pending" in result.lower()
+    deps.exchange.create_order.assert_not_called()
+
+
+async def test_close_position_allows_when_no_pending(deps):
+    """close_position proceeds when no same-direction pending order."""
+    from src.agent.tools_execution import close_position
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    result = await close_position(deps, reasoning="test")
+    assert "submitted" in result.lower()
 ```
 
-- [ ] **Step 2: Add pending check to open_position**
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest tests/test_tools.py::test_open_position_rejects_when_pending tests/test_tools.py::test_close_position_rejects_when_pending -v`
+Expected: FAIL (has_pending_market_order not called yet in tool code)
+
+- [ ] **Step 3: Add pending check to open_position**
 
 In `tools_execution.py`, in `open_position`, after `if quantity <= 0:` check and before `_check_approval`, add:
 
@@ -1686,9 +1709,9 @@ In `tools_execution.py`, in `open_position`, after `if quantity <= 0:` check and
         return "A market order is already pending. Wait for fill confirmation before opening another position."
 ```
 
-- [ ] **Step 3: Add pending check to close_position**
+- [ ] **Step 4: Add pending check to close_position**
 
-In `tools_execution.py`, in `close_position`, after `if not positions:` check, add:
+In `tools_execution.py`, in `close_position`, after `if not positions:` check and before `_check_approval`, add:
 
 ```python
     order_side = "sell" if positions[0].side == "long" else "buy"
@@ -1696,15 +1719,15 @@ In `tools_execution.py`, in `close_position`, after `if not positions:` check, a
         return "A close order is already pending. Wait for fill confirmation."
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 5: Run all 4 tool tests**
 
-Run: `python -m pytest tests/test_simulated_exchange.py::test_duplicate_open_rejected tests/test_simulated_exchange.py::test_duplicate_close_rejected -v`
+Run: `python -m pytest tests/test_tools.py::test_open_position_rejects_when_pending tests/test_tools.py::test_open_position_allows_when_no_pending tests/test_tools.py::test_close_position_rejects_when_pending tests/test_tools.py::test_close_position_allows_when_no_pending -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/agent/tools_execution.py tests/test_simulated_exchange.py
+git add src/agent/tools_execution.py tests/test_tools.py
 git commit -m "feat(r6): add duplicate market order prevention to open_position/close_position"
 ```
 
