@@ -1549,7 +1549,9 @@ Replace the `get_market_data` registration:
     ) -> str:
         """Get market data: ticker, technical indicators, market context, and recent candles.
         candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis.
-        Default 50. symbol and timeframe default to session config."""
+        Default 50. Values above 50 may be capped by exchange API limits.
+        Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
+        symbol and timeframe default to session config."""
         from src.agent.tools_perception import get_market_data as _impl
 
         return await _impl(ctx.deps, symbol, timeframe, candle_count)
@@ -2449,28 +2451,29 @@ class MockDeps:
 
 - [ ] **Step 2: Update deps fixture**
 
-Add any missing mock attributes to the `deps` fixture. The key additions:
-- `d.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))`
-- `d.exchange.get_price_level_alerts = MagicMock(return_value=[])`
-
-Also add to fixture setup:
+Add missing mock attributes to the `deps` fixture:
 
 ```python
-    d.market_data.get_ticker.return_value = Ticker(
-        "BTC/USDT:USDT", 65000.0, 64999.0, 65001.0, 66000.0, 64000.0, 12345.6, 1712534400000
-    )
+    # New mocks needed by enhanced tools:
+    d.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))     # set_price_alert checks this
+    d.exchange.get_price_level_alerts = MagicMock(return_value=[])       # get_active_alerts
 ```
 
-(This is already there, but verify the fixture still works with the new tool implementations.)
+The existing `d.market_data.get_ticker.return_value` is already set — verify it still works.
 
-- [ ] **Step 3: Fix any broken existing tests**
+- [ ] **Step 3: Fix broken existing tests**
 
-The main tests likely to break:
-- `test_get_market_data` — old signature `get_market_data(deps, "BTC/USDT:USDT", "15m")` still works (positional args), but output format changed
-- `test_get_position` — output format changed
-- `test_get_account_balance` — output format changed
-- `test_set_stop_loss` / `test_set_take_profit` — output format changed
-- `test_set_price_alert` — now checks get_alert_params
+Tests that break and why (run suite, fix each based on error):
+
+| Test | Breaks because | Fix |
+|------|---------------|-----|
+| `test_get_market_data` | Output format changed (4-segment) + needs `get_ohlcv_dataframe` returning full DataFrame (now used for candle table) | Update assertion to `"=== Ticker" in result`; fixture already mocks DataFrame |
+| `test_get_position` | Output says "LONG" not "long"; needs `get_ticker` mock (liquidation distance) | Update assertion; `get_ticker` already mocked in fixture |
+| `test_get_account_balance` | Output has "Return" line | Update assertion |
+| `test_set_stop_loss` | Returns distance %, calls `get_ticker` | `get_ticker` already mocked |
+| `test_set_take_profit` | Same as set_stop_loss | Same fix |
+| `test_set_price_alert` | Now calls `get_alert_params` first | Already added mock in Step 2 |
+| `test_get_open_orders` | Calls `get_ticker` for distance % | `get_ticker` already mocked |
 
 Update these tests to match new output formats. For example:
 
