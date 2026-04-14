@@ -62,6 +62,10 @@ async def open_position(
     if quantity <= 0:
         return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
 
+    # Duplicate order prevention
+    if deps.exchange.has_pending_market_order(deps.symbol):
+        return "A market order is already pending. Wait for fill confirmation before opening another position."
+
     # Human approval gate
     action_desc = f"Open {side} {position_pct}% at ~{ticker.last:.2f}, {leverage}x leverage"
     approved = await _check_approval(deps, f"open_{side}", action_desc, position_pct, leverage)
@@ -90,6 +94,10 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if not positions:
         return "No positions to close."
+
+    order_side = "sell" if positions[0].side == "long" else "buy"
+    if deps.exchange.has_pending_market_order(deps.symbol, side=order_side):
+        return "A close order is already pending. Wait for fill confirmation."
 
     total_pnl = sum(p.unrealized_pnl for p in positions)
     action_desc = f"Close {len(positions)} position(s), PnL: {total_pnl:.2f}"
@@ -252,3 +260,49 @@ async def set_next_wake(
     if clamped != minutes:
         return f"Next wake set to {clamped} min (clamped from {minutes}). Reason: {reasoning}"
     return f"Next wake set to {clamped} min. Reason: {reasoning}"
+
+
+async def place_limit_order(
+    deps: TradingDeps,
+    side: str,
+    price: float,
+    position_pct: float,
+    leverage: int,
+    reasoning: str,
+) -> str:
+    """Place a limit order at a specific price."""
+    if side not in ("long", "short"):
+        return "side must be 'long' or 'short'"
+
+    # Leverage: match position if exists, else use specified
+    positions = await deps.exchange.fetch_positions(deps.symbol)
+    if positions:
+        actual_leverage = positions[0].leverage
+    else:
+        await deps.exchange.set_leverage(deps.symbol, leverage)
+        actual_leverage = leverage
+
+    balance = await deps.exchange.fetch_balance()
+    usdt_amount = balance.free_usdt * (position_pct / 100.0)
+    raw_quantity = (usdt_amount * actual_leverage) / price
+    quantity = deps.exchange.amount_to_precision(deps.symbol, raw_quantity)
+    if quantity <= 0:
+        return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
+
+    action_desc = f"Limit {side} {position_pct}% at {price:.2f}, {actual_leverage}x leverage"
+    approved = await _check_approval(deps, f"limit_{side}", action_desc, position_pct, actual_leverage)
+    if not approved:
+        return "Limit order rejected by human approval."
+
+    order_side = "buy" if side == "long" else "sell"
+    order = await deps.exchange.create_order(
+        symbol=deps.symbol, side=order_side, order_type="limit",
+        amount=quantity, price=price,
+    )
+
+    await _record_action(
+        deps, action="place_limit_order", order_id=order.id,
+        side=side, price=price, reasoning=reasoning,
+    )
+
+    return f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, {actual_leverage}x | ID: {order.id}"

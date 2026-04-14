@@ -55,13 +55,22 @@ async def get_memories(deps: TradingDeps) -> str:
 
 
 async def get_open_orders(deps: TradingDeps) -> str:
-    """Get pending conditional orders (stop loss, take profit)."""
+    """Get all pending orders (market awaiting fill, limit, stop loss, take profit)."""
     orders = await deps.exchange.fetch_open_orders(deps.symbol)
     if not orders:
         return "No pending orders."
     lines = ["Pending Orders:"]
     for o in orders:
-        lines.append(f"  {o.order_type.upper()} {o.side} {o.amount} @ {o.price:.2f} | ID: {o.id}")
+        if o.order_type == "market":
+            label = "[PENDING]"
+            price_str = "market price"
+        elif o.order_type == "limit":
+            label = "[LIMIT]"
+            price_str = f"@ {o.price:.2f}"
+        else:
+            label = f"[{o.order_type.upper()}]"
+            price_str = f"@ {o.price:.2f}"
+        lines.append(f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}")
     return "\n".join(lines)
 
 

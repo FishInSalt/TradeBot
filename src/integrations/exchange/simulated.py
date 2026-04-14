@@ -39,9 +39,11 @@ class _PendingOrder:
     symbol: str
     side: str
     position_side: str
-    order_type: str
+    order_type: str          # "market" | "limit" | "stop" | "take_profit"
     amount: float
-    trigger_price: float
+    trigger_price: float | None   # stop/TP: trigger price; limit: fill price; market: None
+    frozen_margin: float = 0.0    # market/limit: frozen margin+fee
+    leverage: int = 1             # leverage at order time (needed at fill time)
 
 
 class SimulatedExchange(BaseExchange):
@@ -57,6 +59,7 @@ class SimulatedExchange(BaseExchange):
         # Internal state (initialized in start() or directly for tests)
         self._free_usdt: float = 0.0
         self._used_usdt: float = 0.0
+        self._frozen_usdt: float = 0.0
         self._positions: dict[str, _Position] = {}
         self._pending_orders: list[_PendingOrder] = []
         self._leverage: dict[str, int] = {}
@@ -64,7 +67,6 @@ class SimulatedExchange(BaseExchange):
         self._running = False
         self._lock = asyncio.Lock()
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
-        self._pending_fills: list[FillEvent] = []
         self._error_count = 0
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
         self._alert_service: Any | None = None
@@ -72,6 +74,22 @@ class SimulatedExchange(BaseExchange):
     def _validate_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
             raise ValueError(f"Symbol mismatch: expected {self._symbol}, got {symbol}")
+
+    def _is_close_order(self, symbol: str, side: str) -> bool:
+        """Is this a close order? Uses current position state (call from create_order)."""
+        pos = self._positions.get(symbol)
+        return (
+            (pos is not None and pos.side == "long" and side == "sell") or
+            (pos is not None and pos.side == "short" and side == "buy")
+        )
+
+    @staticmethod
+    def _is_close_order_static(o: _PendingOrder) -> bool:
+        """Is this a close-direction order? Uses order fields only (no position state)."""
+        return (
+            (o.position_side == "long" and o.side == "sell") or
+            (o.position_side == "short" and o.side == "buy")
+        )
 
     def _calc_unrealized_pnl(self, pos: _Position) -> float:
         if self._latest_ticker is None:
@@ -112,7 +130,7 @@ class SimulatedExchange(BaseExchange):
             for pos in self._positions.values()
         )
         return Balance(
-            total_usdt=self._free_usdt + self._used_usdt + unrealized,
+            total_usdt=self._free_usdt + self._used_usdt + self._frozen_usdt + unrealized,
             free_usdt=max(0.0, self._free_usdt + unrealized),
             used_usdt=self._used_usdt,
         )
@@ -157,125 +175,198 @@ class SimulatedExchange(BaseExchange):
         self._validate_symbol(symbol)
         if amount <= 0:
             raise ValueError(f"amount must be > 0, got {amount}")
-        if order_type not in ("market", "stop", "take_profit"):
+        if order_type not in ("market", "limit", "stop", "take_profit"):
             raise ValueError(f"Unknown order_type: {order_type}")
-        if order_type in ("stop", "take_profit") and price is None:
+        if order_type in ("stop", "take_profit", "limit") and price is None:
             raise ValueError(f"price is required for {order_type} orders")
 
         async with self._lock:
             if order_type == "market":
-                order, position_side, pnl = self._execute_market_order(symbol, side, amount)
-                if self._db_engine:
-                    await self._persist_state(new_orders=[(order, position_side)])
-                self._pending_fills.append(FillEvent(
-                    order_id=order.id, symbol=symbol, side=order.side,
-                    position_side=position_side,
-                    trigger_reason="market",
-                    fill_price=order.price, amount=order.amount,
-                    fee=order.fee, pnl=pnl,
-                    timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
+                if self._latest_ticker is None:
+                    raise RuntimeError("No ticker data available")
+                ticker = self._latest_ticker
+                is_close = self._is_close_order(symbol, side)
+
+                if is_close:
+                    pos = self._positions[symbol]
+                    position_side = pos.side
+                    estimated_price = ticker.bid if pos.side == "long" else ticker.ask
+                    estimated_fee = estimated_price * amount * self._fee_rate
+                    frozen = min(estimated_fee, self._free_usdt)
+                else:
+                    position_side = "long" if side == "buy" else "short"
+                    estimated_price = ticker.ask if side == "buy" else ticker.bid
+                    leverage = self._leverage.get(symbol, 1)
+                    estimated_margin = (estimated_price * amount) / leverage
+                    estimated_fee = estimated_price * amount * self._fee_rate
+                    frozen = (estimated_margin + estimated_fee) * 1.002
+                    if self._free_usdt < frozen:
+                        raise ValueError(
+                            f"Insufficient balance: need {frozen:.2f}, have {self._free_usdt:.2f}"
+                        )
+
+                self._free_usdt -= frozen
+                self._frozen_usdt += frozen
+
+                order_id = str(uuid.uuid4())
+                leverage_val = self._leverage.get(symbol, 1)
+                self._pending_orders.append(_PendingOrder(
+                    id=order_id, symbol=symbol, side=side,
+                    position_side=position_side, order_type="market",
+                    amount=amount, trigger_price=None,
+                    frozen_margin=frozen, leverage=leverage_val,
                 ))
-                return order
+                if self._db_engine:
+                    await self._persist_state()
+                return Order(
+                    id=order_id, symbol=symbol, side=side, order_type="market",
+                    amount=amount, price=None, status="open",
+                )
+            elif order_type == "limit":
+                # Limit orders are open-only (first version — D4)
+                pos = self._positions.get(symbol)
+                position_side = "long" if side == "buy" else "short"
+                if pos is not None and pos.side != position_side:
+                    raise ValueError(
+                        f"Cannot open {position_side} limit order: "
+                        f"existing {pos.side} position. Close position first."
+                    )
+                # Use position leverage if position exists, else current setting
+                if pos is not None:
+                    leverage = pos.leverage
+                else:
+                    leverage = self._leverage.get(symbol, 1)
+                margin = (price * amount) / leverage
+                fee = price * amount * self._fee_rate
+                frozen = margin + fee
+                if self._free_usdt < frozen:
+                    raise ValueError(
+                        f"Insufficient balance: need {frozen:.2f}, have {self._free_usdt:.2f}"
+                    )
+                self._free_usdt -= frozen
+                self._frozen_usdt += frozen
+                order_id = str(uuid.uuid4())
+                self._pending_orders.append(_PendingOrder(
+                    id=order_id, symbol=symbol, side=side,
+                    position_side=position_side, order_type="limit",
+                    amount=amount, trigger_price=price,
+                    frozen_margin=frozen, leverage=leverage,
+                ))
+                if self._db_engine:
+                    await self._persist_state()
+                return Order(
+                    id=order_id, symbol=symbol, side=side,
+                    order_type="limit", amount=amount, price=price, status="open",
+                )
             else:
                 order = self._create_conditional_order(symbol, side, order_type, amount, price)  # type: ignore[arg-type]
                 if self._db_engine:
-                    await self._persist_state()  # persist new pending order
+                    await self._persist_state()
                 return order
 
-    def _execute_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str, float | None]:
-        """Returns (Order, position_side, pnl) tuple."""
-        if self._latest_ticker is None:
-            raise RuntimeError("No ticker data available")
+    def _fill_market_open(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Fill a pending market open order. Returns None if cancelled due to conflict."""
+        pos = self._positions.get(order.symbol)
+        position_side = "long" if order.side == "buy" else "short"
 
-        pos = self._positions.get(symbol)
-        is_close = (
-            (pos is not None and pos.side == "long" and side == "sell") or
-            (pos is not None and pos.side == "short" and side == "buy")
-        )
+        # Defensive: reverse position conflict
+        if pos is not None and pos.side != position_side:
+            logger.warning(f"Market open {order.id} cancelled: conflicts with {pos.side} position")
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
 
-        if is_close:
-            return self._close_market_order(symbol, side, amount, pos)  # type: ignore[arg-type]
-        else:
-            return self._open_market_order(symbol, side, amount)
-
-    def _open_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str, None]:
-        ticker = self._latest_ticker
-        if ticker is None:
-            raise RuntimeError("No ticker data available")
-        fill_price = ticker.ask if side == "buy" else ticker.bid
-        leverage = self._leverage.get(symbol, 1)
-        margin = (fill_price * amount) / leverage
-        fee = fill_price * amount * self._fee_rate
-        required = margin + fee
-
-        if self._free_usdt < required:
-            raise ValueError(
-                f"Insufficient balance: need {required:.2f}, have {self._free_usdt:.2f}"
+        # Defensive: leverage mismatch
+        if pos is not None and pos.leverage != order.leverage:
+            logger.warning(
+                f"Market open {order.id} cancelled: leverage mismatch "
+                f"(order={order.leverage}x, position={pos.leverage}x)"
             )
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
 
-        # Check leverage consistency for add-to-position
-        pos = self._positions.get(symbol)
-        position_side = "long" if side == "buy" else "short"
-        if pos is not None:
-            if pos.leverage != leverage:
-                raise ValueError(
-                    f"Leverage mismatch: position has {pos.leverage}x, "
-                    f"current is {leverage}x. Close position first."
-                )
-            position_side = pos.side  # add-to-position: same direction
-            # Merge position
-            new_contracts = pos.contracts + amount
-            new_entry = (pos.entry_price * pos.contracts + fill_price * amount) / new_contracts
+        fill_price = ticker.ask if order.side == "buy" else ticker.bid
+        leverage = order.leverage
+        actual_margin = (fill_price * order.amount) / leverage
+        actual_fee = fill_price * order.amount * self._fee_rate
+        actual_cost = actual_margin + actual_fee
+
+        # Unfreeze → occupy
+        diff = order.frozen_margin - actual_cost
+        self._frozen_usdt -= order.frozen_margin
+        self._used_usdt += actual_margin
+        self._free_usdt += diff
+        if self._free_usdt < 0:
+            logger.warning(
+                f"Market open {order.id}: free_usdt shortfall {-self._free_usdt:.4f} clamped to 0"
+            )
+            self._free_usdt = 0.0
+
+        self._free_usdt = round(self._free_usdt, 8)
+        self._used_usdt = round(self._used_usdt, 8)
+
+        # Create or merge position
+        if pos is not None and pos.side == position_side:
+            new_contracts = pos.contracts + order.amount
+            new_entry = (pos.entry_price * pos.contracts + fill_price * order.amount) / new_contracts
             pos.contracts = new_contracts
             pos.entry_price = new_entry
             pos.updated_at = datetime.now(timezone.utc)
         else:
-            self._positions[symbol] = _Position(
-                side=position_side,
-                contracts=amount,
-                entry_price=fill_price,
-                leverage=leverage,
+            self._positions[order.symbol] = _Position(
+                side=position_side, contracts=order.amount,
+                entry_price=fill_price, leverage=leverage,
             )
+        self._leverage[order.symbol] = leverage
 
-        self._free_usdt -= required
-        self._used_usdt += margin
-        self._free_usdt = round(self._free_usdt, 8)
-        self._used_usdt = round(self._used_usdt, 8)
-
-        order_id = str(uuid.uuid4())
-        order = Order(
-            id=order_id, symbol=symbol, side=side, order_type="market",
-            amount=amount, price=fill_price, status="closed", fee=fee,
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        logger.info(f"Market open filled: {order.side} {order.amount} {order.symbol} @ {fill_price:.2f}")
+        return FillEvent(
+            order_id=order.id, symbol=order.symbol, side=order.side,
+            position_side=position_side, trigger_reason="market",
+            fill_price=fill_price, amount=order.amount, fee=actual_fee,
+            pnl=None, timestamp=now_ms,
         )
-        logger.info(f"Market order filled: {side} {amount} {symbol} @ {fill_price:.2f}, fee={fee:.4f}")
-        return order, position_side, None
 
-    def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> tuple[Order, str, float]:
-        ticker = self._latest_ticker
-        if ticker is None:
-            raise RuntimeError("No ticker data available")
-        # Clamp amount
-        actual_amount = min(amount, pos.contracts)
-        position_side = pos.side  # record BEFORE close (pos may be deleted)
+    def _fill_market_close(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Fill a pending market close order. Returns None if position already gone."""
+        pos = self._positions.get(order.symbol)
+        if pos is None:
+            logger.warning(f"Market close {order.id} cancelled: position already closed")
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        actual_amount = min(order.amount, pos.contracts)
         fill_price = ticker.bid if pos.side == "long" else ticker.ask
-        pnl, fee, released_margin = self._close_position_core(
-            symbol, pos.side, actual_amount, fill_price,
+        position_side = pos.side
+        pnl, fee, _ = self._close_position_core(
+            order.symbol, pos.side, actual_amount, fill_price, pnl_cap=True,
         )
 
-        # Cancel orphaned orders if position fully closed
-        if symbol not in self._positions:
-            self._cancel_orphaned_orders()
+        # Unfreeze (close doesn't occupy new margin — it's released by _close_position_core)
+        self._frozen_usdt -= order.frozen_margin
+        self._free_usdt += order.frozen_margin
 
-        order_id = str(uuid.uuid4())
-        order = Order(
-            id=order_id, symbol=symbol, side=side, order_type="market",
-            amount=actual_amount, price=fill_price, status="closed", fee=fee,
-        )
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         logger.info(
-            f"Market close filled: {side} {actual_amount} {symbol} @ {fill_price:.2f}, "
+            f"Market close filled: {order.side} {actual_amount} {order.symbol} @ {fill_price:.2f}, "
             f"pnl={pnl:.4f}, fee={fee:.4f}"
         )
-        return order, position_side, pnl
+        return FillEvent(
+            order_id=order.id, symbol=order.symbol, side=order.side,
+            position_side=position_side, trigger_reason="market",
+            fill_price=fill_price, amount=actual_amount, fee=fee,
+            pnl=pnl, timestamp=now_ms,
+        )
+
+    def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Route pending market order to open or close fill. Uses static direction check."""
+        if self._is_close_order_static(order):
+            return self._fill_market_close(order, ticker)
+        else:
+            return self._fill_market_open(order, ticker)
 
     def _close_position_core(
         self, symbol: str, position_side: str, amount: float, fill_price: float,
@@ -340,11 +431,29 @@ class SimulatedExchange(BaseExchange):
         )
 
     def _cancel_orphaned_orders(self) -> None:
-        """Remove pending orders for symbols that no longer have positions."""
-        self._pending_orders = [
-            o for o in self._pending_orders
-            if o.symbol in self._positions
-        ]
+        """Remove pending orders that lost their target.
+        - stop/take_profit: remove if no position (close orders need a target)
+        - market close direction: remove if no position + unfreeze margin
+        - market open / limit: always keep (they create positions)
+        """
+        remaining = []
+        for o in self._pending_orders:
+            if o.order_type in ("stop", "take_profit"):
+                if o.symbol in self._positions:
+                    remaining.append(o)
+                # else: conditional orders have no frozen margin, just drop
+            elif o.order_type == "market" and self._is_close_order_static(o):
+                if o.symbol in self._positions:
+                    remaining.append(o)
+                else:
+                    # Close target gone (liquidated), unfreeze
+                    if o.frozen_margin > 0:
+                        self._frozen_usdt -= o.frozen_margin
+                        self._free_usdt += o.frozen_margin
+            else:
+                # market open / limit: keep
+                remaining.append(o)
+        self._pending_orders = remaining
 
     def _remove_order_by_id(self, order_id: str) -> None:
         self._pending_orders = [o for o in self._pending_orders if o.id != order_id]
@@ -355,7 +464,12 @@ class SimulatedExchange(BaseExchange):
     # --- Matching engine ---
 
     def _should_trigger(self, order: _PendingOrder, ticker: Ticker) -> bool:
-        if order.order_type == "stop":
+        if order.order_type == "limit":
+            if order.side == "buy":
+                return ticker.ask <= order.trigger_price
+            else:
+                return ticker.bid >= order.trigger_price
+        elif order.order_type == "stop":
             if order.position_side == "long":
                 return ticker.bid <= order.trigger_price
             else:
@@ -383,6 +497,64 @@ class SimulatedExchange(BaseExchange):
             timestamp=now_ms,
         )
 
+    def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Fill a limit order. Returns None if cancelled due to conflict (unfreezes margin)."""
+        pos = self._positions.get(order.symbol)
+        position_side = "long" if order.side == "buy" else "short"
+
+        # Check 1: reverse position conflict
+        if pos is not None and pos.side != position_side:
+            logger.warning(f"Limit order {order.id} cancelled: conflicts with {pos.side} position")
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        # Check 2: leverage mismatch
+        if pos is not None and pos.leverage != order.leverage:
+            logger.warning(
+                f"Limit order {order.id} cancelled: leverage mismatch "
+                f"(order={order.leverage}x, position={pos.leverage}x)"
+            )
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        fill_price = order.trigger_price  # limit fills at specified price
+        leverage = order.leverage
+        actual_margin = (fill_price * order.amount) / leverage
+        actual_fee = fill_price * order.amount * self._fee_rate
+        actual_cost = actual_margin + actual_fee
+
+        # Unfreeze → occupy
+        self._frozen_usdt -= order.frozen_margin
+        self._used_usdt += actual_margin
+        self._free_usdt += (order.frozen_margin - actual_cost)
+        self._free_usdt = round(self._free_usdt, 8)
+        self._used_usdt = round(self._used_usdt, 8)
+
+        # Create or merge position
+        if pos is not None and pos.side == position_side:
+            new_contracts = pos.contracts + order.amount
+            new_entry = (pos.entry_price * pos.contracts + fill_price * order.amount) / new_contracts
+            pos.contracts = new_contracts
+            pos.entry_price = new_entry
+            pos.updated_at = datetime.now(timezone.utc)
+        else:
+            self._positions[order.symbol] = _Position(
+                side=position_side, contracts=order.amount,
+                entry_price=fill_price, leverage=leverage,
+            )
+        self._leverage[order.symbol] = leverage
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        logger.info(f"Limit order filled: {order.side} {order.amount} {order.symbol} @ {fill_price:.2f}")
+        return FillEvent(
+            order_id=order.id, symbol=order.symbol, side=order.side,
+            position_side=position_side, trigger_reason="limit",
+            fill_price=fill_price, amount=order.amount, fee=actual_fee,
+            pnl=None, timestamp=now_ms,
+        )
+
     def _force_liquidate(self, pos: _Position, symbol: str, price: float) -> FillEvent:
         contracts = pos.contracts  # capture before close deletes pos
         pnl, fee, _ = self._close_position_core(
@@ -401,17 +573,28 @@ class SimulatedExchange(BaseExchange):
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
-        """Process a single tick -- check liquidations, conditional orders, and price alerts."""
+        """Process a single tick -- match market orders, check liquidations, conditional orders, alerts."""
         self._latest_ticker = ticker
         self._latest_price = ticker.last
 
         triggered: list[FillEvent] = []
         filled_order_ids: list[str] = []
+        cancelled_order_ids: list[str] = []
         new_orders: list[tuple[Order, str]] = []
         alert_info = None
         level_alerts = []
 
         async with self._lock:
+            # 0. Match pending market orders (new — before liquidation)
+            market_orders = [o for o in self._pending_orders if o.order_type == "market"]
+            for order in market_orders:
+                fill = self._execute_market_fill(order, ticker)
+                if fill is None:
+                    cancelled_order_ids.append(order.id)
+                    continue
+                filled_order_ids.append(order.id)
+                triggered.append(fill)
+
             # 1. Liquidation check (must be before conditional orders)
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
@@ -434,31 +617,45 @@ class SimulatedExchange(BaseExchange):
                         status="closed", fee=fill.fee,
                     ), fill.position_side))
 
-            # 2. Conditional order check
+            # 2. Conditional + limit order check
+            processed = set(filled_order_ids + cancelled_order_ids)
             for order in list(self._pending_orders):
+                if order.id in processed:
+                    continue
                 if self._should_trigger(order, ticker):
-                    if not self._has_position(order.symbol):
+                    if order.order_type in ("stop", "take_profit"):
+                        if not self._has_position(order.symbol):
+                            continue
+                        fill = self._execute_fill(order, ticker)
+                    elif order.order_type == "limit":
+                        fill = self._execute_limit_fill(order, ticker)
+                        if fill is None:
+                            cancelled_order_ids.append(order.id)
+                            continue
+                    else:
                         continue
-                    fill = self._execute_fill(order, ticker)
                     triggered.append(fill)
                     filled_order_ids.append(order.id)
 
-            if triggered:
-                for fill in triggered:
-                    self._remove_order_by_id(fill.order_id)
+            # 3. Unified cleanup
+            all_resolved = filled_order_ids + cancelled_order_ids
+            if triggered or all_resolved:
+                for oid in all_resolved:
+                    self._remove_order_by_id(oid)
                 self._cancel_orphaned_orders()
                 if self._db_engine:
                     await self._persist_state(
                         new_orders=new_orders,
                         filled_order_ids=filled_order_ids,
+                        cancelled_order_ids=cancelled_order_ids,
                         fill_events=triggered,
                     )
 
-            # 3. Price alert check (inside lock for consistent ticker reading)
+            # 4. Price alert check
             if self._alert_service:
                 alert_info = self._alert_service.check(ticker.last, ticker.timestamp)
 
-            # 4. Price level alert check (R7)
+            # 5. Price level alert check (R7)
             level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
 
         # Notify outside lock
@@ -466,7 +663,6 @@ class SimulatedExchange(BaseExchange):
             if self._fill_callback:
                 await self._fill_callback(fill)
 
-        # Alert callback outside lock
         if alert_info and self._alert_callback:
             await self._alert_callback(alert_info)
 
@@ -541,22 +737,25 @@ class SimulatedExchange(BaseExchange):
     async def cancel_order(self, order_id: str, symbol: str) -> None:
         self._validate_symbol(symbol)
         async with self._lock:
-            found = any(o.id == order_id for o in self._pending_orders)
-            if not found:
+            order = None
+            for o in self._pending_orders:
+                if o.id == order_id:
+                    order = o
+                    break
+            if order is None:
                 raise ValueError(f"Order not found: {order_id}")
+
+            if order.order_type == "market":
+                raise ValueError("Cannot cancel market orders")
+
+            # Unfreeze margin (limit orders have frozen margin)
+            if order.frozen_margin > 0:
+                self._frozen_usdt -= order.frozen_margin
+                self._free_usdt += order.frozen_margin
+
             self._remove_order_by_id(order_id)
             if self._db_engine:
-                from sqlalchemy import update
-                from src.storage.database import get_session
-                from src.storage.models import SimOrder
-                async with get_session(self._db_engine) as session:
-                    await session.execute(
-                        update(SimOrder)
-                        .where(SimOrder.order_id == order_id)
-                        .where(SimOrder.status == "open")
-                        .values(status="cancelled")
-                    )
-                    await session.commit()
+                await self._persist_state()
         logger.info(f"Order cancelled: {order_id}")
 
     # --- Fill callback ---
@@ -574,16 +773,20 @@ class SimulatedExchange(BaseExchange):
         if self._alert_service:
             self._alert_service.update_params(threshold_pct, window_minutes)
 
-    def drain_pending_fills(self) -> list[FillEvent]:
-        fills = self._pending_fills.copy()
-        self._pending_fills.clear()
-        return fills
+    def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool:
+        """Check for pending market orders matching symbol and optional side."""
+        for o in self._pending_orders:
+            if o.order_type == "market" and o.symbol == symbol:
+                if side is None or o.side == side:
+                    return True
+        return False
 
     # --- Persistence ---
 
     async def _init_state(self, initial_balance: float) -> None:
         self._free_usdt = initial_balance
         self._used_usdt = 0.0
+        self._frozen_usdt = 0.0
         self._positions = {}
         self._pending_orders = []
         self._leverage = {}
@@ -601,6 +804,7 @@ class SimulatedExchange(BaseExchange):
             if bal:
                 self._free_usdt = bal.free_usdt
                 self._used_usdt = bal.used_usdt
+                self._frozen_usdt = bal.frozen_usdt
             else:
                 return
 
@@ -625,10 +829,12 @@ class SimulatedExchange(BaseExchange):
                     id=o.order_id, symbol=o.symbol, side=o.side,
                     position_side=o.position_side, order_type=o.order_type,
                     amount=o.amount, trigger_price=o.trigger_price,
+                    frozen_margin=o.frozen_margin,
+                    leverage=o.leverage,
                 ))
 
         logger.info(
-            f"Restored state: balance={self._free_usdt:.2f}/{self._used_usdt:.2f}, "
+            f"Restored state: balance={self._free_usdt:.2f}/{self._used_usdt:.2f}/{self._frozen_usdt:.2f}, "
             f"positions={len(self._positions)}, pending_orders={len(self._pending_orders)}"
         )
 
@@ -636,6 +842,7 @@ class SimulatedExchange(BaseExchange):
         self,
         new_orders: list[tuple[Order, str]] | None = None,
         filled_order_ids: list[str] | None = None,
+        cancelled_order_ids: list[str] | None = None,  # NEW
         fill_events: list[FillEvent] | None = None,
     ) -> None:
         from sqlalchemy import delete, update
@@ -646,11 +853,12 @@ class SimulatedExchange(BaseExchange):
         now = datetime.now(timezone.utc)
 
         async with get_session(self._db_engine) as session:
-            # 1. Upsert balance
+            # 1. Upsert balance (includes frozen_usdt)
             stmt = sqlite_insert(SimBalance).values(
                 session_id=self._session_id,
                 free_usdt=self._free_usdt,
                 used_usdt=self._used_usdt,
+                frozen_usdt=self._frozen_usdt,
                 updated_at=now,
             )
             stmt = stmt.on_conflict_do_update(
@@ -658,6 +866,7 @@ class SimulatedExchange(BaseExchange):
                 set_={
                     "free_usdt": stmt.excluded.free_usdt,
                     "used_usdt": stmt.excluded.used_usdt,
+                    "frozen_usdt": stmt.excluded.frozen_usdt,
                     "updated_at": now,
                 },
             )
@@ -692,10 +901,20 @@ class SimulatedExchange(BaseExchange):
                             )
                         )
 
+            # 3a-bis. Update cancelled orders → "cancelled"
+            if cancelled_order_ids:
+                for oid in cancelled_order_ids:
+                    await session.execute(
+                        update(SimOrder)
+                        .where(SimOrder.order_id == oid)
+                        .values(status="cancelled")
+                    )
+
             # 3b. Cancel orphaned pending orders in DB
             pending_ids = [o.id for o in self._pending_orders]
             filled_ids = filled_order_ids or []
-            exclude_ids = pending_ids + filled_ids
+            cancelled_ids = cancelled_order_ids or []
+            exclude_ids = pending_ids + filled_ids + cancelled_ids
             if exclude_ids:
                 await session.execute(
                     update(SimOrder)
@@ -727,7 +946,7 @@ class SimulatedExchange(BaseExchange):
                         filled_at=now if order.status == "closed" else None,
                     ))
 
-            # 3d. Upsert pending conditional orders
+            # 3d. Upsert pending orders (includes frozen_margin/leverage)
             for pending in self._pending_orders:
                 stmt = sqlite_insert(SimOrder).values(
                     session_id=self._session_id, order_id=pending.id,
@@ -735,6 +954,8 @@ class SimulatedExchange(BaseExchange):
                     position_side=pending.position_side,
                     order_type=pending.order_type, amount=pending.amount,
                     trigger_price=pending.trigger_price,
+                    frozen_margin=pending.frozen_margin,
+                    leverage=pending.leverage,
                     status="open", created_at=now,
                 )
                 stmt = stmt.on_conflict_do_nothing(index_elements=["order_id"])
