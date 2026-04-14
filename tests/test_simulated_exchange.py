@@ -1215,3 +1215,52 @@ async def test_has_pending_market_order():
         amount=0.001, trigger_price=90000.0,
     )]
     assert ex.has_pending_market_order("BTC/USDT:USDT") is False
+
+
+async def test_limit_order_creation():
+    """create_order("limit") returns status="open", freezes margin."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=90000.0)
+    assert order.status == "open"
+    assert order.order_type == "limit"
+    assert order.price == 90000.0
+    # Check frozen: (90000 * 0.001 / 3) + (90000 * 0.001 * 0.0005) = 30 + 0.045 = 30.045
+    expected_frozen = (90000.0 * 0.001 / 3) + (90000.0 * 0.001 * 0.0005)
+    assert ex._frozen_usdt == pytest.approx(expected_frozen)
+    assert ex._free_usdt == pytest.approx(100.0 - expected_frozen)
+
+
+async def test_limit_order_requires_price():
+    """Limit order without price raises ValueError."""
+    ex = _make_exchange()
+    with pytest.raises(ValueError, match="price is required"):
+        await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001)
+
+
+async def test_limit_order_reverse_position_rejected():
+    """Limit sell rejected when long position exists (one-way mode)."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange()
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.001, entry_price=95000.0, leverage=3,
+    )
+    with pytest.raises(ValueError, match="Cannot open short limit order"):
+        await ex.create_order("BTC/USDT:USDT", "sell", "limit", 0.001, price=100000.0)
+
+
+async def test_limit_order_leverage_matches_position():
+    """Limit order uses position leverage when position exists."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10  # different from position
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.001, entry_price=95000.0, leverage=3,
+    )
+    ex._used_usdt = 95000.0 * 0.001 / 3
+    ex._free_usdt = 100.0 - ex._used_usdt
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=90000.0)
+    # Should use position leverage (3), not _leverage setting (10)
+    # frozen = (90000 * 0.001 / 3) + (90000 * 0.001 * 0.0005)
+    expected_frozen = (90000.0 * 0.001 / 3) + (90000.0 * 0.001 * 0.0005)
+    assert ex._frozen_usdt == pytest.approx(expected_frozen)

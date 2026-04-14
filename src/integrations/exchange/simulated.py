@@ -175,9 +175,9 @@ class SimulatedExchange(BaseExchange):
         self._validate_symbol(symbol)
         if amount <= 0:
             raise ValueError(f"amount must be > 0, got {amount}")
-        if order_type not in ("market", "stop", "take_profit"):
+        if order_type not in ("market", "limit", "stop", "take_profit"):
             raise ValueError(f"Unknown order_type: {order_type}")
-        if order_type in ("stop", "take_profit") and price is None:
+        if order_type in ("stop", "take_profit", "limit") and price is None:
             raise ValueError(f"price is required for {order_type} orders")
 
         async with self._lock:
@@ -221,6 +221,42 @@ class SimulatedExchange(BaseExchange):
                 return Order(
                     id=order_id, symbol=symbol, side=side, order_type="market",
                     amount=amount, price=None, status="open",
+                )
+            elif order_type == "limit":
+                # Limit orders are open-only (first version — D4)
+                pos = self._positions.get(symbol)
+                position_side = "long" if side == "buy" else "short"
+                if pos is not None and pos.side != position_side:
+                    raise ValueError(
+                        f"Cannot open {position_side} limit order: "
+                        f"existing {pos.side} position. Close position first."
+                    )
+                # Use position leverage if position exists, else current setting
+                if pos is not None:
+                    leverage = pos.leverage
+                else:
+                    leverage = self._leverage.get(symbol, 1)
+                margin = (price * amount) / leverage
+                fee = price * amount * self._fee_rate
+                frozen = margin + fee
+                if self._free_usdt < frozen:
+                    raise ValueError(
+                        f"Insufficient balance: need {frozen:.2f}, have {self._free_usdt:.2f}"
+                    )
+                self._free_usdt -= frozen
+                self._frozen_usdt += frozen
+                order_id = str(uuid.uuid4())
+                self._pending_orders.append(_PendingOrder(
+                    id=order_id, symbol=symbol, side=side,
+                    position_side=position_side, order_type="limit",
+                    amount=amount, trigger_price=price,
+                    frozen_margin=frozen, leverage=leverage,
+                ))
+                if self._db_engine:
+                    await self._persist_state()
+                return Order(
+                    id=order_id, symbol=symbol, side=side,
+                    order_type="limit", amount=amount, price=price, status="open",
                 )
             else:
                 order = self._create_conditional_order(symbol, side, order_type, amount, price)  # type: ignore[arg-type]
