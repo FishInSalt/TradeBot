@@ -160,12 +160,16 @@ Time      Open     High     Low      Close    Vol
 - Volume ratio: 使用倒数第 2 根 K 线（最近一根已完成的）的 volume / SMA(volume, 20)。最后一根 K 线可能正在形成中，volume 偏低会导致误判。<0.7x low, 0.7-1.3x normal, >1.3x above normal
 
 **职责划分**：
-- `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责 Technical Indicators 段的格式化（定性标注）。
-- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段、**Market Context 段整体**（ATR 和 volume_ratio 从 indicators dict 读取并格式化，candle range 从展示的 K 线切片计算）、K 线表段的格式化。最终拼接：Ticker + Technical Indicators（来自 format_for_llm）+ Market Context + K 线表。K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
+- `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责 Technical Indicators 的指标行格式化（定性标注），不含段标题，不含 Market Context。Volume ratio 计算需加除零保护（SMA=0 时返回 None）。
+- `tools_perception.py` 的 `get_market_data`：负责所有段落的拼接和段标题。具体职责：
+  - **Ticker 段**：含 symbol（如 `=== Ticker (BTC/USDT:USDT) ===`）
+  - **Technical Indicators 段**：段标题含 timeframe（如 `=== Technical Indicators (5m) ===`），内容来自 `format_for_llm` 返回的指标行
+  - **Market Context 段**：ATR 和 volume_ratio 从 indicators dict 读取并格式化，candle range 从展示的 K 线切片计算
+  - **K 线表段**：标题标注实际展示数量（如 `=== Recent Candles (5m, last 50) ===`），截断时 Agent 可从标题看到实际数量K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
 
 **实现改动**：
 - `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）。当数据不足时（SMA 窗口不够或 ATR 计算行数不足），对应字段返回 None，`format_for_llm` 输出 "N/A"，与现有 `_last()` 模式一致。`format_for_llm` 重写输出格式，加入定性标注，**只输出 Technical Indicators 段**。**同时修复现有指标列索引 bug**：当前用位置索引访问 pandas_ta 返回列，存在两处反转：(1) BB: `bb_cols[0]` 赋给 `bb_upper`，实际是 BBL（lower）。pandas_ta 返回 [BBL, BBM, BBU, BBB, BBP]。(2) MACD: `macd_cols[1]` 赋给 `macd_signal`，实际是 MACDh（histogram）；`macd_cols[2]` 赋给 `macd_histogram`，实际是 MACDs（signal）。pandas_ta 返回 [MACD, MACDh, MACDs]。全部改为列名匹配（`filter(like='BBU')`、`filter(like='MACDh')` 等）。
-- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Total output ~1200-1500 tokens (K-line table ~900-1100 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
+- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
 ### 2. get_position — 增加风险上下文
@@ -202,7 +206,7 @@ Current Position:
 - `src/integrations/exchange/okx.py`: `fetch_positions` 保持 `created_at=None`（无需改动，使用默认值）
 - `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，调用 `deps.market_data.get_ticker()` 获取当前价格（用于计算清算距离百分比 `abs(current_price - liquidation_price) / current_price * 100`），计算百分比和时长
 - `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float` 字段和 `metrics: MetricsService` 字段
-- `src/cli/app.py`: 将 `MetricsService` 创建移入 `build_services` 内部（当前在 app.py:364，在 build_services 返回之后），从 `result.initial_balance` 获取值，同时传入 deps
+- `src/cli/app.py`: 将 `MetricsService` 创建移入 `build_services` 内部（当前在 app.py:364，在 build_services 返回之后），从 `result.initial_balance` 获取值，同时传入 deps。app.py:367 的现有调用 `metrics_service.compute(engine, session_id, ...)` 也需同步改为 `deps.metrics.compute(current_position=...)`
 
 ### 3. get_account_balance — 增加收益率
 
@@ -333,7 +337,7 @@ Order cancelled: limit buy 0.001 @ 72000.00 | ID: abc123
 - 找到且为 limit/stop/take_profit → 调用 `exchange.cancel_order` 取消，返回订单详情确认
 
 **实现改动**：
-- `src/agent/tools_execution.py`: 新增 `cancel_order` 函数。先 fetch_open_orders 找订单，再 cancel，记录 TradeAction。
+- `src/agent/tools_execution.py`: 新增 `cancel_order` 函数。先 fetch_open_orders 找订单，再 cancel，记录 TradeAction（`action="cancel_order"`）。
 - `src/agent/trader.py`: 注册工具
 
 ### 8. get_active_alerts — 查看当前告警配置
@@ -479,7 +483,7 @@ get_position(symbol: str | None = None)
 |------|---------|
 | `src/services/technical.py` | 重写：新增 ATR、成交量比率；修复 BB/MACD 列索引 bug；重写 format_for_llm |
 | `src/agent/tools_perception.py` | 重写：增强 6 个现有函数 + 新增 3 个函数 |
-| `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order |
+| `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order；set_price_alert 对 alert_service=None 返回明确提示（"Alerts are disabled for this session"）而非静默成功 |
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance + metrics 字段 |
 | `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps |
 | `src/integrations/exchange/base.py` | 修改：Position 新增 created_at；改写 set_alert_service（存储引用）；新增 get_alert_params / get_price_level_alerts |
@@ -497,5 +501,5 @@ get_position(symbol: str | None = None)
 - 资金费率查询（当前本金规模下可忽略）
 - 硬性风控代码约束（P3，联调观察后决定）
 - BaseExchange 回调整合：on_fill / on_alert 在两个子类中实现完全相同（`self._fill_callback = callback` / `self._alert_callback = callback`），与本次 set_alert_service 整合属同一类问题，可后续一并上移到 BaseExchange 并在 `__init__` 中初始化
-- Ticker 缓存：同一 ReAct 循环中 get_market_data / get_position / get_open_orders 各自调用 get_ticker()，OKX 模式下产生多次 REST 请求。可在 MarketDataService 加简单 TTL 缓存（如 5s），但超出本次范围
+- Ticker 缓存：本次增强后，典型 Agent 周期的 REST 调用从 ~5 次增至 ~8-9 次（get_position +1 ticker、get_open_orders +1 ticker、set_stop_loss/set_take_profit 各 +1 ticker）。OKX 模式下同一循环内多次获取几乎相同的 ticker。可在 MarketDataService 加简单 TTL 缓存（如 5s），但超出本次范围
 - OKX initial_balance 精度：OKX 模式下 initial_balance 是用户手动输入的近似值（非 API 查询），get_account_balance 和 get_position 的百分比计算基于此值。如需精确，后续可在首次启动时调用 fetch_balance() 获取真实值
