@@ -357,12 +357,26 @@ Volatility alert: OFF
 
 **数据来源**：
 - **价位级别告警**：存在 `BaseExchange._price_level_alerts`（base.py:63）。新增公开方法 `get_price_level_alerts() -> list[dict]` 返回列表拷贝，避免跨层访问私有属性。
-- **百分比波动告警参数**：存在 `PriceAlertService` 实例中。**解决方案**：在 `PriceAlertService` 上新增 `get_params() -> tuple[float, int]` 方法，返回 `(threshold_pct, window_minutes)`。在 `BaseExchange` 上新增 `get_alert_params() -> tuple[float, int] | None` 方法，有 alert service 时委托调用，无则返回 None。工具直接从 exchange 读取，无需 deps 中间存储，完全消除参数不一致风险。
+- **百分比波动告警参数**：存在 `PriceAlertService` 实例中。**解决方案**：在 `PriceAlertService` 上新增 `get_params() -> tuple[float, int]` 方法，返回 `(threshold_pct, window_minutes)`。在 `BaseExchange` 层实现 `set_alert_service` 和 `get_alert_params`（两个子类存储方式完全相同，无需各自实现）：
+
+```python
+# base.py
+def set_alert_service(self, service: Any) -> None:
+    self._alert_service = service
+
+def get_alert_params(self) -> tuple[float, int] | None:
+    if self._alert_service is not None:
+        return self._alert_service.get_params()
+    return None
+```
+
+工具直接从 exchange 读取，无需 deps 中间存储，完全消除参数不一致风险。Sim 和 OKX 两种模式行为一致。
 
 **实现改动**：
 - `src/services/price_alert.py`: `PriceAlertService` 新增 `get_params()` 方法
-- `src/integrations/exchange/base.py`: 新增 `get_alert_params()` 默认方法（返回 None）和 `get_price_level_alerts()` 公开方法
-- `src/integrations/exchange/simulated.py`: 实现 `get_alert_params()` 委托到 `self._alert_service.get_params()`
+- `src/integrations/exchange/base.py`: 改写 `set_alert_service`（从空实现改为存储引用）；新增 `get_alert_params()` 和 `get_price_level_alerts()` 方法
+- `src/integrations/exchange/simulated.py`: 删除自身的 `set_alert_service` 覆写（继承 BaseExchange 即可）
+- `src/integrations/exchange/okx.py`: 删除自身的 `set_alert_service` 覆写（继承 BaseExchange 即可）
 - `src/agent/tools_perception.py`: 新增 `get_active_alerts` 函数，从 exchange 读取两类告警
 - `src/agent/trader.py`: 注册工具
 
@@ -450,9 +464,9 @@ get_position(symbol: str | None = None)
 | `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order |
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance 字段 |
 | `src/cli/app.py` | 修改：build_services 传入 initial_balance 到 deps |
-| `src/integrations/exchange/base.py` | 修改：Position 新增 created_at；新增 get_alert_params / get_price_level_alerts 方法 |
-| `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；实现 get_alert_params |
-| `src/integrations/exchange/okx.py` | 验证：fetch_positions 使用 created_at 默认值 None（无需改动） |
+| `src/integrations/exchange/base.py` | 修改：Position 新增 created_at；改写 set_alert_service（存储引用）；新增 get_alert_params / get_price_level_alerts |
+| `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service 覆写 |
+| `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service 覆写；fetch_positions 无需改动（created_at 使用默认值 None） |
 | `src/services/price_alert.py` | 修改：PriceAlertService 新增 get_params 方法 |
 | `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_streak |
 | `src/integrations/market_data.py` | 修改：limit 参数透传 |
