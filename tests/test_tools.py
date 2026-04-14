@@ -353,3 +353,45 @@ async def test_set_next_wake_not_available(deps):
     deps.set_next_wake_fn = None
     result = await set_next_wake(deps, 10, reasoning="test")
     assert "not available" in result.lower()
+
+
+async def test_open_position_rejects_when_pending(deps):
+    """open_position returns rejection message when market order is pending."""
+    from src.agent.tools_execution import open_position
+    deps.exchange.has_pending_market_order = MagicMock(return_value=True)
+    result = await open_position(deps, "long", 20.0, 3, reasoning="test")
+    assert "already pending" in result.lower()
+    deps.exchange.create_order.assert_not_called()
+
+
+async def test_open_position_allows_when_no_pending(deps):
+    """open_position proceeds normally when no market order is pending."""
+    from src.agent.tools_execution import open_position
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    result = await open_position(deps, "long", 20.0, 3, reasoning="test")
+    assert "submitted" in result.lower()
+
+
+async def test_close_position_rejects_when_pending(deps):
+    """close_position returns rejection message when close order is pending."""
+    from src.agent.tools_execution import close_position
+    from src.integrations.exchange.base import Position
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position("BTC/USDT:USDT", "long", 0.01, 64000.0, 10.0, 3, 55000.0)
+    ])
+    deps.exchange.has_pending_market_order = MagicMock(return_value=True)
+    result = await close_position(deps, reasoning="test")
+    assert "already pending" in result.lower()
+    deps.exchange.create_order.assert_not_called()
+
+
+async def test_close_position_allows_when_no_pending(deps):
+    """close_position proceeds when no same-direction pending order."""
+    from src.agent.tools_execution import close_position
+    from src.integrations.exchange.base import Position
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position("BTC/USDT:USDT", "long", 0.01, 64000.0, 10.0, 3, 55000.0)
+    ])
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    result = await close_position(deps, reasoning="test")
+    assert "submitted" in result.lower()

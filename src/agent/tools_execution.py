@@ -62,6 +62,10 @@ async def open_position(
     if quantity <= 0:
         return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
 
+    # Duplicate order prevention
+    if deps.exchange.has_pending_market_order(deps.symbol):
+        return "A market order is already pending. Wait for fill confirmation before opening another position."
+
     # Human approval gate
     action_desc = f"Open {side} {position_pct}% at ~{ticker.last:.2f}, {leverage}x leverage"
     approved = await _check_approval(deps, f"open_{side}", action_desc, position_pct, leverage)
@@ -90,6 +94,10 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if not positions:
         return "No positions to close."
+
+    order_side = "sell" if positions[0].side == "long" else "buy"
+    if deps.exchange.has_pending_market_order(deps.symbol, side=order_side):
+        return "A close order is already pending. Wait for fill confirmation."
 
     total_pnl = sum(p.unrealized_pnl for p in positions)
     action_desc = f"Close {len(positions)} position(s), PnL: {total_pnl:.2f}"
