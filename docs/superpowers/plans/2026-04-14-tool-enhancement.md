@@ -46,6 +46,7 @@
 """Tests for tool enhancement (spec: 2026-04-14-tool-enhancement-design)."""
 import pytest
 from datetime import datetime, timezone
+from src.integrations.exchange.base import Ticker
 
 
 # --- Task 1: Foundation ---
@@ -1043,7 +1044,12 @@ class TechnicalAnalysisService:
         signal = indicators.get("macd_signal")
         hist = indicators.get("macd_histogram")
         if all(v is not None for v in (macd, signal, hist)):
-            label = "bullish" if hist > 0 else "bearish"
+            if hist > 0:
+                label = "bullish"
+            elif hist < 0:
+                label = "bearish"
+            else:
+                label = "neutral"
             lines.append(f"MACD: {macd:.2f} | Signal: {signal:.2f} | Histogram: {hist:.2f} ({label})")
         else:
             lines.append(f"MACD: {_fmt(macd)} | Signal: {_fmt(signal)} | Histogram: {_fmt(hist)}")
@@ -1145,23 +1151,38 @@ class TradingDeps:
 
 - [ ] **Step 4: Update app.py build_services to wire MetricsService and initial_balance**
 
-In `src/cli/app.py`, after creating deps (line ~231), add MetricsService creation and wiring:
+In `src/cli/app.py`, add MetricsService creation **before** the `deps = TradingDeps(...)` block, then pass both into the constructor:
 
 Add import at top of `build_services` (or near existing imports):
 ```python
 from src.services.metrics import MetricsService
 ```
 
-After `deps = TradingDeps(...)` block and before the alert service block, add:
-
+Before `deps = TradingDeps(...)`, create MetricsService:
 ```python
     metrics_service = MetricsService(
         engine=engine,
         session_id=session_id,
         initial_balance=result.initial_balance,
     )
-    deps.initial_balance = result.initial_balance
-    deps.metrics = metrics_service
+```
+
+Then update the `TradingDeps(...)` constructor to include the new fields:
+```python
+    deps = TradingDeps(
+        symbol=result.symbol,
+        timeframe=result.timeframe,
+        market_data=market_data,
+        exchange=exchange,
+        technical=technical,
+        memory=memory,
+        session_id=session_id,
+        db_engine=engine,
+        approval_gate=approval_gate,
+        approval_enabled=result.approval_enabled,
+        initial_balance=result.initial_balance,
+        metrics=metrics_service,
+    )
 ```
 
 Then update `app.py:362-368` — replace the standalone MetricsService creation:
@@ -1331,6 +1352,37 @@ async def test_get_market_data_default_params():
     assert "5m" in result  # timeframe in segment headers
 
 
+async def test_get_market_data_1h_atr_no_qualitative_label():
+    """Non-5m timeframes should NOT have ATR qualitative labels (low/moderate/high)."""
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    deps.timeframe = "1h"
+    n = 100
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 3600000 for i in range(n)],
+        "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0), "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
+        "atr_14": 850.0, "volume_ratio": 1.0,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00 (neutral)"
+
+    result = await get_market_data(deps, timeframe="1h")
+    # ATR line should exist with value and percentage
+    assert "ATR(14): 850.00" in result
+    assert "1h candles" in result
+    # Should NOT have qualitative labels
+    assert "low volatility" not in result
+    assert "moderate" not in result
+    assert "high volatility" not in result
+
+
 async def test_get_market_data_candle_count_clamp():
     """candle_count is clamped to 10-80."""
     from src.agent.tools_perception import get_market_data
@@ -1352,9 +1404,8 @@ async def test_get_market_data_candle_count_clamp():
     deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
     result = await get_market_data(deps, candle_count=5)
-    # Should request max(10+50, 100) = 100 candles from exchange
-    call_args = deps.market_data.get_ohlcv_dataframe.call_args
-    assert call_args[1].get("limit", call_args[0][2] if len(call_args[0]) > 2 else 100) >= 60
+    # candle_count clamped to 10 → fetch_limit = max(10+50, 100) = 100
+    assert deps.market_data.get_ohlcv_dataframe.call_args.kwargs["limit"] == 100
     # Output should show "last 10" (clamped from 5)
     assert "last 10" in result
 ```
@@ -1836,7 +1887,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
             od = order_details[a.order_id]
             if od.price:
                 line += f" @ {od.price:.2f}"
-            if od.fee:
+            if od.fee is not None:
                 line += f", fee={od.fee:.4f}"
             line += f" [{od.status}]"
         if a.pnl is not None:
@@ -1865,15 +1916,14 @@ async def get_open_orders(deps: TradingDeps) -> str:
 
     lines = ["Pending Orders:"]
     for o in orders:
-        if o.order_type == "market":
-            label = "[PENDING]"
+        if o.order_type == "market" or o.price is None:
+            label = "[PENDING]" if o.order_type == "market" else f"[{o.order_type.upper()}]"
             price_str = "market price"
-        elif o.order_type == "limit":
-            label = "[LIMIT]"
-            dist = (o.price - current) / current * 100
-            price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
         else:
-            label = f"[{o.order_type.upper()}]"
+            if o.order_type == "limit":
+                label = "[LIMIT]"
+            else:
+                label = f"[{o.order_type.upper()}]"
             dist = (o.price - current) / current * 100
             price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
         lines.append(f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}")
@@ -2323,7 +2373,7 @@ async def get_performance(deps: TradingDeps) -> str:
         f"Current Balance: {balance.total_usdt:.2f} USDT\n"
         f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
         f"Realized PnL: {metrics.total_pnl:+.2f} USDT (gross, before fees)\n"
-        f"Total Fees: {metrics.total_fees:.2f} USDT\n\n"
+        f"Total Fees: -{metrics.total_fees:.2f} USDT\n\n"
         f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
         f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
