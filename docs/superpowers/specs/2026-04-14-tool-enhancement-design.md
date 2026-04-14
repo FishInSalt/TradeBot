@@ -450,7 +450,10 @@ No completed trades yet.
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
 - `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_summary: str`（近 N 笔交易的统计汇总，如 "3W 1L (last 4 trades)"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。按时间取最近 N 笔的胜负统计，不跟踪连胜/连败序列。）
 - `MetricsService.__init__` 改为接受 `engine`、`session_id`、`initial_balance`（既然已放入 deps，可在构造时注入），`compute()` 简化为 `deps.metrics.compute(current_position="none")`，其中 `current_position` 保留为可选 kwarg（app.py 初始显示仍需传入）
-- `MetricsService.compute()` 补全新增字段的计算逻辑。**PnL 口径修正**：当前 FillEvent.pnl 是毛利（不含 fee），但余额更新扣了 fee，导致 Realized PnL 累加值与余额变化不一致。修正为 net PnL（pnl - fee）：从 TradeAction 中同时读取 pnl 和对应 FillEvent 的 fee，计算 net_pnl = pnl - fee。这样 Realized PnL 与余额口径一致。
+- `MetricsService.compute()` 补全新增字段的计算逻辑。**PnL 口径修正**：当前 FillEvent.pnl 是毛利（不含 fee），但余额更新扣了 fee，导致 Realized PnL 累加值与余额变化不一致。修正为 net PnL（pnl - fee）：
+- `src/storage/models.py`: TradeAction 新增 `fee: Mapped[float | None]` 列
+- `src/cli/app.py`: `_record_action_from_fill` 写入 `fee=event.fee`
+- `MetricsService.compute()` 计算 `net_pnl = pnl - fee` 用于统计
 - `get_trade_journal` 和 `get_performance` 都调用 `deps.metrics.compute()` 获取统计数据
 
 ---
@@ -495,7 +498,8 @@ get_position(symbol: str | None = None)
 | `src/agent/tools_perception.py` | 重写：增强 6 个现有函数 + 新增 3 个函数 |
 | `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order；set_price_alert 对 alert_service=None 返回明确提示（"Alerts are disabled for this session"）而非静默成功 |
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance + metrics 字段 |
-| `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps |
+| `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps；`_record_action_from_fill` 写入 fee |
+| `src/storage/models.py` | 修改：TradeAction 新增 fee 列 |
 | `src/integrations/exchange/base.py` | 修改：Position 新增 created_at；改写 set_alert_service（存储引用）；新增 get_alert_params / get_price_level_alerts |
 | `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值 |
 | `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值；fetch_positions 无需改动 |
