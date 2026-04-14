@@ -161,11 +161,11 @@ Time      Open     High     Low      Close    Vol
 
 **职责划分**：
 - `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责指标段和 Market Context 段的格式化（不含 K 线表）。
-- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段和 K 线表段的格式化（因为 `candle_count` 是工具层参数），最终拼接所有段落输出。K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
+- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段、K 线表段和 Market Context 中的 candle range 格式化（因为 `candle_count` 是工具层参数，range 必须基于展示的 K 线切片计算，而非完整 DataFrame），最终拼接所有段落输出。K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
 
 **实现改动**：
-- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）、`candle_range_high`、`candle_range_low`。`format_for_llm` 重写输出格式，加入定性标注，只输出指标段和 Market Context 段。**同时修复现有 BB 列索引 bug**：当前用位置索引 `bb_cols[0]` 赋给 `bb_upper`，但 pandas_ta 返回顺序是 [BBL, BBM, BBU, BBB, BBP]，实际 `[0]` 是 lower。改为用列名匹配（`bb_df.filter(like='BBU')` / `bb_df.filter(like='BBL')`）。
-- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Total output ~1200-1400 tokens (K-line table ~800-1000 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
+- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）。`format_for_llm` 重写输出格式，加入定性标注，只输出指标段（不含 Market Context 的 candle range——见下方职责划分）。**同时修复现有指标列索引 bug**：当前用位置索引访问 pandas_ta 返回列，存在两处反转：(1) BB: `bb_cols[0]` 赋给 `bb_upper`，实际是 BBL（lower）。pandas_ta 返回 [BBL, BBM, BBU, BBB, BBP]。(2) MACD: `macd_cols[1]` 赋给 `macd_signal`，实际是 MACDh（histogram）；`macd_cols[2]` 赋给 `macd_histogram`，实际是 MACDs（signal）。pandas_ta 返回 [MACD, MACDh, MACDs]。全部改为列名匹配（`filter(like='BBU')`、`filter(like='MACDh')` 等）。
+- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Total output ~1200-1500 tokens (K-line table ~900-1100 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
 ### 2. get_position — 增加风险上下文
@@ -435,7 +435,7 @@ No completed trades yet.
 
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
 - `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_summary: str`（近 N 笔交易的统计汇总，如 "3W 1L (last 4 trades)"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。注意是无序统计，不是连胜/连败序列。）
-- `MetricsService.__init__` 改为接受 `engine` 和 `session_id`（既然已放入 deps，可在构造时注入），`compute()` 简化为无参调用 `deps.metrics.compute()`
+- `MetricsService.__init__` 改为接受 `engine`、`session_id`、`initial_balance`（既然已放入 deps，可在构造时注入），`compute()` 简化为 `deps.metrics.compute(current_position="none")`，其中 `current_position` 保留为可选 kwarg（app.py 初始显示仍需传入）
 - `MetricsService.compute()` 补全新增字段的计算逻辑
 - `get_trade_journal` 和 `get_performance` 都调用 `deps.metrics.compute()` 获取统计数据
 
@@ -498,3 +498,4 @@ get_position(symbol: str | None = None)
 - 硬性风控代码约束（P3，联调观察后决定）
 - BaseExchange 回调整合：on_fill / on_alert 在两个子类中实现完全相同（`self._fill_callback = callback` / `self._alert_callback = callback`），与本次 set_alert_service 整合属同一类问题，可后续一并上移到 BaseExchange 并在 `__init__` 中初始化
 - Ticker 缓存：同一 ReAct 循环中 get_market_data / get_position / get_open_orders 各自调用 get_ticker()，OKX 模式下产生多次 REST 请求。可在 MarketDataService 加简单 TTL 缓存（如 5s），但超出本次范围
+- OKX initial_balance 精度：OKX 模式下 initial_balance 是用户手动输入的近似值（非 API 查询），get_account_balance 和 get_position 的百分比计算基于此值。如需精确，后续可在首次启动时调用 fetch_balance() 获取真实值
