@@ -114,7 +114,7 @@ Bollinger Middle: 74750.00
 Bollinger Lower: 74400.00
 ```
 
-**新增参数**：`candle_count: int = 50`（上限 80）
+**新增参数**：`candle_count: int = 50`（下限 10，上限 80，实现中 `candle_count = max(10, min(candle_count, 80))`）
 
 **获取与展示解耦**：`candle_count` 控制 K 线表展示的数量，不影响指标计算。实际获取的 K 线数量为 `max(candle_count + 50, 100)`，确保 MA(50)、RSI(14)、MACD(12,26,9) 等指标有足够的热身数据。例如 Agent 传 `candle_count=20`，实际获取 100 根 K 线用于计算指标，K 线表只展示最后 20 根。
 
@@ -161,10 +161,10 @@ Time      Open     High     Low      Close    Vol
 
 **职责划分**：
 - `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责指标段和 Market Context 段的格式化（不含 K 线表）。
-- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段、K 线表段和 Market Context 中的 candle range 格式化（因为 `candle_count` 是工具层参数，range 必须基于展示的 K 线切片计算，而非完整 DataFrame），最终拼接所有段落输出。K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
+- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段、**Market Context 段整体**（ATR 和 volume_ratio 从 indicators dict 读取并格式化，candle range 从展示的 K 线切片计算）、K 线表段的格式化。最终拼接：Ticker + Technical Indicators（来自 format_for_llm）+ Market Context + K 线表。K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
 
 **实现改动**：
-- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）。`format_for_llm` 重写输出格式，加入定性标注，只输出指标段（不含 Market Context 的 candle range——见下方职责划分）。**同时修复现有指标列索引 bug**：当前用位置索引访问 pandas_ta 返回列，存在两处反转：(1) BB: `bb_cols[0]` 赋给 `bb_upper`，实际是 BBL（lower）。pandas_ta 返回 [BBL, BBM, BBU, BBB, BBP]。(2) MACD: `macd_cols[1]` 赋给 `macd_signal`，实际是 MACDh（histogram）；`macd_cols[2]` 赋给 `macd_histogram`，实际是 MACDs（signal）。pandas_ta 返回 [MACD, MACDh, MACDs]。全部改为列名匹配（`filter(like='BBU')`、`filter(like='MACDh')` 等）。
+- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）。当数据不足时（SMA 窗口不够或 ATR 计算行数不足），对应字段返回 None，`format_for_llm` 输出 "N/A"，与现有 `_last()` 模式一致。`format_for_llm` 重写输出格式，加入定性标注，**只输出 Technical Indicators 段**。**同时修复现有指标列索引 bug**：当前用位置索引访问 pandas_ta 返回列，存在两处反转：(1) BB: `bb_cols[0]` 赋给 `bb_upper`，实际是 BBL（lower）。pandas_ta 返回 [BBL, BBM, BBU, BBB, BBP]。(2) MACD: `macd_cols[1]` 赋给 `macd_signal`，实际是 MACDh（histogram）；`macd_cols[2]` 赋给 `macd_histogram`，实际是 MACDs（signal）。pandas_ta 返回 [MACD, MACDh, MACDs]。全部改为列名匹配（`filter(like='BBU')`、`filter(like='MACDh')` 等）。
 - `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Total output ~1200-1500 tokens (K-line table ~900-1100 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
@@ -434,7 +434,7 @@ No completed trades yet.
 - `src/agent/trader.py`: 注册工具
 
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
-- `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_summary: str`（近 N 笔交易的统计汇总，如 "3W 1L (last 4 trades)"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。注意是无序统计，不是连胜/连败序列。）
+- `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_summary: str`（近 N 笔交易的统计汇总，如 "3W 1L (last 4 trades)"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。按时间取最近 N 笔的胜负统计，不跟踪连胜/连败序列。）
 - `MetricsService.__init__` 改为接受 `engine`、`session_id`、`initial_balance`（既然已放入 deps，可在构造时注入），`compute()` 简化为 `deps.metrics.compute(current_position="none")`，其中 `current_position` 保留为可选 kwarg（app.py 初始显示仍需传入）
 - `MetricsService.compute()` 补全新增字段的计算逻辑
 - `get_trade_journal` 和 `get_performance` 都调用 `deps.metrics.compute()` 获取统计数据
