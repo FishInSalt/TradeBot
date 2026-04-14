@@ -1048,3 +1048,14 @@ async def test_orphan_cleanup_unfreezes_margin():
     assert len(ex._pending_orders) == 0
     assert ex._frozen_usdt == 0.0
     assert ex._free_usdt == pytest.approx(100.0)
+
+
+async def test_fetch_balance_total_includes_frozen():
+    """total_usdt = free + used + frozen + unrealized."""
+    ex = _make_exchange(initial_balance=60.0)
+    ex._used_usdt = 30.0
+    ex._frozen_usdt = 10.0
+    balance = await ex.fetch_balance()
+    assert balance.total_usdt == pytest.approx(100.0)
+    assert balance.free_usdt == pytest.approx(60.0)
+    assert balance.used_usdt == 30.0

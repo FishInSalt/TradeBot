@@ -131,7 +131,7 @@ class SimulatedExchange(BaseExchange):
             for pos in self._positions.values()
         )
         return Balance(
-            total_usdt=self._free_usdt + self._used_usdt + unrealized,
+            total_usdt=self._free_usdt + self._used_usdt + self._frozen_usdt + unrealized,
             free_usdt=max(0.0, self._free_usdt + unrealized),
             used_usdt=self._used_usdt,
         )
