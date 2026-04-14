@@ -309,8 +309,6 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    handle_fill = None
-
     async def on_tick(trigger_type: str, context=None):
         if shutdown_event.is_set():
             return
@@ -333,13 +331,6 @@ async def run(
                     await db_sess.commit()
             except Exception:
                 logger.warning("Failed to update last_active_at", exc_info=True)
-            # Process pending fills
-            if handle_fill is not None:
-                for fill in exchange.drain_pending_fills():
-                    try:
-                        await handle_fill(fill)
-                    except Exception:
-                        logger.exception("Fill handler failed for order %s", fill.order_id)
 
     interval = result.scheduler_interval_min * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)

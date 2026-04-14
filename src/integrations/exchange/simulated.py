@@ -67,7 +67,6 @@ class SimulatedExchange(BaseExchange):
         self._running = False
         self._lock = asyncio.Lock()
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
-        self._pending_fills: list[FillEvent] = []
         self._error_count = 0
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
         self._alert_service: Any | None = None
@@ -661,11 +660,6 @@ class SimulatedExchange(BaseExchange):
     def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
         if self._alert_service:
             self._alert_service.update_params(threshold_pct, window_minutes)
-
-    def drain_pending_fills(self) -> list[FillEvent]:
-        fills = self._pending_fills.copy()
-        self._pending_fills.clear()
-        return fills
 
     # --- Persistence ---
 

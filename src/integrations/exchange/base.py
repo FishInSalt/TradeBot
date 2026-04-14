@@ -144,11 +144,6 @@ class BaseExchange(ABC):
         self._price_level_alerts = remaining
         return triggered
 
-    def drain_pending_fills(self) -> list['FillEvent']:
-        """Return and clear queued FillEvents. Default: empty (OKX etc. need not override)."""
-        return []
-
-
 @dataclass
 class FillEvent:
     order_id: str
