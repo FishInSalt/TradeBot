@@ -1125,3 +1125,68 @@ async def test_fetch_balance_total_includes_frozen():
     assert balance.total_usdt == pytest.approx(100.0)
     assert balance.free_usdt == pytest.approx(60.0)
     assert balance.used_usdt == 30.0
+
+
+async def test_e2e_open_then_stop_after_fill():
+    """Core value scenario: open_position → can't set stop in same cycle → tick fills →
+    fill callback triggers → next cycle sets stop successfully."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Agent cycle 1: open position
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert order.status == "open"
+
+    # Same cycle: try to set stop → fails (no position yet)
+    with pytest.raises(ValueError, match="Cannot create conditional order without a position"):
+        await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
+
+    # Tick → fills the market order
+    tick = _tick()
+    await ex._process_tick(tick)
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "market"
+
+    # Agent cycle 2 (triggered by fill callback): position now visible
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+
+    # Now set stop succeeds
+    stop_order = await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
+    assert stop_order.status == "open"
+    assert stop_order.order_type == "stop"
+
+
+async def test_e2e_open_then_immediate_liquidation():
+    """Market buy fills then immediately liquidates in the same tick (extreme price)."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10  # high leverage → tight liquidation price
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # Tick where ask is high (buy fills at ask) but bid is already below liquidation
+    # Entry will be at ask; liquidation check uses bid.
+    # With 10x leverage, liq price ≈ entry * (1 - 1/10) / (1 - fee) ≈ entry * 0.9
+    # We need bid < liq_price. If ask=95010, liq ≈ 85509. Set bid=80000.
+    tick = Ticker(symbol="BTC/USDT:USDT", last=80000.0, bid=80000.0, ask=95010.0,
+                  high=96000.0, low=79000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    # Should have 2 fills: market open + liquidation
+    assert len(fills) == 2
+    assert fills[0].trigger_reason == "market"
+    assert fills[1].trigger_reason == "liquidation"
+    # Position should be gone
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 0
+    balance = await ex.fetch_balance()
+    assert balance.free_usdt >= 0.0
