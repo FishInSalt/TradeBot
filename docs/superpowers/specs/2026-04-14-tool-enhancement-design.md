@@ -486,7 +486,7 @@ get_position(symbol: str | None = None)
 | `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值 |
 | `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值；fetch_positions 无需改动 |
 | `src/services/price_alert.py` | 修改：PriceAlertService 新增 get_params 方法 |
-| `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_streak |
+| `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_summary |
 | `src/integrations/market_data.py` | 修改：limit 参数透传 |
 | `tests/` | 新增/修改测试 |
 
