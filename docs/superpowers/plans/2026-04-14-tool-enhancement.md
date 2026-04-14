@@ -1889,7 +1889,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
             od = order_details[a.order_id]
             if od.price:
                 line += f" @ {od.price:.2f}"
-            if od.fee is not None:
+            if od.fee is not None:  # 现有行为保留，spec 示例未列出但有价值
                 line += f", fee={od.fee:.4f}"
             line += f" [{od.status}]"
         if a.pnl is not None:
