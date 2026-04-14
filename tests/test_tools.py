@@ -56,6 +56,7 @@ def deps():
     d.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, amt: round(amt, 3))
     d.exchange.fetch_open_orders = AsyncMock(return_value=[])
     d.exchange.cancel_order = AsyncMock()
+    d.exchange.has_pending_market_order = MagicMock(return_value=False)
     d.memory.format_for_prompt.return_value = "No memories."
     return d
 
