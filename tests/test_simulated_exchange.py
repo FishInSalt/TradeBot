@@ -1,4 +1,3 @@
-import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from src.integrations.exchange.base import Ticker
@@ -26,6 +25,14 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
     )
     exchange._running = True
     return exchange
+
+
+def _tick(symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0):
+    """Helper: create a Ticker for _process_tick calls in tests."""
+    return Ticker(
+        symbol=symbol, last=last, bid=bid, ask=ask,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000,
+    )
 
 
 async def test_fetch_balance_initial():
@@ -62,17 +69,16 @@ async def test_market_buy_opens_long():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert order.status == "open"
+    assert order.price is None
+    assert order.fee is None
 
-    assert order.status == "closed"
-    assert order.price == 95010.0
-    assert order.fee == pytest.approx(95010.0 * 0.001 * 0.0005)
-    assert order.amount == 0.001
+    await ex._process_tick(_tick())  # fills the market order
 
     positions = await ex.fetch_positions("BTC/USDT:USDT")
     assert len(positions) == 1
     assert positions[0].side == "long"
     assert positions[0].contracts == 0.001
-
     balance = await ex.fetch_balance()
     margin = 95010.0 * 0.001 / 3
     assert balance.used_usdt == pytest.approx(margin)
@@ -82,7 +88,10 @@ async def test_market_sell_opens_short():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
-    assert order.price == 94990.0
+    assert order.status == "open"
+
+    await ex._process_tick(_tick())
+
     positions = await ex.fetch_positions("BTC/USDT:USDT")
     assert positions[0].side == "short"
 
@@ -109,16 +118,19 @@ async def test_market_order_invalid_amount():
 async def test_market_order_unknown_type():
     ex = _make_exchange()
     with pytest.raises(ValueError, match="Unknown order_type"):
-        await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001)
+        await ex.create_order("BTC/USDT:USDT", "buy", "foobar", 0.001)
 
 
 async def test_market_close_long():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
+
     order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
-    assert order.status == "closed"
-    assert order.price == 94990.0
+    assert order.status == "open"
+    await ex._process_tick(_tick())  # fill close
+
     positions = await ex.fetch_positions("BTC/USDT:USDT")
     assert len(positions) == 0
     balance = await ex.fetch_balance()
@@ -129,19 +141,28 @@ async def test_market_close_clamps_amount():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
-    order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.999)
-    assert order.amount == 0.001
+    await ex._process_tick(_tick())  # fill open
+
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.999)
+    await ex._process_tick(_tick())  # fill close — amount clamped in _fill_market_close
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 0  # fully closed despite excess amount
 
 
 async def test_add_to_position():
     ex = _make_exchange(initial_balance=200.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill first buy
+
     ex._latest_ticker = Ticker(
         symbol="BTC/USDT:USDT", last=96000.0, bid=95990.0, ask=96010.0,
         high=97000.0, low=94000.0, base_volume=1000.0, timestamp=1712534500000,
     )
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick(last=96000.0, bid=95990.0, ask=96010.0))  # fill second buy
+
     positions = await ex.fetch_positions("BTC/USDT:USDT")
     assert positions[0].contracts == 0.002
     expected_entry = (95010.0 * 0.001 + 96010.0 * 0.001) / 0.002
@@ -152,9 +173,18 @@ async def test_add_position_leverage_mismatch():
     ex = _make_exchange(initial_balance=200.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
-    ex._leverage["BTC/USDT:USDT"] = 5
-    with pytest.raises(ValueError, match="Leverage mismatch"):
-        await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fills, creates position at 3x
+
+    ex._leverage["BTC/USDT:USDT"] = 5  # change setting
+    order2 = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert order2.status == "open"  # create succeeds (no longer raises)
+    frozen_before = ex._frozen_usdt
+
+    await ex._process_tick(_tick())  # fill → cancelled due to leverage mismatch
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert positions[0].contracts == 0.001  # unchanged — second order was cancelled
+    assert ex._frozen_usdt == 0.0  # margin unfrozen
 
 
 async def test_set_leverage():
@@ -179,6 +209,7 @@ async def test_set_leverage_rejects_with_position():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill → creates position
     with pytest.raises(ValueError, match="Cannot change leverage"):
         await ex.set_leverage("BTC/USDT:USDT", 5)
 
@@ -199,6 +230,7 @@ async def test_stop_order_creation():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill → position exists
     order = await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=93000.0)
     assert order.status == "open"
     assert order.price == 93000.0
@@ -217,6 +249,7 @@ async def test_stop_order_without_price():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill → position exists
     with pytest.raises(ValueError, match="price is required"):
         await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001)
 
@@ -225,6 +258,7 @@ async def test_conditional_order_forces_full_amount():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill → position exists
     order = await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.0005, price=93000.0)
     assert order.amount == 0.001  # forced to position.contracts
 
@@ -233,6 +267,7 @@ async def test_should_trigger_stop_long():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
     await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=93000.0)
 
     fill_events = []
@@ -248,7 +283,7 @@ async def test_should_trigger_stop_long():
 
     assert len(fill_events) == 1
     assert fill_events[0].trigger_reason == "stop"
-    assert fill_events[0].fill_price == 92790.0  # bid for long close
+    assert fill_events[0].fill_price == 92790.0
     assert fill_events[0].position_side == "long"
     positions = await ex.fetch_positions("BTC/USDT:USDT")
     assert len(positions) == 0
@@ -260,6 +295,7 @@ async def test_should_trigger_take_profit_long():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
     await ex.create_order("BTC/USDT:USDT", "sell", "take_profit", 0.001, price=97000.0)
 
     fill_events = []
@@ -280,6 +316,7 @@ async def test_liquidation_triggers_before_stop():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 10
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
     await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
 
     fill_events = []
@@ -302,6 +339,7 @@ async def test_should_trigger_stop_short():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
     await ex.create_order("BTC/USDT:USDT", "buy", "stop", 0.001, price=97000.0)
 
     fill_events = []
@@ -316,7 +354,7 @@ async def test_should_trigger_stop_short():
     await ex._process_tick(tick)
     assert len(fill_events) == 1
     assert fill_events[0].trigger_reason == "stop"
-    assert fill_events[0].fill_price == 97210.0  # ask for short close
+    assert fill_events[0].fill_price == 97210.0
     assert fill_events[0].position_side == "short"
 
 
@@ -324,6 +362,7 @@ async def test_should_trigger_take_profit_short():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
     await ex.create_order("BTC/USDT:USDT", "buy", "take_profit", 0.001, price=93000.0)
 
     fill_events = []
@@ -345,6 +384,7 @@ async def test_no_trigger_when_price_above_stop():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
     await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=93000.0)
 
     fill_events = []
@@ -386,6 +426,10 @@ async def test_persist_and_restore():
     )
     ex1._leverage["BTC/USDT:USDT"] = 3
     await ex1.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex1._process_tick(Ticker(
+        symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000,
+    ))  # fill the market order
     await ex1._persist_state()
 
     ex2 = SimulatedExchange(config, engine, "test-s", "BTC/USDT:USDT")
@@ -403,7 +447,7 @@ async def test_persist_and_restore():
 
 
 async def test_fetch_closed_orders_from_db():
-    """Market orders should be queryable via fetch_closed_orders."""
+    """Market orders should be queryable via fetch_closed_orders after fill."""
     from src.storage.database import init_db, get_session
     from src.storage.models import Session
     from src.integrations.exchange.simulated import SimulatedExchange
@@ -426,6 +470,11 @@ async def test_fetch_closed_orders_from_db():
     ex._leverage["BTC/USDT:USDT"] = 3
 
     order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    # Tick to fill the order (this also persists via _process_tick → _persist_state)
+    await ex._process_tick(Ticker(
+        symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000,
+    ))
 
     closed = await ex.fetch_closed_orders("BTC/USDT:USDT")
     assert len(closed) == 1
@@ -435,7 +484,6 @@ async def test_fetch_closed_orders_from_db():
 
     fetched = await ex.fetch_order(order.id)
     assert fetched.id == order.id
-    assert fetched.price == order.price
 
     await engine.dispose()
 
@@ -445,10 +493,11 @@ async def test_partial_close_position():
     ex = _make_exchange(initial_balance=100.0)
     ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.002)
+    await ex._process_tick(_tick())  # fill open
 
     # Close half
-    order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
-    assert order.amount == 0.001
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+    await ex._process_tick(_tick())  # fill close
 
     positions = await ex.fetch_positions("BTC/USDT:USDT")
     assert len(positions) == 1
@@ -467,20 +516,25 @@ async def test_liquidation_short():
     await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
 
     fill_events = []
-    async def on_fill(event: FillEvent):
+    async def on_fill(event):
         fill_events.append(event)
     ex.on_fill(on_fill)
 
-    # Price surges above liquidation
-    tick = Ticker(
+    # Tick 1: normal price → fills the short (entry = tick.bid = 94990)
+    await ex._process_tick(_tick())
+    assert len(fill_events) == 1
+    assert fill_events[0].trigger_reason == "market"
+
+    # Tick 2: price surges above liquidation price
+    tick2 = Ticker(
         symbol="BTC/USDT:USDT", last=120000.0, bid=119990.0, ask=120010.0,
         high=121000.0, low=94000.0, base_volume=1000.0, timestamp=1712535000000,
     )
-    await ex._process_tick(tick)
+    await ex._process_tick(tick2)
 
-    assert len(fill_events) == 1
-    assert fill_events[0].trigger_reason == "liquidation"
-    assert fill_events[0].position_side == "short"
+    assert len(fill_events) == 2
+    assert fill_events[1].trigger_reason == "liquidation"
+    assert fill_events[1].position_side == "short"
     balance = await ex.fetch_balance()
     assert balance.free_usdt >= 0.0
 
@@ -489,6 +543,7 @@ async def test_cancel_order():
     ex = _make_exchange(initial_balance=100.0)
     await ex.set_leverage("BTC/USDT:USDT", 3)
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill → position exists
     sl_order = await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
     assert len(await ex.fetch_open_orders("BTC/USDT:USDT")) == 1
     await ex.cancel_order(sl_order.id, "BTC/USDT:USDT")
@@ -504,12 +559,15 @@ async def test_cancel_nonexistent_order():
 async def test_fill_event_carries_pnl_on_stop():
     """When a stop order triggers, FillEvent should include pnl."""
     ex = _make_exchange(initial_balance=100.0)
-    fills = []
-    ex.on_fill(lambda event: fills.append(event) or asyncio.sleep(0))
-
-    await ex.set_leverage("BTC/USDT:USDT", 3)
+    ex._leverage["BTC/USDT:USDT"] = 3
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open
     await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
 
     drop_ticker = Ticker("BTC/USDT:USDT", 89000.0, 89000.0, 89010.0,
                          96000.0, 88000.0, 1000.0, 1712534500000)
@@ -521,55 +579,63 @@ async def test_fill_event_carries_pnl_on_stop():
     assert fills[0].pnl < 0
 
 
-async def test_market_order_queues_fill_event():
-    """Market order should queue FillEvent, not call callback immediately."""
+async def test_market_order_fill_callback():
     ex = _make_exchange(initial_balance=100.0)
-    callback_calls = []
-    ex.on_fill(lambda event: callback_calls.append(event) or asyncio.sleep(0))
-
-    await ex.set_leverage("BTC/USDT:USDT", 3)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
-
-    assert len(callback_calls) == 0
-    fills = ex.drain_pending_fills()
+    assert len(fills) == 0  # not yet filled
+    await ex._process_tick(_tick())
     assert len(fills) == 1
     assert fills[0].trigger_reason == "market"
-    assert fills[0].pnl is None
-    assert len(ex.drain_pending_fills()) == 0
+    assert fills[0].side == "buy"
 
 
 async def test_market_close_fill_event_has_pnl():
-    """Market close should produce FillEvent with pnl in pending queue."""
+    """Market close fill callback has pnl."""
     ex = _make_exchange(initial_balance=100.0)
-    await ex.set_leverage("BTC/USDT:USDT", 3)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
-    ex.drain_pending_fills()
+    await ex._process_tick(_tick())  # fill open
+    assert len(fills) == 1
 
     await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
-    fills = ex.drain_pending_fills()
-    assert len(fills) == 1
-    assert fills[0].trigger_reason == "market"
-    assert fills[0].pnl is not None
+    await ex._process_tick(_tick())  # fill close
+    assert len(fills) == 2
+    assert fills[1].trigger_reason == "market"
+    assert fills[1].pnl is not None
 
 
 async def test_force_liquidate_fill_event_has_pnl():
     """Liquidation FillEvent should include pnl."""
     ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10
     fills = []
-    ex.on_fill(lambda event: fills.append(event) or asyncio.sleep(0))
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
 
-    await ex.set_leverage("BTC/USDT:USDT", 10)
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
-    ex.drain_pending_fills()
 
+    # Tick 1: normal price → fills the long (entry = tick.ask = 95010)
+    await ex._process_tick(_tick())
+    assert len(fills) == 1
+
+    # Tick 2: price crashes below liquidation
     liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 80000.0, 80010.0,
                         96000.0, 79000.0, 1000.0, 1712534500000)
     await ex._process_tick(liq_ticker)
 
-    assert len(fills) >= 1
-    liq_fill = [f for f in fills if f.trigger_reason == "liquidation"]
-    assert len(liq_fill) == 1
-    assert liq_fill[0].pnl is not None
+    liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fills) == 1
+    assert liq_fills[0].pnl is not None
 
 
 async def test_simulated_exchange_alert_service_integration():
