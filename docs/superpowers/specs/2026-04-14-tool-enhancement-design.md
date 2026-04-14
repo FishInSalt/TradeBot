@@ -123,7 +123,7 @@ Bollinger Lower: 74400.00
 **改进后输出**（四段结构）：
 
 ```
-=== Ticker ===
+=== Ticker (BTC/USDT:USDT) ===
 Price: 74880.00 | Bid: 74870.00 | Ask: 74890.00
 24h High: 75200.00 | Low: 73800.00 | Volume: 12345.60
 
@@ -187,7 +187,7 @@ Current Positions:
 
 ```
 Current Position:
-  LONG 0.001 BTC @ 74761.10 | 3x leverage
+  LONG 0.001 contracts @ 74761.10 | 3x leverage
   PnL: -19.09 USDT (-0.19% of capital)
   Liquidation: 50200.00 (32.8% away)
   Duration: 25 min
@@ -205,7 +205,7 @@ Current Position:
 - `src/integrations/exchange/simulated.py`: `fetch_positions` 填充 `created_at`
 - `src/integrations/exchange/okx.py`: `fetch_positions` 保持 `created_at=None`（无需改动，使用默认值）
 - `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，调用 `deps.market_data.get_ticker()` 获取当前价格（用于计算清算距离百分比 `abs(current_price - liquidation_price) / current_price * 100`），计算百分比和时长
-- `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float` 字段和 `metrics: MetricsService` 字段
+- `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float = 10000.0` 和 `metrics: MetricsService | None = None`（均需默认值，因为 Python dataclass 要求无默认值字段在有默认值字段之前，而 TradingDeps 从 `db_engine` 开始已有默认值）
 - `src/cli/app.py`: 将 `MetricsService` 创建移入 `build_services` 内部（当前在 app.py:364，在 build_services 返回之后），从 `result.initial_balance` 获取值，同时传入 deps。app.py:367 的现有调用 `metrics_service.compute(engine, session_id, ...)` 也需同步改为 `deps.metrics.compute(current_position=...)`
 
 ### 3. get_account_balance — 增加收益率
@@ -315,6 +315,15 @@ Pending Orders:
 **实现改动**：
 - `src/agent/tools_perception.py`: 获取当前价格，对有 price 的订单计算距离百分比
 
+### 7b. set_price_alert — 禁用状态明确提示
+
+**当前问题**：当 wizard 配置 `alert_enabled=False`（不创建 PriceAlertService）时，Agent 调用 `set_price_alert` 后 `update_alert_params` 静默跳过，工具仍返回成功消息——误导 Agent 认为设置生效了。新增的 `get_active_alerts` 工具让 OFF 状态对 Agent 可见，可能导致 Agent 反复尝试"修复"。
+
+**改进行为**：工具先调用 `deps.exchange.get_alert_params()`，返回 `None` 时直接返回 `"Alerts are disabled for this session. Enable alerts in wizard to use this feature."`，不调用 `update_alert_params`。
+
+**实现改动**：
+- `src/agent/tools_execution.py`: `set_price_alert` 函数开头加 `get_alert_params()` 检查
+
 ---
 
 ## 二、新增工具
@@ -411,7 +420,8 @@ def get_alert_params(self) -> tuple[float, int] | None:
 === Trading Performance ===
 Initial Balance: 10000.00 USDT
 Current Balance: 10245.00 USDT
-Return: +2.45% (+245.00 USDT)
+Total Return: +2.45% (+245.00 USDT) (including unrealized PnL)
+Realized PnL: +195.00 USDT
 
 Total Trades: 12 | Win: 7 (58.3%) | Loss: 5
 Avg Win: +45.20 USDT | Avg Loss: -22.10 USDT
