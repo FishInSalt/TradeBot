@@ -393,11 +393,29 @@ class SimulatedExchange(BaseExchange):
         )
 
     def _cancel_orphaned_orders(self) -> None:
-        """Remove pending orders for symbols that no longer have positions."""
-        self._pending_orders = [
-            o for o in self._pending_orders
-            if o.symbol in self._positions
-        ]
+        """Remove pending orders that lost their target.
+        - stop/take_profit: remove if no position (close orders need a target)
+        - market close direction: remove if no position + unfreeze margin
+        - market open / limit: always keep (they create positions)
+        """
+        remaining = []
+        for o in self._pending_orders:
+            if o.order_type in ("stop", "take_profit"):
+                if o.symbol in self._positions:
+                    remaining.append(o)
+                # else: conditional orders have no frozen margin, just drop
+            elif o.order_type == "market" and self._is_close_order_static(o):
+                if o.symbol in self._positions:
+                    remaining.append(o)
+                else:
+                    # Close target gone (liquidated), unfreeze
+                    if o.frozen_margin > 0:
+                        self._frozen_usdt -= o.frozen_margin
+                        self._free_usdt += o.frozen_margin
+            else:
+                # market open / limit: keep
+                remaining.append(o)
+        self._pending_orders = remaining
 
     def _remove_order_by_id(self, order_id: str) -> None:
         self._pending_orders = [o for o in self._pending_orders if o.id != order_id]
@@ -654,6 +672,7 @@ class SimulatedExchange(BaseExchange):
     async def _init_state(self, initial_balance: float) -> None:
         self._free_usdt = initial_balance
         self._used_usdt = 0.0
+        self._frozen_usdt = 0.0
         self._positions = {}
         self._pending_orders = []
         self._leverage = {}
@@ -671,6 +690,7 @@ class SimulatedExchange(BaseExchange):
             if bal:
                 self._free_usdt = bal.free_usdt
                 self._used_usdt = bal.used_usdt
+                self._frozen_usdt = bal.frozen_usdt
             else:
                 return
 
@@ -695,10 +715,12 @@ class SimulatedExchange(BaseExchange):
                     id=o.order_id, symbol=o.symbol, side=o.side,
                     position_side=o.position_side, order_type=o.order_type,
                     amount=o.amount, trigger_price=o.trigger_price,
+                    frozen_margin=o.frozen_margin,
+                    leverage=o.leverage,
                 ))
 
         logger.info(
-            f"Restored state: balance={self._free_usdt:.2f}/{self._used_usdt:.2f}, "
+            f"Restored state: balance={self._free_usdt:.2f}/{self._used_usdt:.2f}/{self._frozen_usdt:.2f}, "
             f"positions={len(self._positions)}, pending_orders={len(self._pending_orders)}"
         )
 
@@ -717,11 +739,12 @@ class SimulatedExchange(BaseExchange):
         now = datetime.now(timezone.utc)
 
         async with get_session(self._db_engine) as session:
-            # 1. Upsert balance
+            # 1. Upsert balance (includes frozen_usdt)
             stmt = sqlite_insert(SimBalance).values(
                 session_id=self._session_id,
                 free_usdt=self._free_usdt,
                 used_usdt=self._used_usdt,
+                frozen_usdt=self._frozen_usdt,
                 updated_at=now,
             )
             stmt = stmt.on_conflict_do_update(
@@ -729,6 +752,7 @@ class SimulatedExchange(BaseExchange):
                 set_={
                     "free_usdt": stmt.excluded.free_usdt,
                     "used_usdt": stmt.excluded.used_usdt,
+                    "frozen_usdt": stmt.excluded.frozen_usdt,
                     "updated_at": now,
                 },
             )
@@ -808,7 +832,7 @@ class SimulatedExchange(BaseExchange):
                         filled_at=now if order.status == "closed" else None,
                     ))
 
-            # 3d. Upsert pending conditional orders
+            # 3d. Upsert pending orders (includes frozen_margin/leverage)
             for pending in self._pending_orders:
                 stmt = sqlite_insert(SimOrder).values(
                     session_id=self._session_id, order_id=pending.id,
@@ -816,6 +840,8 @@ class SimulatedExchange(BaseExchange):
                     position_side=pending.position_side,
                     order_type=pending.order_type, amount=pending.amount,
                     trigger_price=pending.trigger_price,
+                    frozen_margin=pending.frozen_margin,
+                    leverage=pending.leverage,
                     status="open", created_at=now,
                 )
                 stmt = stmt.on_conflict_do_nothing(index_elements=["order_id"])

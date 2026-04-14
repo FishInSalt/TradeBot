@@ -990,3 +990,61 @@ async def test_fill_market_close_clamps_amount():
 
     assert len(fills) == 1
     assert fills[0].amount == 0.001  # clamped to actual position size
+
+
+async def test_orphan_cleanup_preserves_market_open():
+    """Stop loss closing position should NOT delete pending market/limit open orders."""
+    from src.integrations.exchange.simulated import _PendingOrder
+    ex = _make_exchange()
+    # Pending market open order (no position needed — it creates one)
+    ex._pending_orders.append(_PendingOrder(
+        id="mkt-open", symbol="BTC/USDT:USDT", side="buy",
+        position_side="long", order_type="market",
+        amount=0.001, trigger_price=None,
+        frozen_margin=32.0, leverage=3,
+    ))
+    # No position exists (was just closed by stop)
+    ex._cancel_orphaned_orders()
+    assert len(ex._pending_orders) == 1
+    assert ex._pending_orders[0].id == "mkt-open"
+
+
+async def test_orphan_cleanup_removes_market_close():
+    """Liquidation should remove pending market close orders and unfreeze margin."""
+    from src.integrations.exchange.simulated import _PendingOrder
+    ex = _make_exchange(initial_balance=50.0)
+    ex._frozen_usdt = 0.05
+    ex._free_usdt = 49.95
+    ex._pending_orders.append(_PendingOrder(
+        id="mkt-close", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", order_type="market",
+        amount=0.001, trigger_price=None,
+        frozen_margin=0.05, leverage=3,
+    ))
+    # No position (liquidated)
+    ex._cancel_orphaned_orders()
+    assert len(ex._pending_orders) == 0
+    assert ex._frozen_usdt == 0.0
+    assert ex._free_usdt == pytest.approx(50.0)
+
+
+async def test_orphan_cleanup_unfreezes_margin():
+    """Orphaned close order's frozen margin is correctly returned."""
+    from src.integrations.exchange.simulated import _PendingOrder
+    ex = _make_exchange(initial_balance=100.0)
+    ex._frozen_usdt = 5.0
+    ex._free_usdt = 95.0
+    ex._pending_orders = [
+        _PendingOrder(id="stop-1", symbol="BTC/USDT:USDT", side="sell",
+                      position_side="long", order_type="stop",
+                      amount=0.001, trigger_price=90000.0),
+        _PendingOrder(id="mkt-close", symbol="BTC/USDT:USDT", side="sell",
+                      position_side="long", order_type="market",
+                      amount=0.001, trigger_price=None,
+                      frozen_margin=5.0, leverage=3),
+    ]
+    # No position → both should be cleaned up, market close unfreezes
+    ex._cancel_orphaned_orders()
+    assert len(ex._pending_orders) == 0
+    assert ex._frozen_usdt == 0.0
+    assert ex._free_usdt == pytest.approx(100.0)
