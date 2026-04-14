@@ -76,6 +76,22 @@ class SimulatedExchange(BaseExchange):
         if symbol != self._symbol:
             raise ValueError(f"Symbol mismatch: expected {self._symbol}, got {symbol}")
 
+    def _is_close_order(self, symbol: str, side: str) -> bool:
+        """Is this a close order? Uses current position state (call from create_order)."""
+        pos = self._positions.get(symbol)
+        return (
+            (pos is not None and pos.side == "long" and side == "sell") or
+            (pos is not None and pos.side == "short" and side == "buy")
+        )
+
+    @staticmethod
+    def _is_close_order_static(o: _PendingOrder) -> bool:
+        """Is this a close-direction order? Uses order fields only (no position state)."""
+        return (
+            (o.position_side == "long" and o.side == "sell") or
+            (o.position_side == "short" and o.side == "buy")
+        )
+
     def _calc_unrealized_pnl(self, pos: _Position) -> float:
         if self._latest_ticker is None:
             return 0.0

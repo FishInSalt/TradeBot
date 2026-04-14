@@ -746,3 +746,40 @@ async def test_pending_order_has_frozen_fields():
     )
     assert order.frozen_margin == 100.0
     assert order.leverage == 3
+
+
+async def test_is_close_order_dynamic():
+    """_is_close_order detects close vs open based on current position."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange()
+    # No position → not a close
+    assert ex._is_close_order("BTC/USDT:USDT", "sell") is False
+    # Long position + sell → close
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.001, entry_price=95000.0, leverage=3,
+    )
+    assert ex._is_close_order("BTC/USDT:USDT", "sell") is True
+    assert ex._is_close_order("BTC/USDT:USDT", "buy") is False
+    # Short position + buy → close
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="short", contracts=0.001, entry_price=95000.0, leverage=3,
+    )
+    assert ex._is_close_order("BTC/USDT:USDT", "buy") is True
+    assert ex._is_close_order("BTC/USDT:USDT", "sell") is False
+
+
+async def test_is_close_order_static():
+    """_is_close_order_static detects close direction from order fields only."""
+    from src.integrations.exchange.simulated import SimulatedExchange, _PendingOrder
+    # long position_side + sell → close
+    o = _PendingOrder(id="1", symbol="X", side="sell", position_side="long",
+                      order_type="market", amount=1, trigger_price=None)
+    assert SimulatedExchange._is_close_order_static(o) is True
+    # long position_side + buy → open (add-to)
+    o2 = _PendingOrder(id="2", symbol="X", side="buy", position_side="long",
+                       order_type="market", amount=1, trigger_price=None)
+    assert SimulatedExchange._is_close_order_static(o2) is False
+    # short position_side + buy → close
+    o3 = _PendingOrder(id="3", symbol="X", side="buy", position_side="short",
+                       order_type="market", amount=1, trigger_price=None)
+    assert SimulatedExchange._is_close_order_static(o3) is True
