@@ -298,6 +298,9 @@ class SimulatedExchange(BaseExchange):
         self._used_usdt += actual_margin
         self._free_usdt += diff
         if self._free_usdt < 0:
+            logger.warning(
+                f"Market open {order.id}: free_usdt shortfall {-self._free_usdt:.4f} clamped to 0"
+            )
             self._free_usdt = 0.0
 
         self._free_usdt = round(self._free_usdt, 8)

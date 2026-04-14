@@ -154,7 +154,7 @@ class FillEvent:
     symbol: str
     side: str
     position_side: str
-    trigger_reason: str    # market / stop / take_profit / liquidation
+    trigger_reason: str    # market / limit / stop / take_profit / liquidation
     fill_price: float
     amount: float
     fee: float

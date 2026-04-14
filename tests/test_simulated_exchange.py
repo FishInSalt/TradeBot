@@ -1021,7 +1021,7 @@ async def test_frozen_balance_diff_refund():
 
 
 async def test_frozen_extreme_clamp():
-    """Extreme price movement: free_usdt clamped to 0, shortfall absorbed as slippage cost.
+    """Extreme price movement: free_usdt clamped to 0, shortfall causes phantom total_usdt inflation.
 
     Math: initial=32, ask@submit=95010, leverage=3
       frozen = (95010*0.001/3 + 95010*0.001*0.0005) * 1.002 ≈ 31.78
