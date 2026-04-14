@@ -355,6 +355,8 @@ Volatility alert: OFF
 - **价位级别告警**：存在 `BaseExchange._price_level_alerts`（base.py:63），所有 exchange 实现均可直接访问。
 - **百分比波动告警参数**：存在 `PriceAlertService` 实例中，但 `BaseExchange.set_alert_service` 是空实现（base.py:103-105），BaseExchange 没有存储引用。SimulatedExchange 自己存了 `self._alert_service`，OKX 也有独立存储。**解决方案**：在 `TradingDeps` 中新增 `alert_threshold_pct: float | None` 和 `alert_window_min: int | None` 字段，`build_services` 时从 WizardResult 传入。工具从 deps 读取百分比告警参数，从 exchange 读取价位告警列表。
 
+**同步约束**：`set_price_alert` 工具在调用 `exchange.update_alert_params()` 后，必须同步更新 `deps.alert_threshold_pct` 和 `deps.alert_window_min`，否则 `get_active_alerts` 读到的值会过时。在 `tools_execution.py` 的 `set_price_alert` 末尾加两行赋值即可。
+
 **实现改动**：
 - `src/agent/trader.py`: `TradingDeps` 新增 `alert_threshold_pct` 和 `alert_window_min` 字段
 - `src/cli/app.py`: `build_services` 传入告警参数
