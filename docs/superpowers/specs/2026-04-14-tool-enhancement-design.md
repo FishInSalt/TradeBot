@@ -156,8 +156,8 @@ Time      Open     High     Low      Close    Vol
 - Volume ratio: <0.7x low, 0.7-1.3x normal, >1.3x above normal
 
 **实现改动**：
-- `src/services/technical.py`: 新增 ATR、成交量比率、K 线范围计算；重写 `format_for_llm` 输出格式
-- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，输出 K 线表
+- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`、`candle_range_high`、`candle_range_low`。重写 `format_for_llm` 输出格式，加入定性标注。
+- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，输出 K 线表。工具 docstring 注明 K 线数据的 token 开销（50 根 ≈ 800-1000 tokens），供 Agent 按需调整。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
 ### 2. get_position — 增加风险上下文
@@ -186,7 +186,12 @@ Current Position:
 - 距清算价百分比
 - 持仓时长（从 position 的 created_at 到当前时间）
 
+**持仓时长实现方案**：公开 `Position` dataclass（base.py）没有 `created_at` 字段。新增可选字段 `created_at: datetime | None = None`。SimulatedExchange 的 `fetch_positions` 从内部 `_Position.created_at` 填充；OKXExchange 留 `None`（CCXT 的 position 对象没有可靠的创建时间）。工具端对 `None` 显示 "N/A"。
+
 **实现改动**：
+- `src/integrations/exchange/base.py`: `Position` dataclass 新增 `created_at: datetime | None = None`
+- `src/integrations/exchange/simulated.py`: `fetch_positions` 填充 `created_at`
+- `src/integrations/exchange/okx.py`: `fetch_positions` 保持 `created_at=None`（无需改动，使用默认值）
 - `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，计算百分比和时长
 - `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float` 字段
 - `src/cli/app.py`: `build_services` 中从 `WizardResult.initial_balance` 传入 deps
@@ -215,7 +220,7 @@ Account Balance:
 ```
 
 **实现改动**：
-- `src/agent/tools_perception.py`: 从 session 获取 initial_balance，计算收益率
+- `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，计算收益率
 
 ### 4. get_trade_journal — 增加汇总统计
 
@@ -310,12 +315,13 @@ Pending Orders:
 Order cancelled: limit buy 0.001 @ 72000.00 | ID: abc123
 ```
 
-**错误情况**：
-- 订单不存在: `"Order not found: {order_id}"`
-- 市价单: `"Cannot cancel market orders"`
+**异常处理**：工具端先调用 `exchange.fetch_open_orders` 查找目标订单：
+- 找不到 → 直接返回 `"Order not found or already filled: {order_id}"`（不调用 exchange.cancel_order，避免 Sim/OKX 异常差异）
+- 找到且为 market 类型 → 返回 `"Cannot cancel market orders"`
+- 找到且为 limit/stop/take_profit → 调用 `exchange.cancel_order` 取消，返回订单详情确认
 
 **实现改动**：
-- `src/agent/tools_execution.py`: 新增 `cancel_order` 函数。先通过 `exchange.fetch_open_orders` 查到订单详情（类型、方向、数量、价格），然后调用 `exchange.cancel_order` 取消，最后返回包含订单信息的确认消息。记录 TradeAction。
+- `src/agent/tools_execution.py`: 新增 `cancel_order` 函数。先 fetch_open_orders 找订单，再 cancel，记录 TradeAction。
 - `src/agent/trader.py`: 注册工具
 
 ### 8. get_active_alerts — 查看当前告警配置
@@ -345,10 +351,14 @@ Volatility alert: OFF
   No active alerts.
 ```
 
+**数据来源**：
+- **价位级别告警**：存在 `BaseExchange._price_level_alerts`（base.py:63），所有 exchange 实现均可直接访问。
+- **百分比波动告警参数**：存在 `PriceAlertService` 实例中，但 `BaseExchange.set_alert_service` 是空实现（base.py:103-105），BaseExchange 没有存储引用。SimulatedExchange 自己存了 `self._alert_service`，OKX 也有独立存储。**解决方案**：在 `TradingDeps` 中新增 `alert_threshold_pct: float | None` 和 `alert_window_min: int | None` 字段，`build_services` 时从 WizardResult 传入。工具从 deps 读取百分比告警参数，从 exchange 读取价位告警列表。
+
 **实现改动**：
-- `src/integrations/exchange/base.py`: 新增 `get_alert_info()` 方法，返回告警参数和活跃告警列表
-- `src/integrations/exchange/simulated.py`: 实现该方法
-- `src/agent/tools_perception.py`: 新增 `get_active_alerts` 函数
+- `src/agent/trader.py`: `TradingDeps` 新增 `alert_threshold_pct` 和 `alert_window_min` 字段
+- `src/cli/app.py`: `build_services` 传入告警参数
+- `src/agent/tools_perception.py`: 新增 `get_active_alerts` 函数，从 deps 读取波动告警参数，从 `exchange._price_level_alerts` 读取价位告警
 - `src/agent/trader.py`: 注册工具
 
 ### 9. get_performance — 交易表现统计
@@ -387,7 +397,10 @@ No completed trades yet.
 - `src/agent/tools_perception.py`: 新增 `get_performance` 函数，调用共享的交易统计函数 + 当前余额计算
 - `src/agent/trader.py`: 注册工具
 
-**共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要从 TradeAction 表计算胜率/盈亏比等指标。提取一个共享函数 `_compute_trade_stats(db_engine, session_id)` 放在 `tools_perception.py` 中（或复用 `src/services/metrics.py`），两个工具复用，避免重复实现。
+**共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
+- `PerformanceMetrics` dataclass 新增字段：`avg_win`、`avg_loss`、`best_trade`、`worst_trade`、`recent_streak`（近 N 笔胜负串）
+- `MetricsService.compute()` 补全这些字段的计算逻辑
+- `get_trade_journal` 和 `get_performance` 都调用 `MetricsService.compute()` 获取统计数据
 
 ---
 
@@ -431,9 +444,11 @@ get_position(symbol: str | None = None)
 | `src/agent/tools_perception.py` | 重写：增强 6 个现有函数 + 新增 3 个函数 |
 | `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order |
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具 |
-| `src/integrations/exchange/base.py` | 修改：新增 get_alert_info 默认方法 |
-| `src/integrations/exchange/simulated.py` | 修改：实现 get_alert_info |
-| `src/integrations/market_data.py` | 可能修改：limit 参数透传 |
+| `src/integrations/exchange/base.py` | 修改：Position dataclass 新增 created_at 可选字段 |
+| `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at |
+| `src/integrations/exchange/okx.py` | 验证：fetch_positions 使用 created_at 默认值 None（无需改动） |
+| `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_streak |
+| `src/integrations/market_data.py` | 修改：limit 参数透传 |
 | `tests/` | 新增/修改测试 |
 
 ## 五、不在本轮范围
