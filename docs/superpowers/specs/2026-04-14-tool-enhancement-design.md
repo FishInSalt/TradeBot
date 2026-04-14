@@ -114,11 +114,11 @@ Bollinger Middle: 74750.00
 Bollinger Lower: 74400.00
 ```
 
-**新增参数**：`candle_count: int = 50`（上限 100）
+**新增参数**：`candle_count: int = 50`（上限 80）
 
 **获取与展示解耦**：`candle_count` 控制 K 线表展示的数量，不影响指标计算。实际获取的 K 线数量为 `max(candle_count + 50, 100)`，确保 MA(50)、RSI(14)、MACD(12,26,9) 等指标有足够的热身数据。例如 Agent 传 `candle_count=20`，实际获取 100 根 K 线用于计算指标，K 线表只展示最后 20 根。
 
-**API 限制说明**：OKX `fetch_ohlcv` 单次返回上限取决于时间框架（通常 100-300 根）。当请求量超出 API 限制时 CCXT 会静默截断。实际影响很小：截断只减少指标热身数据，K 线表始终从末尾取 `candle_count` 根展示。如果返回数据不足 `candle_count`，展示实际返回数量即可。
+**API 限制说明**：OKX `fetch_ohlcv` 单次返回上限取决于时间框架（通常 100-300 根）。当请求量超出 API 限制时 CCXT 会静默截断。`candle_count` 上限设为 80（而非 100），确保 `max(80+50, 100) = 130` 即使被截断到 100 根仍有 20 根热身数据。如果返回数据不足 `candle_count + 50`，展示量为 `返回数量 - 50`（确保指标有基本热身），最少展示 10 根。
 
 **改进后输出**（四段结构）：
 
@@ -156,16 +156,16 @@ Time      Open     High     Low      Close    Vol
 - MA: price above → bullish, price below → bearish
 - MACD: histogram > 0 → bullish, < 0 → bearish
 - BB: price 位于上下轨间的位置描述
-- ATR: 占价格百分比，<0.1% low, 0.1-0.3% moderate, >0.3% high
+- ATR: 占价格百分比，<0.1% low, 0.1-0.3% moderate, >0.3% high。**已知限制**：阈值不随 timeframe 调整，高 timeframe（如 1H/4H）的 ATR 天然更大，几乎永远标注为 high。当前默认 5m 单交易对影响有限，后续多时间框架引导时可加 timeframe 系数优化。
 - Volume ratio: 使用倒数第 2 根 K 线（最近一根已完成的）的 volume / SMA(volume, 20)。最后一根 K 线可能正在形成中，volume 偏低会导致误判。<0.7x low, 0.7-1.3x normal, >1.3x above normal
 
 **职责划分**：
 - `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责指标段和 Market Context 段的格式化（不含 K 线表）。
-- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段和 K 线表段的格式化（因为 `candle_count` 是工具层参数），最终拼接所有段落输出。K 线时间列使用 UTC 格式（HH:MM UTC），从 UNIX 毫秒时间戳转换。
+- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段和 K 线表段的格式化（因为 `candle_count` 是工具层参数），最终拼接所有段落输出。K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
 
 **实现改动**：
 - `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）、`candle_range_high`、`candle_range_low`。`format_for_llm` 重写输出格式，加入定性标注，只输出指标段和 Market Context 段。**同时修复现有 BB 列索引 bug**：当前用位置索引 `bb_cols[0]` 赋给 `bb_upper`，但 pandas_ta 返回顺序是 [BBL, BBM, BBU, BBB, BBP]，实际 `[0]` 是 lower。改为用列名匹配（`bb_df.filter(like='BBU')` / `bb_df.filter(like='BBL')`）。
-- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50, ~800-1000 tokens per call."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
+- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Total output ~1200-1400 tokens (K-line table ~800-1000 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
 ### 2. get_position — 增加风险上下文
@@ -434,9 +434,10 @@ No completed trades yet.
 - `src/agent/trader.py`: 注册工具
 
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
-- `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_streak: str`（近 N 笔胜负串，如 "3W 1L"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。）
-- `MetricsService.compute()` 补全这些字段的计算逻辑
-- `get_trade_journal` 和 `get_performance` 都调用 `MetricsService.compute()` 获取统计数据
+- `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_summary: str`（近 N 笔交易的统计汇总，如 "3W 1L (last 4 trades)"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。注意是无序统计，不是连胜/连败序列。）
+- `MetricsService.__init__` 改为接受 `engine` 和 `session_id`（既然已放入 deps，可在构造时注入），`compute()` 简化为无参调用 `deps.metrics.compute()`
+- `MetricsService.compute()` 补全新增字段的计算逻辑
+- `get_trade_journal` 和 `get_performance` 都调用 `deps.metrics.compute()` 获取统计数据
 
 ---
 
@@ -452,7 +453,7 @@ get_market_data(symbol: str, timeframe: str)
 get_market_data(symbol: str | None = None, timeframe: str | None = None, candle_count: int = 50)
 # symbol 默认 deps.symbol
 # timeframe 默认 deps.timeframe
-# candle_count 默认 50，上限 100
+# candle_count 默认 50，上限 80
 ```
 
 ### get_position
@@ -482,8 +483,8 @@ get_position(symbol: str | None = None)
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance + metrics 字段 |
 | `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps |
 | `src/integrations/exchange/base.py` | 修改：Position 新增 created_at；改写 set_alert_service（存储引用）；新增 get_alert_params / get_price_level_alerts |
-| `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service + update_alert_params 覆写 |
-| `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service + update_alert_params 覆写；fetch_positions 无需改动 |
+| `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值 |
+| `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值；fetch_positions 无需改动 |
 | `src/services/price_alert.py` | 修改：PriceAlertService 新增 get_params 方法 |
 | `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_streak |
 | `src/integrations/market_data.py` | 修改：limit 参数透传 |
@@ -496,3 +497,4 @@ get_position(symbol: str | None = None)
 - 资金费率查询（当前本金规模下可忽略）
 - 硬性风控代码约束（P3，联调观察后决定）
 - BaseExchange 回调整合：on_fill / on_alert 在两个子类中实现完全相同（`self._fill_callback = callback` / `self._alert_callback = callback`），与本次 set_alert_service 整合属同一类问题，可后续一并上移到 BaseExchange 并在 `__init__` 中初始化
+- Ticker 缓存：同一 ReAct 循环中 get_market_data / get_position / get_open_orders 各自调用 get_ticker()，OKX 模式下产生多次 REST 请求。可在 MarketDataService 加简单 TTL 缓存（如 5s），但超出本次范围
