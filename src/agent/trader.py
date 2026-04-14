@@ -63,7 +63,7 @@ def create_trader_agent(
 
     @agent.tool
     async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
-        """Get pending conditional orders (stop loss, take profit)."""
+        """Get all pending orders (market awaiting fill, limit, stop loss, take profit)."""
         from src.agent.tools_perception import get_open_orders as _impl
 
         return await _impl(ctx.deps)
