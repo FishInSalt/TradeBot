@@ -168,7 +168,7 @@ Time      Open     High     Low      Close    Vol
   - **K 线表段**：标题标注实际展示数量（如 `=== Recent Candles (5m, last 50) ===`），截断时 Agent 可从标题看到实际数量K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
 
 **实现改动**：
-- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）。当数据不足时（SMA 窗口不够或 ATR 计算行数不足），对应字段返回 None，`format_for_llm` 输出 "N/A"，与现有 `_last()` 模式一致。`format_for_llm` 重写输出格式，加入定性标注，**只输出 Technical Indicators 段**。**同时修复现有指标列索引 bug**：当前用位置索引访问 pandas_ta 返回列，存在两处反转：(1) BB: `bb_cols[0]` 赋给 `bb_upper`，实际是 BBL（lower）。pandas_ta 返回 [BBL, BBM, BBU, BBB, BBP]。(2) MACD: `macd_cols[1]` 赋给 `macd_signal`，实际是 MACDh（histogram）；`macd_cols[2]` 赋给 `macd_histogram`，实际是 MACDs（signal）。pandas_ta 返回 [MACD, MACDh, MACDs]。全部改为列名匹配（`filter(like='BBU')`、`filter(like='MACDh')` 等）。
+- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（分子取 volume.iloc[-2]，分母取 SMA(volume, 20).iloc[-2]，保持分子分母取值位置一致，均避开最后一根未完成 K 线）。当数据不足时（SMA 窗口不够、ATR 计算行数不足、或 SMA 值为 0），对应字段返回 None。`format_for_llm` 新增 `timeframe: str` 参数，重写输出格式，加入定性标注（ATR 定性标签仅对 5m 生效，非 5m 只标数值），**只输出 Technical Indicators 的指标行**。数据不足导致的 None 值输出为 "N/A"，与现有 `_last()` 模式一致——这是预期行为，非 bug。**同时修复现有指标列索引 bug**：当前用位置索引访问 pandas_ta 返回列，存在两处反转：(1) BB: `bb_cols[0]` 赋给 `bb_upper`，实际是 BBL（lower）。pandas_ta 返回 [BBL, BBM, BBU, BBB, BBP]。(2) MACD: `macd_cols[1]` 赋给 `macd_signal`，实际是 MACDh（histogram）；`macd_cols[2]` 赋给 `macd_histogram`，实际是 MACDs（signal）。pandas_ta 返回 [MACD, MACDh, MACDs]。全部改为列名匹配（`filter(like='BBU')`、`filter(like='MACDh')` 等）。
 - `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Values above 50 may be capped by exchange API limits. Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
@@ -204,7 +204,7 @@ Current Position:
 - `src/integrations/exchange/base.py`: `Position` dataclass 新增 `created_at: datetime | None = None`
 - `src/integrations/exchange/simulated.py`: `fetch_positions` 填充 `created_at`
 - `src/integrations/exchange/okx.py`: `fetch_positions` 保持 `created_at=None`（无需改动，使用默认值）
-- `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，调用 `deps.market_data.get_ticker()` 获取当前价格（用于计算清算距离百分比 `abs(current_price - liquidation_price) / current_price * 100`），计算百分比和时长
+- `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，调用 `deps.market_data.get_ticker()` 获取当前价格（用于计算清算距离百分比 `abs(current_price - liquidation_price) / current_price * 100`），计算百分比和时长。注意：OKX 模式新增 1 次 ticker REST 请求。
 - `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float = 10000.0` 和 `metrics: MetricsService | None = None`（均需默认值，因为 Python dataclass 要求无默认值字段在有默认值字段之前，而 TradingDeps 从 `db_engine` 开始已有默认值）
 - `src/cli/app.py`: 将 `MetricsService` 创建移入 `build_services` 内部（当前在 app.py:364，在 build_services 返回之后），从 `result.initial_balance` 获取值，同时传入 deps。app.py:367 的现有调用 `metrics_service.compute(engine, session_id, ...)` 也需同步改为 `deps.metrics.compute(current_position=...)`
 
@@ -313,7 +313,7 @@ Pending Orders:
 ```
 
 **实现改动**：
-- `src/agent/tools_perception.py`: 获取当前价格，对有 price 的订单计算距离百分比
+- `src/agent/tools_perception.py`: 调用 `deps.market_data.get_ticker()` 获取当前价格，对有 price 的订单计算距离百分比。注意：OKX 模式新增 1 次 ticker REST 请求（原本该工具无外部请求）。
 
 ### 7b. set_price_alert — 禁用状态明确提示
 
@@ -450,7 +450,7 @@ No completed trades yet.
 
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
 - `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_summary: str`（近 N 笔交易的统计汇总，如 "3W 1L (last 4 trades)"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。按时间取最近 N 笔的胜负统计，不跟踪连胜/连败序列。）
-- `MetricsService.__init__` 改为接受 `engine`、`session_id`、`initial_balance`（既然已放入 deps，可在构造时注入），`compute()` 简化为 `deps.metrics.compute(current_position="none")`，其中 `current_position` 保留为可选 kwarg（app.py 初始显示仍需传入）
+- `MetricsService.__init__` 新增 `engine` 和 `session_id` 参数注入（`initial_balance` 已有），`compute()` 简化为 `deps.metrics.compute(current_position="none")`，其中 `current_position` 保留为可选 kwarg（app.py 初始显示仍需传入）
 - `MetricsService.compute()` 补全新增字段的计算逻辑。**PnL 口径说明**：FillEvent.pnl 是毛利（不含 fee）。一个完整交易的余额变化 = gross_pnl - open_fee - close_fee，但 MetricsService 只看 close fill 的 pnl（开仓 pnl=None）。如果做 net_pnl = pnl - close_fee，仍漏掉 open_fee，需要匹配开平仓记录，复杂度过高。
 
 **解决方案**：保持 MetricsService 统计 gross PnL（不改现有逻辑），新增 `total_fees: float` 字段累加所有 fill 的 fee（开仓 + 平仓），在输出中单独展示。Total Return（从余额计算）是准确的净值指标，Realized PnL 标注为 gross。差异对 Agent 透明。
