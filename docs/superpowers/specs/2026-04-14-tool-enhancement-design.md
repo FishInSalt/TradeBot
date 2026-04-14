@@ -2,20 +2,81 @@
 
 > 目标：补全和优化 Agent 工具库，提供好用且全面的工具集，提升 Agent 交易决策质量。
 
+## 审查员上下文
+
+### 系统架构
+
+TradeBot 是一个 LLM 驱动的加密货币交易系统。核心架构：
+
+- **Agent**：基于 pydantic-ai 的 ReAct Agent，使用 DeepSeek-V3 模型，通过 tool calling 与系统交互
+- **Exchange**：抽象层支持模拟交易所（SimulatedExchange）和真实交易所（OKXExchange）
+- **Scheduler**：事件驱动调度器，定时唤醒 Agent 或在成交/告警时立即唤醒
+- **交易标的**：BTC/USDT 永续合约
+
+### Agent 工作流
+
+每次唤醒后，Agent 进入一个 ReAct 循环（非单次 API 调用）：
+
+```
+唤醒(定时/成交/告警) → Agent 自主决定调用哪些工具 → 收集信息 → 分析判断 → 执行/观望 → 休眠
+```
+
+Agent 通过工具获取所有外部信息（市场数据、持仓、余额等），也通过工具执行所有操作（开仓、设止损等）。工具是 Agent 的"感官和手脚"——工具质量直接决定决策质量。
+
+### 为什么要做这个改动
+
+联调验证（Phase 1 冒烟测试通过）发现：Agent 的工作流结构正确，但感知工具的信息密度严重不足。对比真实交易员的信息需求：
+
+| 信息维度 | 真实交易员 | 当前 Agent |
+|---------|-----------|-----------|
+| 价格走势 | 看 K 线图（多时间框架） | 只有 9 个指标数值，无 K 线数据 |
+| 波动率 | ATR、布林带宽度 | 有 BB 数值但无 ATR |
+| 成交量 | 量能分析（放量/缩量） | 无 |
+| 支撑阻力 | 近期高低点、关键价位 | 无 |
+| 指标解读 | 看数值含义（超买/超卖） | 裸数值，需要 LLM 自行解读 |
+| 仓位风险 | 占本金比例、距清算距离 | 只有 PnL 绝对值 |
+| 整体表现 | 胜率、盈亏比、回撤 | 无统计工具 |
+
+### 现有工具列表（16 个）
+
+**感知工具**（信息输入）— 本次增强重点：
+| 工具 | 用途 | 参数 |
+|------|------|------|
+| `get_market_data(symbol, timeframe)` | 市场数据 + 技术指标 | 2 个必填 |
+| `get_position(symbol)` | 当前持仓 | 1 个必填 |
+| `get_account_balance()` | 账户余额 | 无 |
+| `get_open_orders()` | 挂单列表 | 无 |
+| `get_trade_journal()` | 交易流水 | 无 |
+| `get_memories()` | 长期记忆 | 无 |
+
+**执行工具**（行动输出）— 小幅优化：
+| 工具 | 用途 | 参数 |
+|------|------|------|
+| `open_position(side, position_pct, leverage, reasoning)` | 市价开仓 | 4 个 |
+| `close_position(reasoning)` | 市价平仓 | 1 个 |
+| `place_limit_order(side, price, position_pct, leverage, reasoning)` | 限价开仓 | 5 个 |
+| `set_stop_loss(price, reasoning)` | 设止损 | 2 个 |
+| `set_take_profit(price, reasoning)` | 设止盈 | 2 个 |
+| `adjust_leverage(leverage, reasoning)` | 调杠杆 | 2 个 |
+| `set_price_alert(threshold_pct, window_minutes, reasoning)` | 调波动告警参数 | 3 个 |
+| `add_price_level_alert(price, direction, reasoning)` | 设价位告警 | 3 个 |
+| `set_next_wake(minutes, reasoning)` | 设下次唤醒时间 | 2 个 |
+| `save_memory(category, content, importance)` | 存记忆 | 3 个 |
+
 ## 背景
 
 联调验证发现 Agent 的工作流结构正确（ReAct 循环），但感知工具的信息密度不足，导致 Agent 决策所需的市场信息严重缺失。本次改动统一审视并增强现有工具、补全缺失工具。
 
 ## 设计标准
 
-工具设计遵循 6 条标准：
+工具设计遵循 6 条标准（从 LLM 作为工具使用者的特性出发）：
 
-1. **命名和描述清晰** — LLM 一看就知道什么时候该用
-2. **参数尽量少** — 有合理默认值，降低 LLM 填参出错概率
-3. **返回信息预消化** — 在工具内完成计算，返回结论性信息，不让 LLM 做数学
-4. **信息密度适中** — 足够决策，不要淹没
-5. **输出带上下文参照** — 不要裸数值，加定性标注和百分比
-6. **单一职责** — 一个工具做一件事
+1. **命名和描述清晰** — LLM 靠 docstring 决定调哪个工具，描述必须一看就懂
+2. **参数尽量少** — LLM 填参可靠性与参数数量成反比，可选参数给默认值
+3. **返回信息预消化** — LLM 数学能力弱，在工具内完成计算，返回结论性信息
+4. **信息密度适中** — 足够决策但不淹没，LLM 处理长序列数据效率会下降
+5. **输出带上下文参照** — 裸数值（ATR: 85）无意义，加定性标注（0.11% of price — low volatility）
+6. **单一职责** — 一个工具做一件事，让 Agent 自己组合调用
 
 ## 改动范围
 
@@ -32,9 +93,30 @@
 
 **当前问题**：只返回 9 个裸数值指标，缺 K 线数据、波动率、成交量趋势、支撑阻力。
 
+**当前输出**：
+
+```
+Symbol: BTC/USDT:USDT
+Price: 74880.00 | Bid: 74870.00 | Ask: 74890.00
+24h High: 75200.00 | Low: 73800.00 | Volume: 12345.60
+
+Technical Indicators (5m):
+Current Price: 74880.00
+
+RSI(14): 52.88
+MA(20): 74750.00
+MA(50): 74500.00
+MACD: 12.50
+MACD Signal: 8.30
+MACD Histogram: 4.20
+Bollinger Upper: 75100.00
+Bollinger Middle: 74750.00
+Bollinger Lower: 74400.00
+```
+
 **新增参数**：`candle_count: int = 50`（上限 100）
 
-**输出格式**（四段结构）：
+**改进后输出**（四段结构）：
 
 ```
 === Ticker ===
@@ -82,7 +164,14 @@ Time      Open     High     Low      Close    Vol
 
 **当前问题**：缺少仓位风险信息。PnL 是绝对值，Agent 不知道占本金多少。
 
-**输出格式**：
+**当前输出**：
+
+```
+Current Positions:
+  LONG 0.001 contracts @ 74761.10 | Leverage: 3x | PnL: -19.09 USDT| Liq: 50200.00
+```
+
+**改进后输出**：
 
 ```
 Current Position:
@@ -106,7 +195,16 @@ Current Position:
 
 **当前问题**：只有 total/free/used，Agent 不知道自己整体赚了还是亏了。
 
-**输出格式**：
+**当前输出**：
+
+```
+Account Balance:
+  Total: 9981.00 USDT
+  Free: 8981.00 USDT
+  Used: 1000.00 USDT
+```
+
+**改进后输出**：
 
 ```
 Account Balance:
@@ -123,7 +221,18 @@ Account Balance:
 
 **当前问题**：只有原始流水，缺少汇总。
 
-**输出格式**（在原始流水前加统计头部）：
+**当前输出**：
+
+```
+=== Trade Journal ===
+[04-14 16:35] open_position (long) @ 74761.10 [closed]
+  Reasoning: trend following entry on RSI pullback
+[04-14 17:10] close_position (long) @ 74900.00, pnl=12.50 [closed]
+  Reasoning: take profit at resistance
+...
+```
+
+**改进后输出**（在原始流水前加统计头部）：
 
 ```
 === Performance Summary ===
@@ -144,7 +253,13 @@ Recent: 3W 1L (last 4 trades)
 
 **当前问题**：返回只有绝对价格，Agent 不知道距当前价多远。
 
-**输出格式**：
+**当前输出**：
+
+```
+Stop loss set at 72500.00 | Order: abc123
+```
+
+**改进后输出**：
 
 ```
 Stop loss set at 72500.00 (-3.02% from current 74761.10) | Order: abc123
@@ -158,7 +273,15 @@ Take profit set at 79200.00 (+5.94% from current 74761.10) | Order: def456
 
 **当前问题**：SL/TP 价格是裸值。
 
-**输出格式**：
+**当前输出**：
+
+```
+Pending Orders:
+  [STOP] sell 0.001 @ 72500.00 | ID: abc123
+  [TAKE_PROFIT] sell 0.001 @ 79200.00 | ID: def456
+```
+
+**改进后输出**：
 
 ```
 Pending Orders:
