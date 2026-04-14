@@ -98,7 +98,9 @@ Current Position:
 - 持仓时长（从 position 的 created_at 到当前时间）
 
 **实现改动**：
-- `src/agent/tools_perception.py`: 从 deps 获取 initial_balance（需要通过 session DB 或 TradingDeps 传入），计算百分比和时长
+- `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，计算百分比和时长
+- `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float` 字段
+- `src/cli/app.py`: `build_services` 中从 `WizardResult.initial_balance` 传入 deps
 
 ### 3. get_account_balance — 增加收益率
 
@@ -136,7 +138,7 @@ Recent: 3W 1L (last 4 trades)
 ```
 
 **实现改动**：
-- `src/agent/tools_perception.py`: 从 DB 查询已关闭交易计算胜率、盈亏比等，输出在流水前
+- `src/agent/tools_perception.py`: 调用共享的交易统计函数（见"共享统计逻辑"），输出在流水前
 
 ### 5. set_stop_loss / set_take_profit — 返回距离百分比
 
@@ -190,7 +192,7 @@ Order cancelled: limit buy 0.001 @ 72000.00 | ID: abc123
 - 市价单: `"Cannot cancel market orders"`
 
 **实现改动**：
-- `src/agent/tools_execution.py`: 新增 `cancel_order` 函数，调用 `exchange.cancel_order`，记录 TradeAction
+- `src/agent/tools_execution.py`: 新增 `cancel_order` 函数。先通过 `exchange.fetch_open_orders` 查到订单详情（类型、方向、数量、价格），然后调用 `exchange.cancel_order` 取消，最后返回包含订单信息的确认消息。记录 TradeAction。
 - `src/agent/trader.py`: 注册工具
 
 ### 8. get_active_alerts — 查看当前告警配置
@@ -259,9 +261,10 @@ No completed trades yet.
 ```
 
 **实现改动**：
-- `src/agent/tools_perception.py`: 新增 `get_performance` 函数，从 DB 查询 TradeAction + 当前余额计算
+- `src/agent/tools_perception.py`: 新增 `get_performance` 函数，调用共享的交易统计函数 + 当前余额计算
 - `src/agent/trader.py`: 注册工具
-- 可复用 `src/services/metrics.py` 已有的部分逻辑
+
+**共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要从 TradeAction 表计算胜率/盈亏比等指标。提取一个共享函数 `_compute_trade_stats(db_engine, session_id)` 放在 `tools_perception.py` 中（或复用 `src/services/metrics.py`），两个工具复用，避免重复实现。
 
 ---
 
