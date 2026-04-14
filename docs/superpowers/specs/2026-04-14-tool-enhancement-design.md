@@ -157,15 +157,15 @@ Time      Open     High     Low      Close    Vol
 - MACD: histogram > 0 → bullish, < 0 → bearish
 - BB: price 位于上下轨间的位置描述
 - ATR: 占价格百分比，<0.1% low, 0.1-0.3% moderate, >0.3% high
-- Volume ratio: latest_volume / SMA(volume, 20)。<0.7x low, 0.7-1.3x normal, >1.3x above normal
+- Volume ratio: 使用倒数第 2 根 K 线（最近一根已完成的）的 volume / SMA(volume, 20)。最后一根 K 线可能正在形成中，volume 偏低会导致误判。<0.7x low, 0.7-1.3x normal, >1.3x above normal
 
 **职责划分**：
 - `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责指标段和 Market Context 段的格式化（不含 K 线表）。
 - `tools_perception.py` 的 `get_market_data`：负责 Ticker 段和 K 线表段的格式化（因为 `candle_count` 是工具层参数），最终拼接所有段落输出。K 线时间列使用 UTC 格式（HH:MM UTC），从 UNIX 毫秒时间戳转换。
 
 **实现改动**：
-- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`、`candle_range_high`、`candle_range_low`。`format_for_llm` 重写输出格式，加入定性标注，只输出指标段和 Market Context 段。
-- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check, 50 for detailed analysis, default 50, ~800-1000 tokens"），降低 Agent 选择负担。
+- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）、`candle_range_high`、`candle_range_low`。`format_for_llm` 重写输出格式，加入定性标注，只输出指标段和 Market Context 段。**同时修复现有 BB 列索引 bug**：当前用位置索引 `bb_cols[0]` 赋给 `bb_upper`，但 pandas_ta 返回顺序是 [BBL, BBM, BBU, BBB, BBP]，实际 `[0]` 是 lower。改为用列名匹配（`bb_df.filter(like='BBU')` / `bb_df.filter(like='BBL')`）。
+- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50, ~800-1000 tokens per call."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
 ### 2. get_position — 增加风险上下文
@@ -200,9 +200,9 @@ Current Position:
 - `src/integrations/exchange/base.py`: `Position` dataclass 新增 `created_at: datetime | None = None`
 - `src/integrations/exchange/simulated.py`: `fetch_positions` 填充 `created_at`
 - `src/integrations/exchange/okx.py`: `fetch_positions` 保持 `created_at=None`（无需改动，使用默认值）
-- `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，计算百分比和时长
+- `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，调用 `deps.market_data.get_ticker()` 获取当前价格（用于计算清算距离百分比 `abs(current_price - liquidation_price) / current_price * 100`），计算百分比和时长
 - `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float` 字段和 `metrics: MetricsService` 字段
-- `src/cli/app.py`: `build_services` 中传入 `initial_balance` 和 `MetricsService` 实例到 deps（app.py:364 已有实例，复用即可）
+- `src/cli/app.py`: 将 `MetricsService` 创建移入 `build_services` 内部（当前在 app.py:364，在 build_services 返回之后），从 `result.initial_balance` 获取值，同时传入 deps
 
 ### 3. get_account_balance — 增加收益率
 
@@ -327,7 +327,7 @@ Pending Orders:
 Order cancelled: limit buy 0.001 @ 72000.00 | ID: abc123
 ```
 
-**异常处理**：工具端先调用 `exchange.fetch_open_orders` 查找目标订单：
+**异常处理**：工具端先调用 `exchange.fetch_open_orders(deps.symbol)` 查找目标订单（使用 `deps.symbol`，当前单交易对系统）：
 - 找不到 → 直接返回 `"Order not found or already filled: {order_id}"`（不调用 exchange.cancel_order，避免 Sim/OKX 异常差异）
 - 找到且为 market 类型 → 返回 `"Cannot cancel market orders"`
 - 找到且为 limit/stop/take_profit → 调用 `exchange.cancel_order` 取消，返回订单详情确认
@@ -434,7 +434,7 @@ No completed trades yet.
 - `src/agent/trader.py`: 注册工具
 
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
-- `PerformanceMetrics` dataclass 新增字段：`avg_win`、`avg_loss`、`best_trade`、`worst_trade`、`recent_streak`（近 N 笔胜负串）
+- `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_streak: str`（近 N 笔胜负串，如 "3W 1L"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。）
 - `MetricsService.compute()` 补全这些字段的计算逻辑
 - `get_trade_journal` 和 `get_performance` 都调用 `MetricsService.compute()` 获取统计数据
 
