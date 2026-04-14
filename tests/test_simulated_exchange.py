@@ -783,3 +783,112 @@ async def test_is_close_order_static():
     o3 = _PendingOrder(id="3", symbol="X", side="buy", position_side="short",
                        order_type="market", amount=1, trigger_price=None)
     assert SimulatedExchange._is_close_order_static(o3) is True
+
+
+async def test_market_order_returns_open_status():
+    """create_order("market") now returns status="open", price=None, fee=None."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert order.status == "open"
+    assert order.price is None
+    assert order.fee is None
+
+
+async def test_market_order_frozen_balance():
+    """Market order freezes margin+fee from free_usdt."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    # Frozen should be (ask * amount / leverage + ask * amount * fee_rate) * 1.002
+    ask = 95010.0
+    margin = (ask * 0.001) / 3
+    fee = ask * 0.001 * 0.0005
+    frozen = (margin + fee) * 1.002
+    assert ex._frozen_usdt == pytest.approx(frozen)
+    assert ex._free_usdt == pytest.approx(100.0 - frozen)
+    # No position yet
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 0
+
+
+async def test_market_order_fills_on_next_tick():
+    """Market order fills on next _process_tick: position created, callback called."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert len(await ex.fetch_positions("BTC/USDT:USDT")) == 0
+
+    # Tick with slightly different price
+    tick = Ticker(symbol="BTC/USDT:USDT", last=95100.0, bid=95090.0, ask=95110.0,
+                  high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    assert positions[0].side == "long"
+    assert positions[0].contracts == 0.001
+
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "market"
+    assert fills[0].fill_price == 95110.0  # ask price at tick time
+    assert fills[0].pnl is None  # open order, no PnL
+    assert ex._frozen_usdt == 0.0
+
+
+async def test_market_close_fills_on_next_tick():
+    """Close market order: position still exists after create_order, gone after tick."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange(initial_balance=50.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    # Setup existing long position
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.001, entry_price=95010.0, leverage=3,
+    )
+    margin = 95010.0 * 0.001 / 3
+    ex._used_usdt = margin
+    ex._free_usdt = 50.0 - margin
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+    assert order.status == "open"
+    # Position still exists
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+
+    tick = Ticker(symbol="BTC/USDT:USDT", last=95100.0, bid=95090.0, ask=95110.0,
+                  high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 0
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "market"
+    assert fills[0].pnl is not None
+
+
+async def test_close_market_order_minimal_freeze():
+    """Close order only freezes fee (not margin), allowing close even when free_usdt ≈ 0."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    margin = 95010.0 * 0.001 / 3
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.001, entry_price=95010.0, leverage=3,
+    )
+    ex._used_usdt = margin
+    ex._free_usdt = 0.01  # Almost no free balance
+
+    # Should NOT raise — close only freezes fee (min of estimated_fee, free_usdt)
+    order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+    assert order.status == "open"
+    assert ex._frozen_usdt == pytest.approx(0.01)  # min(fee, 0.01)

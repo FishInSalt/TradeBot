@@ -183,118 +183,51 @@ class SimulatedExchange(BaseExchange):
 
         async with self._lock:
             if order_type == "market":
-                order, position_side, pnl = self._execute_market_order(symbol, side, amount)
-                if self._db_engine:
-                    await self._persist_state(new_orders=[(order, position_side)])
-                self._pending_fills.append(FillEvent(
-                    order_id=order.id, symbol=symbol, side=order.side,
-                    position_side=position_side,
-                    trigger_reason="market",
-                    fill_price=order.price, amount=order.amount,
-                    fee=order.fee, pnl=pnl,
-                    timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
+                if self._latest_ticker is None:
+                    raise RuntimeError("No ticker data available")
+                ticker = self._latest_ticker
+                is_close = self._is_close_order(symbol, side)
+
+                if is_close:
+                    pos = self._positions[symbol]
+                    position_side = pos.side
+                    estimated_price = ticker.bid if pos.side == "long" else ticker.ask
+                    estimated_fee = estimated_price * amount * self._fee_rate
+                    frozen = min(estimated_fee, self._free_usdt)
+                else:
+                    position_side = "long" if side == "buy" else "short"
+                    estimated_price = ticker.ask if side == "buy" else ticker.bid
+                    leverage = self._leverage.get(symbol, 1)
+                    estimated_margin = (estimated_price * amount) / leverage
+                    estimated_fee = estimated_price * amount * self._fee_rate
+                    frozen = (estimated_margin + estimated_fee) * 1.002
+                    if self._free_usdt < frozen:
+                        raise ValueError(
+                            f"Insufficient balance: need {frozen:.2f}, have {self._free_usdt:.2f}"
+                        )
+
+                self._free_usdt -= frozen
+                self._frozen_usdt += frozen
+
+                order_id = str(uuid.uuid4())
+                leverage_val = self._leverage.get(symbol, 1)
+                self._pending_orders.append(_PendingOrder(
+                    id=order_id, symbol=symbol, side=side,
+                    position_side=position_side, order_type="market",
+                    amount=amount, trigger_price=None,
+                    frozen_margin=frozen, leverage=leverage_val,
                 ))
-                return order
+                if self._db_engine:
+                    await self._persist_state()
+                return Order(
+                    id=order_id, symbol=symbol, side=side, order_type="market",
+                    amount=amount, price=None, status="open",
+                )
             else:
                 order = self._create_conditional_order(symbol, side, order_type, amount, price)  # type: ignore[arg-type]
                 if self._db_engine:
-                    await self._persist_state()  # persist new pending order
+                    await self._persist_state()
                 return order
-
-    def _execute_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str, float | None]:
-        """Returns (Order, position_side, pnl) tuple."""
-        if self._latest_ticker is None:
-            raise RuntimeError("No ticker data available")
-
-        pos = self._positions.get(symbol)
-        is_close = (
-            (pos is not None and pos.side == "long" and side == "sell") or
-            (pos is not None and pos.side == "short" and side == "buy")
-        )
-
-        if is_close:
-            return self._close_market_order(symbol, side, amount, pos)  # type: ignore[arg-type]
-        else:
-            return self._open_market_order(symbol, side, amount)
-
-    def _open_market_order(self, symbol: str, side: str, amount: float) -> tuple[Order, str, None]:
-        ticker = self._latest_ticker
-        if ticker is None:
-            raise RuntimeError("No ticker data available")
-        fill_price = ticker.ask if side == "buy" else ticker.bid
-        leverage = self._leverage.get(symbol, 1)
-        margin = (fill_price * amount) / leverage
-        fee = fill_price * amount * self._fee_rate
-        required = margin + fee
-
-        if self._free_usdt < required:
-            raise ValueError(
-                f"Insufficient balance: need {required:.2f}, have {self._free_usdt:.2f}"
-            )
-
-        # Check leverage consistency for add-to-position
-        pos = self._positions.get(symbol)
-        position_side = "long" if side == "buy" else "short"
-        if pos is not None:
-            if pos.leverage != leverage:
-                raise ValueError(
-                    f"Leverage mismatch: position has {pos.leverage}x, "
-                    f"current is {leverage}x. Close position first."
-                )
-            position_side = pos.side  # add-to-position: same direction
-            # Merge position
-            new_contracts = pos.contracts + amount
-            new_entry = (pos.entry_price * pos.contracts + fill_price * amount) / new_contracts
-            pos.contracts = new_contracts
-            pos.entry_price = new_entry
-            pos.updated_at = datetime.now(timezone.utc)
-        else:
-            self._positions[symbol] = _Position(
-                side=position_side,
-                contracts=amount,
-                entry_price=fill_price,
-                leverage=leverage,
-            )
-
-        self._free_usdt -= required
-        self._used_usdt += margin
-        self._free_usdt = round(self._free_usdt, 8)
-        self._used_usdt = round(self._used_usdt, 8)
-
-        order_id = str(uuid.uuid4())
-        order = Order(
-            id=order_id, symbol=symbol, side=side, order_type="market",
-            amount=amount, price=fill_price, status="closed", fee=fee,
-        )
-        logger.info(f"Market order filled: {side} {amount} {symbol} @ {fill_price:.2f}, fee={fee:.4f}")
-        return order, position_side, None
-
-    def _close_market_order(self, symbol: str, side: str, amount: float, pos: _Position) -> tuple[Order, str, float]:
-        ticker = self._latest_ticker
-        if ticker is None:
-            raise RuntimeError("No ticker data available")
-        # Clamp amount
-        actual_amount = min(amount, pos.contracts)
-        position_side = pos.side  # record BEFORE close (pos may be deleted)
-        fill_price = ticker.bid if pos.side == "long" else ticker.ask
-        pnl, fee, released_margin = self._close_position_core(
-            symbol, pos.side, actual_amount, fill_price,
-        )
-
-        # Cancel orphaned orders if position fully closed
-        if symbol not in self._positions:
-            self._cancel_orphaned_orders()
-
-        order_id = str(uuid.uuid4())
-        order = Order(
-            id=order_id, symbol=symbol, side=side, order_type="market",
-            amount=actual_amount, price=fill_price, status="closed", fee=fee,
-        )
-        logger.info(
-            f"Market close filled: {side} {actual_amount} {symbol} @ {fill_price:.2f}, "
-            f"pnl={pnl:.4f}, fee={fee:.4f}"
-        )
-        return order, position_side, pnl
 
     def _close_position_core(
         self, symbol: str, position_side: str, amount: float, fill_price: float,
