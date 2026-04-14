@@ -794,6 +794,50 @@ async def test_simulated_exchange_alert_callback_outside_lock():
     assert lock_held_during_callback is False
 
 
+async def test_pending_market_order_fields():
+    """Market order creates _PendingOrder with correct frozen_margin/leverage/trigger_price."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    assert len(ex._pending_orders) == 1
+    po = ex._pending_orders[0]
+    assert po.order_type == "market"
+    assert po.frozen_margin > 0
+    assert po.leverage == 3
+    assert po.trigger_price is None
+
+
+async def test_pending_limit_order_fields():
+    """Limit order creates _PendingOrder with correct frozen_margin/leverage/trigger_price."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=90000.0)
+
+    assert len(ex._pending_orders) == 1
+    po = ex._pending_orders[0]
+    assert po.order_type == "limit"
+    assert po.frozen_margin > 0
+    assert po.leverage == 3
+    assert po.trigger_price == 90000.0
+
+
+async def test_frozen_buffer_covers_price_movement():
+    """0.2% buffer covers normal tick-to-tick price movement."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # Price moves up by 0.1% (within buffer)
+    new_ask = 95010.0 * 1.001
+    tick = Ticker(symbol="BTC/USDT:USDT", last=new_ask - 10, bid=new_ask - 20, ask=new_ask,
+                  high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    assert ex._free_usdt >= 0.0
+    assert ex._frozen_usdt == 0.0
+
+
 async def test_sim_order_model_has_frozen_fields():
     """SimOrder model has frozen_margin and leverage columns."""
     from src.storage.models import SimOrder
