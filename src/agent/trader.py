@@ -160,6 +160,20 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
+    @agent.tool
+    async def place_limit_order(
+        ctx: RunContext[TradingDeps],
+        side: str,
+        price: float,
+        position_pct: float,
+        leverage: int,
+        reasoning: str,
+    ) -> str:
+        """Place a limit order at a specific price (e.g., buy at support level). side='long' or 'short'. position_pct=% of free balance. Always provide reasoning."""
+        from src.agent.tools_execution import place_limit_order as _impl
+
+        return await _impl(ctx.deps, side, price, position_pct, leverage, reasoning=reasoning)
+
     # === Memory Tools ===
 
     @agent.tool
