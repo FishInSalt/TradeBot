@@ -118,6 +118,8 @@ Bollinger Lower: 74400.00
 
 **获取与展示解耦**：`candle_count` 控制 K 线表展示的数量，不影响指标计算。实际获取的 K 线数量为 `max(candle_count + 50, 100)`，确保 MA(50)、RSI(14)、MACD(12,26,9) 等指标有足够的热身数据。例如 Agent 传 `candle_count=20`，实际获取 100 根 K 线用于计算指标，K 线表只展示最后 20 根。
 
+**API 限制说明**：OKX `fetch_ohlcv` 单次返回上限取决于时间框架（通常 100-300 根）。当请求量超出 API 限制时 CCXT 会静默截断。实际影响很小：截断只减少指标热身数据，K 线表始终从末尾取 `candle_count` 根展示。如果返回数据不足 `candle_count`，展示实际返回数量即可。
+
 **改进后输出**（四段结构）：
 
 ```
@@ -157,9 +159,13 @@ Time      Open     High     Low      Close    Vol
 - ATR: 占价格百分比，<0.1% low, 0.1-0.3% moderate, >0.3% high
 - Volume ratio: latest_volume / SMA(volume, 20)。<0.7x low, 0.7-1.3x normal, >1.3x above normal
 
+**职责划分**：
+- `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责指标段和 Market Context 段的格式化（不含 K 线表）。
+- `tools_perception.py` 的 `get_market_data`：负责 Ticker 段和 K 线表段的格式化（因为 `candle_count` 是工具层参数），最终拼接所有段落输出。K 线时间列使用 UTC 格式（HH:MM UTC），从 UNIX 毫秒时间戳转换。
+
 **实现改动**：
-- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`、`candle_range_high`、`candle_range_low`。重写 `format_for_llm` 输出格式，加入定性标注。
-- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，输出 K 线表。工具 docstring 注明 K 线数据的 token 开销（50 根 ≈ 800-1000 tokens），供 Agent 按需调整。
+- `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`、`candle_range_high`、`candle_range_low`。`format_for_llm` 重写输出格式，加入定性标注，只输出指标段和 Market Context 段。
+- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check, 50 for detailed analysis, default 50, ~800-1000 tokens"），降低 Agent 选择负担。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
 ### 2. get_position — 增加风险上下文
@@ -195,8 +201,8 @@ Current Position:
 - `src/integrations/exchange/simulated.py`: `fetch_positions` 填充 `created_at`
 - `src/integrations/exchange/okx.py`: `fetch_positions` 保持 `created_at=None`（无需改动，使用默认值）
 - `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，计算百分比和时长
-- `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float` 字段
-- `src/cli/app.py`: `build_services` 中从 `WizardResult.initial_balance` 传入 deps
+- `src/agent/trader.py`: `TradingDeps` 新增 `initial_balance: float` 字段和 `metrics: MetricsService` 字段
+- `src/cli/app.py`: `build_services` 中传入 `initial_balance` 和 `MetricsService` 实例到 deps（app.py:364 已有实例，复用即可）
 
 ### 3. get_account_balance — 增加收益率
 
@@ -253,8 +259,10 @@ Recent: 3W 1L (last 4 trades)
 ...
 ```
 
+**Docstring 定位**：`"""Get trade journal — decision timeline with quick stats summary. Use for reviewing recent decisions and their outcomes."""`（强调决策时间线 + 快速概要，区别于 get_performance 的详细复盘）
+
 **实现改动**：
-- `src/agent/tools_perception.py`: 调用 `MetricsService.compute()` 获取统计，输出在流水前
+- `src/agent/tools_perception.py`: 调用 `deps.metrics.compute()` 获取统计，输出在流水前
 
 **设计取舍**：get_trade_journal 已查 TradeAction 获取流水，`MetricsService.compute()` 会再次查 TradeAction（过滤 pnl IS NOT NULL）。两次查询数据部分重叠，但过滤条件不同（流水含全部 action，统计只含 fills with pnl），合并会增加耦合。SQLite 本地查询开销极小，接受双查询以保持 MetricsService 作为统计逻辑的单一来源。
 
@@ -357,12 +365,19 @@ Volatility alert: OFF
 
 **数据来源**：
 - **价位级别告警**：存在 `BaseExchange._price_level_alerts`（base.py:63）。新增公开方法 `get_price_level_alerts() -> list[dict]` 返回列表拷贝，避免跨层访问私有属性。
-- **百分比波动告警参数**：存在 `PriceAlertService` 实例中。**解决方案**：在 `PriceAlertService` 上新增 `get_params() -> tuple[float, int]` 方法，返回 `(threshold_pct, window_minutes)`。在 `BaseExchange` 层实现 `set_alert_service` 和 `get_alert_params`（两个子类存储方式完全相同，无需各自实现）：
+- **百分比波动告警参数**：存在 `PriceAlertService` 实例中。**解决方案**：在 `PriceAlertService` 上新增 `get_params() -> tuple[float, int]` 方法，返回 `(threshold_pct, window_minutes)`。在 `BaseExchange` 层统一实现告警相关方法（`set_alert_service`、`update_alert_params`、`get_alert_params`），两个子类的实现完全相同，无需各自覆写：
 
 ```python
-# base.py
+# base.py — __init__ 新增
+self._alert_service: Any | None = None
+
+# base.py — 替换原有空实现
 def set_alert_service(self, service: Any) -> None:
     self._alert_service = service
+
+def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
+    if self._alert_service:
+        self._alert_service.update_params(threshold_pct, window_minutes)
 
 def get_alert_params(self) -> tuple[float, int] | None:
     if self._alert_service is not None:
@@ -374,9 +389,9 @@ def get_alert_params(self) -> tuple[float, int] | None:
 
 **实现改动**：
 - `src/services/price_alert.py`: `PriceAlertService` 新增 `get_params()` 方法
-- `src/integrations/exchange/base.py`: 改写 `set_alert_service`（从空实现改为存储引用）；新增 `get_alert_params()` 和 `get_price_level_alerts()` 方法
-- `src/integrations/exchange/simulated.py`: 删除自身的 `set_alert_service` 覆写（继承 BaseExchange 即可）
-- `src/integrations/exchange/okx.py`: 删除自身的 `set_alert_service` 覆写（继承 BaseExchange 即可）
+- `src/integrations/exchange/base.py`: `__init__` 新增 `self._alert_service = None`；改写 `set_alert_service` 和 `update_alert_params`（从空实现改为真实实现）；新增 `get_alert_params()` 和 `get_price_level_alerts()` 方法
+- `src/integrations/exchange/simulated.py`: 删除 `set_alert_service` 和 `update_alert_params` 覆写（继承 BaseExchange 即可）
+- `src/integrations/exchange/okx.py`: 删除 `set_alert_service` 和 `update_alert_params` 覆写（继承 BaseExchange 即可）
 - `src/agent/tools_perception.py`: 新增 `get_active_alerts` 函数，从 exchange 读取两类告警
 - `src/agent/trader.py`: 注册工具
 
@@ -412,8 +427,10 @@ Return: +0.00% (+0.00 USDT)
 No completed trades yet.
 ```
 
+**Docstring 定位**：`"""Get detailed trading performance statistics. Use for reviewing overall results and evaluating strategy effectiveness."""`（强调详细复盘统计，区别于 get_trade_journal 的决策时间线）
+
 **实现改动**：
-- `src/agent/tools_perception.py`: 新增 `get_performance` 函数，调用共享的交易统计函数 + 当前余额计算
+- `src/agent/tools_perception.py`: 新增 `get_performance` 函数，调用 `deps.metrics.compute()` + 当前余额计算
 - `src/agent/trader.py`: 注册工具
 
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
@@ -462,11 +479,11 @@ get_position(symbol: str | None = None)
 | `src/services/technical.py` | 重写：新增 ATR、成交量比率、K 线范围；重写 format_for_llm |
 | `src/agent/tools_perception.py` | 重写：增强 6 个现有函数 + 新增 3 个函数 |
 | `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order |
-| `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance 字段 |
-| `src/cli/app.py` | 修改：build_services 传入 initial_balance 到 deps |
+| `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance + metrics 字段 |
+| `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps |
 | `src/integrations/exchange/base.py` | 修改：Position 新增 created_at；改写 set_alert_service（存储引用）；新增 get_alert_params / get_price_level_alerts |
-| `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service 覆写 |
-| `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service 覆写；fetch_positions 无需改动（created_at 使用默认值 None） |
+| `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service + update_alert_params 覆写 |
+| `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service + update_alert_params 覆写；fetch_positions 无需改动 |
 | `src/services/price_alert.py` | 修改：PriceAlertService 新增 get_params 方法 |
 | `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_streak |
 | `src/integrations/market_data.py` | 修改：limit 参数透传 |
@@ -478,3 +495,4 @@ get_position(symbol: str | None = None)
 - 新闻/消息面工具（需外部 API 集成）
 - 资金费率查询（当前本金规模下可忽略）
 - 硬性风控代码约束（P3，联调观察后决定）
+- BaseExchange 回调整合：on_fill / on_alert 在两个子类中实现完全相同（`self._fill_callback = callback` / `self._alert_callback = callback`），与本次 set_alert_service 整合属同一类问题，可后续一并上移到 BaseExchange 并在 `__init__` 中初始化
