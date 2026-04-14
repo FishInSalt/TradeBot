@@ -989,7 +989,18 @@ class SimulatedExchange(BaseExchange):
             await self._persist_state()
 
         self._ccxt = ccxtpro.okx()
-        seed_ticker = await self._ccxt.fetch_ticker(self._symbol)
+        seed_ticker = None
+        for attempt in range(3):
+            try:
+                seed_ticker = await self._ccxt.fetch_ticker(self._symbol)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    logger.warning(f"fetch_ticker attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
+                    await asyncio.sleep(delay)
+                else:
+                    raise RuntimeError(f"Failed to fetch initial ticker after 3 attempts: {e}") from e
         self._latest_ticker = Ticker(
             symbol=seed_ticker["symbol"],
             last=float(seed_ticker["last"]),
