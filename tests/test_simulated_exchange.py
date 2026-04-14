@@ -16,6 +16,7 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
     exchange = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol=symbol)
     exchange._free_usdt = initial_balance
     exchange._used_usdt = 0.0
+    exchange._frozen_usdt = 0.0
     exchange._positions = {}
     exchange._pending_orders = []
     exchange._leverage = {}
@@ -732,3 +733,16 @@ async def test_sim_order_model_has_frozen_fields():
     from src.storage.models import SimOrder
     assert hasattr(SimOrder, "frozen_margin")
     assert hasattr(SimOrder, "leverage")
+
+
+async def test_pending_order_has_frozen_fields():
+    """_PendingOrder supports frozen_margin and leverage fields."""
+    from src.integrations.exchange.simulated import _PendingOrder
+    order = _PendingOrder(
+        id="test", symbol="BTC/USDT:USDT", side="buy",
+        position_side="long", order_type="market",
+        amount=0.001, trigger_price=None,
+        frozen_margin=100.0, leverage=3,
+    )
+    assert order.frozen_margin == 100.0
+    assert order.leverage == 3

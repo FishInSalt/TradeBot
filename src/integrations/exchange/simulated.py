@@ -39,9 +39,11 @@ class _PendingOrder:
     symbol: str
     side: str
     position_side: str
-    order_type: str
+    order_type: str          # "market" | "limit" | "stop" | "take_profit"
     amount: float
-    trigger_price: float
+    trigger_price: float | None   # stop/TP: trigger price; limit: fill price; market: None
+    frozen_margin: float = 0.0    # market/limit: frozen margin+fee
+    leverage: int = 1             # leverage at order time (needed at fill time)
 
 
 class SimulatedExchange(BaseExchange):
@@ -57,6 +59,7 @@ class SimulatedExchange(BaseExchange):
         # Internal state (initialized in start() or directly for tests)
         self._free_usdt: float = 0.0
         self._used_usdt: float = 0.0
+        self._frozen_usdt: float = 0.0
         self._positions: dict[str, _Position] = {}
         self._pending_orders: list[_PendingOrder] = []
         self._leverage: dict[str, int] = {}
