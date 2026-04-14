@@ -454,17 +454,28 @@ class SimulatedExchange(BaseExchange):
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
-        """Process a single tick -- check liquidations, conditional orders, and price alerts."""
+        """Process a single tick -- match market orders, check liquidations, conditional orders, alerts."""
         self._latest_ticker = ticker
         self._latest_price = ticker.last
 
         triggered: list[FillEvent] = []
         filled_order_ids: list[str] = []
+        cancelled_order_ids: list[str] = []
         new_orders: list[tuple[Order, str]] = []
         alert_info = None
         level_alerts = []
 
         async with self._lock:
+            # 0. Match pending market orders (new — before liquidation)
+            market_orders = [o for o in self._pending_orders if o.order_type == "market"]
+            for order in market_orders:
+                fill = self._execute_market_fill(order, ticker)
+                if fill is None:
+                    cancelled_order_ids.append(order.id)
+                    continue
+                filled_order_ids.append(order.id)
+                triggered.append(fill)
+
             # 1. Liquidation check (must be before conditional orders)
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
@@ -488,30 +499,37 @@ class SimulatedExchange(BaseExchange):
                     ), fill.position_side))
 
             # 2. Conditional order check
+            processed = set(filled_order_ids + cancelled_order_ids)
             for order in list(self._pending_orders):
-                if self._should_trigger(order, ticker):
-                    if not self._has_position(order.symbol):
-                        continue
-                    fill = self._execute_fill(order, ticker)
-                    triggered.append(fill)
-                    filled_order_ids.append(order.id)
+                if order.id in processed:
+                    continue
+                if order.order_type in ("stop", "take_profit"):
+                    if self._should_trigger(order, ticker):
+                        if not self._has_position(order.symbol):
+                            continue
+                        fill = self._execute_fill(order, ticker)
+                        triggered.append(fill)
+                        filled_order_ids.append(order.id)
 
-            if triggered:
-                for fill in triggered:
-                    self._remove_order_by_id(fill.order_id)
+            # 3. Unified cleanup
+            all_resolved = filled_order_ids + cancelled_order_ids
+            if triggered or all_resolved:
+                for oid in all_resolved:
+                    self._remove_order_by_id(oid)
                 self._cancel_orphaned_orders()
                 if self._db_engine:
                     await self._persist_state(
                         new_orders=new_orders,
                         filled_order_ids=filled_order_ids,
+                        cancelled_order_ids=cancelled_order_ids,
                         fill_events=triggered,
                     )
 
-            # 3. Price alert check (inside lock for consistent ticker reading)
+            # 4. Price alert check
             if self._alert_service:
                 alert_info = self._alert_service.check(ticker.last, ticker.timestamp)
 
-            # 4. Price level alert check (R7)
+            # 5. Price level alert check (R7)
             level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)
 
         # Notify outside lock
@@ -519,7 +537,6 @@ class SimulatedExchange(BaseExchange):
             if self._fill_callback:
                 await self._fill_callback(fill)
 
-        # Alert callback outside lock
         if alert_info and self._alert_callback:
             await self._alert_callback(alert_info)
 
@@ -689,6 +706,7 @@ class SimulatedExchange(BaseExchange):
         self,
         new_orders: list[tuple[Order, str]] | None = None,
         filled_order_ids: list[str] | None = None,
+        cancelled_order_ids: list[str] | None = None,  # NEW
         fill_events: list[FillEvent] | None = None,
     ) -> None:
         from sqlalchemy import delete, update
@@ -745,10 +763,20 @@ class SimulatedExchange(BaseExchange):
                             )
                         )
 
+            # 3a-bis. Update cancelled orders → "cancelled"
+            if cancelled_order_ids:
+                for oid in cancelled_order_ids:
+                    await session.execute(
+                        update(SimOrder)
+                        .where(SimOrder.order_id == oid)
+                        .values(status="cancelled")
+                    )
+
             # 3b. Cancel orphaned pending orders in DB
             pending_ids = [o.id for o in self._pending_orders]
             filled_ids = filled_order_ids or []
-            exclude_ids = pending_ids + filled_ids
+            cancelled_ids = cancelled_order_ids or []
+            exclude_ids = pending_ids + filled_ids + cancelled_ids
             if exclude_ids:
                 await session.execute(
                     update(SimOrder)
