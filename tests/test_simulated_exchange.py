@@ -725,3 +725,10 @@ async def test_simulated_exchange_alert_callback_outside_lock():
     await exchange._process_tick(ticker)
 
     assert lock_held_during_callback is False
+
+
+async def test_sim_order_model_has_frozen_fields():
+    """SimOrder model has frozen_margin and leverage columns."""
+    from src.storage.models import SimOrder
+    assert hasattr(SimOrder, "frozen_margin")
+    assert hasattr(SimOrder, "leverage")

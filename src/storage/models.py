@@ -102,6 +102,7 @@ class SimBalance(Base):
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), primary_key=True)
     free_usdt: Mapped[float] = mapped_column(Float)
     used_usdt: Mapped[float] = mapped_column(Float)
+    frozen_usdt: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
@@ -142,3 +143,5 @@ class SimOrder(Base):
     fee: Mapped[float | None] = mapped_column(Float, nullable=True)
     filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    frozen_margin: Mapped[float] = mapped_column(Float, default=0.0)
+    leverage: Mapped[int] = mapped_column(Integer, default=1)
