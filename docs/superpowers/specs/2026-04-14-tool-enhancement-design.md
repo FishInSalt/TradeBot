@@ -160,7 +160,7 @@ Time      Open     High     Low      Close    Vol
 - Volume ratio: 使用倒数第 2 根 K 线（最近一根已完成的）的 volume / SMA(volume, 20)。最后一根 K 线可能正在形成中，volume 偏低会导致误判。<0.7x low, 0.7-1.3x normal, >1.3x above normal
 
 **职责划分**：
-- `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责指标段和 Market Context 段的格式化（不含 K 线表）。
+- `technical.py` 的 `compute_indicators`：扩展为使用完整 OHLCV DataFrame，新增返回字段。`format_for_llm` 只负责 Technical Indicators 段的格式化（定性标注）。
 - `tools_perception.py` 的 `get_market_data`：负责 Ticker 段、**Market Context 段整体**（ATR 和 volume_ratio 从 indicators dict 读取并格式化，candle range 从展示的 K 线切片计算）、K 线表段的格式化。最终拼接：Ticker + Technical Indicators（来自 format_for_llm）+ Market Context + K 线表。K 线时间列使用 UTC，格式按 timeframe 自适应：1m/5m/15m → `HH:MM`，1H/4H → `MM-DD HH:MM`，1D/1W → `YYYY-MM-DD`。
 
 **实现改动**：
