@@ -734,22 +734,25 @@ class SimulatedExchange(BaseExchange):
     async def cancel_order(self, order_id: str, symbol: str) -> None:
         self._validate_symbol(symbol)
         async with self._lock:
-            found = any(o.id == order_id for o in self._pending_orders)
-            if not found:
+            order = None
+            for o in self._pending_orders:
+                if o.id == order_id:
+                    order = o
+                    break
+            if order is None:
                 raise ValueError(f"Order not found: {order_id}")
+
+            if order.order_type == "market":
+                raise ValueError("Cannot cancel market orders")
+
+            # Unfreeze margin (limit orders have frozen margin)
+            if order.frozen_margin > 0:
+                self._frozen_usdt -= order.frozen_margin
+                self._free_usdt += order.frozen_margin
+
             self._remove_order_by_id(order_id)
             if self._db_engine:
-                from sqlalchemy import update
-                from src.storage.database import get_session
-                from src.storage.models import SimOrder
-                async with get_session(self._db_engine) as session:
-                    await session.execute(
-                        update(SimOrder)
-                        .where(SimOrder.order_id == order_id)
-                        .where(SimOrder.status == "open")
-                        .values(status="cancelled")
-                    )
-                    await session.commit()
+                await self._persist_state()
         logger.info(f"Order cancelled: {order_id}")
 
     # --- Fill callback ---

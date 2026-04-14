@@ -1350,3 +1350,26 @@ async def test_limit_fill_cancelled_on_leverage_mismatch():
 
     assert ex._frozen_usdt == 0.0
     assert len(ex._pending_orders) == 0
+
+
+async def test_limit_order_cancel_unfreezes():
+    """Cancelling a limit order returns frozen margin to free_usdt."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=90000.0)
+    frozen = ex._frozen_usdt
+    assert frozen > 0
+
+    await ex.cancel_order(order.id, "BTC/USDT:USDT")
+    assert ex._frozen_usdt == 0.0
+    assert ex._free_usdt == pytest.approx(100.0)
+    assert len(ex._pending_orders) == 0
+
+
+async def test_cancel_market_order_rejected():
+    """Cannot cancel a market order (already in matching queue)."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    with pytest.raises(ValueError, match="Cannot cancel market orders"):
+        await ex.cancel_order(order.id, "BTC/USDT:USDT")
