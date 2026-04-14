@@ -477,7 +477,7 @@ get_position(symbol: str | None = None)
 
 | 文件 | 改动类型 |
 |------|---------|
-| `src/services/technical.py` | 重写：新增 ATR、成交量比率、K 线范围；重写 format_for_llm |
+| `src/services/technical.py` | 重写：新增 ATR、成交量比率；修复 BB/MACD 列索引 bug；重写 format_for_llm |
 | `src/agent/tools_perception.py` | 重写：增强 6 个现有函数 + 新增 3 个函数 |
 | `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order |
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance + metrics 字段 |
