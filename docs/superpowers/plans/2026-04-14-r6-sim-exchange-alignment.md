@@ -114,7 +114,7 @@ async def test_pending_order_has_frozen_fields():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_simulated_exchange.py::test_pending_order_has_frozen_fields -v`
-Expected: FAIL with `TypeError: unexpected keyword argument`
+Expected: FAIL with `TypeError: __init__() got an unexpected keyword argument 'frozen_margin'`
 
 - [ ] **Step 3: Expand _PendingOrder dataclass**
 
@@ -526,6 +526,10 @@ async def test_frozen_extreme_clamp():
     # Clamp inflates total_usdt by ~shortfall (phantom value from raising free
     # from -0.38 to 0 without a corresponding deduction). Known trade-off of not
     # tracking shortfall in _used_usdt (which would leak cumulatively).
+    # Lifecycle: phantom does NOT disappear on close — _close_position_core releases
+    # actual_margin (which equals _used_usdt), so the shortfall is never deducted.
+    # It persists as a permanent ~0.38 USDT inflation per extreme-price open event.
+    # Acceptable: only fires when tick-to-tick movement exceeds 0.2% buffer.
     balance = await ex.fetch_balance()
     assert balance.total_usdt > total_before  # phantom value: total inflated, not shrunk
 
@@ -1640,16 +1644,51 @@ async def test_e2e_open_then_stop_after_fill():
     assert stop_order.order_type == "stop"
 ```
 
-- [ ] **Step 2: Run test**
+- [ ] **Step 2: Write "open then immediately liquidate" test**
 
-Run: `python -m pytest tests/test_simulated_exchange.py::test_e2e_open_then_stop_after_fill -v`
+Design doc (line 410-412): market buy fills in step 0, same tick's step 1 detects price already past liquidation → two FillEvents in one tick.
+
+```python
+async def test_e2e_open_then_immediate_liquidation():
+    """Market buy fills then immediately liquidates in the same tick (extreme price)."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10  # high leverage → tight liquidation price
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # Tick where ask is high (buy fills at ask) but bid is already below liquidation
+    # Entry will be at ask; liquidation check uses bid.
+    # With 10x leverage, liq price ≈ entry * (1 - 1/10) / (1 - fee) ≈ entry * 0.9
+    # We need bid < liq_price. If ask=95010, liq ≈ 85509. Set bid=80000.
+    tick = Ticker(symbol="BTC/USDT:USDT", last=80000.0, bid=80000.0, ask=95010.0,
+                  high=96000.0, low=79000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    # Should have 2 fills: market open + liquidation
+    assert len(fills) == 2
+    assert fills[0].trigger_reason == "market"
+    assert fills[1].trigger_reason == "liquidation"
+    # Position should be gone
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 0
+    balance = await ex.fetch_balance()
+    assert balance.free_usdt >= 0.0
+```
+
+- [ ] **Step 3: Run tests**
+
+Run: `python -m pytest tests/test_simulated_exchange.py::test_e2e_open_then_stop_after_fill tests/test_simulated_exchange.py::test_e2e_open_then_immediate_liquidation -v`
 Expected: PASS
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add tests/test_simulated_exchange.py
-git commit -m "test(r6): add e2e scenario test — open → tick fill → set stop"
+git commit -m "test(r6): add e2e scenario tests — open→stop, open→immediate liquidation"
 ```
 
 ---
@@ -1806,6 +1845,9 @@ async def test_close_position_rejects_when_pending(deps):
 async def test_close_position_allows_when_no_pending(deps):
     """close_position proceeds when no same-direction pending order."""
     from src.agent.tools_execution import close_position
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position("BTC/USDT:USDT", "long", 0.01, 64000.0, 10.0, 3, 55000.0)
+    ])
     deps.exchange.has_pending_market_order = MagicMock(return_value=False)
     result = await close_position(deps, reasoning="test")
     assert "submitted" in result.lower()
