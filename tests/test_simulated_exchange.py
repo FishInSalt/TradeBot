@@ -1190,3 +1190,28 @@ async def test_e2e_open_then_immediate_liquidation():
     assert len(positions) == 0
     balance = await ex.fetch_balance()
     assert balance.free_usdt >= 0.0
+
+
+async def test_has_pending_market_order():
+    """has_pending_market_order returns True when pending market order exists."""
+    from src.integrations.exchange.simulated import _PendingOrder
+    ex = _make_exchange()
+    assert ex.has_pending_market_order("BTC/USDT:USDT") is False
+
+    ex._pending_orders.append(_PendingOrder(
+        id="m1", symbol="BTC/USDT:USDT", side="buy",
+        position_side="long", order_type="market",
+        amount=0.001, trigger_price=None,
+        frozen_margin=32.0, leverage=3,
+    ))
+    assert ex.has_pending_market_order("BTC/USDT:USDT") is True
+    assert ex.has_pending_market_order("BTC/USDT:USDT", side="buy") is True
+    assert ex.has_pending_market_order("BTC/USDT:USDT", side="sell") is False
+
+    # Stop orders don't count
+    ex._pending_orders = [_PendingOrder(
+        id="s1", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", order_type="stop",
+        amount=0.001, trigger_price=90000.0,
+    )]
+    assert ex.has_pending_market_order("BTC/USDT:USDT") is False

@@ -661,6 +661,14 @@ class SimulatedExchange(BaseExchange):
         if self._alert_service:
             self._alert_service.update_params(threshold_pct, window_minutes)
 
+    def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool:
+        """Check for pending market orders matching symbol and optional side."""
+        for o in self._pending_orders:
+            if o.order_type == "market" and o.symbol == symbol:
+                if side is None or o.side == side:
+                    return True
+        return False
+
     # --- Persistence ---
 
     async def _init_state(self, initial_balance: float) -> None:

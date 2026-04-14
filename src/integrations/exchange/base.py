@@ -108,6 +108,10 @@ class BaseExchange(ABC):
         """更新价格预警参数。默认空实现。"""
         pass
 
+    def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool:
+        """Check for pending market orders. Default: False (real exchanges don't track client-side)."""
+        return False
+
     def add_price_level_alert(self, price: float, direction: str,
                                symbol: str, reasoning: str) -> str | None:
         """Add a price level alert. Returns alert_id, or None if at limit (20)."""
