@@ -12,7 +12,7 @@
 
 **Branch:** `feature/r6-sim-exchange-alignment`
 
-**PR structure:** All tasks commit to `feature/r6-sim-exchange-alignment`, merged as a single PR. The plan uses "PR #1/#2/#3" as logical groupings for readability — PR description will label commit ranges by group. Design doc's 3-PR split is for multi-reviewer scenarios; single-developer workflow doesn't benefit from the overhead.
+**PR structure:** All tasks commit to `feature/r6-sim-exchange-alignment`, merged as a single PR. The plan uses "PR #1/#2/#3" as logical groupings for readability — PR description will label commit ranges by group. Design doc's 3-PR split is for multi-reviewer scenarios; single-developer workflow doesn't benefit from the overhead. **Note:** Tasks 4-11 have a broken test suite window (market order semantics change before test adaptation). This is expected for TDD granularity. Optionally squash Task 4-6 commits before final PR if clean history is preferred.
 
 ---
 
@@ -1665,6 +1665,32 @@ git commit -m "test(r6): add e2e scenario test — open → tick fill → set st
 - [ ] **Step 1: Write tests**
 
 ```python
+# tests/test_exchange.py — add base layer default behavior test
+async def test_base_exchange_has_pending_market_order_default():
+    """BaseExchange.has_pending_market_order returns False by default."""
+    from src.integrations.exchange.base import BaseExchange
+    # BaseExchange is abstract; test the default method via a minimal concrete subclass
+    # or directly call the method (it's not abstract, just a default impl)
+    class _Stub(BaseExchange):
+        async def fetch_ticker(self, s): ...
+        async def fetch_ohlcv(self, s, t, limit=100): ...
+        async def create_order(self, s, side, ot, amt, price=None): ...
+        async def fetch_balance(self): ...
+        async def fetch_positions(self, s): ...
+        async def set_leverage(self, s, l): ...
+        def amount_to_precision(self, s, a): ...
+        async def close(self): ...
+        async def fetch_order(self, oid, s=None): ...
+        async def fetch_open_orders(self, s): ...
+        async def fetch_closed_orders(self, s, limit=20): ...
+        async def cancel_order(self, oid, s): ...
+    stub = _Stub()
+    assert stub.has_pending_market_order("BTC/USDT:USDT") is False
+    assert stub.has_pending_market_order("BTC/USDT:USDT", side="buy") is False
+```
+
+```python
+# tests/test_simulated_exchange.py — add SimExchange implementation test
 async def test_has_pending_market_order():
     """has_pending_market_order returns True when pending market order exists."""
     from src.integrations.exchange.simulated import _PendingOrder
@@ -1719,15 +1745,15 @@ In `simulated.py`, add method:
         return False
 ```
 
-- [ ] **Step 5: Run test**
+- [ ] **Step 5: Run tests**
 
-Run: `python -m pytest tests/test_simulated_exchange.py::test_has_pending_market_order -v`
+Run: `python -m pytest tests/test_exchange.py::test_base_exchange_has_pending_market_order_default tests/test_simulated_exchange.py::test_has_pending_market_order -v`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/integrations/exchange/base.py src/integrations/exchange/simulated.py tests/test_simulated_exchange.py
+git add src/integrations/exchange/base.py src/integrations/exchange/simulated.py tests/test_simulated_exchange.py tests/test_exchange.py
 git commit -m "feat(r6): add has_pending_market_order to BaseExchange and SimExchange"
 ```
 
@@ -1765,10 +1791,12 @@ async def test_open_position_allows_when_no_pending(deps):
 
 
 async def test_close_position_rejects_when_pending(deps):
-    """close_position returns rejection message when close order is pending.
-    NOTE: depends on deps fixture returning a non-empty position list (test_tools.py:49-51),
-    otherwise close_position returns 'No positions' before reaching the pending check."""
+    """close_position returns rejection message when close order is pending."""
     from src.agent.tools_execution import close_position
+    # Explicit: close_position needs a position to pass the "no positions" gate
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position("BTC/USDT:USDT", "long", 0.01, 64000.0, 10.0, 3, 55000.0)
+    ])
     deps.exchange.has_pending_market_order = MagicMock(return_value=True)
     result = await close_position(deps, reasoning="test")
     assert "already pending" in result.lower()
