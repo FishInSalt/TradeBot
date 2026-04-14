@@ -1264,3 +1264,89 @@ async def test_limit_order_leverage_matches_position():
     # frozen = (90000 * 0.001 / 3) + (90000 * 0.001 * 0.0005)
     expected_frozen = (90000.0 * 0.001 / 3) + (90000.0 * 0.001 * 0.0005)
     assert ex._frozen_usdt == pytest.approx(expected_frozen)
+
+
+async def test_limit_order_fills_when_price_reached():
+    """Buy limit triggers when ask <= limit price."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=94000.0)
+
+    # Tick with ask above limit → no fill
+    tick1 = Ticker(symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+                   high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick1)
+    assert len(fills) == 0
+
+    # Tick with ask at limit → fill
+    tick2 = Ticker(symbol="BTC/USDT:USDT", last=93900.0, bid=93890.0, ask=93900.0,
+                   high=96000.0, low=93000.0, base_volume=1000.0, timestamp=1712534402000)
+    await ex._process_tick(tick2)
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "limit"
+    assert fills[0].fill_price == 94000.0  # fills at limit price, not market
+    assert fills[0].pnl is None  # open order
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    assert positions[0].entry_price == 94000.0
+    assert ex._frozen_usdt == 0.0
+
+
+async def test_limit_order_not_filled_above_price():
+    """Buy limit does NOT trigger when ask > limit price."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=90000.0)
+
+    tick = Ticker(symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+                  high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+    assert len(ex._pending_orders) == 1  # still pending
+    assert ex._frozen_usdt > 0
+
+
+async def test_limit_fill_cancelled_on_reverse_position():
+    """Limit buy cancelled at fill time if short position now exists."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=94000.0)
+    frozen = ex._frozen_usdt
+
+    # Manually create a short position
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="short", contracts=0.001, entry_price=96000.0, leverage=3,
+    )
+
+    tick = Ticker(symbol="BTC/USDT:USDT", last=93900.0, bid=93890.0, ask=93900.0,
+                  high=96000.0, low=93000.0, base_volume=1000.0, timestamp=1712534402000)
+    await ex._process_tick(tick)
+
+    assert ex._frozen_usdt == 0.0
+    assert ex._free_usdt == pytest.approx(100.0)
+
+
+async def test_limit_fill_cancelled_on_leverage_mismatch():
+    """Limit order cancelled at fill time if position leverage doesn't match."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=94000.0)
+
+    # Create position with DIFFERENT leverage
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.001, entry_price=96000.0, leverage=5,
+    )
+
+    tick = Ticker(symbol="BTC/USDT:USDT", last=93900.0, bid=93890.0, ask=93900.0,
+                  high=96000.0, low=93000.0, base_volume=1000.0, timestamp=1712534402000)
+    await ex._process_tick(tick)
+
+    assert ex._frozen_usdt == 0.0
+    assert len(ex._pending_orders) == 0

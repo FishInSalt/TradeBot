@@ -461,7 +461,12 @@ class SimulatedExchange(BaseExchange):
     # --- Matching engine ---
 
     def _should_trigger(self, order: _PendingOrder, ticker: Ticker) -> bool:
-        if order.order_type == "stop":
+        if order.order_type == "limit":
+            if order.side == "buy":
+                return ticker.ask <= order.trigger_price
+            else:
+                return ticker.bid >= order.trigger_price
+        elif order.order_type == "stop":
             if order.position_side == "long":
                 return ticker.bid <= order.trigger_price
             else:
@@ -487,6 +492,64 @@ class SimulatedExchange(BaseExchange):
             fill_price=fill_price, amount=actual_amount, fee=fee,
             pnl=pnl,
             timestamp=now_ms,
+        )
+
+    def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Fill a limit order. Returns None if cancelled due to conflict (unfreezes margin)."""
+        pos = self._positions.get(order.symbol)
+        position_side = "long" if order.side == "buy" else "short"
+
+        # Check 1: reverse position conflict
+        if pos is not None and pos.side != position_side:
+            logger.warning(f"Limit order {order.id} cancelled: conflicts with {pos.side} position")
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        # Check 2: leverage mismatch
+        if pos is not None and pos.leverage != order.leverage:
+            logger.warning(
+                f"Limit order {order.id} cancelled: leverage mismatch "
+                f"(order={order.leverage}x, position={pos.leverage}x)"
+            )
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        fill_price = order.trigger_price  # limit fills at specified price
+        leverage = order.leverage
+        actual_margin = (fill_price * order.amount) / leverage
+        actual_fee = fill_price * order.amount * self._fee_rate
+        actual_cost = actual_margin + actual_fee
+
+        # Unfreeze → occupy
+        self._frozen_usdt -= order.frozen_margin
+        self._used_usdt += actual_margin
+        self._free_usdt += (order.frozen_margin - actual_cost)
+        self._free_usdt = round(self._free_usdt, 8)
+        self._used_usdt = round(self._used_usdt, 8)
+
+        # Create or merge position
+        if pos is not None and pos.side == position_side:
+            new_contracts = pos.contracts + order.amount
+            new_entry = (pos.entry_price * pos.contracts + fill_price * order.amount) / new_contracts
+            pos.contracts = new_contracts
+            pos.entry_price = new_entry
+            pos.updated_at = datetime.now(timezone.utc)
+        else:
+            self._positions[order.symbol] = _Position(
+                side=position_side, contracts=order.amount,
+                entry_price=fill_price, leverage=leverage,
+            )
+        self._leverage[order.symbol] = leverage
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        logger.info(f"Limit order filled: {order.side} {order.amount} {order.symbol} @ {fill_price:.2f}")
+        return FillEvent(
+            order_id=order.id, symbol=order.symbol, side=order.side,
+            position_side=position_side, trigger_reason="limit",
+            fill_price=fill_price, amount=order.amount, fee=actual_fee,
+            pnl=None, timestamp=now_ms,
         )
 
     def _force_liquidate(self, pos: _Position, symbol: str, price: float) -> FillEvent:
@@ -551,18 +614,25 @@ class SimulatedExchange(BaseExchange):
                         status="closed", fee=fill.fee,
                     ), fill.position_side))
 
-            # 2. Conditional order check
+            # 2. Conditional + limit order check
             processed = set(filled_order_ids + cancelled_order_ids)
             for order in list(self._pending_orders):
                 if order.id in processed:
                     continue
-                if order.order_type in ("stop", "take_profit"):
-                    if self._should_trigger(order, ticker):
+                if self._should_trigger(order, ticker):
+                    if order.order_type in ("stop", "take_profit"):
                         if not self._has_position(order.symbol):
                             continue
                         fill = self._execute_fill(order, ticker)
-                        triggered.append(fill)
-                        filled_order_ids.append(order.id)
+                    elif order.order_type == "limit":
+                        fill = self._execute_limit_fill(order, ticker)
+                        if fill is None:
+                            cancelled_order_ids.append(order.id)
+                            continue
+                    else:
+                        continue
+                    triggered.append(fill)
+                    filled_order_ids.append(order.id)
 
             # 3. Unified cleanup
             all_resolved = filled_order_ids + cancelled_order_ids
