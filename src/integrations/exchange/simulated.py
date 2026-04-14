@@ -229,6 +229,107 @@ class SimulatedExchange(BaseExchange):
                     await self._persist_state()
                 return order
 
+    def _fill_market_open(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Fill a pending market open order. Returns None if cancelled due to conflict."""
+        pos = self._positions.get(order.symbol)
+        position_side = "long" if order.side == "buy" else "short"
+
+        # Defensive: reverse position conflict
+        if pos is not None and pos.side != position_side:
+            logger.warning(f"Market open {order.id} cancelled: conflicts with {pos.side} position")
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        # Defensive: leverage mismatch
+        if pos is not None and pos.leverage != order.leverage:
+            logger.warning(
+                f"Market open {order.id} cancelled: leverage mismatch "
+                f"(order={order.leverage}x, position={pos.leverage}x)"
+            )
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        fill_price = ticker.ask if order.side == "buy" else ticker.bid
+        leverage = order.leverage
+        actual_margin = (fill_price * order.amount) / leverage
+        actual_fee = fill_price * order.amount * self._fee_rate
+        actual_cost = actual_margin + actual_fee
+
+        # Unfreeze → occupy
+        diff = order.frozen_margin - actual_cost
+        self._frozen_usdt -= order.frozen_margin
+        self._used_usdt += actual_margin
+        self._free_usdt += diff
+        if self._free_usdt < 0:
+            self._free_usdt = 0.0
+
+        self._free_usdt = round(self._free_usdt, 8)
+        self._used_usdt = round(self._used_usdt, 8)
+
+        # Create or merge position
+        if pos is not None and pos.side == position_side:
+            new_contracts = pos.contracts + order.amount
+            new_entry = (pos.entry_price * pos.contracts + fill_price * order.amount) / new_contracts
+            pos.contracts = new_contracts
+            pos.entry_price = new_entry
+            pos.updated_at = datetime.now(timezone.utc)
+        else:
+            self._positions[order.symbol] = _Position(
+                side=position_side, contracts=order.amount,
+                entry_price=fill_price, leverage=leverage,
+            )
+        self._leverage[order.symbol] = leverage
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        logger.info(f"Market open filled: {order.side} {order.amount} {order.symbol} @ {fill_price:.2f}")
+        return FillEvent(
+            order_id=order.id, symbol=order.symbol, side=order.side,
+            position_side=position_side, trigger_reason="market",
+            fill_price=fill_price, amount=order.amount, fee=actual_fee,
+            pnl=None, timestamp=now_ms,
+        )
+
+    def _fill_market_close(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Fill a pending market close order. Returns None if position already gone."""
+        pos = self._positions.get(order.symbol)
+        if pos is None:
+            logger.warning(f"Market close {order.id} cancelled: position already closed")
+            self._frozen_usdt -= order.frozen_margin
+            self._free_usdt += order.frozen_margin
+            return None
+
+        actual_amount = min(order.amount, pos.contracts)
+        fill_price = ticker.bid if pos.side == "long" else ticker.ask
+        position_side = pos.side
+        pnl, fee, _ = self._close_position_core(
+            order.symbol, pos.side, actual_amount, fill_price, pnl_cap=True,
+        )
+
+        # Unfreeze (close doesn't occupy new margin — it's released by _close_position_core)
+        self._frozen_usdt -= order.frozen_margin
+        self._free_usdt += order.frozen_margin
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        logger.info(
+            f"Market close filled: {order.side} {actual_amount} {order.symbol} @ {fill_price:.2f}, "
+            f"pnl={pnl:.4f}, fee={fee:.4f}"
+        )
+        return FillEvent(
+            order_id=order.id, symbol=order.symbol, side=order.side,
+            position_side=position_side, trigger_reason="market",
+            fill_price=fill_price, amount=actual_amount, fee=fee,
+            pnl=pnl, timestamp=now_ms,
+        )
+
+    def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
+        """Route pending market order to open or close fill. Uses static direction check."""
+        if self._is_close_order_static(order):
+            return self._fill_market_close(order, ticker)
+        else:
+            return self._fill_market_open(order, ticker)
+
     def _close_position_core(
         self, symbol: str, position_side: str, amount: float, fill_price: float,
         *, pnl_cap: bool = False,

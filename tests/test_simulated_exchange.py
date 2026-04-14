@@ -892,3 +892,101 @@ async def test_close_market_order_minimal_freeze():
     order = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
     assert order.status == "open"
     assert ex._frozen_usdt == pytest.approx(0.01)  # min(fee, 0.01)
+
+
+async def test_frozen_balance_diff_refund():
+    """When tick price is lower than submit price, diff is refunded to free_usdt."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    free_after_freeze = ex._free_usdt
+
+    # Tick with LOWER ask → actual cost < frozen → refund
+    tick = Ticker(symbol="BTC/USDT:USDT", last=94900.0, bid=94890.0, ask=94900.0,
+                  high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    assert ex._frozen_usdt == 0.0
+    assert ex._free_usdt > free_after_freeze  # got a refund
+
+
+async def test_frozen_extreme_clamp():
+    """Extreme price movement: free_usdt clamped to 0, shortfall absorbed as slippage cost.
+
+    Math: initial=32, ask@submit=95010, leverage=3
+      frozen = (95010*0.001/3 + 95010*0.001*0.0005) * 1.002 ≈ 31.78
+      free_after_freeze = 32 - 31.78 = 0.22
+    Tick ask=97000:
+      actual_cost = 97000*0.001/3 + 97000*0.001*0.0005 ≈ 32.38
+      diff = 31.78 - 32.38 = -0.60
+      free = 0.22 + (-0.60) = -0.38 → clamped to 0 (shortfall = 0.38 lost as slippage)
+    """
+    ex = _make_exchange(initial_balance=32.0)  # tight: just barely covers frozen
+    ex._leverage["BTC/USDT:USDT"] = 3
+    total_before = 32.0
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    assert ex._free_usdt < 1.0  # confirm tight margin
+
+    # Tick with MUCH HIGHER ask → actual cost > frozen → clamp
+    tick = Ticker(symbol="BTC/USDT:USDT", last=97000.0, bid=96990.0, ask=97000.0,
+                  high=97000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    assert ex._frozen_usdt == 0.0
+    assert ex._free_usdt == 0.0  # clamped to zero
+    # used_usdt = actual_margin only (no phantom residue in _used_usdt)
+    actual_margin = (97000.0 * 0.001) / 3
+    assert ex._used_usdt == pytest.approx(actual_margin)
+    balance = await ex.fetch_balance()
+    assert balance.total_usdt > total_before  # phantom value: total inflated, not shrunk
+
+
+async def test_fill_market_close_position_gone():
+    """If position was liquidated before close fill, close order is cancelled and margin unfrozen."""
+    from src.integrations.exchange.simulated import _Position, _PendingOrder
+    ex = _make_exchange(initial_balance=50.0)
+    # Manually set up a pending close order but no position (simulating liquidation ate it)
+    ex._pending_orders.append(_PendingOrder(
+        id="close-1", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", order_type="market",
+        amount=0.001, trigger_price=None,
+        frozen_margin=0.05, leverage=3,
+    ))
+    ex._frozen_usdt = 0.05
+    ex._free_usdt = 49.95
+
+    tick = Ticker(symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+                  high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    # Close order should be cancelled, margin unfrozen
+    assert ex._frozen_usdt == 0.0
+    assert ex._free_usdt == pytest.approx(50.0)
+    assert len(ex._pending_orders) == 0
+
+
+async def test_fill_market_close_clamps_amount():
+    """Close fill amount is clamped to position contracts."""
+    from src.integrations.exchange.simulated import _Position
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    margin = 95010.0 * 0.001 / 3
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.001, entry_price=95010.0, leverage=3,
+    )
+    ex._used_usdt = margin
+    ex._free_usdt = 100.0 - margin
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Submit close for MORE than position size
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.005)
+    tick = Ticker(symbol="BTC/USDT:USDT", last=95100.0, bid=95090.0, ask=95110.0,
+                  high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
+    await ex._process_tick(tick)
+
+    assert len(fills) == 1
+    assert fills[0].amount == 0.001  # clamped to actual position size
