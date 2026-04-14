@@ -156,7 +156,7 @@ Time      Open     High     Low      Close    Vol
 - MA: price above → bullish, price below → bearish
 - MACD: histogram > 0 → bullish, < 0 → bearish
 - BB: price 位于上下轨间的位置描述
-- ATR: 占价格百分比，<0.1% low, 0.1-0.3% moderate, >0.3% high。输出中附带 timeframe 信息（如 `ATR(14): 850.20 (1.14% of price — high volatility, note: 1H candles)`），让 LLM 自行校准。**已知限制**：阈值不随 timeframe 调整，高 timeframe（如 1H/4H）的 ATR 天然更大，几乎永远标注为 high。后续可加 timeframe 系数优化。
+- ATR: 占价格百分比。5m timeframe 使用定性标注（<0.1% low, 0.1-0.3% moderate, >0.3% high）。非 5m timeframe 只标数值和百分比，不加定性标签（如 `ATR(14): 850.20 (1.14% of price, 1H candles)`），因为阈值不随 timeframe 缩放，高 timeframe 的定性标注会系统性误导。让 LLM 结合 timeframe 自行判断波动率水平。
 - Volume ratio: 使用倒数第 2 根 K 线（最近一根已完成的）的 volume / SMA(volume, 20)。最后一根 K 线可能正在形成中，volume 偏低会导致误判。<0.7x low, 0.7-1.3x normal, >1.3x above normal
 
 **职责划分**：
@@ -169,7 +169,7 @@ Time      Open     High     Low      Close    Vol
 
 **实现改动**：
 - `src/services/technical.py`: `compute_indicators` 扩展为使用完整 OHLCV DataFrame（当前只用 close 列，需改为同时使用 high/low/close/volume）。新增返回字段：`atr_14`、`volume_ratio`（使用倒数第 2 根 K 线）。当数据不足时（SMA 窗口不够或 ATR 计算行数不足），对应字段返回 None，`format_for_llm` 输出 "N/A"，与现有 `_last()` 模式一致。`format_for_llm` 重写输出格式，加入定性标注，**只输出 Technical Indicators 段**。**同时修复现有指标列索引 bug**：当前用位置索引访问 pandas_ta 返回列，存在两处反转：(1) BB: `bb_cols[0]` 赋给 `bb_upper`，实际是 BBL（lower）。pandas_ta 返回 [BBL, BBM, BBU, BBB, BBP]。(2) MACD: `macd_cols[1]` 赋给 `macd_signal`，实际是 MACDh（histogram）；`macd_cols[2]` 赋给 `macd_histogram`，实际是 MACDs（signal）。pandas_ta 返回 [MACD, MACDh, MACDs]。全部改为列名匹配（`filter(like='BBU')`、`filter(like='MACDh')` 等）。
-- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
+- `src/agent/tools_perception.py`: `get_market_data` 接受 `candle_count` 参数，负责 Ticker 段和 K 线表段的格式化。工具 docstring 注明用法建议（如 "candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis. Default 50. Values above 50 may be capped by exchange API limits. Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context)."），降低 Agent 选择负担，引导多 timeframe 场景使用较小的 candle_count。
 - `src/integrations/market_data.py`: `get_ohlcv_dataframe` 的 `limit` 参数由上层传入
 
 ### 2. get_position — 增加风险上下文
@@ -188,7 +188,7 @@ Current Positions:
 ```
 Current Position:
   LONG 0.001 contracts @ 74761.10 | 3x leverage
-  PnL: -19.09 USDT (-0.19% of capital)
+  PnL: -19.09 USDT (-0.19% of initial capital)
   Liquidation: 50200.00 (32.8% away)
   Duration: 25 min
 ```
@@ -232,7 +232,7 @@ Account Balance:
 ```
 
 **实现改动**：
-- `src/agent/tools_perception.py`: 从 `deps.initial_balance` 获取初始本金，计算收益率
+- `src/agent/tools_perception.py`: Return = `(balance.total_usdt - deps.initial_balance) / deps.initial_balance * 100`。SimulatedExchange 和 OKX 的 `total_usdt` 均已含 unrealized PnL，直接用即可，无需额外查持仓。
 
 ### 4. get_trade_journal — 增加汇总统计
 
@@ -420,8 +420,9 @@ def get_alert_params(self) -> tuple[float, int] | None:
 === Trading Performance ===
 Initial Balance: 10000.00 USDT
 Current Balance: 10245.00 USDT
-Total Return: +2.45% (+245.00 USDT) (including unrealized PnL)
-Realized PnL: +195.00 USDT
+Total Return: +2.45% (+245.00 USDT) (incl. unrealized)
+Realized PnL: +210.00 USDT (gross, before fees)
+Total Fees: -15.00 USDT
 
 Total Trades: 12 | Win: 7 (58.3%) | Loss: 5
 Avg Win: +45.20 USDT | Avg Loss: -22.10 USDT
@@ -450,10 +451,16 @@ No completed trades yet.
 **共享统计逻辑**：`get_trade_journal` 的汇总头部和 `get_performance` 的详细统计都需要计算胜率/盈亏比等指标。**扩展现有 `src/services/metrics.py` 的 `MetricsService`**，而非新建函数：
 - `PerformanceMetrics` dataclass 新增字段：`avg_win: float`、`avg_loss: float`、`best_trade: float`、`worst_trade: float`、`recent_summary: str`（近 N 笔交易的统计汇总，如 "3W 1L (last 4 trades)"。N = min(5, total_trades)，在 MetricsService 中格式化为 str。交易不足时展示全部。按时间取最近 N 笔的胜负统计，不跟踪连胜/连败序列。）
 - `MetricsService.__init__` 改为接受 `engine`、`session_id`、`initial_balance`（既然已放入 deps，可在构造时注入），`compute()` 简化为 `deps.metrics.compute(current_position="none")`，其中 `current_position` 保留为可选 kwarg（app.py 初始显示仍需传入）
-- `MetricsService.compute()` 补全新增字段的计算逻辑。**PnL 口径修正**：当前 FillEvent.pnl 是毛利（不含 fee），但余额更新扣了 fee，导致 Realized PnL 累加值与余额变化不一致。修正为 net PnL（pnl - fee）：
+- `MetricsService.compute()` 补全新增字段的计算逻辑。**PnL 口径说明**：FillEvent.pnl 是毛利（不含 fee）。一个完整交易的余额变化 = gross_pnl - open_fee - close_fee，但 MetricsService 只看 close fill 的 pnl（开仓 pnl=None）。如果做 net_pnl = pnl - close_fee，仍漏掉 open_fee，需要匹配开平仓记录，复杂度过高。
+
+**解决方案**：保持 MetricsService 统计 gross PnL（不改现有逻辑），新增 `total_fees: float` 字段累加所有 fill 的 fee（开仓 + 平仓），在输出中单独展示。Total Return（从余额计算）是准确的净值指标，Realized PnL 标注为 gross。差异对 Agent 透明。
+
+新增改动：
 - `src/storage/models.py`: TradeAction 新增 `fee: Mapped[float | None]` 列
 - `src/cli/app.py`: `_record_action_from_fill` 写入 `fee=event.fee`
-- `MetricsService.compute()` 计算 `net_pnl = pnl - fee` 用于统计
+- `src/cli/session_manager.py`: 新增 `_migrate_trade_actions_table`，用 `ALTER TABLE trade_actions ADD COLUMN fee REAL` 处理已有数据库
+- `PerformanceMetrics` 新增 `total_fees: float` 字段
+- `MetricsService.compute()` 累加 fee（含 pnl=None 的开仓 fill）
 - `get_trade_journal` 和 `get_performance` 都调用 `deps.metrics.compute()` 获取统计数据
 
 ---
@@ -498,13 +505,14 @@ get_position(symbol: str | None = None)
 | `src/agent/tools_perception.py` | 重写：增强 6 个现有函数 + 新增 3 个函数 |
 | `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order；set_price_alert 对 alert_service=None 返回明确提示（"Alerts are disabled for this session"）而非静默成功 |
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance + metrics 字段 |
-| `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps；`_record_action_from_fill` 写入 fee |
+| `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps；`_record_action_from_fill` 写入 fee；app.py:367 调用方同步改为 deps.metrics.compute() |
 | `src/storage/models.py` | 修改：TradeAction 新增 fee 列 |
+| `src/cli/session_manager.py` | 修改：新增 `_migrate_trade_actions_table`，ALTER TABLE ADD COLUMN fee |
 | `src/integrations/exchange/base.py` | 修改：Position 新增 created_at；改写 set_alert_service（存储引用）；新增 get_alert_params / get_price_level_alerts |
 | `src/integrations/exchange/simulated.py` | 修改：fetch_positions 填充 created_at；删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值 |
 | `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值；fetch_positions 无需改动 |
 | `src/services/price_alert.py` | 修改：PriceAlertService 新增 get_params 方法 |
-| `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_summary |
+| `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_summary/total_fees；__init__ 改为注入 engine+session_id+initial_balance |
 | `src/integrations/market_data.py` | 修改：limit 参数透传 |
 | `tests/` | 新增/修改测试 |
 
@@ -517,3 +525,4 @@ get_position(symbol: str | None = None)
 - BaseExchange 回调整合：on_fill / on_alert 在两个子类中实现完全相同（`self._fill_callback = callback` / `self._alert_callback = callback`），与本次 set_alert_service 整合属同一类问题，可后续一并上移到 BaseExchange 并在 `__init__` 中初始化
 - Ticker 缓存：本次增强后，典型 Agent 周期的 REST 调用从 ~5 次增至 ~8-9 次（get_position +1 ticker、get_open_orders +1 ticker、set_stop_loss/set_take_profit 各 +1 ticker）。OKX 模式下同一循环内多次获取几乎相同的 ticker。可在 MarketDataService 加简单 TTL 缓存（如 5s），但超出本次范围
 - OKX initial_balance 精度：OKX 模式下 initial_balance 是用户手动输入的近似值（非 API 查询），get_account_balance 和 get_position 的百分比计算基于此值。如需精确，后续可在首次启动时调用 fetch_balance() 获取真实值
+- get_trade_journal N+1 查询：tools_perception.py:98-104 逐个 order_id 调用 fetch_order()，OKX 模式下 20 条流水可能产生 20 次 REST 请求。可后续优化为批量查询
