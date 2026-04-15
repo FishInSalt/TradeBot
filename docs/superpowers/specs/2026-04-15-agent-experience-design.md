@@ -240,16 +240,15 @@ pydantic-ai 的 `result.new_messages()` 返回 `list[ModelMessage]`（`ModelRequ
 ```python
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse,
-    ToolCallPart, ToolReturnPart, TextPart,
+    ToolCallPart, ToolReturnPart,
 )
 
+# 消息遍历仅提取 tool 调用信息，Agent 最终文本使用 result.output
 for msg in result.new_messages():
     if isinstance(msg, ModelResponse):
         for part in msg.parts:
             if isinstance(part, ToolCallPart):
-                # 记录：tool_name, args（用于 DEBUG 日志）
-            elif isinstance(part, TextPart):
-                # Agent 最终文本输出
+                # 记录：tool_name, args（用于 DEBUG 日志 + save_memory 完整内容提取）
     elif isinstance(msg, ModelRequest):
         for part in msg.parts:
             if isinstance(part, ToolReturnPart):
