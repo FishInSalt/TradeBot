@@ -225,7 +225,9 @@ tokens: 1,842 | budget: 48,158 remaining
 
 > 注：以上摘要格式为方向性指导，实际解析器必须对照 tool 源码（`tools_perception.py` / `tools_execution.py`）的返回字符串编写。
 
-**成功/失败检测**：`ToolReturnPart.outcome` 只区分异常（error）和正常返回（success），业务拒绝（如 "Trade rejected by human approval"）是正常返回字符串，outcome 仍为 success。采用**成功前缀白名单**方案：每个执行 tool 定义成功返回的前缀模式（如 open_position 成功以 "Order submitted:" 开头），不匹配则视为拒绝/异常，使用 `✗` 图标。感知工具和记忆工具默认成功，无需检测。
+**成功/失败检测**（两层判断）：
+1. **第一层：所有 tool 统一检查 `ToolReturnPart.outcome`**（类型 `Literal['success', 'failed', 'denied']`）。outcome 为 `'failed'` 或 `'denied'` 时直接使用 `✗` 图标 — 这覆盖了 tool 抛异常或被 pydantic-ai 拒绝的情况。
+2. **第二层：仅对执行 tool，在 outcome='success' 时检查业务拒绝**。业务拒绝（如 "Trade rejected by human approval"、"Position too small"）是正常返回字符串，outcome 仍为 'success'。采用**成功前缀白名单**：每个执行 tool 定义成功返回的前缀模式（如 open_position 成功以 "Order submitted:" 开头），不匹配则视为业务拒绝，使用 `✗` 图标。
 
 **记忆工具：**
 
@@ -360,6 +362,7 @@ Layer 3 设计为注入点，未来迭代将扩展为：
 | preferred_leverage | "MUST NOT exceed Nx" | 不注入 prompt，保留代码默认值 |
 | stop_loss_pct | "EVERY trade MUST have stop loss" | 不注入 prompt，保留代码默认值 |
 | take_profit_pct | 隐含在规则中 | 不注入 prompt，保留代码默认值 |
+| position_sizing | 未使用（代码中存在但 prompt 和 wizard 均未引用） | 保持不变，不涉及本次改动 |
 
 ### Wizard 配置简化
 
