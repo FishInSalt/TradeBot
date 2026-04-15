@@ -48,13 +48,13 @@ def test_summarize_get_market_data():
         "Price: 84200.50 | Bid: 84190.00 | Ask: 84210.00\n"
         "24h High: 85000.00 | Low: 83000.00 | Volume: 1234.56\n\n"
         "=== Technical Indicators (15m) ===\n"
-        "Current Price: 84200.50\n\n"
         "RSI(14): 62.30 (neutral)\n"
-        "MA(20): 84000.00\nMA(50): 83500.00\n"
-        "MACD: 50.00\nMACD Signal: 45.00\nMACD Histogram: 5.00\n"
-        "Bollinger Upper: 85000.00\nBollinger Middle: 84000.00\nBollinger Lower: 83000.00\n\n"
+        "MA(20): 84000.00 (price above — bullish)\n"
+        "MA(50): 83500.00 (price above — bullish)\n"
+        "MACD: 50.00 | Signal: 45.00 | Histogram: 5.00 (bullish)\n"
+        "BB: 85000 / 84000 / 83000 (price in upper half)\n\n"
         "=== Market Context ===\n"
-        "ATR(14): 101.04 (0.12% of price — moderate)\n"
+        "ATR(14): 101.04 (0.12% of price, 15m candles)\n"
         "Volume: 500.0 (1.10x avg — normal)\n"
         "50-candle Range: 83000 — 85000\n\n"
         "=== Recent Candles (15m, last 50) ===\n"
@@ -457,7 +457,9 @@ def test_summarize_cancel_order():
     from src.cli.display import summarize_tool
     content = "Order cancelled: stop sell 0.050000 @ 81500.00 | ID: abc"
     result = summarize_tool("cancel_order", content)
-    assert "cancel" in result.lower() or "Cancelled" in result
+    assert "Cancelled" in result
+    assert "stop" in result
+    assert "81,500" in result or "81500" in result
 
 
 def test_summarize_set_price_alert():
@@ -589,11 +591,13 @@ def _summarize_place_limit_order(content: str) -> str:
 
 
 def _summarize_cancel_order(content: str) -> str:
-    m = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)\s+([\d.]+)", content)
+    m = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)\s+[\d.]+\s*@\s*([\d.]+)", content)
     if m:
-        return f"Cancelled {m.group(1)} {m.group(2)} {m.group(3)}"
-    if "not found" in content.lower():
-        return _fallback_summary(content)
+        return f"Cancelled {m.group(1)} {m.group(2)} @ ${float(m.group(3)):,.0f}"
+    # Fallback: no price (e.g., market orders without price)
+    m2 = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)", content)
+    if m2:
+        return f"Cancelled {m2.group(1)} {m2.group(2)}"
     return _fallback_summary(content)
 
 
@@ -885,7 +889,17 @@ agent output text, and token usage footer."
 
 - [ ] **Step 1: Modify run_agent_cycle to extract and display messages**
 
-In `src/cli/app.py`, replace the current output section (lines 147-167) with message extraction, display formatting, and logging:
+First, add imports at the top of `src/cli/app.py` (after existing imports):
+
+```python
+from pydantic_ai.messages import (
+    ModelRequest, ModelResponse,
+    ToolCallPart, ToolReturnPart,
+)
+from src.cli.display import format_cycle_output, summarize_tool, is_tool_error
+```
+
+Then, in `run_agent_cycle`, replace the current output section (lines 147-167) with message extraction, display formatting, and logging:
 
 ```python
 # After result = await agent.run(prompt, **run_kwargs) and retry logic (line 146):
@@ -896,11 +910,6 @@ In `src/cli/app.py`, replace the current output section (lines 147-167) with mes
     # === A2: Extract tool calls from message history ===
     tool_calls = []
     _call_args_by_id: dict[str, dict | None] = {}
-
-    from pydantic_ai.messages import (
-        ModelRequest, ModelResponse,
-        ToolCallPart, ToolReturnPart,
-    )
 
     for msg in result.new_messages():
         if isinstance(msg, ModelResponse):
@@ -915,7 +924,7 @@ In `src/cli/app.py`, replace the current output section (lines 147-167) with mes
             for part in msg.parts:
                 if isinstance(part, ToolReturnPart):
                     content_str = str(part.content)
-                    outcome = getattr(part, "outcome", "success")
+                    outcome = part.outcome
                     if part.tool_call_id not in _call_args_by_id:
                         logger.warning(
                             f"tool_call_id mismatch for {part.tool_name}, using fallback"
@@ -929,7 +938,6 @@ In `src/cli/app.py`, replace the current output section (lines 147-167) with mes
                     })
 
                     # System log: INFO summary, DEBUG full content
-                    from src.cli.display import summarize_tool, is_tool_error
                     summary = summarize_tool(part.tool_name, content_str)
                     icon = "✗" if is_tool_error(part.tool_name, content_str, outcome) else "⚙"
                     logger.info(f"  {icon} {part.tool_name}: {summary}")
@@ -957,7 +965,6 @@ In `src/cli/app.py`, replace the current output section (lines 147-167) with mes
 
     # === A2: Display formatted cycle output ===
     if console is not None:
-        from src.cli.display import format_cycle_output
         output = format_cycle_output(
             cycle_id=cycle_id,
             trigger_type=trigger_type,
@@ -1029,7 +1036,7 @@ def test_prompt_contains_layer2_thinking_framework():
     assert "market structure" in prompt_lower
     assert "risk" in prompt_lower and "reward" in prompt_lower
     assert "support" in prompt_lower or "resistance" in prompt_lower
-    assert "position" in prompt_lower and "management" in prompt_lower or "sizing" in prompt_lower
+    assert "position" in prompt_lower and ("management" in prompt_lower or "sizing" in prompt_lower)
 
 
 def test_prompt_no_must_never_constraints():
@@ -1046,7 +1053,7 @@ def test_prompt_no_fixed_step_workflow():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
     # Must not have fixed "Step 1: ... Step 2: ..." workflow
-    assert "Step 1" not in prompt or "step 1" not in prompt.lower()
+    assert "step 1" not in prompt.lower()
 
 
 def test_prompt_no_numerical_params():
@@ -1459,7 +1466,7 @@ Risk Params summary row also commented out."
 - [ ] **Step 1: Run full test suite**
 
 Run: `pytest tests/ -v --timeout=30`
-Expected: All tests PASS (count should be 352 + new display tests)
+Expected: All tests PASS (352 original - 4 replaced persona tests + 13 new persona tests + ~35 new display tests ≈ 396)
 
 - [ ] **Step 2: Verify no import errors**
 
