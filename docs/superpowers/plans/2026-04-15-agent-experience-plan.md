@@ -459,6 +459,7 @@ def test_summarize_cancel_order():
     result = summarize_tool("cancel_order", content)
     assert "Cancelled" in result
     assert "stop" in result
+    assert "0.050000" in result
     assert "81,500" in result or "81500" in result
 
 
@@ -591,9 +592,9 @@ def _summarize_place_limit_order(content: str) -> str:
 
 
 def _summarize_cancel_order(content: str) -> str:
-    m = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)\s+[\d.]+\s*@\s*([\d.]+)", content)
+    m = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)\s+([\d.]+)\s*@\s*([\d.]+)", content)
     if m:
-        return f"Cancelled {m.group(1)} {m.group(2)} @ ${float(m.group(3)):,.0f}"
+        return f"Cancelled {m.group(1)} {m.group(2)} {m.group(3)} @ ${float(m.group(4)):,.0f}"
     # Fallback: no price (e.g., market orders without price)
     m2 = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)", content)
     if m2:
@@ -837,17 +838,17 @@ def format_cycle_output(
         outcome = tc.get("outcome", "success")
         args = tc.get("args")
 
-        # Determine icon
-        if name == "save_memory":
+        # Determine icon — error check first for ALL tools (spec: outcome takes priority)
+        if is_tool_error(name, content, outcome):
+            icon = "✗"
+            summary = _fallback_summary(content)
+        elif name == "save_memory":
             icon = "✎"
             # Extract full content from args (ToolReturnPart truncates to 80 chars)
             if args and isinstance(args, dict):
                 summary = summarize_save_memory(args)
             else:
                 summary = summarize_tool(name, content)
-        elif is_tool_error(name, content, outcome):
-            icon = "✗"
-            summary = _fallback_summary(content)
         else:
             icon = "⚙"
             summary = summarize_tool(name, content)
@@ -889,14 +890,14 @@ agent output text, and token usage footer."
 
 - [ ] **Step 1: Modify run_agent_cycle to extract and display messages**
 
-First, add imports at the top of `src/cli/app.py` (after existing imports):
+First, update imports at the top of `src/cli/app.py`. Merge with the existing `from src.cli.display import display_metrics` (line 15):
 
 ```python
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse,
     ToolCallPart, ToolReturnPart,
 )
-from src.cli.display import format_cycle_output, summarize_tool, is_tool_error
+from src.cli.display import display_metrics, format_cycle_output, is_tool_error, summarize_tool
 ```
 
 Then, in `run_agent_cycle`, replace the current output section (lines 147-167) with message extraction, display formatting, and logging:
