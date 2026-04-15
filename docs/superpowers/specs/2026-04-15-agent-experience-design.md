@@ -197,11 +197,11 @@ tokens: 1,842 | budget: 48,158 remaining
 
 | 工具 | 摘要格式 | 提取逻辑 |
 |------|---------|---------|
-| get_market_data | `{symbol} ${price} \| RSI {rsi} \| ATR {atr}%` | 解析 "Price:" 行取价格；解析 indicators 段取 RSI、ATR |
-| get_position | `{side} {contracts} @ ${entry} \| PnL {pnl}%` 或 `No open position` | 解析 side + contracts + entry_price + PnL 行 |
+| get_market_data | `{symbol} ${price} \| RSI {rsi} \| ATR {atr}%` | 解析 Ticker 段 "Price:" 取价格；解析 Technical Indicators 段取 `RSI(14): XX.XX`；解析 Market Context 段取 `ATR(14): XX.XX (XX.XX% of price)` — RSI 和 ATR 在不同段落 |
+| get_position | `{side} {contracts} @ ${entry} \| PnL {pnl}%` 或 `No open position` | 解析 side + contracts + entry_price；PnL 百分比在括号内 `(+X.XX% of initial capital)` |
 | get_account_balance | `${total} ({ret}%)` | 解析 "Total:" 和 "Return:" 行 |
 | get_open_orders | `{count} orders (types)` 或 `No pending orders` | 统计订单数，汇总类型（SL/TP/LIMIT） |
-| get_trade_journal | `{total} trades \| Win {rate}% \| PnL {pnl}` | 解析 performance summary 段 |
+| get_trade_journal | `{total} trades \| Win {rate}% \| PnL {pnl}` | 解析 Performance Summary 段 |
 | get_memories | `{count} memories` 或 `No memories` | 统计记忆条目数 |
 | get_active_alerts | `Vol: {threshold}%/{window}min \| {count} price alerts` | 解析两个段落 |
 | get_performance | `Return {ret}% \| {trades} trades \| Win {rate}%` | 解析 return、total trades、win rate |
@@ -211,15 +211,17 @@ tokens: 1,842 | budget: 48,158 remaining
 | 工具 | 摘要格式 | 提取逻辑 |
 |------|---------|---------|
 | open_position | `{side} {qty} @ ~${price}, {lev}x` | 解析 "Order submitted:" 行 |
-| close_position | `Close {count} position(s)` | 解析提交行 |
-| set_stop_loss | `SL @ ${price} ({dist}% from current)` | 直接解析返回字符串 |
-| set_take_profit | `TP @ ${price} ({dist}% from current)` | 直接解析返回字符串 |
-| adjust_leverage | `{lev}x for {symbol}` | 直接解析返回字符串 |
-| place_limit_order | `Limit {side} {qty} @ ${price}, {lev}x` | 直接解析返回字符串 |
-| cancel_order | `Cancelled {type} {side} @ ${price}` | 直接解析返回字符串 |
-| set_price_alert | `threshold={pct}%, window={min}min` | 直接解析返回字符串 |
-| add_price_level_alert | `{direction} ${price}` | 直接解析返回字符串 |
-| set_next_wake | `{min}min` | 直接解析返回字符串 |
+| close_position | `Close {count} position(s)` | 解析 "Orders submitted:" 行 |
+| set_stop_loss | `SL @ ${price} ({dist}%)` | 解析 "Stop loss set at X.XX (X.XX% from current X.XX) \| Order: X" |
+| set_take_profit | `TP @ ${price} ({dist}%)` | 解析 "Take profit set at X.XX (X.XX% from current X.XX) \| Order: X" |
+| adjust_leverage | `{lev}x for {symbol}` | 解析 "Leverage adjusted to Nx for symbol" |
+| place_limit_order | `Limit {side} {qty} @ ${price}, {lev}x` | 解析 "Limit order placed:" 行 |
+| cancel_order | `Cancelled {type} {side} {amount} @ ${price}` | 解析 "Order cancelled: {type} {side} {amount}{price} \| ID: X" |
+| set_price_alert | `threshold={pct}%, window={min}min` | 解析 "Price alert updated:" 行 |
+| add_price_level_alert | `{direction} ${price}` | 解析 "Price level alert set:" 行 |
+| set_next_wake | `{min}min` | 解析 "Next wake set to X min" |
+
+> 注：以上摘要格式为方向性指导，实际解析器必须对照 tool 源码（`tools_perception.py` / `tools_execution.py`）的返回字符串编写。
 
 **记忆工具：**
 
@@ -362,7 +364,7 @@ Layer 3 设计为注入点，未来迭代将扩展为：
 
 - **保留**：`risk_tolerance`、`trading_style` 的交互式选择
 - **注释掉**：`max_position_pct`、`preferred_leverage`、`stop_loss_pct`、`take_profit_pct` 的 prompt 询问，加注释说明后续产品阶段可能重新启用
-- **配置摘要简化**：从 `moderate / trend_following / pos 30% / 3x / SL 3% / TP 6%` 简化为 `moderate / trend_following`
+- **配置摘要简化**：`_show_summary()` 当前有两行表格行 — Persona 行（`moderate / trend_following`）和 Risk Params 行（`pos 30% / 3x / SL 3% / TP 6%`）。删除 Risk Params 行，保留 Persona 行
 
 ### 涉及文件
 
@@ -423,4 +425,6 @@ Layer 3 设计为注入点，未来迭代将扩展为：
 - A1 仅改 `persona.py` — 不影响 tool 实现、config schema、CLI 逻辑
 - 两个改动与现有 352 测试保持兼容（A2 新增展示代码，A1 仅改 prompt 文本）
 - 不引入新依赖
+- **最低依赖版本**：pydantic-ai >= 1.0（消息 API 依赖此版本，已在 pyproject.toml 声明）
 - **语言规范**：系统代码全部使用英文，包括 prompt 文本、注释、变量名。本 spec 文档用中文描述设计意图，但实现时 prompt 必须用英文编写
+- **已有日志兼容**：`app.py:164` 已有一条 cycle 级 INFO 日志 `Cycle {cycle_id}: {tokens} tokens ({budget.remaining} remaining)`，A2 新增的 tool 摘要 INFO 日志需与其格式风格保持一致
