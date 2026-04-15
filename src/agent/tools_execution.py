@@ -143,7 +143,9 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
         side=p.side, price=price, reasoning=reasoning,
     )
 
-    return f"Stop loss set at {price:.2f} | Order: {order.id}"
+    ticker = await deps.market_data.get_ticker(deps.symbol)
+    dist_pct = (price - ticker.last) / ticker.last * 100
+    return f"Stop loss set at {price:.2f} ({dist_pct:+.2f}% from current {ticker.last:.2f}) | Order: {order.id}"
 
 
 async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> str:
@@ -169,7 +171,9 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
         side=p.side, price=price, reasoning=reasoning,
     )
 
-    return f"Take profit set at {price:.2f} | Order: {order.id}"
+    ticker = await deps.market_data.get_ticker(deps.symbol)
+    dist_pct = (price - ticker.last) / ticker.last * 100
+    return f"Take profit set at {price:.2f} ({dist_pct:+.2f}% from current {ticker.last:.2f}) | Order: {order.id}"
 
 
 async def adjust_leverage(deps: TradingDeps, leverage: int, reasoning: str) -> str:
@@ -189,7 +193,11 @@ async def set_price_alert(
     reasoning: str,
 ) -> str:
     """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-240."""
-    # 参数边界验证
+    # Check if alerts are enabled
+    if deps.exchange.get_alert_params() is None:
+        return "Alerts are disabled for this session. Enable alerts in wizard to use this feature."
+
+    # Parameter validation
     if not (0.5 <= threshold_pct <= 50.0):
         return f"Invalid threshold_pct: must be 0.5-50.0, got {threshold_pct}"
     if not (1 <= window_minutes <= 240):
@@ -306,3 +314,33 @@ async def place_limit_order(
     )
 
     return f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, {actual_leverage}x | ID: {order.id}"
+
+
+async def cancel_order(
+    deps: TradingDeps,
+    order_id: str,
+    reasoning: str,
+) -> str:
+    """Cancel a pending order (limit, stop, take_profit)."""
+    open_orders = await deps.exchange.fetch_open_orders(deps.symbol)
+    target = None
+    for o in open_orders:
+        if o.id == order_id:
+            target = o
+            break
+
+    if target is None:
+        return f"Order not found or already filled: {order_id}"
+
+    if target.order_type == "market":
+        return "Cannot cancel market orders"
+
+    await deps.exchange.cancel_order(order_id, deps.symbol)
+
+    await _record_action(
+        deps, action="cancel_order", order_id=order_id,
+        side=target.side, price=target.price, reasoning=reasoning,
+    )
+
+    price_str = f" @ {target.price:.2f}" if target.price else ""
+    return f"Order cancelled: {target.order_type} {target.side} {target.amount}{price_str} | ID: {order_id}"

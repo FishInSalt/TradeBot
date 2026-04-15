@@ -575,3 +575,98 @@ async def test_get_open_orders_with_distance():
     assert "% from current" in result or "from current" in result
     # Market order should show "market price" without distance
     assert "market price" in result
+
+
+# --- Task 10: Execution tool enhancements ---
+
+async def test_set_stop_loss_distance():
+    from src.agent.tools_execution import set_stop_loss
+
+    deps = _make_deps()
+    deps.exchange.fetch_positions.return_value = [
+        Position("BTC/USDT:USDT", "long", 0.001, 74761.10, -19.09, 3, 50200.0),
+    ]
+    deps.exchange.create_order.return_value = Order(
+        "o1", "BTC/USDT:USDT", "sell", "stop", 0.001, 72500.0, "open",
+    )
+    deps.market_data.get_ticker.return_value = Ticker(
+        "BTC/USDT:USDT", 74761.0, 74760.0, 74762.0, 75200.0, 73800.0, 100.0, 1000,
+    )
+
+    result = await set_stop_loss(deps, 72500.0, reasoning="protect capital")
+    assert "72500" in result
+    assert "% from current" in result or "from current" in result
+
+
+async def test_set_take_profit_distance():
+    from src.agent.tools_execution import set_take_profit
+
+    deps = _make_deps()
+    deps.exchange.fetch_positions.return_value = [
+        Position("BTC/USDT:USDT", "long", 0.001, 74761.10, -19.09, 3, 50200.0),
+    ]
+    deps.exchange.create_order.return_value = Order(
+        "o1", "BTC/USDT:USDT", "sell", "take_profit", 0.001, 79200.0, "open",
+    )
+    deps.market_data.get_ticker.return_value = Ticker(
+        "BTC/USDT:USDT", 74761.0, 74760.0, 74762.0, 75200.0, 73800.0, 100.0, 1000,
+    )
+
+    result = await set_take_profit(deps, 79200.0, reasoning="target resistance")
+    assert "79200" in result
+    assert "% from current" in result or "from current" in result
+
+
+async def test_set_price_alert_disabled():
+    from src.agent.tools_execution import set_price_alert
+
+    deps = _make_deps()
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
+
+    result = await set_price_alert(deps, 5.0, 60, reasoning="test")
+    assert "disabled" in result.lower() or "Alerts are disabled" in result
+
+
+async def test_set_price_alert_enabled():
+    from src.agent.tools_execution import set_price_alert
+
+    deps = _make_deps()
+    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
+    deps.exchange.update_alert_params = MagicMock()
+
+    result = await set_price_alert(deps, 3.0, 30, reasoning="tighter alert")
+    assert "updated" in result.lower() or "3.0%" in result
+
+
+async def test_cancel_order_success():
+    from src.agent.tools_execution import cancel_order
+
+    deps = _make_deps()
+    target_order = Order("o1", "BTC/USDT:USDT", "buy", "limit", 0.001, 72000.0, "open")
+    deps.exchange.fetch_open_orders.return_value = [target_order]
+    deps.exchange.cancel_order = AsyncMock()
+
+    result = await cancel_order(deps, "o1", reasoning="no longer needed")
+    assert "cancelled" in result.lower() or "Cancelled" in result or "cancel" in result.lower()
+    deps.exchange.cancel_order.assert_called_once_with("o1", "BTC/USDT:USDT")
+
+
+async def test_cancel_order_not_found():
+    from src.agent.tools_execution import cancel_order
+
+    deps = _make_deps()
+    deps.exchange.fetch_open_orders.return_value = []
+
+    result = await cancel_order(deps, "nonexistent", reasoning="cleanup")
+    assert "not found" in result.lower() or "already filled" in result.lower()
+
+
+async def test_cancel_order_market_rejected():
+    from src.agent.tools_execution import cancel_order
+
+    deps = _make_deps()
+    market_order = Order("o1", "BTC/USDT:USDT", "buy", "market", 0.001, None, "open")
+    deps.exchange.fetch_open_orders.return_value = [market_order]
+
+    result = await cancel_order(deps, "o1", reasoning="want to cancel")
+    assert "Cannot cancel market" in result or "market" in result.lower()

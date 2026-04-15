@@ -147,6 +147,13 @@ def create_trader_agent(
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
 
     @agent.tool
+    async def cancel_order(ctx: RunContext[TradingDeps], order_id: str, reasoning: str) -> str:
+        """Cancel a pending order (limit, stop loss, take profit). Always provide reasoning."""
+        from src.agent.tools_execution import cancel_order as _impl
+
+        return await _impl(ctx.deps, order_id, reasoning=reasoning)
+
+    @agent.tool
     async def add_price_level_alert(
         ctx: RunContext[TradingDeps],
         price: float,
