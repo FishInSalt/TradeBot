@@ -9,18 +9,117 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def get_market_data(deps: TradingDeps, symbol: str, timeframe: str) -> str:
-    """Get current market data with technical indicators."""
+async def get_market_data(
+    deps: TradingDeps,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    candle_count: int = 50,
+) -> str:
+    """Get market data: ticker, indicators, market context, and recent candles.
+
+    candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis.
+    Default 50. Values above 50 may be capped by exchange API limits.
+    Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
+    """
+    symbol = symbol or deps.symbol
+    timeframe = timeframe or deps.timeframe
+    candle_count = max(10, min(candle_count, 80))
+
     ticker = await deps.market_data.get_ticker(symbol)
-    df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=100)
+    fetch_limit = max(candle_count + 50, 100)
+    df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=fetch_limit)
     indicators = deps.technical.compute_indicators(df)
-    indicators_text = deps.technical.format_for_llm(indicators, current_price=ticker.last)
-    return (
-        f"Symbol: {symbol}\n"
-        f"Price: {ticker.last:.2f} | Bid: {ticker.bid:.2f} | Ask: {ticker.ask:.2f}\n"
-        f"24h High: {ticker.high:.2f} | Low: {ticker.low:.2f} | Volume: {ticker.base_volume:.2f}\n\n"
-        f"Technical Indicators ({timeframe}):\n{indicators_text}"
+    indicators_text = deps.technical.format_for_llm(
+        indicators, current_price=ticker.last, timeframe=timeframe,
     )
+
+    # Determine display count
+    available = len(df)
+    if available >= candle_count + 50:
+        display_count = candle_count
+    else:
+        display_count = max(10, available - 50)
+    display_df = df.tail(display_count)
+
+    sections: list[str] = []
+
+    # === Ticker ===
+    sections.append(
+        f"=== Ticker ({symbol}) ===\n"
+        f"Price: {ticker.last:.2f} | Bid: {ticker.bid:.2f} | Ask: {ticker.ask:.2f}\n"
+        f"24h High: {ticker.high:.2f} | Low: {ticker.low:.2f} | Volume: {ticker.base_volume:.2f}"
+    )
+
+    # === Technical Indicators ===
+    sections.append(
+        f"=== Technical Indicators ({timeframe}) ===\n{indicators_text}"
+    )
+
+    # === Market Context ===
+    ctx_lines = []
+    atr = indicators.get("atr_14")
+    if atr is not None and ticker.last > 0:
+        pct = atr / ticker.last * 100
+        if timeframe == "5m":
+            if pct < 0.1:
+                atr_label = f"{pct:.2f}% of price — low volatility"
+            elif pct <= 0.3:
+                atr_label = f"{pct:.2f}% of price — moderate"
+            else:
+                atr_label = f"{pct:.2f}% of price — high volatility"
+        else:
+            atr_label = f"{pct:.2f}% of price, {timeframe} candles"
+        ctx_lines.append(f"ATR(14): {atr:.2f} ({atr_label})")
+    else:
+        ctx_lines.append("ATR(14): N/A")
+
+    vr = indicators.get("volume_ratio")
+    if vr is not None:
+        raw_vol = df["volume"].iloc[-2] if len(df) >= 2 else df["volume"].iloc[-1]
+        if vr < 0.7:
+            vr_label = "low"
+        elif vr <= 1.3:
+            vr_label = "normal"
+        else:
+            vr_label = "above normal"
+        ctx_lines.append(f"Volume: {raw_vol:.1f} ({vr:.2f}x avg — {vr_label})")
+    else:
+        ctx_lines.append("Volume: N/A")
+
+    if not display_df.empty:
+        candle_high = display_df["high"].max()
+        candle_low = display_df["low"].min()
+        ctx_lines.append(f"{display_count}-candle Range: {candle_low:.0f} — {candle_high:.0f}")
+    else:
+        ctx_lines.append("Range: N/A")
+    sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
+
+    # === Recent Candles ===
+    from datetime import datetime, timezone
+    tf_short = timeframe.lower()
+    candle_lines = [f"{'Time':<14} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10} {'Vol':>10}"]
+    for _, row in display_df.iterrows():
+        ts = row["timestamp"]
+        if isinstance(ts, (int, float)):
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        else:
+            dt = ts
+        if tf_short in ("1m", "5m", "15m"):
+            time_str = dt.strftime("%H:%M")
+        elif tf_short in ("1h", "4h"):
+            time_str = dt.strftime("%m-%d %H:%M")
+        else:
+            time_str = dt.strftime("%Y-%m-%d")
+        candle_lines.append(
+            f"{time_str:<14} {row['open']:>10.2f} {row['high']:>10.2f} "
+            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}"
+        )
+    sections.append(
+        f"=== Recent Candles ({timeframe}, last {display_count}) ===\n"
+        + "\n".join(candle_lines)
+    )
+
+    return "\n\n".join(sections)
 
 
 async def get_position(deps: TradingDeps, symbol: str) -> str:

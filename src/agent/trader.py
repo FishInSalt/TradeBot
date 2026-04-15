@@ -42,12 +42,19 @@ def create_trader_agent(
 
     @agent.tool
     async def get_market_data(
-        ctx: RunContext[TradingDeps], symbol: str, timeframe: str
+        ctx: RunContext[TradingDeps],
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        candle_count: int = 50,
     ) -> str:
-        """Get current market data with technical indicators."""
+        """Get market data: ticker, technical indicators, market context, and recent candles.
+        candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis.
+        Default 50. Values above 50 may be capped by exchange API limits.
+        Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
+        symbol and timeframe default to session config."""
         from src.agent.tools_perception import get_market_data as _impl
 
-        return await _impl(ctx.deps, symbol, timeframe)
+        return await _impl(ctx.deps, symbol, timeframe, candle_count)
 
     @agent.tool
     async def get_position(ctx: RunContext[TradingDeps], symbol: str) -> str:

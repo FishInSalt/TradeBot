@@ -226,3 +226,206 @@ def test_trading_deps_new_fields():
     )
     assert deps.initial_balance == 10000.0
     assert deps.metrics is None
+
+
+# --- Task 7+: Shared fixtures ---
+
+import pandas as pd
+import numpy as np
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock
+from src.integrations.exchange.base import Ticker, Balance, Position, Order
+
+
+@dataclass
+class MockDeps:
+    symbol: str
+    timeframe: str
+    market_data: AsyncMock
+    exchange: AsyncMock
+    technical: MagicMock
+    memory: AsyncMock
+    session_id: str = "test-session"
+    db_engine: object = None
+    approval_gate: object = None
+    approval_enabled: bool = False
+    wake_min_minutes: int = 1
+    wake_max_minutes: int = 60
+    set_next_wake_fn: object = None
+    initial_balance: float = 10000.0
+    metrics: object = None
+
+
+def _make_deps():
+    """Create a MockDeps with all needed fields for enhanced tools."""
+    d = MockDeps(
+        symbol="BTC/USDT:USDT",
+        timeframe="5m",
+        market_data=AsyncMock(),
+        exchange=AsyncMock(),
+        technical=MagicMock(),
+        memory=AsyncMock(),
+    )
+    d.market_data.get_ticker.return_value = Ticker(
+        "BTC/USDT:USDT", 74880.0, 74870.0, 74890.0, 75200.0, 73800.0, 12345.6, 1000,
+    )
+    d.exchange.fetch_balance.return_value = Balance(10000.0, 8000.0, 2000.0)
+    d.exchange.fetch_positions.return_value = []
+    d.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    d.exchange.has_pending_market_order = MagicMock(return_value=False)
+    d.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
+    d.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    d.exchange.cancel_order = AsyncMock()
+    d.exchange.set_leverage = AsyncMock()
+    d.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, amt: round(amt, 3))
+    d.exchange.create_order = AsyncMock(return_value=Order(
+        "o1", "BTC/USDT:USDT", "buy", "market", 0.01, 65000.0, "closed",
+    ))
+    return d
+
+
+async def test_get_market_data_four_segments():
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    # Create a realistic DataFrame
+    n = 100
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 300000 for i in range(n)],
+        "open": np.full(n, 74800.0),
+        "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0),
+        "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 52.88, "ma_20": 74750.0, "ma_50": 74500.0,
+        "macd": 12.5, "macd_signal": 8.3, "macd_histogram": 4.2,
+        "bb_upper": 75100.0, "bb_middle": 74750.0, "bb_lower": 74400.0,
+        "atr_14": 85.2, "volume_ratio": 1.35,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 52.88 (neutral)\nMA(20): 74750.00"
+
+    result = await get_market_data(deps)
+    # Four segment headers
+    assert "=== Ticker" in result
+    assert "=== Technical Indicators" in result
+    assert "=== Market Context ===" in result
+    assert "=== Recent Candles" in result
+    # Ticker data
+    assert "74880" in result
+    assert "74870" in result  # bid
+    # Market context — ATR and Volume come from indicators dict
+    assert "ATR" in result
+    assert "Volume" in result
+    assert "avg" in result  # volume ratio label
+
+
+async def test_get_market_data_default_params():
+    """get_market_data uses deps.symbol and deps.timeframe when called without args."""
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    n = 100
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 300000 for i in range(n)],
+        "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0), "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
+        "atr_14": 80.0, "volume_ratio": 1.0,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00 (neutral)"
+
+    result = await get_market_data(deps)
+    # Should have called with deps.symbol and deps.timeframe
+    deps.market_data.get_ticker.assert_called_once_with("BTC/USDT:USDT")
+    assert "5m" in result  # timeframe in segment headers
+
+
+async def test_get_market_data_1h_atr_no_qualitative_label():
+    """Non-5m timeframes should NOT have ATR qualitative labels (low/moderate/high)."""
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    deps.timeframe = "1h"
+    n = 100
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 3600000 for i in range(n)],
+        "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0), "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
+        "atr_14": 850.0, "volume_ratio": 1.0,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00 (neutral)"
+
+    result = await get_market_data(deps, timeframe="1h")
+    # ATR line should exist with value and percentage
+    assert "ATR(14): 850.00" in result
+    assert "1h candles" in result
+    # Should NOT have qualitative labels
+    assert "low volatility" not in result
+    assert "moderate" not in result
+    assert "high volatility" not in result
+
+
+async def test_get_market_data_truncated_data():
+    """When exchange returns fewer candles than requested, display_count adapts."""
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    # Only 70 rows returned (requested 100 = candle_count 50 + 50 warmup)
+    n = 70
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 300000 for i in range(n)],
+        "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0), "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": None,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
+        "atr_14": 80.0, "volume_ratio": 1.0,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
+
+    result = await get_market_data(deps, candle_count=50)
+    # display_count = max(10, 70-50) = 20
+    assert "last 20" in result
+
+
+async def test_get_market_data_candle_count_clamp():
+    """candle_count is clamped to 10-80."""
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    n = 100
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 300000 for i in range(n)],
+        "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0), "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
+        "atr_14": 80.0, "volume_ratio": 1.0,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
+
+    result = await get_market_data(deps, candle_count=5)
+    # candle_count clamped to 10 → fetch_limit = max(10+50, 100) = 100
+    assert deps.market_data.get_ohlcv_dataframe.call_args.kwargs["limit"] == 100
+    # Output should show "last 10" (clamped from 5)
+    assert "last 10" in result
