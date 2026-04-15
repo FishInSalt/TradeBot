@@ -217,8 +217,8 @@ Expected: FAIL — `summarize_tool` not defined
 - [ ] **Step 3: Implement perception tool parsers**
 
 ```python
-# Add to src/cli/display.py after existing code
-from __future__ import annotations
+# Add to src/cli/display.py after existing imports
+# Note: `from __future__ import annotations` already exists at line 1; only add `import re`
 
 import re
 
@@ -724,7 +724,7 @@ Add to `tests/test_display_cycle.py`:
 def test_format_cycle_output_basic():
     from src.cli.display import format_cycle_output
     tool_calls = [
-        {"tool_name": "get_market_data", "content": "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30 (neutral)\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price — moderate)", "outcome": "success"},
+        {"tool_name": "get_market_data", "content": "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30 (neutral)\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)", "outcome": "success"},
         {"tool_name": "get_position", "content": "No open positions.", "outcome": "success"},
     ]
     result = format_cycle_output(
@@ -897,7 +897,10 @@ from pydantic_ai.messages import (
     ModelRequest, ModelResponse,
     ToolCallPart, ToolReturnPart,
 )
-from src.cli.display import display_metrics, format_cycle_output, is_tool_error, summarize_tool
+from src.cli.display import (
+    display_metrics, format_cycle_output, is_tool_error,
+    summarize_save_memory, summarize_tool,
+)
 ```
 
 Then, in `run_agent_cycle`, replace the current output section (lines 147-167) with message extraction, display formatting, and logging:
@@ -939,8 +942,16 @@ Then, in `run_agent_cycle`, replace the current output section (lines 147-167) w
                     })
 
                     # System log: INFO summary, DEBUG full content
-                    summary = summarize_tool(part.tool_name, content_str)
-                    icon = "✗" if is_tool_error(part.tool_name, content_str, outcome) else "⚙"
+                    # Mirror format_cycle_output icon/summary logic for consistency
+                    if is_tool_error(part.tool_name, content_str, outcome):
+                        icon = "✗"
+                        summary = content_str[:80]
+                    elif part.tool_name == "save_memory" and args:
+                        icon = "✎"
+                        summary = summarize_save_memory(args)
+                    else:
+                        icon = "⚙"
+                        summary = summarize_tool(part.tool_name, content_str)
                     logger.info(f"  {icon} {part.tool_name}: {summary}")
                     logger.debug(
                         f"  Tool {part.tool_name} args={args} "
