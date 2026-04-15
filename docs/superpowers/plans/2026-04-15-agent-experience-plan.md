@@ -906,14 +906,9 @@ In `src/cli/app.py`, replace the current output section (lines 147-167) with mes
         if isinstance(msg, ModelResponse):
             for part in msg.parts:
                 if isinstance(part, ToolCallPart):
-                    args = part.args
-                    if isinstance(args, str):
-                        import json as _json
-                        try:
-                            args = _json.loads(args)
-                        except (ValueError, TypeError):
-                            args = None
-                    elif not isinstance(args, dict):
+                    try:
+                        args = part.args_as_dict()
+                    except Exception:
                         args = None
                     _call_args_by_id[part.tool_call_id] = args
         elif isinstance(msg, ModelRequest):
@@ -921,12 +916,11 @@ In `src/cli/app.py`, replace the current output section (lines 147-167) with mes
                 if isinstance(part, ToolReturnPart):
                     content_str = str(part.content)
                     outcome = getattr(part, "outcome", "success")
-                    args = _call_args_by_id.get(part.tool_call_id)
-                    if args is None:
-                        # Fallback: sequential matching (log warning)
+                    if part.tool_call_id not in _call_args_by_id:
                         logger.warning(
                             f"tool_call_id mismatch for {part.tool_name}, using fallback"
                         )
+                    args = _call_args_by_id.get(part.tool_call_id)
                     tool_calls.append({
                         "tool_name": part.tool_name,
                         "content": content_str,
@@ -935,9 +929,10 @@ In `src/cli/app.py`, replace the current output section (lines 147-167) with mes
                     })
 
                     # System log: INFO summary, DEBUG full content
-                    from src.cli.display import summarize_tool
+                    from src.cli.display import summarize_tool, is_tool_error
                     summary = summarize_tool(part.tool_name, content_str)
-                    logger.info(f"  ⚙ {part.tool_name}: {summary}")
+                    icon = "✗" if is_tool_error(part.tool_name, content_str, outcome) else "⚙"
+                    logger.info(f"  {icon} {part.tool_name}: {summary}")
                     logger.debug(
                         f"  Tool {part.tool_name} args={args} "
                         f"return={content_str[:500]}"
@@ -1063,7 +1058,7 @@ def test_prompt_no_numerical_params():
     prompt = generate_system_prompt(config)
     # Numerical params should NOT appear in prompt
     assert "30%" not in prompt
-    assert "3x" not in prompt or "3x leverage" not in prompt.lower()
+    assert "3x" not in prompt
     assert "3.0%" not in prompt
     assert "6.0%" not in prompt
 
@@ -1348,9 +1343,90 @@ In `_show_summary` (line 302-339), remove the Risk Params row (lines 330-334):
     # )
 ```
 
-- [ ] **Step 2: Update wizard tests if any reference the removed fields**
+- [ ] **Step 2: Update wizard tests for simplified persona step**
 
-Check `tests/test_wizard.py` for tests that assert on `max_position_pct`, `stop_loss_pct`, etc. in wizard output. Update as needed — the `PersonaConfig` in `WizardResult` will now use code defaults for numerical fields.
+Four tests break because they mock `FloatPrompt.ask` and `IntPrompt.ask` for numerical params that are now commented out. Update `tests/test_wizard.py`:
+
+**test_step_persona_defaults** (line 234): Remove FloatPrompt and IntPrompt mocks, remove numerical assertions:
+
+```python
+@patch("src.cli.wizard.Prompt.ask", side_effect=["moderate", "trend_following"])
+def test_step_persona_defaults(mock_prompt):
+    from src.cli.wizard import _step_persona
+    result = _step_persona(TraderConfig(), Console())
+    p = result["persona"]
+    assert p.risk_tolerance == "moderate"
+    assert p.trading_style == "trend_following"
+    # Numerical params use code defaults (not asked in wizard)
+    assert p.max_position_pct == 30.0
+    assert p.position_sizing == "percentage"
+```
+
+**test_step_persona_custom** (line 251): Remove FloatPrompt and IntPrompt mocks:
+
+```python
+@patch("src.cli.wizard.Prompt.ask", side_effect=["aggressive", "breakout"])
+def test_step_persona_custom(mock_prompt):
+    from src.cli.wizard import _step_persona
+    result = _step_persona(TraderConfig(), Console())
+    p = result["persona"]
+    assert p.risk_tolerance == "aggressive"
+    assert p.trading_style == "breakout"
+```
+
+**test_run_wizard_full_flow** (line 307): Remove numerical persona params from FloatPrompt and IntPrompt side_effects:
+
+```python
+    with patch("src.cli.wizard.Prompt.ask", side_effect=[
+        "sim",               # Step 1: mode
+        "BTC/USDT:USDT",    # Step 2: symbol
+        "15m",               # Step 2: timeframe
+        "moderate",          # Step 5: risk tolerance
+        "trend_following",   # Step 5: trading style
+        "BTC sim",           # Session name
+    ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
+        0.05, 100.0,        # Step 1: fee_rate, balance
+        3.0,                 # Step 4: threshold
+        # 30.0, 3.0, 6.0 removed — persona numericals no longer asked
+    ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
+        1,                   # Step 3: select model #1
+        15,                  # Step 4: interval
+        5,                   # Step 4: alert window
+        500000,              # Step 4: budget
+        # 3 removed — persona leverage no longer asked
+    ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
+        False,               # Step 4: approval OFF (sim default)
+        True,                # Step 4: alerts ON
+        True,                # Summary: confirm
+    ]):
+```
+
+**test_run_wizard_reject_then_confirm** (line 350): Same removal in both rounds:
+
+```python
+    with patch("src.cli.wizard.Prompt.ask", side_effect=[
+        # Round 1
+        "sim", "BTC/USDT:USDT", "15m", "moderate", "trend_following",
+        # Round 2
+        "sim", "ETH/USDT:USDT", "15m", "moderate", "trend_following",
+        "ETH sim",
+    ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
+        # Round 1
+        0.05, 100.0, 3.0,
+        # Round 2
+        0.05, 200.0, 3.0,
+    ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
+        # Round 1
+        1, 15, 5, 500000,
+        # Round 2
+        1, 15, 5, 500000,
+    ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
+        # Round 1
+        False, True, False,  # approval OFF, alerts ON, summary REJECT
+        # Round 2
+        False, True, True,   # approval OFF, alerts ON, summary CONFIRM
+    ]):
+```
 
 - [ ] **Step 3: Run tests**
 
