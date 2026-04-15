@@ -206,8 +206,11 @@ async def get_open_orders(deps: TradingDeps) -> str:
                 label = "[LIMIT]"
             else:
                 label = f"[{o.order_type.upper()}]"
-            dist = (o.price - current) / current * 100
-            price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
+            if current > 0:
+                dist = (o.price - current) / current * 100
+                price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
+            else:
+                price_str = f"@ {o.price:.2f}"
         lines.append(f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}")
     return "\n".join(lines)
 
