@@ -231,33 +231,25 @@ def test_step_risk_alerts_off(mock_confirm, mock_int):
 
 # --- Step 5: Persona ---
 
-@patch("src.cli.wizard.FloatPrompt.ask", side_effect=[30.0, 3.0, 6.0])
-@patch("src.cli.wizard.IntPrompt.ask", return_value=3)
 @patch("src.cli.wizard.Prompt.ask", side_effect=["moderate", "trend_following"])
-def test_step_persona_defaults(mock_prompt, mock_int, mock_float):
+def test_step_persona_defaults(mock_prompt):
     from src.cli.wizard import _step_persona
     result = _step_persona(TraderConfig(), Console())
     p = result["persona"]
     assert p.risk_tolerance == "moderate"
     assert p.trading_style == "trend_following"
+    # Numerical params use code defaults (not asked in wizard)
     assert p.max_position_pct == 30.0
-    assert p.preferred_leverage == 3
-    assert p.stop_loss_pct == 3.0
-    assert p.take_profit_pct == 6.0
-    # position_sizing uses default, not exposed in wizard
     assert p.position_sizing == "percentage"
 
 
-@patch("src.cli.wizard.FloatPrompt.ask", side_effect=[50.0, 5.0, 10.0])
-@patch("src.cli.wizard.IntPrompt.ask", return_value=10)
 @patch("src.cli.wizard.Prompt.ask", side_effect=["aggressive", "breakout"])
-def test_step_persona_custom(mock_prompt, mock_int, mock_float):
+def test_step_persona_custom(mock_prompt):
     from src.cli.wizard import _step_persona
     result = _step_persona(TraderConfig(), Console())
     p = result["persona"]
     assert p.risk_tolerance == "aggressive"
     assert p.trading_style == "breakout"
-    assert p.preferred_leverage == 10
 
 
 # --- Session naming ---
@@ -321,13 +313,11 @@ async def test_run_wizard_full_flow(tmp_path):
     ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
         0.05, 100.0,        # Step 1: fee_rate, balance
         3.0,                 # Step 4: threshold
-        30.0, 3.0, 6.0,     # Step 5: max_pos, stop_loss, take_profit
     ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
         1,                   # Step 3: select model #1
         15,                  # Step 4: interval
         5,                   # Step 4: alert window
         500000,              # Step 4: budget
-        3,                   # Step 5: leverage
     ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
         False,               # Step 4: approval OFF (sim default)
         True,                # Step 4: alerts ON
@@ -363,14 +353,14 @@ async def test_run_wizard_reject_then_confirm(tmp_path):
         "ETH sim",           # Session name (only reached on confirm)
     ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
         # Round 1
-        0.05, 100.0, 3.0, 30.0, 3.0, 6.0,
+        0.05, 100.0, 3.0,
         # Round 2
-        0.05, 200.0, 3.0, 30.0, 3.0, 6.0,
+        0.05, 200.0, 3.0,
     ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
         # Round 1
-        1, 15, 5, 500000, 3,
+        1, 15, 5, 500000,
         # Round 2
-        1, 15, 5, 500000, 3,
+        1, 15, 5, 500000,
     ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
         # Round 1
         False, True, False,  # approval OFF, alerts ON, summary REJECT

@@ -276,17 +276,16 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
         "  Trading style", choices=["trend_following", "swing", "breakout"],
         default=p.trading_style, console=console,
     )
-    max_pos = FloatPrompt.ask("  Max position (%)", default=p.max_position_pct, console=console)
-    leverage = IntPrompt.ask("  Leverage", default=p.preferred_leverage, console=console)
-    stop_loss = FloatPrompt.ask("  Stop loss (%)", default=p.stop_loss_pct, console=console)
-    take_profit = FloatPrompt.ask("  Take profit (%)", default=p.take_profit_pct, console=console)
+    # Numerical params commented out — not injected into prompt in MVP stage.
+    # Agent decides position sizing, leverage, SL/TP based on its own analysis.
+    # Uncomment when implementing P3 (hard risk controls) for live trading.
+    # max_pos = FloatPrompt.ask("  Max position (%)", default=p.max_position_pct, console=console)
+    # leverage = IntPrompt.ask("  Leverage", default=p.preferred_leverage, console=console)
+    # stop_loss = FloatPrompt.ask("  Stop loss (%)", default=p.stop_loss_pct, console=console)
+    # take_profit = FloatPrompt.ask("  Take profit (%)", default=p.take_profit_pct, console=console)
     persona = PersonaConfig(
         risk_tolerance=risk,
         trading_style=style,
-        max_position_pct=max_pos,
-        preferred_leverage=leverage,
-        stop_loss_pct=stop_loss,
-        take_profit_pct=take_profit,
     )
     return {"persona": persona}
 
@@ -327,11 +326,13 @@ def _show_summary(data: dict, console: Console) -> bool:
 
     p = data["persona"]
     table.add_row("Persona", f"{p.risk_tolerance} / {p.trading_style}")
-    table.add_row(
-        "Risk Params",
-        f"pos {p.max_position_pct:.0f}% / {p.preferred_leverage}x / "
-        f"SL {p.stop_loss_pct:.0f}% / TP {p.take_profit_pct:.0f}%",
-    )
+    # Risk Params row removed — numerical params not used in MVP stage.
+    # Uncomment when implementing P3 (hard risk controls) for live trading.
+    # table.add_row(
+    #     "Risk Params",
+    #     f"pos {p.max_position_pct:.0f}% / {p.preferred_leverage}x / "
+    #     f"SL {p.stop_loss_pct:.0f}% / TP {p.take_profit_pct:.0f}%",
+    # )
 
     console.print()
     console.print(table)
