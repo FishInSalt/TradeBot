@@ -778,7 +778,8 @@ class MetricsService:
         recent_pnls = pnls[-n:]
         recent_wins = sum(1 for p in recent_pnls if p > 0)
         recent_losses = n - recent_wins
-        recent_summary = f"{recent_wins}W {recent_losses}L (last {n} trades)"
+        trade_word = "trade" if n == 1 else "trades"
+        recent_summary = f"{recent_wins}W {recent_losses}L (last {n} {trade_word})"
 
         return PerformanceMetrics(
             # Note: total_return_pct is based on gross PnL (excludes fees and unrealized).
@@ -2440,7 +2441,8 @@ async def get_performance(deps: TradingDeps) -> str:
         f"Current Balance: {balance.total_usdt:.2f} USDT\n"
         f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
         f"Realized PnL: {metrics.total_pnl:+.2f} USDT (gross, before fees)\n"
-        f"Total Fees: {-metrics.total_fees:+.2f} USDT\n\n"
+        f"Total Fees: -{metrics.total_fees:.2f} USDT\n\n" if metrics.total_fees > 0
+        else f"Total Fees: 0.00 USDT\n\n"
         f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
         f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
@@ -2526,6 +2528,8 @@ Add missing mock attributes to the `deps` fixture:
 
 The existing `d.market_data.get_ticker.return_value` is already set — verify it still works.
 
+Note: The existing `d.technical.compute_indicators.return_value = {"rsi_14": 55.0}` lacks new keys (`atr_14`, `volume_ratio`). This is fine — `get_market_data` uses `.get()` with N/A fallback for missing keys. ATR/Volume will show as N/A in test output, which is expected behavior, not a bug.
+
 - [ ] **Step 3: Fix broken existing tests**
 
 Tests that break and why (run suite, fix each based on error):
@@ -2541,6 +2545,14 @@ Tests that break and why (run suite, fix each based on error):
 | `test_get_open_orders` | Calls `get_ticker` for distance % | `get_ticker` already mocked |
 | `test_get_trade_journal_with_entries` | Uses `MagicMock()` — `deps.metrics` is truthy, `await .compute()` TypeError | Add `mock_deps.metrics = None` after `mock_deps = MagicMock()` |
 | `test_get_trade_journal_order_fetch_failure` | Same as above | Add `mock_deps.metrics = None` after `mock_deps = MagicMock()` |
+
+For the two `MagicMock()`-based journal tests, add `metrics = None` right after construction:
+
+```python
+# In test_get_trade_journal_with_entries and test_get_trade_journal_order_fetch_failure:
+    mock_deps = MagicMock()
+    mock_deps.metrics = None  # prevent await deps.metrics.compute() TypeError
+```
 
 Update these tests to match new output formats. For example:
 
