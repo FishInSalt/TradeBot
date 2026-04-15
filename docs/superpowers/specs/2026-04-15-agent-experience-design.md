@@ -184,9 +184,9 @@ tokens: 1,842 | budget: 48,158 remaining
 
 格式规则：
 - 感知/执行工具使用 `⚙` 图标，记忆工具使用 `✎` 图标 — 视觉区分"操作"和"反思"
-- `save_memory` 显示完整 content（不截断）— 它代表 Agent 的认知产出，对用户有观察价值
-- 其他 tool 显示结构化一行摘要
-- Cycle 头包含 cycle_id（前 4 字符）和触发类型（scheduled / conditional / alert）
+- `save_memory` 显示完整 content（不截断）— 它代表 Agent 的认知产出，对用户有观察价值。**注意：`save_memory` 的 `ToolReturnPart` 返回值已在 `tools_memory.py:17` 截断到 80 字符，因此完整 content 必须从 `ToolCallPart.args` 中提取（`content` 参数）。这是所有 tool 中唯一从 args 而非 return 提取摘要数据的例外。**
+- 其他 tool 显示结构化一行摘要（从 `ToolReturnPart` 提取）
+- Cycle 头包含 cycle_id（前 4 字符，仅终端展示用途，完整 8 字符 ID 已存入 DecisionLog 数据库）和触发类型（scheduled / conditional / alert）
 - 尾部显示 token 用量和剩余预算
 
 ### Tool 摘要解析
@@ -225,7 +225,7 @@ tokens: 1,842 | budget: 48,158 remaining
 
 | 工具 | 摘要格式 | 提取逻辑 |
 |------|---------|---------|
-| save_memory | `[{category}] {完整 content} (importance: {score})` | 解析 category，显示完整内容（不截断） |
+| save_memory | `[{category}] {完整 content} (importance: {score})` | **从 `ToolCallPart.args` 提取**（非 ToolReturnPart，因返回值已截断到 80 字符） |
 
 **兜底机制**：任何无法解析的返回值（格式变化、新增 tool、错误响应），显示返回值前 80 字符。
 
@@ -256,7 +256,7 @@ for msg in result.new_messages():
 
 ### 涉及文件
 
-1. **`src/cli/display.py`** — 新增 `format_cycle_output()` 和各 tool 摘要解析函数
+1. **`src/cli/display.py`** — 扩展现有文件（已有 `format_metrics` / `display_metrics`），新增 `format_cycle_output()` 和各 tool 摘要解析函数
 2. **`src/cli/app.py`** — 修改 `run_agent_cycle`：提取 messages → 调用 display 格式化 → 写 INFO/DEBUG 日志 → 通过 console.print 输出
 3. **测试** — 每个摘要解析函数的单元测试（输入样例返回字符串，验证提取结果）
 
@@ -270,7 +270,7 @@ for msg in result.new_messages():
 
 1. **硬编码绝对约束**（39-44 行）：`MUST`、`NEVER`、`MUST NOT` 把 Agent 变成指令执行器
 2. **固定决策工作流**（48-65 行）：Step 1-4 线性流程阻止 Agent 根据市况灵活调整
-3. **人格描述过浅**（8-18 行）：trading style 和 risk tolerance 各只有一句话描述，对 LLM 信息量接近零
+3. **人格描述过浅**（8-18 行定义浅层描述字典，注入 prompt 第 28-35 行）：trading style 和 risk tolerance 各只有一句话描述，对 LLM 信息量接近零
 
 ### 方案选择
 
