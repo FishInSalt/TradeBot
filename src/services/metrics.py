@@ -69,7 +69,7 @@ class MetricsService:
 
         total_pnl = sum(pnls)
         winning_pnls = [p for p in pnls if p > 0]
-        losing_pnls = [p for p in pnls if p <= 0]
+        losing_pnls = [p for p in pnls if p <= 0]  # breakeven (0.0) counted as loss
         gross_profit = sum(winning_pnls) if winning_pnls else 0.0
         gross_loss = abs(sum(losing_pnls)) if losing_pnls else 0.0
 

@@ -350,7 +350,7 @@ async def get_performance(deps: TradingDeps) -> str:
         f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
         f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
-        f"Profit Factor: {metrics.profit_factor:.2f}\n"
-        f"Max Drawdown: -{metrics.max_drawdown_pct:.1f}%\n"
+        f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f}'}\n"
+        f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}%\n"
         f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT"
     )

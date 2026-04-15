@@ -58,7 +58,7 @@ class TechnicalAnalysisService:
         self,
         indicators: dict[str, float | None],
         current_price: float,
-        timeframe: str = "5m",
+        timeframe: str = "5m",  # part of API contract; callers pass it, reserved for future use
     ) -> str:
         def _fmt(val: float | None, fmt: str = ".2f") -> str:
             return f"{val:{fmt}}" if val is not None else "N/A"

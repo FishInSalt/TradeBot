@@ -346,5 +346,5 @@ async def cancel_order(
         side=target.side, price=target.price, reasoning=reasoning,
     )
 
-    price_str = f" @ {target.price:.2f}" if target.price else ""
-    return f"Order cancelled: {target.order_type} {target.side} {target.amount}{price_str} | ID: {order_id}"
+    price_str = f" @ {target.price:.2f}" if target.price is not None else ""
+    return f"Order cancelled: {target.order_type} {target.side} {target.amount:.6f}{price_str} | ID: {order_id}"
