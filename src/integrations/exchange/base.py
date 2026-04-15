@@ -3,6 +3,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 
@@ -56,12 +57,14 @@ class Position:
     unrealized_pnl: float
     leverage: int
     liquidation_price: float | None
+    created_at: datetime | None = None
 
 
 class BaseExchange(ABC):
     def __init__(self):
         self._price_level_alerts: list[dict] = []
         self._latest_price: float | None = None
+        self._alert_service: Any | None = None
 
     @abstractmethod
     async def fetch_ticker(self, symbol: str) -> Ticker: ...
@@ -101,12 +104,23 @@ class BaseExchange(ABC):
         pass
 
     def set_alert_service(self, service: Any) -> None:
-        """注入 PriceAlertService。默认空实现。"""
-        pass
+        """Inject PriceAlertService instance."""
+        self._alert_service = service
 
     def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
-        """更新价格预警参数。默认空实现。"""
-        pass
+        """Update price alert parameters. Delegates to alert service if set."""
+        if self._alert_service:
+            self._alert_service.update_params(threshold_pct, window_minutes)
+
+    def get_alert_params(self) -> tuple[float, int] | None:
+        """Return (threshold_pct, window_minutes) or None if alerts disabled."""
+        if self._alert_service is not None:
+            return self._alert_service.get_params()
+        return None
+
+    def get_price_level_alerts(self) -> list[dict]:
+        """Return a copy of active price level alerts."""
+        return list(self._price_level_alerts)
 
     def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool:
         """Check for pending market orders. Default: False (real exchanges don't track client-side)."""
