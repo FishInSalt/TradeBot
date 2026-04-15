@@ -502,7 +502,7 @@ get_position(symbol: str | None = None)
 | 文件 | 改动类型 |
 |------|---------|
 | `src/services/technical.py` | 重写：新增 ATR、成交量比率；修复 BB/MACD 列索引 bug；重写 format_for_llm |
-| `src/agent/tools_perception.py` | 重写：增强 6 个现有函数 + 新增 3 个函数 |
+| `src/agent/tools_perception.py` | 重写：增强 5 个现有函数 + 新增 2 个函数 |
 | `src/agent/tools_execution.py` | 修改：set_stop_loss/set_take_profit 返回值增加距离百分比；新增 cancel_order；set_price_alert 对 alert_service=None 返回明确提示（"Alerts are disabled for this session"）而非静默成功 |
 | `src/agent/trader.py` | 修改：更新工具签名和 docstring；注册 3 个新工具；TradingDeps 新增 initial_balance + metrics 字段 |
 | `src/cli/app.py` | 修改：build_services 传入 initial_balance 和 MetricsService 实例到 deps；`_record_action_from_fill` 写入 fee；app.py:367 调用方同步改为 deps.metrics.compute() |

@@ -1222,6 +1222,8 @@ git commit -m "feat: TradingDeps initial_balance + metrics; wire MetricsService 
 
 ### Task 7: get_market_data Enhancement
 
+> **Note:** From Task 7 through Task 11, tool output formats change but `tests/test_tools.py` still has old assertions. Full-suite failures in `test_tools.py` are expected and will be fixed in Task 12. Run only `test_tool_enhancement.py` tests during Tasks 7-11.
+
 **Files:**
 - Modify: `src/integrations/market_data.py:17-23`
 - Rewrite: `src/agent/tools_perception.py:12-23` (get_market_data function)
@@ -1491,6 +1493,8 @@ async def get_market_data(
     vr = indicators.get("volume_ratio")
     if vr is not None:
         # Show raw volume (iloc[-2], last completed candle) + ratio
+        # Note: raw_vol must come from the same df passed to compute_indicators,
+        # so it matches the volume_ratio denominator position (both iloc[-2]).
         raw_vol = df["volume"].iloc[-2] if len(df) >= 2 else df["volume"].iloc[-1]
         if vr < 0.7:
             vr_label = "low"
@@ -1502,9 +1506,12 @@ async def get_market_data(
     else:
         ctx_lines.append("Volume: N/A")
 
-    candle_high = display_df["high"].max()
-    candle_low = display_df["low"].min()
-    ctx_lines.append(f"{display_count}-candle Range: {candle_low:.0f} — {candle_high:.0f}")
+    if not display_df.empty:
+        candle_high = display_df["high"].max()
+        candle_low = display_df["low"].min()
+        ctx_lines.append(f"{display_count}-candle Range: {candle_low:.0f} — {candle_high:.0f}")
+    else:
+        ctx_lines.append("Range: N/A")
     sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
 
     # === Recent Candles ===
