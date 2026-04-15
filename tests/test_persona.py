@@ -1,32 +1,127 @@
+# tests/test_persona.py
 from src.config import PersonaConfig
 
 
-def test_generate_system_prompt():
+def test_prompt_contains_layer1_identity():
     from src.agent.persona import generate_system_prompt
-    config = PersonaConfig(risk_tolerance="moderate", trading_style="trend_following",
-        max_position_pct=30, preferred_leverage=3, stop_loss_pct=3.0, take_profit_pct=6.0)
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    # Market context
+    assert "perpetual" in prompt_lower
+    assert "one-way" in prompt_lower or "single direction" in prompt_lower or "close position first" in prompt_lower
+    # Fill timing
+    assert "fill" in prompt_lower
+    # Multi-timeframe (P0)
+    assert "timeframe" in prompt_lower
+    # Memory
+    assert "save_memory" in prompt_lower or "memory" in prompt_lower
+    # Dynamic wake
+    assert "set_next_wake" in prompt_lower or "wake" in prompt_lower
+
+
+def test_prompt_contains_layer2_thinking_framework():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    # Thinking dimensions
+    assert "market structure" in prompt_lower
+    assert "risk" in prompt_lower and "reward" in prompt_lower
+    assert "support" in prompt_lower or "resistance" in prompt_lower
+    assert "position" in prompt_lower and ("management" in prompt_lower or "sizing" in prompt_lower)
+
+
+def test_prompt_no_must_never_constraints():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    # Must not contain MUST/NEVER/ALWAYS as hard imperatives
+    assert "You MUST" not in prompt
+    assert "MUST NOT" not in prompt
+    assert "NEVER go" not in prompt
+    assert "NEVER exceed" not in prompt
+
+
+def test_prompt_no_fixed_step_workflow():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    # Must not have fixed "Step 1: ... Step 2: ..." workflow
+    assert "step 1" not in prompt.lower()
+
+
+def test_prompt_no_numerical_params():
+    from src.agent.persona import generate_system_prompt
+    config = PersonaConfig(
+        max_position_pct=30, preferred_leverage=3,
+        stop_loss_pct=3.0, take_profit_pct=6.0,
+    )
     prompt = generate_system_prompt(config)
-    assert "moderate" in prompt.lower()
-    assert "trend" in prompt.lower()
-    assert "30" in prompt
-    assert len(prompt) > 100
+    # Numerical params should NOT appear in prompt
+    assert "30%" not in prompt
+    assert "3x" not in prompt
+    assert "3.0%" not in prompt
+    assert "6.0%" not in prompt
 
 
-def test_prompt_includes_event_driven_workflow():
+def test_prompt_contains_trading_style_trend():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(trading_style="trend_following"))
+    prompt_lower = prompt.lower()
+    assert "trend" in prompt_lower
+    assert "confirmation" in prompt_lower or "follow" in prompt_lower
+
+
+def test_prompt_contains_trading_style_swing():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(trading_style="swing"))
+    prompt_lower = prompt.lower()
+    assert "swing" in prompt_lower
+    assert "range" in prompt_lower or "pullback" in prompt_lower
+
+
+def test_prompt_contains_trading_style_breakout():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(trading_style="breakout"))
+    prompt_lower = prompt.lower()
+    assert "breakout" in prompt_lower
+    assert "consolidation" in prompt_lower or "volume" in prompt_lower
+
+
+def test_prompt_styles_are_distinct():
+    from src.agent.persona import generate_system_prompt
+    p1 = generate_system_prompt(PersonaConfig(trading_style="trend_following"))
+    p2 = generate_system_prompt(PersonaConfig(trading_style="swing"))
+    p3 = generate_system_prompt(PersonaConfig(trading_style="breakout"))
+    # Each style should produce meaningfully different content
+    assert p1 != p2
+    assert p2 != p3
+
+
+def test_prompt_contains_risk_tolerance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(risk_tolerance="conservative"))
+    prompt_lower = prompt.lower()
+    assert "capital preservation" in prompt_lower or "conservative" in prompt_lower
+
+
+def test_prompt_risk_tolerances_are_distinct():
+    from src.agent.persona import generate_system_prompt
+    p1 = generate_system_prompt(PersonaConfig(risk_tolerance="conservative"))
+    p2 = generate_system_prompt(PersonaConfig(risk_tolerance="moderate"))
+    p3 = generate_system_prompt(PersonaConfig(risk_tolerance="aggressive"))
+    assert p1 != p2
+    assert p2 != p3
+
+
+def test_prompt_is_in_english():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
-    assert "scheduled trigger" in prompt.lower() or "scheduled" in prompt.lower()
-    assert "fill event" in prompt.lower() or "fill" in prompt.lower()
+    # Should not contain Chinese characters
+    import re
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]', prompt)
+    assert len(chinese_chars) == 0, f"Found Chinese characters: {chinese_chars[:5]}"
 
 
-def test_prompt_includes_naked_position_check():
+def test_prompt_minimum_length():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
-    assert "stop loss" in prompt.lower()
-    assert "take profit" in prompt.lower() or "protective" in prompt.lower()
-
-
-def test_prompt_includes_reasoning_instruction():
-    from src.agent.persona import generate_system_prompt
-    prompt = generate_system_prompt(PersonaConfig())
-    assert "reasoning" in prompt.lower()
+    # Three-layer prompt should be substantial
+    assert len(prompt) > 500
