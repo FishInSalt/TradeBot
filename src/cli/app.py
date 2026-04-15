@@ -188,9 +188,12 @@ async def run_agent_cycle(
                     if is_tool_error(part.tool_name, content_str, outcome):
                         icon = "✗"
                         summary = content_str[:80]
-                    elif part.tool_name == "save_memory" and args:
+                    elif part.tool_name == "save_memory":
                         icon = "✎"
-                        summary = summarize_save_memory(args)
+                        if args:
+                            summary = summarize_save_memory(args)
+                        else:
+                            summary = summarize_tool(part.tool_name, content_str)
                     else:
                         icon = "⚙"
                         summary = summarize_tool(part.tool_name, content_str)

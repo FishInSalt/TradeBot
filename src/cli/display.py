@@ -80,19 +80,19 @@ def _summarize_get_open_orders(content: str) -> str:
     if "No pending orders" in content:
         return "No pending orders."
     type_map = {"STOP": "SL", "TAKE_PROFIT": "TP", "LIMIT": "LMT", "PENDING": "MKT"}
-    # Extract each order's type and price
+    # Extract all orders — with price (@ ...) or without (market orders)
     order_parts = []
-    for m in re.finditer(r"\[(STOP|TAKE_PROFIT|LIMIT|PENDING)\].*?@\s*([\d.]+)", content):
+    for m in re.finditer(r"\[(STOP|TAKE_PROFIT|LIMIT|PENDING)\]", content):
         label = type_map.get(m.group(1), m.group(1))
-        price = f"${float(m.group(2)):,.0f}"
-        order_parts.append(f"{label} {price}")
+        # Look for price after the tag on the same line
+        rest = content[m.end():content.index("\n", m.end())] if "\n" in content[m.end():] else content[m.end():]
+        price_m = re.search(r"@\s*([\d.]+)", rest)
+        if price_m:
+            order_parts.append(f"{label} ${float(price_m.group(1)):,.0f}")
+        else:
+            order_parts.append(label)
     if order_parts:
         return f"{len(order_parts)} orders ({' / '.join(order_parts)})"
-    # Fallback: orders without price (e.g. market orders)
-    tags = re.findall(r"\[(STOP|TAKE_PROFIT|LIMIT|PENDING)\]", content)
-    if tags:
-        types = " / ".join(type_map.get(t, t) for t in tags)
-        return f"{len(tags)} orders ({types})"
     return _fallback_summary(content)
 
 

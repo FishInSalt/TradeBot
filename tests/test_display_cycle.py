@@ -80,6 +80,19 @@ def test_summarize_get_open_orders_with_orders():
     assert "86,000" in result or "86000" in result
 
 
+def test_summarize_get_open_orders_mixed_with_market():
+    from src.cli.display import summarize_tool
+    content = (
+        "Pending Orders:\n"
+        "  [STOP] sell 0.500 @ 81500.00 (-3.21% from current) | ID: abc\n"
+        "  [PENDING] buy 0.100 market price | ID: xyz"
+    )
+    result = summarize_tool("get_open_orders", content)
+    assert "2" in result
+    assert "SL" in result
+    assert "MKT" in result
+
+
 def test_summarize_get_open_orders_none():
     from src.cli.display import summarize_tool
     result = summarize_tool("get_open_orders", "No pending orders.")
@@ -159,6 +172,34 @@ def test_summarize_get_performance():
     assert "5.50" in result
     assert "12" in result
     assert "66.7" in result
+
+
+def test_summarize_get_performance_no_trades():
+    from src.cli.display import summarize_tool
+    content = (
+        "=== Trading Performance ===\n"
+        "Initial Balance: 10000.00 USDT\n"
+        "Current Balance: 10050.00 USDT\n"
+        "Return: +0.50% (+50.00 USDT)\n\n"
+        "No completed trades yet."
+    )
+    result = summarize_tool("get_performance", content)
+    assert "0.50" in result
+    assert "No trades yet" in result
+
+
+def test_summarize_get_performance_no_metrics():
+    from src.cli.display import summarize_tool
+    content = (
+        "=== Trading Performance ===\n"
+        "Initial Balance: 10000.00 USDT\n"
+        "Current Balance: 10000.00 USDT\n"
+        "Return: +0.00% (+0.00 USDT)\n\n"
+        "No metrics service available."
+    )
+    result = summarize_tool("get_performance", content)
+    assert "0.00" in result
+    assert "No trades yet" in result
 
 
 def test_summarize_fallback_unknown_tool():
