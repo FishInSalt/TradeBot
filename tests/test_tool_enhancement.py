@@ -207,3 +207,22 @@ async def test_migrate_trade_actions_table(tmp_path):
     async with engine.begin() as conn:
         await _migrate_trade_actions_table(conn)
     await engine.dispose()
+
+
+# --- Task 6: TradingDeps expansion ---
+
+def test_trading_deps_new_fields():
+    """TradingDeps has initial_balance and metrics fields with defaults."""
+    from src.agent.trader import TradingDeps
+    from unittest.mock import MagicMock, AsyncMock
+    deps = TradingDeps(
+        symbol="BTC/USDT:USDT",
+        timeframe="15m",
+        market_data=MagicMock(),
+        exchange=MagicMock(),
+        technical=MagicMock(),
+        memory=AsyncMock(),
+        session_id="test",
+    )
+    assert deps.initial_balance == 10000.0
+    assert deps.metrics is None

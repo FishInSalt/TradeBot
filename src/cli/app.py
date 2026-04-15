@@ -18,7 +18,6 @@ from src.config import ExchangeConfig, Settings, load_settings, load_trader_conf
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
-from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
 from src.storage.models import DecisionLog, Session, TradeAction
@@ -218,6 +217,13 @@ def build_services(
 
     agent = create_trader_agent(model=result.model, persona_config=result.persona)
 
+    from src.services.metrics import MetricsService
+    metrics_service = MetricsService(
+        engine=engine,
+        session_id=session_id,
+        initial_balance=result.initial_balance,
+    )
+
     deps = TradingDeps(
         symbol=result.symbol,
         timeframe=result.timeframe,
@@ -229,6 +235,8 @@ def build_services(
         db_engine=engine,
         approval_gate=approval_gate,
         approval_enabled=result.approval_enabled,
+        initial_balance=result.initial_balance,
+        metrics=metrics_service,
     )
 
     # Alert service
@@ -362,10 +370,9 @@ async def run(
     await exchange.start()
 
     # Initial metrics
-    metrics_service = MetricsService(initial_balance=result.initial_balance)
     positions = await exchange.fetch_positions(result.symbol)
     pos_str = f"{positions[0].side} {positions[0].contracts}" if positions else "none"
-    metrics = await metrics_service.compute(engine, session_id, current_position=pos_str)
+    metrics = await deps.metrics.compute(current_position=pos_str)
     display_metrics(metrics, console=sc)
 
     sc.print(f"\n[bold]Scheduler: every {result.scheduler_interval_min} min[/]")

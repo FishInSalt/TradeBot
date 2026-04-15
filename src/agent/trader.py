@@ -28,6 +28,8 @@ class TradingDeps:
     wake_min_minutes: int = 1
     wake_max_minutes: int = 60
     set_next_wake_fn: Callable[[int], None] | None = None
+    initial_balance: float = 10000.0
+    metrics: object | None = None  # MetricsService, typed as object to avoid circular import
 
 
 def create_trader_agent(
