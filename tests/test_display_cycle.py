@@ -76,6 +76,8 @@ def test_summarize_get_open_orders_with_orders():
     result = summarize_tool("get_open_orders", content)
     assert "2" in result
     assert "order" in result.lower()
+    assert "81,500" in result or "81500" in result
+    assert "86,000" in result or "86000" in result
 
 
 def test_summarize_get_open_orders_none():
@@ -348,6 +350,7 @@ def test_format_cycle_output_basic():
     assert "Agent:" in result
     assert "Market is quiet" in result
     assert "1,200" in result
+    assert "48,800" in result
 
 
 def test_format_cycle_output_with_memory():

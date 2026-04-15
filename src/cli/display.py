@@ -28,11 +28,11 @@ def display_metrics(metrics: PerformanceMetrics, console) -> None:
 
 
 def _fallback_summary(content: str, max_len: int = 80) -> str:
-    """Fallback: first line or first max_len chars."""
-    first_line = str(content).split("\n")[0].strip()
-    if len(first_line) <= max_len:
-        return first_line
-    return first_line[:max_len] + "..."
+    """Fallback: first max_len chars of content (per spec: 'display first 80 chars')."""
+    text = " ".join(str(content).split())  # collapse whitespace/newlines
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "..."
 
 
 def _summarize_get_market_data(content: str) -> str:
@@ -79,9 +79,18 @@ def _summarize_get_account_balance(content: str) -> str:
 def _summarize_get_open_orders(content: str) -> str:
     if "No pending orders" in content:
         return "No pending orders."
+    type_map = {"STOP": "SL", "TAKE_PROFIT": "TP", "LIMIT": "LMT", "PENDING": "MKT"}
+    # Extract each order's type and price
+    order_parts = []
+    for m in re.finditer(r"\[(STOP|TAKE_PROFIT|LIMIT|PENDING)\].*?@\s*([\d.]+)", content):
+        label = type_map.get(m.group(1), m.group(1))
+        price = f"${float(m.group(2)):,.0f}"
+        order_parts.append(f"{label} {price}")
+    if order_parts:
+        return f"{len(order_parts)} orders ({' / '.join(order_parts)})"
+    # Fallback: orders without price (e.g. market orders)
     tags = re.findall(r"\[(STOP|TAKE_PROFIT|LIMIT|PENDING)\]", content)
     if tags:
-        type_map = {"STOP": "SL", "TAKE_PROFIT": "TP", "LIMIT": "LMT", "PENDING": "MKT"}
         types = " / ".join(type_map.get(t, t) for t in tags)
         return f"{len(tags)} orders ({types})"
     return _fallback_summary(content)
@@ -151,8 +160,8 @@ def _summarize_open_position(content: str) -> str:
 
 
 def _summarize_close_position(content: str) -> str:
-    if "No positions to close" in content:
-        return "No positions to close."
+    # "No positions to close." is a business rejection — is_tool_error catches it
+    # before this parser runs, so no need to handle it here.
     m = re.search(r"close\s+(\d+)\s+position", content)
     if m:
         return f"Close {m.group(1)} position(s)"
