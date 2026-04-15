@@ -134,14 +134,20 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     lines.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
 
     # PnL as % of initial capital
-    pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
-    lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
+    if deps.initial_balance > 0:
+        pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
+        lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
+    else:
+        lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
 
     # Liquidation distance
     if p.liquidation_price:
         ticker = await deps.market_data.get_ticker(symbol)
-        liq_dist = abs(ticker.last - p.liquidation_price) / ticker.last * 100
-        lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist:.1f}% away)")
+        if ticker.last > 0:
+            liq_dist = abs(ticker.last - p.liquidation_price) / ticker.last * 100
+            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist:.1f}% away)")
+        else:
+            lines.append(f"  Liquidation: {p.liquidation_price:.2f}")
 
     # Duration
     if p.created_at is not None:
@@ -166,7 +172,7 @@ async def get_account_balance(deps: TradingDeps) -> str:
     """Get account balance with return on initial capital."""
     balance = await deps.exchange.fetch_balance()
     ret_usdt = balance.total_usdt - deps.initial_balance
-    ret_pct = (ret_usdt / deps.initial_balance) * 100
+    ret_pct = (ret_usdt / deps.initial_balance) * 100 if deps.initial_balance > 0 else 0.0
     return (
         f"Account Balance:\n"
         f"  Total: {balance.total_usdt:.2f} USDT (initial: {deps.initial_balance:.2f})\n"
@@ -307,7 +313,7 @@ async def get_performance(deps: TradingDeps) -> str:
     Use for reviewing overall results and evaluating strategy effectiveness."""
     balance = await deps.exchange.fetch_balance()
     ret_usdt = balance.total_usdt - deps.initial_balance
-    ret_pct = (ret_usdt / deps.initial_balance) * 100
+    ret_pct = (ret_usdt / deps.initial_balance) * 100 if deps.initial_balance > 0 else 0.0
 
     if deps.metrics is None:
         return (

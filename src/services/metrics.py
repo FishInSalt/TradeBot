@@ -94,10 +94,10 @@ class MetricsService:
         recent_summary = f"{recent_wins}W {recent_losses}L (last {n} {trade_word})"
 
         return PerformanceMetrics(
-            total_return_pct=(total_pnl / self._initial_balance) * 100,
+            total_return_pct=(total_pnl / self._initial_balance) * 100 if self._initial_balance > 0 else 0.0,
             total_pnl=total_pnl,
             win_rate=len(winning_pnls) / len(pnls),
-            max_drawdown_pct=(max_dd / self._initial_balance) * 100,
+            max_drawdown_pct=(max_dd / self._initial_balance) * 100 if self._initial_balance > 0 else 0.0,
             profit_factor=gross_profit / gross_loss if gross_loss > 0 else float("inf"),
             total_trades=len(pnls),
             winning_trades=len(winning_pnls),
