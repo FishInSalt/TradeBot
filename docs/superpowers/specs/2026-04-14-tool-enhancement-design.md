@@ -513,7 +513,7 @@ get_position(symbol: str | None = None)
 | `src/integrations/exchange/okx.py` | 修改：删除 set_alert_service + update_alert_params 覆写 + __init__ 中冗余的 `self._alert_service = None` 赋值；fetch_positions 无需改动 |
 | `src/services/price_alert.py` | 修改：PriceAlertService 新增 get_params 方法 |
 | `src/services/metrics.py` | 扩展：PerformanceMetrics 新增 avg_win/avg_loss/best_trade/worst_trade/recent_summary/total_fees；__init__ 改为注入 engine+session_id+initial_balance |
-| `src/integrations/market_data.py` | 修改：limit 参数透传 |
+| `src/integrations/market_data.py` | 无需改动（已有 limit 参数透传） |
 | `tests/` | 新增/修改测试 |
 
 ## 五、不在本轮范围

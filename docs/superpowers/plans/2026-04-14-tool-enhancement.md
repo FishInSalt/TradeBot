@@ -24,7 +24,7 @@
 | `src/cli/session_manager.py` | Modify | Add _migrate_trade_actions_table |
 | `src/services/metrics.py` | Rewrite | Expand PerformanceMetrics fields; inject engine+session_id in __init__; enhance compute() |
 | `src/services/technical.py` | Rewrite | Fix BB/MACD column bugs; add ATR + volume_ratio; rewrite format_for_llm with annotations |
-| `src/integrations/market_data.py` | Modify | limit param passthrough |
+| `src/integrations/market_data.py` | None | Already has limit param passthrough — no change needed |
 | `src/agent/trader.py` | Modify | TradingDeps new fields; update tool signatures + docstrings; register 3 new tools |
 | `src/agent/tools_perception.py` | Rewrite | Enhance 5 existing tools; add 2 new tools (get_active_alerts, get_performance) |
 | `src/agent/tools_execution.py` | Modify | SL/TP distance %; cancel_order; set_price_alert disabled check |
@@ -781,6 +781,9 @@ class MetricsService:
         recent_summary = f"{recent_wins}W {recent_losses}L (last {n} trades)"
 
         return PerformanceMetrics(
+            # Note: total_return_pct is based on gross PnL (excludes fees and unrealized).
+            # For accurate net return, use (balance.total_usdt - initial) / initial
+            # as done in get_performance(). This is a pre-existing design choice.
             total_return_pct=(total_pnl / self._initial_balance) * 100,
             total_pnl=total_pnl,
             win_rate=len(winning_pnls) / len(pnls),
@@ -1078,7 +1081,7 @@ Expected: All PASS
 - [ ] **Step 5: Run full test suite (format_for_llm signature changed)**
 
 Run: `cd /Users/z/Z/TradeBot && python -m pytest --tb=short 2>&1 | tail -30`
-Expected: May need to update callers of `format_for_llm`. The only caller is `tools_perception.py:17` — will be rewritten in Task 7. Check if test_tools.py mocks it (yes — `d.technical.format_for_llm.return_value = "RSI(14): 55.0"` — mocked, so no breakage).
+Expected: May need to update callers of `format_for_llm`. The only caller is `tools_perception.py:17` — will be rewritten in Task 7. Check if test_tools.py mocks it (yes — `d.technical.format_for_llm.return_value = "RSI(14): 55.0"` — mocked, so no breakage). Note: Task 4 changed MetricsService.__init__ signature, but app.py (the only other caller) is not exercised by any test — no test failure expected until Task 6 updates app.py.
 
 - [ ] **Step 6: Commit**
 
@@ -1385,6 +1388,32 @@ async def test_get_market_data_1h_atr_no_qualitative_label():
     assert "high volatility" not in result
 
 
+async def test_get_market_data_truncated_data():
+    """When exchange returns fewer candles than requested, display_count adapts."""
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    # Only 70 rows returned (requested 100 = candle_count 50 + 50 warmup)
+    n = 70
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 300000 for i in range(n)],
+        "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0), "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": None,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
+        "atr_14": 80.0, "volume_ratio": 1.0,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
+
+    result = await get_market_data(deps, candle_count=50)
+    # display_count = max(10, 70-50) = 20
+    assert "last 20" in result
+
+
 async def test_get_market_data_candle_count_clamp():
     """candle_count is clamped to 10-80."""
     from src.agent.tools_perception import get_market_data
@@ -1618,6 +1647,23 @@ async def test_get_position_enhanced():
     assert "away" in result.lower()
     # Duration
     assert "Duration" in result or "duration" in result.lower() or "min" in result.lower()
+
+
+async def test_get_position_created_at_none():
+    """OKX mode: created_at is None → Duration shows N/A."""
+    from src.agent.tools_perception import get_position
+
+    deps = _make_deps()
+    deps.exchange.fetch_positions.return_value = [
+        Position("BTC/USDT:USDT", "long", 0.001, 74761.10, -19.09, 3, 50200.0,
+                 created_at=None),
+    ]
+    deps.market_data.get_ticker.return_value = Ticker(
+        "BTC/USDT:USDT", 74500.0, 74499.0, 74501.0, 75200.0, 73800.0, 100.0, 1000,
+    )
+
+    result = await get_position(deps)
+    assert "Duration: N/A" in result
 
 
 async def test_get_position_no_position():
@@ -2285,6 +2331,18 @@ async def test_get_performance_with_trades(tmp_path):
     await engine.dispose()
 
 
+async def test_get_performance_no_metrics_service():
+    """get_performance handles deps.metrics=None gracefully."""
+    from src.agent.tools_perception import get_performance
+
+    deps = _make_deps()
+    deps.metrics = None
+    deps.exchange.fetch_balance.return_value = Balance(10000.0, 10000.0, 0.0)
+
+    result = await get_performance(deps)
+    assert "No metrics service available" in result
+
+
 async def test_get_performance_empty(tmp_path):
     from src.agent.tools_perception import get_performance
     from src.storage.database import init_db, get_session
@@ -2382,7 +2440,7 @@ async def get_performance(deps: TradingDeps) -> str:
         f"Current Balance: {balance.total_usdt:.2f} USDT\n"
         f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
         f"Realized PnL: {metrics.total_pnl:+.2f} USDT (gross, before fees)\n"
-        f"Total Fees: -{metrics.total_fees:.2f} USDT\n\n"
+        f"Total Fees: {-metrics.total_fees:+.2f} USDT\n\n"
         f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
         f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
