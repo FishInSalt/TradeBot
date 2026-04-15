@@ -311,6 +311,20 @@ def test_is_tool_error_execution_success():
     assert not is_tool_error("set_stop_loss", "Stop loss set at 81500.00", outcome="success")
 
 
+def test_is_tool_error_add_price_level_alert_immediate_trigger():
+    from src.cli.display import is_tool_error
+    # Normal success
+    assert not is_tool_error("add_price_level_alert", "Price level alert set: above 86000.00 (id=a1)", outcome="success")
+    # Immediate trigger warning — still a success (alert was created)
+    assert not is_tool_error(
+        "add_price_level_alert",
+        "Alert set (id=a1), but WARNING: current price (87000.00) already above 86000.00, may trigger immediately",
+        outcome="success",
+    )
+    # Actual failure
+    assert is_tool_error("add_price_level_alert", "Invalid direction: must be 'above' or 'below', got 'up'", outcome="success")
+
+
 # === Cycle output formatting ===
 
 def test_format_cycle_output_basic():

@@ -248,7 +248,7 @@ _EXECUTION_SUCCESS_PREFIXES = {
     "place_limit_order": "Limit order placed:",
     "cancel_order": "Order cancelled:",
     "set_price_alert": "Price alert updated:",
-    "add_price_level_alert": "Price level alert set:",
+    "add_price_level_alert": ("Price level alert set:", "Alert set"),
     "set_next_wake": "Next wake set to",
 }
 
@@ -272,6 +272,9 @@ def is_tool_error(tool_name: str, content: str, outcome: str = "success") -> boo
         return True
     prefix = _EXECUTION_SUCCESS_PREFIXES.get(tool_name)
     if prefix is not None:
+        # prefix can be a str or tuple of str (multiple success prefixes)
+        if isinstance(prefix, tuple):
+            return not any(str(content).startswith(p) for p in prefix)
         return not str(content).startswith(prefix)
     return False
 
