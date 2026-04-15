@@ -143,3 +143,67 @@ def test_okx_exchange_inherits_alert_methods():
     from src.integrations.exchange.base import BaseExchange
     assert OKXExchange.set_alert_service is BaseExchange.set_alert_service
     assert OKXExchange.update_alert_params is BaseExchange.update_alert_params
+
+
+# --- Task 3: TradeAction.fee column ---
+
+async def test_trade_action_fee_column(tmp_path):
+    """TradeAction has optional fee column."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t3.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="t3", name="test-fee", initial_balance=100.0))
+        session.add(TradeAction(
+            session_id="t3", action="order_filled", symbol="BTC/USDT:USDT",
+            pnl=10.0, fee=0.05,
+        ))
+        await session.commit()
+
+    async with get_session(engine) as session:
+        from sqlalchemy import select
+        result = await session.execute(select(TradeAction).where(TradeAction.session_id == "t3"))
+        action = result.scalar_one()
+        assert action.fee == pytest.approx(0.05)
+    await engine.dispose()
+
+
+async def test_trade_action_fee_nullable(tmp_path):
+    """TradeAction.fee defaults to None."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t3b.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="t3b", name="test-fee-null", initial_balance=100.0))
+        session.add(TradeAction(
+            session_id="t3b", action="open_position", symbol="BTC/USDT:USDT",
+        ))
+        await session.commit()
+
+    async with get_session(engine) as session:
+        from sqlalchemy import select
+        result = await session.execute(select(TradeAction).where(TradeAction.session_id == "t3b"))
+        action = result.scalar_one()
+        assert action.fee is None
+    await engine.dispose()
+
+
+async def test_migrate_trade_actions_table(tmp_path):
+    """Migration adds fee column to existing trade_actions table."""
+    from sqlalchemy import text
+    from src.storage.database import init_db, get_session
+    from src.cli.session_manager import _migrate_trade_actions_table
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t3c.db")
+    # Verify fee column exists (init_db creates it from model)
+    async with get_session(engine) as session:
+        result = await session.execute(text("PRAGMA table_info(trade_actions)"))
+        columns = {row[1] for row in result}
+        assert "fee" in columns
+
+    # Running migration again should be idempotent
+    async with engine.begin() as conn:
+        await _migrate_trade_actions_table(conn)
+    await engine.dispose()

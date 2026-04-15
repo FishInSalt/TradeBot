@@ -73,6 +73,7 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
             trigger_reason=event.trigger_reason,
             price=event.fill_price,
             pnl=event.pnl,
+            fee=event.fee,
             reasoning=f"(exchange: {event.trigger_reason} order filled @ {event.fill_price:.2f})",
         ))
         await session.commit()
