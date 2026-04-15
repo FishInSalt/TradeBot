@@ -274,3 +274,74 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
 
     sections.append("=== Trade Journal ===\n" + "\n".join(lines))
     return "\n\n".join(sections)
+
+
+async def get_active_alerts(deps: TradingDeps) -> str:
+    """Get current alert configuration: volatility alert params and active price level alerts."""
+    sections: list[str] = []
+
+    # Volatility alert settings
+    params = deps.exchange.get_alert_params()
+    if params is not None:
+        threshold, window = params
+        sections.append(f"=== Price Alert Settings ===\nVolatility alert: {threshold}% in {window}min window")
+    else:
+        sections.append("=== Price Alert Settings ===\nVolatility alert: OFF")
+
+    # Price level alerts
+    alerts = deps.exchange.get_price_level_alerts()
+    count = len(alerts)
+    lines = [f"=== Active Price Level Alerts ({count}/20) ==="]
+    if alerts:
+        for i, a in enumerate(alerts, 1):
+            lines.append(f'  #{i} {a["direction"]} {a["price"]:.2f} — "{a["reasoning"]}"')
+    else:
+        lines.append("  No active alerts.")
+    sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
+async def get_performance(deps: TradingDeps) -> str:
+    """Get detailed trading performance statistics.
+    Use for reviewing overall results and evaluating strategy effectiveness."""
+    balance = await deps.exchange.fetch_balance()
+    ret_usdt = balance.total_usdt - deps.initial_balance
+    ret_pct = (ret_usdt / deps.initial_balance) * 100
+
+    if deps.metrics is None:
+        return (
+            f"=== Trading Performance ===\n"
+            f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
+            f"Current Balance: {balance.total_usdt:.2f} USDT\n"
+            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)\n\n"
+            f"No metrics service available."
+        )
+
+    metrics = await deps.metrics.compute()
+
+    if metrics.total_trades == 0:
+        return (
+            f"=== Trading Performance ===\n"
+            f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
+            f"Current Balance: {balance.total_usdt:.2f} USDT\n"
+            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)\n\n"
+            f"No completed trades yet."
+        )
+
+    fees_line = f"Total Fees: -{metrics.total_fees:.2f} USDT\n\n" if metrics.total_fees > 0 else "Total Fees: 0.00 USDT\n\n"
+
+    return (
+        f"=== Trading Performance ===\n"
+        f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
+        f"Current Balance: {balance.total_usdt:.2f} USDT\n"
+        f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
+        f"Realized PnL: {metrics.total_pnl:+.2f} USDT (gross, before fees)\n"
+        f"{fees_line}"
+        f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
+        f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
+        f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
+        f"Profit Factor: {metrics.profit_factor:.2f}\n"
+        f"Max Drawdown: -{metrics.max_drawdown_pct:.1f}%\n"
+        f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT"
+    )

@@ -91,6 +91,20 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
+    @agent.tool
+    async def get_active_alerts(ctx: RunContext[TradingDeps]) -> str:
+        """Get current alert configuration: volatility alert params and active price level alerts."""
+        from src.agent.tools_perception import get_active_alerts as _impl
+
+        return await _impl(ctx.deps)
+
+    @agent.tool
+    async def get_performance(ctx: RunContext[TradingDeps]) -> str:
+        """Get detailed trading performance statistics. Use for reviewing overall results and evaluating strategy effectiveness."""
+        from src.agent.tools_perception import get_performance as _impl
+
+        return await _impl(ctx.deps)
+
     # === Execution Tools ===
 
     @agent.tool

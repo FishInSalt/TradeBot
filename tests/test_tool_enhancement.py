@@ -670,3 +670,110 @@ async def test_cancel_order_market_rejected():
 
     result = await cancel_order(deps, "o1", reasoning="want to cancel")
     assert "Cannot cancel market" in result or "market" in result.lower()
+
+
+# --- Task 11: New tools ---
+
+async def test_get_active_alerts_with_data():
+    from src.agent.tools_perception import get_active_alerts
+
+    deps = _make_deps()
+    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[
+        {"id": "a1", "price": 75000.0, "direction": "above", "reasoning": "key resistance breakout"},
+        {"id": "a2", "price": 74000.0, "direction": "below", "reasoning": "support breakdown"},
+    ])
+
+    result = await get_active_alerts(deps)
+    assert "=== Price Alert Settings ===" in result
+    assert "5.0%" in result
+    assert "60min" in result
+    assert "=== Active Price Level Alerts" in result
+    assert "2/20" in result
+    assert "75000" in result
+    assert "above" in result
+    assert "key resistance" in result
+
+
+async def test_get_active_alerts_disabled():
+    from src.agent.tools_perception import get_active_alerts
+
+    deps = _make_deps()
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
+
+    result = await get_active_alerts(deps)
+    assert "OFF" in result
+    assert "0/20" in result
+
+
+async def test_get_performance_with_trades(tmp_path):
+    from src.agent.tools_perception import get_performance
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+    from src.services.metrics import MetricsService
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t11.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="t11", name="test-perf", initial_balance=10000.0))
+        session.add(TradeAction(
+            session_id="t11", action="order_filled", order_id="o1",
+            symbol="BTC/USDT:USDT", side="long", pnl=45.0, fee=0.5,
+        ))
+        session.add(TradeAction(
+            session_id="t11", action="order_filled", order_id="o2",
+            symbol="BTC/USDT:USDT", side="long", pnl=-22.0, fee=0.3,
+        ))
+        await session.commit()
+
+    deps = _make_deps()
+    deps.db_engine = engine
+    deps.session_id = "t11"
+    deps.initial_balance = 10000.0
+    deps.metrics = MetricsService(engine=engine, session_id="t11", initial_balance=10000.0)
+    deps.exchange.fetch_balance.return_value = Balance(10023.0, 9023.0, 1000.0)
+
+    result = await get_performance(deps)
+    assert "=== Trading Performance ===" in result
+    assert "Total Trades: 2" in result
+    assert "Win: 1" in result
+    assert "Profit Factor:" in result
+    assert "Max Drawdown:" in result
+    assert "Best Trade:" in result
+    assert "Total Fees:" in result
+    await engine.dispose()
+
+
+async def test_get_performance_no_metrics_service():
+    """get_performance handles deps.metrics=None gracefully."""
+    from src.agent.tools_perception import get_performance
+
+    deps = _make_deps()
+    deps.metrics = None
+    deps.exchange.fetch_balance.return_value = Balance(10000.0, 10000.0, 0.0)
+
+    result = await get_performance(deps)
+    assert "No metrics service available" in result
+
+
+async def test_get_performance_empty(tmp_path):
+    from src.agent.tools_perception import get_performance
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session
+    from src.services.metrics import MetricsService
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t11b.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="t11b", name="test-perf-empty", initial_balance=10000.0))
+        await session.commit()
+
+    deps = _make_deps()
+    deps.db_engine = engine
+    deps.session_id = "t11b"
+    deps.initial_balance = 10000.0
+    deps.metrics = MetricsService(engine=engine, session_id="t11b", initial_balance=10000.0)
+    deps.exchange.fetch_balance.return_value = Balance(10000.0, 10000.0, 0.0)
+
+    result = await get_performance(deps)
+    assert "No completed trades yet" in result
+    await engine.dispose()
