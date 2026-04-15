@@ -246,7 +246,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
                 f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
                 f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}",
                 f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT",
-                f"Profit Factor: {metrics.profit_factor:.2f}",
+                f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f}'}",
             ]
             if metrics.recent_summary:
                 summary_lines.append(f"Recent: {metrics.recent_summary}")
