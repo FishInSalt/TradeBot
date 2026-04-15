@@ -99,3 +99,47 @@ def test_base_exchange_get_price_level_alerts():
     # Verify it's a copy (mutating returned list doesn't affect internal state)
     alerts.pop()
     assert len(ex.get_price_level_alerts()) == 1
+
+
+# --- Task 2: Exchange subclass cleanup ---
+
+async def test_simulated_fetch_positions_has_created_at(tmp_path):
+    """SimulatedExchange.fetch_positions fills Position.created_at."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.config import ExchangeConfig
+    from src.storage.database import init_db
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t2.db")
+    config = ExchangeConfig(name="simulated", fee_rate=0.0005, precision={"BTC/USDT:USDT": 3})
+    ex = SimulatedExchange(config=config, db_engine=engine, session_id="t2", symbol="BTC/USDT:USDT")
+    # Manually set up state for test (bypass start())
+    ex._free_usdt = 10000.0
+
+    from src.integrations.exchange.simulated import _Position
+    ex._positions["BTC/USDT:USDT"] = _Position(
+        side="long", contracts=0.01, entry_price=65000.0, leverage=3,
+    )
+    ex._latest_ticker = Ticker("BTC/USDT:USDT", 65500.0, 65499.0, 65501.0, 66000.0, 64000.0, 100.0, 1000)
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    assert positions[0].created_at is not None
+    assert isinstance(positions[0].created_at, datetime)
+    await engine.dispose()
+
+
+def test_simulated_exchange_inherits_alert_methods():
+    """SimulatedExchange should NOT override set_alert_service/update_alert_params."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.base import BaseExchange
+    # Verify the methods are inherited, not overridden
+    assert SimulatedExchange.set_alert_service is BaseExchange.set_alert_service
+    assert SimulatedExchange.update_alert_params is BaseExchange.update_alert_params
+
+
+def test_okx_exchange_inherits_alert_methods():
+    """OKXExchange should NOT override set_alert_service/update_alert_params."""
+    from src.integrations.exchange.okx import OKXExchange
+    from src.integrations.exchange.base import BaseExchange
+    assert OKXExchange.set_alert_service is BaseExchange.set_alert_service
+    assert OKXExchange.update_alert_params is BaseExchange.update_alert_params

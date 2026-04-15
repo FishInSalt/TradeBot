@@ -69,7 +69,6 @@ class SimulatedExchange(BaseExchange):
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._error_count = 0
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
-        self._alert_service: Any | None = None
 
     def _validate_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:
@@ -148,6 +147,7 @@ class SimulatedExchange(BaseExchange):
             unrealized_pnl=self._calc_unrealized_pnl(pos),
             leverage=pos.leverage,
             liquidation_price=self._calc_liquidation_price(pos),
+            created_at=pos.created_at,
         )]
 
     async def set_leverage(self, symbol: str, leverage: int) -> None:
@@ -765,13 +765,6 @@ class SimulatedExchange(BaseExchange):
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback
-
-    def set_alert_service(self, service: Any) -> None:
-        self._alert_service = service
-
-    def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
-        if self._alert_service:
-            self._alert_service.update_params(threshold_pct, window_minutes)
 
     def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool:
         """Check for pending market orders matching symbol and optional side."""
