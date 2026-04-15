@@ -122,27 +122,55 @@ async def get_market_data(
     return "\n\n".join(sections)
 
 
-async def get_position(deps: TradingDeps, symbol: str) -> str:
-    """Get current open positions."""
+async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
+    """Get current open position with risk context."""
+    symbol = symbol or deps.symbol
     positions = await deps.exchange.fetch_positions(symbol)
     if not positions:
         return "No open positions."
-    lines = ["Current Positions:"]
-    for p in positions:
-        lines.append(
-            f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} "
-            f"| Leverage: {p.leverage}x | PnL: {p.unrealized_pnl:.2f} USDT"
-            f"{'| Liq: ' + f'{p.liquidation_price:.2f}' if p.liquidation_price else ''}"
-        )
+
+    p = positions[0]
+    lines = ["Current Position:"]
+    lines.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
+
+    # PnL as % of initial capital
+    pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
+    lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
+
+    # Liquidation distance
+    if p.liquidation_price:
+        ticker = await deps.market_data.get_ticker(symbol)
+        liq_dist = abs(ticker.last - p.liquidation_price) / ticker.last * 100
+        lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist:.1f}% away)")
+
+    # Duration
+    if p.created_at is not None:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        delta = now - p.created_at
+        total_minutes = int(delta.total_seconds() / 60)
+        if total_minutes < 60:
+            dur_str = f"{total_minutes} min"
+        elif total_minutes < 1440:
+            dur_str = f"{total_minutes // 60}h {total_minutes % 60}m"
+        else:
+            dur_str = f"{total_minutes // 1440}d {(total_minutes % 1440) // 60}h"
+        lines.append(f"  Duration: {dur_str}")
+    else:
+        lines.append("  Duration: N/A")
+
     return "\n".join(lines)
 
 
 async def get_account_balance(deps: TradingDeps) -> str:
-    """Get account balance."""
+    """Get account balance with return on initial capital."""
     balance = await deps.exchange.fetch_balance()
+    ret_usdt = balance.total_usdt - deps.initial_balance
+    ret_pct = (ret_usdt / deps.initial_balance) * 100
     return (
         f"Account Balance:\n"
-        f"  Total: {balance.total_usdt:.2f} USDT\n"
+        f"  Total: {balance.total_usdt:.2f} USDT (initial: {deps.initial_balance:.2f})\n"
+        f"  Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
         f"  Free: {balance.free_usdt:.2f} USDT\n"
         f"  Used: {balance.used_usdt:.2f} USDT"
     )

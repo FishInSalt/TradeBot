@@ -429,3 +429,79 @@ async def test_get_market_data_candle_count_clamp():
     assert deps.market_data.get_ohlcv_dataframe.call_args.kwargs["limit"] == 100
     # Output should show "last 10" (clamped from 5)
     assert "last 10" in result
+
+
+# --- Task 8: get_position + get_account_balance enhancement ---
+
+async def test_get_position_enhanced():
+    from src.agent.tools_perception import get_position
+
+    deps = _make_deps()
+    deps.exchange.fetch_positions.return_value = [
+        Position("BTC/USDT:USDT", "long", 0.001, 74761.10, -19.09, 3, 50200.0,
+                 created_at=datetime(2026, 4, 14, 12, 0, tzinfo=timezone.utc)),
+    ]
+    deps.market_data.get_ticker.return_value = Ticker(
+        "BTC/USDT:USDT", 74500.0, 74499.0, 74501.0, 75200.0, 73800.0, 100.0, 1000,
+    )
+
+    result = await get_position(deps)
+    assert "LONG" in result
+    assert "74761.10" in result
+    # PnL percentage of initial capital
+    assert "% of initial capital" in result.lower() or "of initial capital" in result
+    # Liquidation distance
+    assert "away" in result.lower()
+    # Duration
+    assert "Duration" in result or "duration" in result.lower() or "min" in result.lower()
+
+
+async def test_get_position_created_at_none():
+    """OKX mode: created_at is None → Duration shows N/A."""
+    from src.agent.tools_perception import get_position
+
+    deps = _make_deps()
+    deps.exchange.fetch_positions.return_value = [
+        Position("BTC/USDT:USDT", "long", 0.001, 74761.10, -19.09, 3, 50200.0,
+                 created_at=None),
+    ]
+    deps.market_data.get_ticker.return_value = Ticker(
+        "BTC/USDT:USDT", 74500.0, 74499.0, 74501.0, 75200.0, 73800.0, 100.0, 1000,
+    )
+
+    result = await get_position(deps)
+    assert "Duration: N/A" in result
+
+
+async def test_get_position_no_position():
+    from src.agent.tools_perception import get_position
+
+    deps = _make_deps()
+    deps.exchange.fetch_positions.return_value = []
+
+    result = await get_position(deps)
+    assert "No open positions" in result
+
+
+async def test_get_position_default_symbol():
+    """get_position uses deps.symbol when called without args."""
+    from src.agent.tools_perception import get_position
+
+    deps = _make_deps()
+    result = await get_position(deps)
+    deps.exchange.fetch_positions.assert_called_once_with("BTC/USDT:USDT")
+
+
+async def test_get_account_balance_enhanced():
+    from src.agent.tools_perception import get_account_balance
+
+    deps = _make_deps()
+    deps.exchange.fetch_balance.return_value = Balance(9981.0, 8981.0, 1000.0)
+    deps.initial_balance = 10000.0
+
+    result = await get_account_balance(deps)
+    assert "9981.00" in result
+    assert "initial" in result.lower()
+    assert "Return" in result or "return" in result.lower()
+    # Return should be negative
+    assert "-0.19%" in result or "-19.00" in result

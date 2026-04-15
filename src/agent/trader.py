@@ -57,8 +57,8 @@ def create_trader_agent(
         return await _impl(ctx.deps, symbol, timeframe, candle_count)
 
     @agent.tool
-    async def get_position(ctx: RunContext[TradingDeps], symbol: str) -> str:
-        """Get current open positions."""
+    async def get_position(ctx: RunContext[TradingDeps], symbol: str | None = None) -> str:
+        """Get current open position with risk context (PnL %, liquidation distance, duration)."""
         from src.agent.tools_perception import get_position as _impl
 
         return await _impl(ctx.deps, symbol)
