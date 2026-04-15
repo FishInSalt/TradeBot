@@ -290,6 +290,68 @@ _PERCEPTION_PARSERS = {
 }
 
 
+def format_cycle_output(
+    cycle_id: str,
+    trigger_type: str,
+    tool_calls: list[dict],
+    agent_output: str,
+    tokens_used: int,
+    budget_remaining: int,
+) -> str:
+    """Format a complete cycle's output for terminal/session log display.
+
+    Args:
+        cycle_id: Full 8-char cycle ID (first 4 shown in header).
+        trigger_type: "scheduled", "conditional", or "alert".
+        tool_calls: List of dicts with keys: tool_name, content, outcome, args (optional).
+        agent_output: Final agent text (from result.output).
+        tokens_used: Token count for this cycle.
+        budget_remaining: Remaining daily token budget.
+
+    Returns:
+        Formatted string with Rich markup for terminal display.
+    """
+    lines = []
+
+    # Header
+    short_id = cycle_id[:4]
+    lines.append(f"[dim]── Cycle {short_id} ({trigger_type}) {'─' * 30}[/]")
+
+    # Tool call summaries
+    for tc in tool_calls:
+        name = tc["tool_name"]
+        content = tc.get("content", "")
+        outcome = tc.get("outcome", "success")
+        args = tc.get("args")
+
+        # Determine icon — error check first for ALL tools (spec: outcome takes priority)
+        if is_tool_error(name, content, outcome):
+            icon = "✗"
+            summary = _fallback_summary(content)
+        elif name == "save_memory":
+            icon = "✎"
+            # Extract full content from args (ToolReturnPart truncates to 80 chars)
+            if args and isinstance(args, dict):
+                summary = summarize_save_memory(args)
+            else:
+                summary = summarize_tool(name, content)
+        else:
+            icon = "⚙"
+            summary = summarize_tool(name, content)
+
+        # Format: icon + tool_name (padded) + summary
+        lines.append(f"{icon} {name:<22} {summary}")
+
+    # Agent output
+    lines.append(f"\n[bold cyan]Agent:[/]\n{agent_output}")
+
+    # Footer
+    lines.append(f"\n[dim]tokens: {tokens_used:,} | budget: {budget_remaining:,} remaining[/]")
+    lines.append(f"[dim]{'─' * 44}[/]")
+
+    return "\n".join(lines)
+
+
 def summarize_tool(tool_name: str, content: str) -> str:
     """Summarize a tool's return value into a one-line display string."""
     content_str = str(content)

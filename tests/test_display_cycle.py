@@ -309,3 +309,78 @@ def test_is_tool_error_execution_success():
     from src.cli.display import is_tool_error
     assert not is_tool_error("open_position", "Order submitted: long 0.05 @ ~84200", outcome="success")
     assert not is_tool_error("set_stop_loss", "Stop loss set at 81500.00", outcome="success")
+
+
+# === Cycle output formatting ===
+
+def test_format_cycle_output_basic():
+    from src.cli.display import format_cycle_output
+    tool_calls = [
+        {"tool_name": "get_market_data", "content": "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30 (neutral)\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)", "outcome": "success"},
+        {"tool_name": "get_position", "content": "No open positions.", "outcome": "success"},
+    ]
+    result = format_cycle_output(
+        cycle_id="a3f2e1b4",
+        trigger_type="scheduled",
+        tool_calls=tool_calls,
+        agent_output="Market is quiet, no action taken.",
+        tokens_used=1200,
+        budget_remaining=48800,
+    )
+    assert "a3f2" in result
+    assert "scheduled" in result
+    assert "get_market_data" in result
+    assert "get_position" in result
+    assert "Agent:" in result
+    assert "Market is quiet" in result
+    assert "1,200" in result
+
+
+def test_format_cycle_output_with_memory():
+    from src.cli.display import format_cycle_output
+    tool_calls = [
+        {"tool_name": "save_memory", "content": "Memory saved [lesson] (importance=0.8): Always wait for confirmation", "outcome": "success", "args": {"category": "lesson", "content": "Always wait for RSI confirmation before entry", "importance": 0.8}},
+    ]
+    result = format_cycle_output(
+        cycle_id="b5c6d7e8",
+        trigger_type="conditional",
+        tool_calls=tool_calls,
+        agent_output="Lesson recorded.",
+        tokens_used=500,
+        budget_remaining=49500,
+    )
+    assert "✎" in result
+    assert "[lesson]" in result
+    assert "Always wait for RSI confirmation" in result  # full content from args
+
+
+def test_format_cycle_output_with_error():
+    from src.cli.display import format_cycle_output
+    tool_calls = [
+        {"tool_name": "open_position", "content": "Trade rejected by human approval.", "outcome": "success"},
+    ]
+    result = format_cycle_output(
+        cycle_id="c7d8e9f0",
+        trigger_type="scheduled",
+        tool_calls=tool_calls,
+        agent_output="Trade was rejected.",
+        tokens_used=800,
+        budget_remaining=49200,
+    )
+    assert "✗" in result
+
+
+def test_format_cycle_output_outcome_failed():
+    from src.cli.display import format_cycle_output
+    tool_calls = [
+        {"tool_name": "get_market_data", "content": "Connection error", "outcome": "failed"},
+    ]
+    result = format_cycle_output(
+        cycle_id="d1e2f3a4",
+        trigger_type="scheduled",
+        tool_calls=tool_calls,
+        agent_output="Could not fetch data.",
+        tokens_used=300,
+        budget_remaining=49700,
+    )
+    assert "✗" in result
