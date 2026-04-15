@@ -18,6 +18,11 @@ class MockDeps:
     db_engine: object = None
     approval_gate: object = None
     approval_enabled: bool = False
+    wake_min_minutes: int = 1
+    wake_max_minutes: int = 60
+    set_next_wake_fn: object = None
+    initial_balance: float = 10000.0
+    metrics: object = None
 
 
 @pytest.fixture
@@ -58,6 +63,8 @@ def deps():
     d.exchange.cancel_order = AsyncMock()
     d.exchange.has_pending_market_order = MagicMock(return_value=False)
     d.memory.format_for_prompt.return_value = "No memories."
+    d.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
+    d.exchange.get_price_level_alerts = MagicMock(return_value=[])
     return d
 
 
@@ -66,14 +73,14 @@ async def test_get_market_data(deps):
 
     result = await get_market_data(deps, "BTC/USDT:USDT", "15m")
     assert "65000" in result
-    assert "RSI" in result
+    assert "=== Ticker" in result
 
 
 async def test_get_position(deps):
     from src.agent.tools_perception import get_position
 
     result = await get_position(deps, "BTC/USDT:USDT")
-    assert "long" in result.lower()
+    assert "LONG" in result
     assert "64000" in result
 
 
@@ -82,6 +89,7 @@ async def test_get_account_balance(deps):
 
     result = await get_account_balance(deps)
     assert "10000" in result
+    assert "Return" in result or "return" in result.lower()
 
 
 async def test_get_memories(deps):
@@ -189,6 +197,7 @@ async def test_get_trade_journal_with_entries(tmp_path):
         await session.commit()
 
     mock_deps = MagicMock()
+    mock_deps.metrics = None  # prevent await deps.metrics.compute() TypeError
     mock_deps.db_engine = engine
     mock_deps.session_id = "s1"
     mock_deps.symbol = "BTC/USDT:USDT"
@@ -223,6 +232,7 @@ async def test_get_trade_journal_order_fetch_failure(tmp_path):
         await session.commit()
 
     mock_deps = MagicMock()
+    mock_deps.metrics = None  # prevent await deps.metrics.compute() TypeError
     mock_deps.db_engine = engine
     mock_deps.session_id = "s1"
     mock_deps.symbol = "BTC/USDT:USDT"

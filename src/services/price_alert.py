@@ -78,3 +78,7 @@ class PriceAlertService:
         self._window_ms = window_minutes * 60 * 1000
         self._window_minutes = window_minutes
         self._ticks.clear()
+
+    def get_params(self) -> tuple[float, int]:
+        """Return current (threshold_pct, window_minutes)."""
+        return (self._threshold_pct, self._window_minutes)

@@ -37,6 +37,14 @@ async def _migrate_session_table(conn) -> None:
             await conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {col} {defn}"))
 
 
+async def _migrate_trade_actions_table(conn) -> None:
+    """Add fee column to trade_actions table. Idempotent."""
+    result = await conn.execute(text("PRAGMA table_info(trade_actions)"))
+    existing = {row[1] for row in result}
+    if "fee" not in existing:
+        await conn.execute(text("ALTER TABLE trade_actions ADD COLUMN fee REAL"))
+
+
 async def _fix_residual_active(conn) -> int:
     """Set any 'active' sessions to 'paused'. Returns count of fixed sessions."""
     result = await conn.execute(
@@ -326,6 +334,7 @@ async def select_or_create_session(
     # Fix residual active sessions from unclean shutdown
     async with engine.begin() as conn:
         await _migrate_session_table(conn)
+        await _migrate_trade_actions_table(conn)
         fixed = await _fix_residual_active(conn)
     if fixed:
         console.print(f"[dim]Fixed {fixed} residual active session(s)[/]")

@@ -28,6 +28,8 @@ class TradingDeps:
     wake_min_minutes: int = 1
     wake_max_minutes: int = 60
     set_next_wake_fn: Callable[[int], None] | None = None
+    initial_balance: float = 10000.0
+    metrics: object | None = None  # MetricsService, typed as object to avoid circular import
 
 
 def create_trader_agent(
@@ -40,37 +42,44 @@ def create_trader_agent(
 
     @agent.tool
     async def get_market_data(
-        ctx: RunContext[TradingDeps], symbol: str, timeframe: str
+        ctx: RunContext[TradingDeps],
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        candle_count: int = 50,
     ) -> str:
-        """Get current market data with technical indicators."""
+        """Get market data: ticker, technical indicators, market context, and recent candles.
+        candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis.
+        Default 50. Values above 50 may be capped by exchange API limits.
+        Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
+        symbol and timeframe default to session config."""
         from src.agent.tools_perception import get_market_data as _impl
 
-        return await _impl(ctx.deps, symbol, timeframe)
+        return await _impl(ctx.deps, symbol, timeframe, candle_count)
 
     @agent.tool
-    async def get_position(ctx: RunContext[TradingDeps], symbol: str) -> str:
-        """Get current open positions."""
+    async def get_position(ctx: RunContext[TradingDeps], symbol: str | None = None) -> str:
+        """Get current open position with risk context (PnL %, liquidation distance, duration)."""
         from src.agent.tools_perception import get_position as _impl
 
         return await _impl(ctx.deps, symbol)
 
     @agent.tool
     async def get_account_balance(ctx: RunContext[TradingDeps]) -> str:
-        """Get account balance."""
+        """Get account balance with return on initial capital."""
         from src.agent.tools_perception import get_account_balance as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
-        """Get all pending orders (market awaiting fill, limit, stop loss, take profit)."""
+        """Get all pending orders with distance from current price."""
         from src.agent.tools_perception import get_open_orders as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_trade_journal(ctx: RunContext[TradingDeps]) -> str:
-        """Get trade journal — agent's decision timeline with fill details."""
+        """Get trade journal — decision timeline with quick stats summary. Use for reviewing recent decisions and their outcomes."""
         from src.agent.tools_perception import get_trade_journal as _impl
 
         return await _impl(ctx.deps)
@@ -79,6 +88,20 @@ def create_trader_agent(
     async def get_memories(ctx: RunContext[TradingDeps]) -> str:
         """Get long-term memories (lessons, patterns, trade reviews)."""
         from src.agent.tools_perception import get_memories as _impl
+
+        return await _impl(ctx.deps)
+
+    @agent.tool
+    async def get_active_alerts(ctx: RunContext[TradingDeps]) -> str:
+        """Get current alert configuration: volatility alert params and active price level alerts."""
+        from src.agent.tools_perception import get_active_alerts as _impl
+
+        return await _impl(ctx.deps)
+
+    @agent.tool
+    async def get_performance(ctx: RunContext[TradingDeps]) -> str:
+        """Get detailed trading performance statistics. Use for reviewing overall results and evaluating strategy effectiveness."""
+        from src.agent.tools_perception import get_performance as _impl
 
         return await _impl(ctx.deps)
 
@@ -136,6 +159,13 @@ def create_trader_agent(
         from src.agent.tools_execution import set_price_alert as _impl
 
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
+
+    @agent.tool
+    async def cancel_order(ctx: RunContext[TradingDeps], order_id: str, reasoning: str) -> str:
+        """Cancel a pending order (limit, stop loss, take profit). Always provide reasoning."""
+        from src.agent.tools_execution import cancel_order as _impl
+
+        return await _impl(ctx.deps, order_id, reasoning=reasoning)
 
     @agent.tool
     async def add_price_level_alert(
