@@ -8,6 +8,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# NOTE: Return string prefixes are used by src/cli/display.py (_EXECUTION_SUCCESS_PREFIXES)
+# to detect success vs business rejection. If you change a return string's prefix,
+# update _EXECUTION_SUCCESS_PREFIXES in display.py accordingly.
+
 
 async def _record_action(deps: TradingDeps, action: str, order_id: str | None = None,
                           side: str | None = None, price: float | None = None,

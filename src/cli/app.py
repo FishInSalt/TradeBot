@@ -12,7 +12,14 @@ from sqlalchemy import update as sql_update
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
 from src.cli.approval import ApprovalGate
-from src.cli.display import display_metrics
+from pydantic_ai.messages import (
+    ModelRequest, ModelResponse,
+    ToolCallPart, ToolReturnPart,
+)
+from src.cli.display import (
+    display_metrics, format_cycle_output,
+    is_tool_error, resolve_tool_display,
+)
 from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging
 from src.config import ExchangeConfig, Settings, load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
@@ -147,6 +154,47 @@ async def run_agent_cycle(
     tokens = result.usage().total_tokens if result.usage() else 0
     budget.record(tokens)
 
+    # === A2: Extract tool calls from message history ===
+    tool_calls = []
+    _call_args_by_id: dict[str, dict | None] = {}
+
+    for msg in result.new_messages():
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, ToolCallPart):
+                    try:
+                        args = part.args_as_dict()
+                    except Exception:
+                        args = None
+                    _call_args_by_id[part.tool_call_id] = args
+        elif isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart):
+                    content_str = str(part.content)
+                    outcome = part.outcome
+                    if part.tool_call_id not in _call_args_by_id:
+                        logger.warning(
+                            f"tool_call_id mismatch for {part.tool_name}, using fallback"
+                        )
+                    args = _call_args_by_id.get(part.tool_call_id)
+                    tool_calls.append({
+                        "tool_name": part.tool_name,
+                        "content": content_str,
+                        "outcome": outcome,
+                        "args": args,
+                    })
+
+                    # System log: INFO summary, DEBUG full content
+                    icon, summary = resolve_tool_display(
+                        part.tool_name, content_str, outcome, args,
+                    )
+                    logger.info(f"  {icon} {part.tool_name}: {summary}")
+                    logger.debug(
+                        f"  Tool {part.tool_name} args={args} "
+                        f"return={content_str[:500]}"
+                    )
+
+    # === Record to database ===
     async with get_session(engine) as session:
         session.add(
             DecisionLog(
@@ -162,8 +210,19 @@ async def run_agent_cycle(
         await session.commit()
 
     logger.info(f"Cycle {cycle_id}: {tokens} tokens ({budget.remaining} remaining)")
+
+    # === A2: Display formatted cycle output ===
     if console is not None:
-        console.print(f"\n[bold cyan]Agent:[/]\n{result.output}\n")
+        output = format_cycle_output(
+            cycle_id=cycle_id,
+            trigger_type=trigger_type,
+            tool_calls=tool_calls,
+            agent_output=result.output,
+            tokens_used=tokens,
+            budget_remaining=budget.remaining,
+        )
+        console.print(output)
+
     return result
 
 
