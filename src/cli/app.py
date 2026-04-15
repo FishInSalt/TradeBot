@@ -17,8 +17,8 @@ from pydantic_ai.messages import (
     ToolCallPart, ToolReturnPart,
 )
 from src.cli.display import (
-    _fallback_summary, display_metrics, format_cycle_output,
-    is_tool_error, summarize_save_memory, summarize_tool,
+    display_metrics, format_cycle_output,
+    is_tool_error, resolve_tool_display,
 )
 from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging
 from src.config import ExchangeConfig, Settings, load_settings, load_trader_config
@@ -185,18 +185,9 @@ async def run_agent_cycle(
                     })
 
                     # System log: INFO summary, DEBUG full content
-                    if is_tool_error(part.tool_name, content_str, outcome):
-                        icon = "✗"
-                        summary = _fallback_summary(content_str)
-                    elif part.tool_name == "save_memory":
-                        icon = "✎"
-                        if args and isinstance(args, dict):
-                            summary = summarize_save_memory(args)
-                        else:
-                            summary = summarize_tool(part.tool_name, content_str)
-                    else:
-                        icon = "⚙"
-                        summary = summarize_tool(part.tool_name, content_str)
+                    icon, summary = resolve_tool_display(
+                        part.tool_name, content_str, outcome, args,
+                    )
                     logger.info(f"  {icon} {part.tool_name}: {summary}")
                     logger.debug(
                         f"  Tool {part.tool_name} args={args} "

@@ -302,6 +302,26 @@ _PERCEPTION_PARSERS = {
 }
 
 
+def resolve_tool_display(
+    tool_name: str,
+    content: str,
+    outcome: str = "success",
+    args: dict | None = None,
+) -> tuple[str, str]:
+    """Resolve icon and summary for a single tool call.
+
+    Returns:
+        (icon, summary) tuple. Used by both terminal display and system log.
+    """
+    if is_tool_error(tool_name, content, outcome):
+        return "✗", _fallback_summary(content)
+    if tool_name == "save_memory":
+        if args and isinstance(args, dict):
+            return "✎", summarize_save_memory(args)
+        return "✎", summarize_tool(tool_name, content)
+    return "⚙", summarize_tool(tool_name, content)
+
+
 def format_cycle_output(
     cycle_id: str,
     trigger_type: str,
@@ -336,22 +356,7 @@ def format_cycle_output(
         outcome = tc.get("outcome", "success")
         args = tc.get("args")
 
-        # Determine icon — error check first for ALL tools (spec: outcome takes priority)
-        if is_tool_error(name, content, outcome):
-            icon = "✗"
-            summary = _fallback_summary(content)
-        elif name == "save_memory":
-            icon = "✎"
-            # Extract full content from args (ToolReturnPart truncates to 80 chars)
-            if args and isinstance(args, dict):
-                summary = summarize_save_memory(args)
-            else:
-                summary = summarize_tool(name, content)
-        else:
-            icon = "⚙"
-            summary = summarize_tool(name, content)
-
-        # Format: icon + tool_name (padded) + summary
+        icon, summary = resolve_tool_display(name, content, outcome, args)
         lines.append(f"{icon} {name:<22} {summary}")
 
     # Agent output
