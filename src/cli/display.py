@@ -140,6 +140,142 @@ def _summarize_get_performance(content: str) -> str:
     return " | ".join(parts) if parts else _fallback_summary(content)
 
 
+# === Execution tool parsers ===
+
+
+def _summarize_open_position(content: str) -> str:
+    m = re.search(r"Order submitted:\s*(\w+)\s+([\d.]+)\s*@\s*~?([\d.]+),\s*(\d+)x", content)
+    if m:
+        return f"{m.group(1)} {m.group(2)} @ ~${float(m.group(3)):,.0f}, {m.group(4)}x"
+    return _fallback_summary(content)
+
+
+def _summarize_close_position(content: str) -> str:
+    if "No positions to close" in content:
+        return "No positions to close."
+    m = re.search(r"close\s+(\d+)\s+position", content)
+    if m:
+        return f"Close {m.group(1)} position(s)"
+    return _fallback_summary(content)
+
+
+def _summarize_set_stop_loss(content: str) -> str:
+    m = re.search(r"Stop loss set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m:
+        return f"SL @ ${float(m.group(1)):,.0f} ({m.group(2).split('from')[0].strip()})"
+    m2 = re.search(r"Stop loss set at\s+([\d.]+)", content)
+    if m2:
+        return f"SL @ ${float(m2.group(1)):,.0f}"
+    return _fallback_summary(content)
+
+
+def _summarize_set_take_profit(content: str) -> str:
+    m = re.search(r"Take profit set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m:
+        return f"TP @ ${float(m.group(1)):,.0f} ({m.group(2).split('from')[0].strip()})"
+    m2 = re.search(r"Take profit set at\s+([\d.]+)", content)
+    if m2:
+        return f"TP @ ${float(m2.group(1)):,.0f}"
+    return _fallback_summary(content)
+
+
+def _summarize_adjust_leverage(content: str) -> str:
+    m = re.search(r"(\d+)x\s+for\s+(\S+)", content)
+    if m:
+        return f"{m.group(1)}x for {m.group(2)}"
+    return _fallback_summary(content)
+
+
+def _summarize_place_limit_order(content: str) -> str:
+    m = re.search(r"Limit order placed:\s*(\w+)\s+([\d.]+)\s*@\s*([\d.]+),\s*(\d+)x", content)
+    if m:
+        return f"Limit {m.group(1)} {m.group(2)} @ ${float(m.group(3)):,.0f}, {m.group(4)}x"
+    return _fallback_summary(content)
+
+
+def _summarize_cancel_order(content: str) -> str:
+    m = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)\s+([\d.]+)\s*@\s*([\d.]+)", content)
+    if m:
+        return f"Cancelled {m.group(1)} {m.group(2)} {m.group(3)} @ ${float(m.group(4)):,.0f}"
+    # Fallback: no price (e.g., market orders without price)
+    m2 = re.search(r"Order cancelled:\s*(\w+)\s+(\w+)", content)
+    if m2:
+        return f"Cancelled {m2.group(1)} {m2.group(2)}"
+    return _fallback_summary(content)
+
+
+def _summarize_set_price_alert(content: str) -> str:
+    m = re.search(r"threshold=([\d.]+)%.*window=(\d+)min", content)
+    if m:
+        return f"threshold={m.group(1)}%, window={m.group(2)}min"
+    return _fallback_summary(content)
+
+
+def _summarize_add_price_level_alert(content: str) -> str:
+    m = re.search(r"(above|below)\s+([\d.]+)", content)
+    if m:
+        return f"{m.group(1)} ${float(m.group(2)):,.0f}"
+    return _fallback_summary(content)
+
+
+def _summarize_set_next_wake(content: str) -> str:
+    m = re.search(r"(\d+)\s*min", content)
+    if m:
+        return f"{m.group(1)}min"
+    return _fallback_summary(content)
+
+
+_EXECUTION_PARSERS = {
+    "open_position": _summarize_open_position,
+    "close_position": _summarize_close_position,
+    "set_stop_loss": _summarize_set_stop_loss,
+    "set_take_profit": _summarize_set_take_profit,
+    "adjust_leverage": _summarize_adjust_leverage,
+    "place_limit_order": _summarize_place_limit_order,
+    "cancel_order": _summarize_cancel_order,
+    "set_price_alert": _summarize_set_price_alert,
+    "add_price_level_alert": _summarize_add_price_level_alert,
+    "set_next_wake": _summarize_set_next_wake,
+}
+
+# Success prefix whitelist for execution tools (business rejection detection)
+_EXECUTION_SUCCESS_PREFIXES = {
+    "open_position": "Order submitted:",
+    "close_position": "Orders submitted:",
+    "set_stop_loss": "Stop loss set at",
+    "set_take_profit": "Take profit set at",
+    "adjust_leverage": "Leverage adjusted to",
+    "place_limit_order": "Limit order placed:",
+    "cancel_order": "Order cancelled:",
+    "set_price_alert": "Price alert updated:",
+    "add_price_level_alert": "Price level alert set:",
+    "set_next_wake": "Next wake set to",
+}
+
+
+def summarize_save_memory(args: dict) -> str:
+    """Summarize save_memory from ToolCallPart.args (full content, not truncated return)."""
+    category = args.get("category", "unknown")
+    content = args.get("content", "")
+    importance = args.get("importance", 0.5)
+    return f"[{category}] {content} (importance: {importance})"
+
+
+def is_tool_error(tool_name: str, content: str, outcome: str = "success") -> bool:
+    """Detect if a tool call resulted in an error or business rejection.
+
+    Two-layer detection:
+    1. outcome != 'success' → always error (pydantic-ai level)
+    2. For execution tools with outcome='success' → check success prefix whitelist
+    """
+    if outcome != "success":
+        return True
+    prefix = _EXECUTION_SUCCESS_PREFIXES.get(tool_name)
+    if prefix is not None:
+        return not str(content).startswith(prefix)
+    return False
+
+
 # === Public API ===
 
 _PERCEPTION_PARSERS = {
@@ -157,11 +293,10 @@ _PERCEPTION_PARSERS = {
 def summarize_tool(tool_name: str, content: str) -> str:
     """Summarize a tool's return value into a one-line display string."""
     content_str = str(content)
-    parser = _PERCEPTION_PARSERS.get(tool_name)
+    parser = _PERCEPTION_PARSERS.get(tool_name) or _EXECUTION_PARSERS.get(tool_name)
     if parser:
         try:
             return parser(content_str)
         except Exception:
             return _fallback_summary(content_str)
-    # Not a known perception tool — fallback for now (execution parsers added in Task 2)
     return _fallback_summary(content_str)

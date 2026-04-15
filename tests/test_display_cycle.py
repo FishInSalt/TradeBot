@@ -170,3 +170,142 @@ def test_summarize_fallback_malformed():
     result = summarize_tool("get_market_data", "Error: connection timeout")
     # Should not crash, should return truncated fallback
     assert "Error" in result
+
+
+# === Execution tool summary parsers ===
+
+def test_summarize_open_position():
+    from src.cli.display import summarize_tool
+    content = (
+        "Order submitted: long 0.050000 @ ~84200.50, 3x | ID: abc-123\n"
+        "You will be notified when filled."
+    )
+    result = summarize_tool("open_position", content)
+    assert "long" in result.lower()
+    assert "0.05" in result
+    assert "84" in result
+
+
+def test_summarize_open_position_rejected():
+    from src.cli.display import is_tool_error
+    content = "Trade rejected by human approval."
+    assert is_tool_error("open_position", content)
+
+
+def test_summarize_close_position():
+    from src.cli.display import summarize_tool
+    content = (
+        "Orders submitted: close 1 position(s) | IDs: xyz-456\n"
+        "You will be notified when filled."
+    )
+    result = summarize_tool("close_position", content)
+    assert "Close" in result or "close" in result
+    assert "1" in result
+
+
+def test_summarize_set_stop_loss():
+    from src.cli.display import summarize_tool
+    content = "Stop loss set at 81500.00 (-3.21% from current 84200.00) | Order: abc"
+    result = summarize_tool("set_stop_loss", content)
+    assert "SL" in result
+    assert "81500" in result or "81,500" in result
+
+
+def test_summarize_set_take_profit():
+    from src.cli.display import summarize_tool
+    content = "Take profit set at 87000.00 (+3.33% from current 84200.00) | Order: def"
+    result = summarize_tool("set_take_profit", content)
+    assert "TP" in result
+    assert "87000" in result or "87,000" in result
+
+
+def test_summarize_adjust_leverage():
+    from src.cli.display import summarize_tool
+    content = "Leverage adjusted to 5x for BTC/USDT:USDT"
+    result = summarize_tool("adjust_leverage", content)
+    assert "5x" in result
+
+
+def test_summarize_place_limit_order():
+    from src.cli.display import summarize_tool
+    content = "Limit order placed: long 0.050000 @ 83000.00, 3x | ID: lmt-789"
+    result = summarize_tool("place_limit_order", content)
+    assert "Limit" in result or "limit" in result
+    assert "long" in result.lower()
+    assert "83000" in result or "83,000" in result
+
+
+def test_summarize_cancel_order():
+    from src.cli.display import summarize_tool
+    content = "Order cancelled: stop sell 0.050000 @ 81500.00 | ID: abc"
+    result = summarize_tool("cancel_order", content)
+    assert "Cancelled" in result
+    assert "stop" in result
+    assert "0.050000" in result
+    assert "81,500" in result or "81500" in result
+
+
+def test_summarize_set_price_alert():
+    from src.cli.display import summarize_tool
+    content = "Price alert updated: threshold=5.0%, window=60min"
+    result = summarize_tool("set_price_alert", content)
+    assert "5.0" in result
+    assert "60" in result
+
+
+def test_summarize_add_price_level_alert():
+    from src.cli.display import summarize_tool
+    content = "Price level alert set: above 86000.00 (id=alert-1)"
+    result = summarize_tool("add_price_level_alert", content)
+    assert "above" in result
+    assert "86000" in result or "86,000" in result
+
+
+def test_summarize_set_next_wake():
+    from src.cli.display import summarize_tool
+    content = "Next wake set to 30 min. Reason: market quiet, no position"
+    result = summarize_tool("set_next_wake", content)
+    assert "30" in result
+    assert "min" in result
+    assert "Reason" not in result  # reasoning should be truncated
+
+
+# === Memory tool ===
+
+def test_summarize_save_memory():
+    from src.cli.display import summarize_save_memory
+    args = {"category": "lesson", "content": "Always wait for RSI confirmation before entering", "importance": 0.8}
+    result = summarize_save_memory(args)
+    assert "[lesson]" in result
+    assert "Always wait for RSI confirmation" in result
+    assert "0.8" in result
+
+
+# === Success/failure detection ===
+
+def test_is_tool_error_outcome_failed():
+    from src.cli.display import is_tool_error
+    assert is_tool_error("get_market_data", "any content", outcome="failed")
+
+
+def test_is_tool_error_outcome_denied():
+    from src.cli.display import is_tool_error
+    assert is_tool_error("get_market_data", "any content", outcome="denied")
+
+
+def test_is_tool_error_outcome_success_perception():
+    from src.cli.display import is_tool_error
+    assert not is_tool_error("get_market_data", "=== Ticker...", outcome="success")
+
+
+def test_is_tool_error_business_rejection():
+    from src.cli.display import is_tool_error
+    assert is_tool_error("open_position", "Trade rejected by human approval.", outcome="success")
+    assert is_tool_error("open_position", "Position too small: 0.00001 rounds to 0", outcome="success")
+    assert is_tool_error("open_position", "A market order is already pending.", outcome="success")
+
+
+def test_is_tool_error_execution_success():
+    from src.cli.display import is_tool_error
+    assert not is_tool_error("open_position", "Order submitted: long 0.05 @ ~84200", outcome="success")
+    assert not is_tool_error("set_stop_loss", "Stop loss set at 81500.00", outcome="success")
