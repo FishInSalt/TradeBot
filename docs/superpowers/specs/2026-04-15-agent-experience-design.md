@@ -183,9 +183,11 @@ tokens: 1,842 | budget: 48,158 remaining
 ```
 
 格式规则：
-- 感知/执行工具使用 `⚙` 图标，记忆工具使用 `✎` 图标 — 视觉区分"操作"和"反思"
+- 感知/执行工具成功时使用 `⚙` 图标，错误/拒绝时使用 `✗` 图标（如 "Trade rejected by human approval"、"Position too small"、"A market order is already pending" 等非正常路径），记忆工具使用 `✎` 图标 — 视觉区分"成功操作"、"失败/拒绝"和"反思"
 - `save_memory` 显示完整 content（不截断）— 它代表 Agent 的认知产出，对用户有观察价值。**注意：`save_memory` 的 `ToolReturnPart` 返回值已在 `tools_memory.py:17` 截断到 80 字符，因此完整 content 必须从 `ToolCallPart.args` 中提取（`content` 参数）。这是所有 tool 中唯一从 args 而非 return 提取摘要数据的例外。**
 - 其他 tool 显示结构化一行摘要（从 `ToolReturnPart` 提取）
+- 摘要中的 `$` 价格前缀是 display 层添加的装饰，tool 返回字符串中不含 `$` 符号
+- Agent 最终文本继续使用 `result.output`（而非从消息历史中提取 TextPart），消息遍历仅用于提取 tool 调用信息。原因：ReAct 循环中 ModelResponse 可能包含多个 TextPart（tool call 前的中间推理 + 最终总结），使用 `result.output` 避免区分中间/最终文本的复杂性
 - Cycle 头包含 cycle_id（前 4 字符，仅终端展示用途，完整 8 字符 ID 已存入 DecisionLog 数据库）和触发类型（scheduled / conditional / alert）
 - 尾部显示 token 用量和剩余预算
 
@@ -254,7 +256,7 @@ for msg in result.new_messages():
                 # 记录：tool_name, content（用于摘要 + DEBUG 日志）
 ```
 
-通过 `tool_call_id` 或顺序匹配将 `ToolCallPart` 与对应的 `ToolReturnPart` 配对。
+通过 `tool_call_id` 将 `ToolCallPart` 与对应的 `ToolReturnPart` 配对（优先使用，pydantic-ai 提供此字段）。顺序匹配仅作为 fallback — 并行 tool call 场景下顺序可能不可靠。
 
 ### 涉及文件
 
