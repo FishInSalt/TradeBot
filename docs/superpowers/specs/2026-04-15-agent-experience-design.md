@@ -200,11 +200,11 @@ tokens: 1,842 | budget: 48,158 remaining
 | 工具 | 摘要格式 | 提取逻辑 |
 |------|---------|---------|
 | get_market_data | `{symbol} ${price} \| RSI {rsi} \| ATR {atr}%` | 解析 Ticker 段 "Price:" 取价格；解析 Technical Indicators 段取 `RSI(14): XX.XX`；解析 Market Context 段取 `ATR(14): XX.XX (XX.XX% of price)` — RSI 和 ATR 在不同段落 |
-| get_position | `{side} {contracts} @ ${entry} \| PnL {pnl}%` 或 `No open position` | 解析 side + contracts + entry_price；PnL 百分比在括号内 `(+X.XX% of initial capital)` |
+| get_position | `{side} {contracts} @ ${entry} \| PnL {pnl}%` 或 `No open positions.` | 解析 side + contracts + entry_price；PnL 百分比在括号内 `(+X.XX% of initial capital)` |
 | get_account_balance | `${total} ({ret}%)` | 解析 "Total:" 和 "Return:" 行 |
-| get_open_orders | `{count} orders (types)` 或 `No pending orders` | 统计订单数，汇总类型（SL/TP/LIMIT） |
-| get_trade_journal | `{total} trades \| Win {rate}% \| PnL {pnl}` | 解析 Performance Summary 段 |
-| get_memories | `{count} memories` 或 `No memories` | 统计记忆条目数 |
+| get_open_orders | `{count} orders (types)` 或 `No pending orders.` | 统计订单数，汇总类型（SL/TP/LIMIT） |
+| get_trade_journal | `{total} trades \| Win {rate}% \| PF {pf}` | 解析 Performance Summary 段（无直接 PnL 字段，使用 Profit Factor） |
+| get_memories | `{count} memories` 或 `No relevant memories.` | 统计记忆条目数 |
 | get_active_alerts | `Vol: {threshold}%/{window}min \| {count} price alerts` | 解析两个段落 |
 | get_performance | `Return {ret}% \| {trades} trades \| Win {rate}%` | 解析 return、total trades、win rate |
 
@@ -221,9 +221,11 @@ tokens: 1,842 | budget: 48,158 remaining
 | cancel_order | `Cancelled {type} {side} {amount} @ ${price}` | 解析 "Order cancelled: {type} {side} {amount}{price} \| ID: X" |
 | set_price_alert | `threshold={pct}%, window={min}min` | 解析 "Price alert updated:" 行 |
 | add_price_level_alert | `{direction} ${price}` | 解析 "Price level alert set:" 行 |
-| set_next_wake | `{min}min` | 解析 "Next wake set to X min" |
+| set_next_wake | `{min}min` | 解析 "Next wake set to X min"，在 "min" 或 "." 处截断（返回值末尾附 "Reason: {reasoning}"，可能很长） |
 
 > 注：以上摘要格式为方向性指导，实际解析器必须对照 tool 源码（`tools_perception.py` / `tools_execution.py`）的返回字符串编写。
+
+**成功/失败检测**：`ToolReturnPart.outcome` 只区分异常（error）和正常返回（success），业务拒绝（如 "Trade rejected by human approval"）是正常返回字符串，outcome 仍为 success。采用**成功前缀白名单**方案：每个执行 tool 定义成功返回的前缀模式（如 open_position 成功以 "Order submitted:" 开头），不匹配则视为拒绝/异常，使用 `✗` 图标。感知工具和记忆工具默认成功，无需检测。
 
 **记忆工具：**
 
@@ -255,7 +257,7 @@ for msg in result.new_messages():
                 # 记录：tool_name, content（用于摘要 + DEBUG 日志）
 ```
 
-通过 `tool_call_id` 将 `ToolCallPart` 与对应的 `ToolReturnPart` 配对（优先使用，pydantic-ai 提供此字段）。顺序匹配仅作为 fallback — 并行 tool call 场景下顺序可能不可靠。
+通过 `tool_call_id` 将 `ToolCallPart` 与对应的 `ToolReturnPart` 配对（优先使用，pydantic-ai 提供此字段）。顺序匹配仅作为 fallback — 并行 tool call 场景下顺序可能不可靠。如果 `tool_call_id` 匹配失败，应 log warning 而非静默 fallback。
 
 ### 涉及文件
 
