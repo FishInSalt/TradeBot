@@ -2445,7 +2445,7 @@ async def get_performance(deps: TradingDeps) -> str:
         f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
         f"Profit Factor: {metrics.profit_factor:.2f}\n"
-        f"Max Drawdown: {metrics.max_drawdown_pct:.1f}%\n"
+        f"Max Drawdown: -{metrics.max_drawdown_pct:.1f}%\n"
         f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT"
     )
 ```
@@ -2539,6 +2539,8 @@ Tests that break and why (run suite, fix each based on error):
 | `test_set_take_profit` | Same as set_stop_loss | Same fix |
 | `test_set_price_alert` | Now calls `get_alert_params` first | Already added mock in Step 2 |
 | `test_get_open_orders` | Calls `get_ticker` for distance % | `get_ticker` already mocked |
+| `test_get_trade_journal_with_entries` | Uses `MagicMock()` — `deps.metrics` is truthy, `await .compute()` TypeError | Add `mock_deps.metrics = None` after `mock_deps = MagicMock()` |
+| `test_get_trade_journal_order_fetch_failure` | Same as above | Add `mock_deps.metrics = None` after `mock_deps = MagicMock()` |
 
 Update these tests to match new output formats. For example:
 
