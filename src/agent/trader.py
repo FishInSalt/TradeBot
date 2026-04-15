@@ -65,21 +65,21 @@ def create_trader_agent(
 
     @agent.tool
     async def get_account_balance(ctx: RunContext[TradingDeps]) -> str:
-        """Get account balance."""
+        """Get account balance with return on initial capital."""
         from src.agent.tools_perception import get_account_balance as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
-        """Get all pending orders (market awaiting fill, limit, stop loss, take profit)."""
+        """Get all pending orders with distance from current price."""
         from src.agent.tools_perception import get_open_orders as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_trade_journal(ctx: RunContext[TradingDeps]) -> str:
-        """Get trade journal — agent's decision timeline with fill details."""
+        """Get trade journal — decision timeline with quick stats summary. Use for reviewing recent decisions and their outcomes."""
         from src.agent.tools_perception import get_trade_journal as _impl
 
         return await _impl(ctx.deps)
