@@ -182,27 +182,33 @@ async def get_memories(deps: TradingDeps) -> str:
 
 
 async def get_open_orders(deps: TradingDeps) -> str:
-    """Get all pending orders (market awaiting fill, limit, stop loss, take profit)."""
+    """Get all pending orders with distance from current price."""
     orders = await deps.exchange.fetch_open_orders(deps.symbol)
     if not orders:
         return "No pending orders."
+
+    ticker = await deps.market_data.get_ticker(deps.symbol)
+    current = ticker.last
+
     lines = ["Pending Orders:"]
     for o in orders:
-        if o.order_type == "market":
-            label = "[PENDING]"
+        if o.order_type == "market" or o.price is None:
+            label = "[PENDING]" if o.order_type == "market" else f"[{o.order_type.upper()}]"
             price_str = "market price"
-        elif o.order_type == "limit":
-            label = "[LIMIT]"
-            price_str = f"@ {o.price:.2f}"
         else:
-            label = f"[{o.order_type.upper()}]"
-            price_str = f"@ {o.price:.2f}"
+            if o.order_type == "limit":
+                label = "[LIMIT]"
+            else:
+                label = f"[{o.order_type.upper()}]"
+            dist = (o.price - current) / current * 100
+            price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
         lines.append(f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}")
     return "\n".join(lines)
 
 
 async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
-    """Get trade journal — agent's decision timeline with fill details."""
+    """Get trade journal — decision timeline with quick stats summary.
+    Use for reviewing recent decisions and their outcomes."""
     if deps.db_engine is None:
         return "No trade journal entries yet."
     from sqlalchemy import select, desc
@@ -221,6 +227,23 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
     if not actions:
         return "No trade journal entries yet."
 
+    sections: list[str] = []
+
+    # Performance Summary (from MetricsService)
+    if deps.metrics is not None:
+        metrics = await deps.metrics.compute()
+        if metrics.total_trades > 0:
+            summary_lines = [
+                f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
+                f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}",
+                f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT",
+                f"Profit Factor: {metrics.profit_factor:.2f}",
+            ]
+            if metrics.recent_summary:
+                summary_lines.append(f"Recent: {metrics.recent_summary}")
+            sections.append("=== Performance Summary ===\n" + "\n".join(summary_lines))
+
+    # Trade Journal
     order_details = {}
     order_ids = list({a.order_id for a in actions if a.order_id})
     for oid in order_ids:
@@ -230,7 +253,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
         except Exception:
             logger.warning("Failed to fetch order %s", oid, exc_info=True)
 
-    lines = ["=== Trade Journal ==="]
+    lines = []
     for a in reversed(actions):  # chronological order
         ts = a.created_at.strftime("%m-%d %H:%M")
         line = f"[{ts}] {a.action}"
@@ -240,7 +263,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
             od = order_details[a.order_id]
             if od.price:
                 line += f" @ {od.price:.2f}"
-            if od.fee:
+            if od.fee is not None:
                 line += f", fee={od.fee:.4f}"
             line += f" [{od.status}]"
         if a.pnl is not None:
@@ -248,4 +271,6 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
         if a.reasoning:
             line += f"\n  Reasoning: {a.reasoning}"
         lines.append(line)
-    return "\n".join(lines)
+
+    sections.append("=== Trade Journal ===\n" + "\n".join(lines))
+    return "\n\n".join(sections)

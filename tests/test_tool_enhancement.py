@@ -505,3 +505,73 @@ async def test_get_account_balance_enhanced():
     assert "Return" in result or "return" in result.lower()
     # Return should be negative
     assert "-0.19%" in result or "-19.00" in result
+
+
+# --- Task 9: get_trade_journal + get_open_orders enhancement ---
+
+async def test_get_trade_journal_with_summary(tmp_path):
+    from src.agent.tools_perception import get_trade_journal
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session, TradeAction
+    from src.services.metrics import MetricsService
+
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t9.db")
+    async with get_session(engine) as session:
+        session.add(Session(id="t9", name="test-journal", initial_balance=10000.0))
+        session.add(TradeAction(
+            session_id="t9", action="order_filled", order_id="o1",
+            symbol="BTC/USDT:USDT", side="long", pnl=30.0, fee=0.5,
+            reasoning="test fill",
+        ))
+        session.add(TradeAction(
+            session_id="t9", action="order_filled", order_id="o2",
+            symbol="BTC/USDT:USDT", side="long", pnl=-10.0, fee=0.3,
+            reasoning="test fill 2",
+        ))
+        await session.commit()
+
+    deps = _make_deps()
+    deps.db_engine = engine
+    deps.session_id = "t9"
+    deps.metrics = MetricsService(engine=engine, session_id="t9", initial_balance=10000.0)
+    deps.exchange.fetch_order = AsyncMock(return_value=Order(
+        "o1", "BTC/USDT:USDT", "buy", "market", 0.01, 65000.0, "closed", fee=0.5,
+    ))
+
+    result = await get_trade_journal(deps)
+    # Should have Performance Summary section before Trade Journal
+    assert "=== Performance Summary ===" in result
+    assert "Win:" in result
+    assert "=== Trade Journal ===" in result
+    await engine.dispose()
+
+
+async def test_get_trade_journal_empty(tmp_path):
+    from src.agent.tools_perception import get_trade_journal
+
+    deps = _make_deps()
+    deps.db_engine = None
+
+    result = await get_trade_journal(deps)
+    assert "No trade journal" in result
+
+
+async def test_get_open_orders_with_distance():
+    from src.agent.tools_perception import get_open_orders
+
+    deps = _make_deps()
+    deps.market_data.get_ticker.return_value = Ticker(
+        "BTC/USDT:USDT", 74761.0, 74760.0, 74762.0, 75200.0, 73800.0, 100.0, 1000,
+    )
+    deps.exchange.fetch_open_orders.return_value = [
+        Order("o1", "BTC/USDT:USDT", "sell", "stop", 0.001, 72500.0, "open"),
+        Order("o2", "BTC/USDT:USDT", "sell", "take_profit", 0.001, 79200.0, "open"),
+        Order("o3", "BTC/USDT:USDT", "buy", "limit", 0.001, 72000.0, "open"),
+        Order("o4", "BTC/USDT:USDT", "buy", "market", 0.001, None, "open"),
+    ]
+
+    result = await get_open_orders(deps)
+    # Stop and TP should show distance
+    assert "% from current" in result or "from current" in result
+    # Market order should show "market price" without distance
+    assert "market price" in result
