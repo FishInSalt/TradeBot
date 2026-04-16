@@ -130,10 +130,10 @@ Agent Tool (thin wrapper)
 
 | 项目 | 详情 |
 |------|------|
-| 方法 | `fetch_funding_rate(symbol)`, `fetch_open_interest(symbol)`, `fetch_long_short_ratio(symbol, timeframe)` |
+| 方法 | `fetch_funding_rate(symbol)`, `fetch_open_interest(symbol)`, `fetch_long_short_ratio_history(symbol, timeframe, since, limit)` |
 | 认证 | 无需认证（公开市场数据端点） |
-| 数据 | funding rate（当前费率 + 下次结算时间）、OI（全市场持仓量）、多空比（底层调 `/api/v5/rubik/stat/contracts/long-short-account-ratio`） |
-| 注意 | `fetch_funding_rate()` 仅返回当前费率，不含历史均值（v1 不做历史均值）。`fetch_long_short_ratio()` 的底层 OKX API 需要 `period` 参数，ccxt 映射为 `timeframe`；实现层固定传 `"5m"` 作为默认值，不暴露到 BaseExchange 抽象方法中 |
+| 数据 | funding rate（当前费率 + 下次结算时间）、OI（全市场持仓量）、多空比（底层调 `/api/v5/rubik/stat/contracts/long-short-account-ratio-contract`） |
+| 注意 | ccxt OKX 的 `has.fetchLongShortRatio` 为 `False`，不支持单条查询；需使用 `fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条。`fetch_funding_rate()` 仅返回当前费率，不含历史均值（v1 不做历史均值）。ccxt 返回的 `longShortRatio` 仅为比值（如 0.94），`long_ratio` / `short_ratio` 需在实现层推算：`long_ratio = ratio / (1 + ratio)`，`short_ratio = 1 / (1 + ratio)` |
 | **稳定性** | **高** — 官方交易所 API 的标准封装，ccxt 库活跃维护 |
 
 ### 2.6 未选方案及理由
@@ -276,7 +276,7 @@ async def get_derivatives_data(
 **设计决策：** derivatives 数据是全市场公开数据（无需 API key），不是账户数据。无论使用 SimulatedExchange 还是 OKXExchange，都直接从 OKX 获取真实数据。
 
 **实现方式：** 与 `get_market_data` 走完全相同的数据路径——通过 BaseExchange 抽象层：
-- `BaseExchange` 新增 `fetch_funding_rate()` / `fetch_open_interest()` / `fetch_long_short_ratio()` 三个抽象方法
+- `BaseExchange` 新增 `fetch_funding_rate()` / `fetch_open_interest()` / `fetch_long_short_ratio()` 三个抽象方法（`fetch_long_short_ratio` 保持简洁接口，实现层内部调用 ccxt 的 `fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条）
 - `OKXExchange` 用已有的 `self._client`（ccxt）实现
 - `SimulatedExchange` 用已有的 `self._ccxt`（ccxt.pro）实现——和它的 `fetch_ohlcv()` 一样，读的是真实市场数据
 - `MarketDataService` 通过 `self._exchange` 调用，和 `get_ticker()` / `get_ohlcv_dataframe()` 一致
@@ -312,10 +312,11 @@ Long/Short Ratio: 1.35 (57.4% long / 42.6% short)
 
 ## 4. 数据模型
 
-统一的 Pydantic 基类，不做持久化存储，仅规范内存中的数据结构：
+统一的 dataclass，不做持久化存储，仅规范内存中的数据结构。使用 `@dataclass` 而非 `BaseModel`，与代码库中所有 DTO（Ticker, Candle, Order, Balance, Position 等）风格一致（`BaseModel` 仅用于配置类）：
 
 ```python
-class InformationEvent(BaseModel):
+@dataclass
+class InformationEvent:
     timestamp: datetime
     source: str           # "cryptopanic" / "alternative_me" / "okx" / "forexfactory"
     category: str         # "news" / "fgi" / "announcement" / "macro_event"
@@ -323,10 +324,8 @@ class InformationEvent(BaseModel):
     title: str
     content: str = ""
     url: str = ""
-    symbols: list[str] = []
+    symbols: list[str] = field(default_factory=list)
 ```
-
-`importance` 使用 `Literal` 类型，与项目现有风格一致（如 `PersonaConfig.personality` 使用 `Literal["conservative", "moderate", "aggressive"]`）。
 
 后续加新数据源只需新增采集器，不需要改数据结构。
 
@@ -408,9 +407,9 @@ class OpenInterest:
 @dataclass
 class LongShortRatio:
     symbol: str
-    long_short_ratio: float   # e.g. 1.35
-    long_ratio: float         # e.g. 0.574 (做多账户占比, 0.0-1.0)
-    short_ratio: float        # e.g. 0.426 (做空账户占比, 0.0-1.0)
+    long_short_ratio: float   # API 原始值, e.g. 1.35
+    long_ratio: float         # 衍生计算: ratio / (1 + ratio), e.g. 0.574
+    short_ratio: float        # 衍生计算: 1 / (1 + ratio), e.g. 0.426
     timestamp: int
 
 class BaseExchange(ABC):
@@ -496,12 +495,12 @@ class Settings(BaseModel):
 **`src/integrations/exchange/okx.py`：**
 - 实现 `fetch_funding_rate()` — 调用 `self._client.fetch_funding_rate()`
 - 实现 `fetch_open_interest()` — 调用 `self._client.fetch_open_interest()`
-- 实现 `fetch_long_short_ratio()` — 调用 `self._client.fetch_long_short_ratio()`
+- 实现 `fetch_long_short_ratio()` — 内部调用 `self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条，推算 `long_ratio` / `short_ratio`
 
 **`src/integrations/exchange/simulated.py`：**
 - 实现 `fetch_funding_rate()` — 调用 `self._ccxt.fetch_funding_rate()`（与 `fetch_ohlcv` 同路径）
 - 实现 `fetch_open_interest()` — 调用 `self._ccxt.fetch_open_interest()`
-- 实现 `fetch_long_short_ratio()` — 调用 `self._ccxt.fetch_long_short_ratio()`
+- 实现 `fetch_long_short_ratio()` — 内部调用 `self._ccxt.fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条
 
 **`src/integrations/market_data.py`：**
 - 新增 `get_funding_rate()`、`get_open_interest()`、`get_long_short_ratio()` 便捷方法（含 3min TTL 缓存），委托给 `self._exchange`
@@ -543,6 +542,7 @@ get_critical_alerts(lookback_hours?, lookahead_hours?) — Exchange announcement
   - Contract maintenance, parameter changes, delistings = immediate risk
   - FOMC/CPI/NFP within 1h = avoid new entries or reduce size
   - Often returns empty — no alerts is good news
+  - Note: macro calendar covers current week only — Friday evening/weekend may miss next week's early events
   - Output ~100-400 tokens
 
 get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
