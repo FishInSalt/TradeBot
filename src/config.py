@@ -43,7 +43,7 @@ class SchedulerConfig(BaseModel):
 
 
 class LLMBudgetConfig(BaseModel):
-    daily_max_tokens: int = 500000
+    daily_max_tokens: int = 10000000
 
 
 class DatabaseConfig(BaseModel):

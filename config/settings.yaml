@@ -20,7 +20,7 @@ scheduler:
 
 # === LLM Cost Control ===
 llm_budget:
-  daily_max_tokens: 500000     # Max tokens per day across all LLM calls; agent sleeps when exhausted
+  daily_max_tokens: 10000000   # Max tokens per day across all LLM calls; agent sleeps when exhausted
 
 # === Database ===
 database:
