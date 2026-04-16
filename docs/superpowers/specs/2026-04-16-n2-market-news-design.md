@@ -1,5 +1,65 @@
 # N2: 市场信息面工具增强 — 设计文档
 
+## 0. 背景
+
+### 0.1 项目概述
+
+TradeBot 是一个 LLM 驱动的加密货币自动交易系统。Agent（Claude）通过工具调用感知市场、管理仓位、做出交易决策，在 USDT 保证金永续合约上自主交易。
+
+核心运行循环：Agent 每 15 分钟被唤醒一次（也可被订单成交、价格警报等事件提前唤醒），通过工具获取市场数据和账户状态，分析后决定是否操作。
+
+### 0.2 当前架构
+
+**System Prompt 三层结构：**
+- **Layer 1**（身份 + 工具引导）— Agent 是谁、市场上下文（永续合约、单向持仓）、每个工具的使用场景和注意事项
+- **Layer 2**（思维框架）— 通用交易分析维度：市场结构、信号确认、风险回报、仓位管理、自我复盘
+- **Layer 3**（人格 + 策略，均可选）— 注入交易风格（conservative/moderate/aggressive）和策略偏好（trend_following/swing/breakout）
+
+**现有工具（19 个）：**
+
+| 类别 | 工具 | 说明 |
+|------|------|------|
+| 感知（8） | `get_market_data` | K 线 + 技术指标 + ticker（~1000-1200 tokens） |
+| | `get_position` | 当前持仓 + PnL + 清算距离 |
+| | `get_account_balance` | 账户余额 + 收益率 |
+| | `get_open_orders` | 挂单列表 + 与当前价距离 |
+| | `get_trade_journal` | 交易记录 + 绩效摘要 |
+| | `get_memories` | 长期记忆（教训、模式、复盘） |
+| | `get_active_alerts` | 警报配置 |
+| | `get_performance` | 详细绩效统计 |
+| 执行（10） | `open_position`, `close_position`, `set_stop_loss`, `set_take_profit`, `adjust_leverage`, `place_limit_order`, `cancel_order`, `set_price_alert`, `add_price_level_alert`, `set_next_wake` | 订单管理 + 警报 + 唤醒间隔 |
+| 记忆（1） | `save_memory` | 保存经验到长期记忆 |
+
+**服务分层：**
+
+```
+Agent Tool (thin wrapper)
+  → tools_perception.py / tools_execution.py (实现)
+    → MarketDataService (市场数据)    → BaseExchange (抽象层)
+    → MemoryService (记忆)              ├─ OKXExchange (真实交易, ccxt)
+    → MetricsService (绩效)             └─ SimulatedExchange (模拟交易, ccxt.pro 实时行情)
+```
+
+`SimulatedExchange` 模拟的是账户状态（仓位、余额、订单撮合），但使用的市场数据（ticker、K 线）来自真实 OKX 行情。即：模拟交易环境下 Agent 看到的价格是真实的，只是订单不会真的提交到交易所。
+
+**配置体系：**
+- `config/settings.yaml` — 交易所、交易对、模型路由、调度间隔、预算、审批等
+- `config/trader.yaml` — 人格和策略偏好
+- 环境变量 — API key 等敏感信息（通过 `.env` + `load_dotenv` 加载）
+
+### 0.3 为什么做这个迭代
+
+当前 Agent 的**感知能力有一个关键盲区**：它只能看到技术面数据（K 线、指标），完全看不到信息面。这意味着：
+
+- 不知道有重大新闻事件（如监管公告、交易所安全事件），可能在市场恐慌时逆势开仓
+- 不知道 FOMC / CPI 等宏观事件即将发生，可能在高波动窗口贸然操作
+- 做永续合约却看不到 funding rate / OI / 多空比，缺少衍生品交易的核心决策指标
+- 不知道交易所维护停机或合约参数变更，可能做出灾难性决策
+
+这个盲区的优先级排序来自与专业交易员的讨论，按 "Agent 不知道就会犯的错误严重程度" 排列。
+
+---
+
 ## 1. 目标
 
 为交易 Agent 增加三个感知工具，覆盖当前缺失的关键信息维度：
