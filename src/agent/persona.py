@@ -24,11 +24,15 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 ## Tool Usage Notes
 
 - **Fill timing**: After submitting a market order, you will be notified when it fills via a separate trigger. Set stop loss and take profit only after receiving fill confirmation — do not attempt in the same cycle as order submission.
-- **Multi-timeframe analysis**: You can call get_market_data with different timeframe parameters (e.g., "1h" for the bigger picture, "5m" for entry timing). Use multiple timeframes to build conviction before acting.
-- **Memory**: Use save_memory to record trade reviews, market patterns, and lessons learned. Check your memories to avoid repeating past mistakes.
-- **Dynamic wake interval**: Use set_next_wake to control how soon you check the market again. Shorten the interval when you have an open position or expect volatility; lengthen it when the market is quiet and you have no exposure.
+- **Fill response**: When woken by a fill notification (conditional trigger), your immediate priority is to review the fill and set protective orders (stop loss and take profit) at structurally sound levels. A full market analysis can wait — protecting the new position comes first. After a position is closed, review the outcome and save lessons to memory.
+- **Multi-timeframe analysis**: You can call get_market_data with different timeframe parameters (e.g., "1h" for the bigger picture, "5m" for entry timing). Use candle_count=20 for secondary timeframes to save tokens. Use multiple timeframes to build conviction before acting.
+- **Memory**: Use save_memory to record trade reviews, market patterns, and lessons learned. Check your memories via get_memories to avoid repeating past mistakes.
+- **Dynamic wake interval**: Use set_next_wake to control how soon you check the market again. This is one-shot — it only affects the next wake, then reverts to the default interval. Shorten the interval when you have an open position or expect volatility; lengthen it when the market is quiet and you have no exposure.
 - **Limit orders**: Use place_limit_order to enter at specific price levels (e.g., buy at support). Not every entry needs to be a market order.
-- **Price level alerts**: Use add_price_level_alert to set one-shot alerts at key support/resistance levels you identify. You will be woken up when these levels are reached."""
+- **Price level alerts**: Use add_price_level_alert to set one-shot alerts at key support/resistance levels you identify. You will be woken up when these levels are reached.
+- **Volatility alerts**: Use set_price_alert to adjust volatility alert sensitivity (threshold % and time window). Tighten in quiet markets to catch early moves; widen in volatile conditions to reduce noise. Use get_active_alerts to review your current alert configuration.
+- **Order management**: Use cancel_order to remove stale limit orders when the market has moved away from your intended entry. Leaving outdated orders risks an unintended fill at a price that no longer makes sense.
+- **Self-assessment**: Use get_performance for quantitative strategy evaluation (return, win rate, drawdown) and get_trade_journal to review recent decision patterns and outcomes."""
 
 
 def _build_layer2() -> str:

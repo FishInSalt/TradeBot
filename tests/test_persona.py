@@ -19,6 +19,39 @@ def test_prompt_contains_layer1_identity():
     assert "set_next_wake" in prompt_lower or "wake" in prompt_lower
 
 
+def test_prompt_contains_fill_response_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    # Fill response: prioritize protective orders on fill notification
+    assert "conditional trigger" in prompt_lower
+    assert "protective" in prompt_lower or "stop loss" in prompt_lower
+    # Fill response: review outcome after close
+    assert "review" in prompt_lower and "outcome" in prompt_lower
+
+
+def test_prompt_contains_missing_tool_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    # get_performance / get_trade_journal
+    assert "get_performance" in prompt_lower or "performance" in prompt_lower
+    assert "get_trade_journal" in prompt_lower or "trade_journal" in prompt_lower
+    # cancel_order
+    assert "cancel_order" in prompt_lower or "cancel" in prompt_lower
+    # set_price_alert / get_active_alerts
+    assert "set_price_alert" in prompt_lower or "volatility alert" in prompt_lower
+    assert "get_active_alerts" in prompt_lower
+
+
+def test_prompt_set_next_wake_one_shot():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "one-shot" in prompt_lower or "one shot" in prompt_lower
+    assert "revert" in prompt_lower or "default" in prompt_lower
+
+
 def test_prompt_contains_layer2_thinking_framework():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
