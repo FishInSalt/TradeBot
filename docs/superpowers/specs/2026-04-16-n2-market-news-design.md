@@ -527,7 +527,7 @@ class Settings(BaseModel):
 - Layer 1 新增三个工具的引导
 
 **`src/cli/wizard.py`：**
-- 在现有 Step 5 之后新增 Step 6：CryptoPanic API key 配置（允许跳过，提示 "Press Enter to skip — Fear & Greed Index still works without it"）
+- 在现有 Step 5 之后新增 Step 6：CryptoPanic API key 配置（允许跳过，跳过时提示 "News headlines disabled, Fear & Greed Index still available"）
 - 启动时校验已有 key：超时重试、429 视为有效、401/403 重新引导
 
 ### 5.5 币种提取
@@ -556,7 +556,7 @@ get_market_news(news_filter?) — Get crypto news headlines + Fear & Greed Index
   - Output ~500-700 tokens
 
 get_critical_alerts(lookback_hours?, lookahead_hours?) — Exchange announcements + upcoming macro events.
-  - CHECK BEFORE opening any new position
+  - Valuable to check before opening positions — helps avoid trading into known risk events
   - Contract maintenance, parameter changes, delistings = immediate risk
   - FOMC/CPI/NFP within 1h = avoid new entries or reduce size
   - Often returns empty — no alerts is good news
