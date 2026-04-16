@@ -114,13 +114,14 @@ Agent Tool (thin wrapper)
 | 免费额度 | 每 5 分钟 2 次请求 |
 | 响应格式 | JSON 数组，含 `title`, `country`, `date`, `impact`(High/Medium/Low), `forecast`, `previous` |
 | 覆盖范围 | 当周所有经济事件：FOMC、CPI、NFP、PPI、GDP 等 |
+| 已知限制 | 仅包含当前一周数据。周五晚间 `lookahead_hours=12` 可能跨入下周，但数据中无下周事件，存在假阴性风险（如漏掉下周一/二的 FOMC）。实际影响有限——高影响力经济事件不在周末发生，且 Agent 下一个工作日会自动获取新一周数据 |
 | **稳定性** | **中低** — 非官方 feed，无文档/SLA，可能随时改格式。但已稳定运行多年，被众多开源项目使用 |
 
 ### 2.4 OKX 公告 API
 
 | 项目 | 详情 |
 |------|------|
-| 端点 | 具体端点待实现时调研确认（OKX 公开 REST API，非 ccxt 封装） |
+| 端点 | 候选：`GET /api/v5/support/announcements` 或 `GET /api/v5/public/announcements`（实现时调研确认） |
 | 认证 | 无需认证（公开端点） |
 | 内容 | 合约参数变更、维护停机、上下币公告等 |
 | **稳定性** | **中** — 非标准化，OKX 可能改版。返回内容含营销/运营混杂，需过滤 |
@@ -129,10 +130,10 @@ Agent Tool (thin wrapper)
 
 | 项目 | 详情 |
 |------|------|
-| 方法 | `fetch_funding_rate(symbol)`, `fetch_open_interest(symbol)`, `fetch_long_short_ratio(symbol)` |
+| 方法 | `fetch_funding_rate(symbol)`, `fetch_open_interest(symbol)`, `fetch_long_short_ratio(symbol, timeframe)` |
 | 认证 | 无需认证（公开市场数据端点） |
 | 数据 | funding rate（当前费率 + 下次结算时间）、OI（全市场持仓量）、多空比（底层调 `/api/v5/rubik/stat/contracts/long-short-account-ratio`） |
-| 注意 | `fetch_funding_rate()` 仅返回当前费率，不含历史均值。计算 8h 均值需额外调用 `fetch_funding_rate_history()`，v1 不做 |
+| 注意 | `fetch_funding_rate()` 仅返回当前费率，不含历史均值（v1 不做历史均值）。`fetch_long_short_ratio()` 的底层 OKX API 需要 `period` 参数，ccxt 映射为 `timeframe`；实现层固定传 `"5m"` 作为默认值，不暴露到 BaseExchange 抽象方法中 |
 | **稳定性** | **高** — 官方交易所 API 的标准封装，ccxt 库活跃维护 |
 
 ### 2.6 未选方案及理由
@@ -318,12 +319,14 @@ class InformationEvent(BaseModel):
     timestamp: datetime
     source: str           # "cryptopanic" / "alternative_me" / "okx" / "forexfactory"
     category: str         # "news" / "fgi" / "announcement" / "macro_event"
-    importance: str       # "low" / "medium" / "high"
+    importance: Literal["low", "medium", "high"]
     title: str
     content: str = ""
     url: str = ""
     symbols: list[str] = []
 ```
+
+`importance` 使用 `Literal` 类型，与项目现有风格一致（如 `PersonaConfig.personality` 使用 `Literal["conservative", "moderate", "aggressive"]`）。
 
 后续加新数据源只需新增采集器，不需要改数据结构。
 
@@ -406,8 +409,8 @@ class OpenInterest:
 class LongShortRatio:
     symbol: str
     long_short_ratio: float   # e.g. 1.35
-    long_account: float       # e.g. 0.574
-    short_account: float      # e.g. 0.426
+    long_ratio: float         # e.g. 0.574 (做多账户占比, 0.0-1.0)
+    short_ratio: float        # e.g. 0.426 (做空账户占比, 0.0-1.0)
     timestamp: int
 
 class BaseExchange(ABC):
@@ -427,15 +430,24 @@ class MarketDataService:
     # 现有方法（不变）...
 
     # 新增：衍生品数据（缓存 TTL 3min，cache key = symbol）
+    # 缓存结构与 NewsService 统一：_cache: dict[str, tuple[data, float, float]]
+    # 存储 (data, created_at, ttl)，429 时将 ttl 覆盖为 1800s
+    _derivatives_cache: dict[str, tuple[Any, float, float]] = field(default_factory=dict)
+
     async def get_funding_rate(self, symbol: str) -> FundingRate:
-        return await self._exchange.fetch_funding_rate(symbol)
+        return await self._cached_fetch("funding:" + symbol, 180,
+            lambda: self._exchange.fetch_funding_rate(symbol))
 
     async def get_open_interest(self, symbol: str) -> OpenInterest:
-        return await self._exchange.fetch_open_interest(symbol)
+        return await self._cached_fetch("oi:" + symbol, 180,
+            lambda: self._exchange.fetch_open_interest(symbol))
 
     async def get_long_short_ratio(self, symbol: str) -> LongShortRatio:
-        return await self._exchange.fetch_long_short_ratio(symbol)
+        return await self._cached_fetch("lsr:" + symbol, 180,
+            lambda: self._exchange.fetch_long_short_ratio(symbol))
 ```
+
+注意：当前 `MarketDataService` 是纯透传（25 行），加入缓存是引入新的架构模式。缓存实现采用与 `NewsService` 相同的 `(data, created_at, ttl)` 三元组结构，通过统一的 `_cached_fetch()` 辅助方法处理 TTL 判断和 429 延长逻辑。
 
 数据路径与 `get_market_data` 完全一致（ccxt Python 全部使用 snake_case）：
 ```
@@ -494,6 +506,10 @@ class Settings(BaseModel):
 
 **`src/agent/persona.py`：**
 - Layer 1 新增三个工具的引导
+
+**`src/cli/wizard.py`：**
+- 新增 CryptoPanic API key 配置步骤（允许跳过）
+- 启动时校验已有 key：超时重试、429 视为有效、401/403 重新引导
 
 ### 5.5 币种提取
 
@@ -591,6 +607,10 @@ tests/test_news_service.py
   - test_news_cache_hit                     # 缓存命中
   - test_news_cache_expired                 # 缓存过期刷新
   - test_fgi_cache_ttl                      # 6h TTL
+  # 限流保护
+  - test_rate_limit_429_extends_ttl         # 收到 429 后 TTL 延长至 30min
+  - test_rate_limit_429_uses_stale_cache    # 429 时继续使用上次缓存数据
+  - test_rate_limit_429_recovery            # 30min 后恢复正常 TTL
   # 降级
   - test_graceful_degradation_partial       # 单个 API 失败 → 其余正常
   - test_graceful_degradation_total         # 全部失败 → 降级消息
@@ -603,6 +623,9 @@ tests/test_news_service.py
 tests/test_derivatives_data.py
   - test_funding_rate_format                # 格式化输出
   - test_open_interest_format               # 格式化输出
+  - test_long_short_ratio_format            # 格式化输出
+  - test_derivatives_cache_hit              # 3min TTL 缓存命中
+  - test_derivatives_cache_by_symbol        # 不同 symbol 独立缓存
   - test_derivatives_api_failure            # API 失败 → 降级消息
 
 tests/test_config.py（扩展）
