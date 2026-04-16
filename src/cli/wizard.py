@@ -325,13 +325,6 @@ def _show_summary(data: dict, console: Console) -> bool:
     personality_display = p.personality or "auto"
     style_display = p.trading_style.replace("_", " ") if p.trading_style else "auto"
     table.add_row("Persona", f"{personality_display} / {style_display}")
-    # Risk Params row removed — numerical params not used in MVP stage.
-    # Uncomment when implementing P3 (hard risk controls) for live trading.
-    # table.add_row(
-    #     "Risk Params",
-    #     f"pos {p.max_position_pct:.0f}% / {p.preferred_leverage}x / "
-    #     f"SL {p.stop_loss_pct:.0f}% / TP {p.take_profit_pct:.0f}%",
-    # )
 
     console.print()
     console.print(table)
