@@ -99,13 +99,21 @@ async def get_market_news(
 ) -> str:
     """Get recent crypto news headlines and market sentiment.
     filter: 'rising' (trending), 'bullish', 'bearish', 'important'. Default: no filter (latest).
-    Returns top headlines for the trading symbol + Fear & Greed Index.
-    Output ~300-500 tokens."""
+    Returns 10 headlines (5 symbol-specific + 5 general crypto) + Fear & Greed Index.
+    Output ~500-700 tokens."""
 ```
 
 **参数：**
 - `filter`（可选）：CryptoPanic 过滤器 — `rising|bullish|bearish|important|hot`。默认：最新新闻。
 - 币种从 `deps.symbol` 自动提取（如 `BTC/USDT:USDT` → `BTC`）。
+
+**新闻范围：10 条 = 5 币种相关 + 5 通用**
+
+单次 API 调用不带 `currencies` 过滤、`limit=20`，返回后在本地按是否包含交易币种分为两组，各取 top 5。好处：
+- 只用 1 次 API 调用（节省 CryptoPanic 配额）
+- 币种相关新闻确保 Agent 不漏关键事件
+- 通用新闻捕捉宏观事件（如监管政策、市场恐慌）
+- 如果币种相关不足 5 条，用通用新闻补齐
 
 **为何 FGI 搭车而非独立工具：**
 - FGI 仅 ~20 tokens，附带成本可忽略
@@ -119,26 +127,40 @@ async def get_market_news(
 Value: 23 / 100 — Extreme Fear
 (Updated: 2026-04-16)
 
-=== Market News (BTC, latest 5) ===
+=== Symbol News (BTC, 5) ===
 [2026-04-16 14:30] SEC Approves New Bitcoin ETF Options Trading
   Source: CoinDesk | Currencies: BTC
 
 [2026-04-16 13:15] Bitcoin Breaks $90K as Institutional Inflows Surge
   Source: CoinTelegraph | Currencies: BTC, ETH
 
-[2026-04-16 12:00] OKX Lists New Perpetual Contracts for SOL and AVAX
-  Source: The Block | Currencies: SOL, AVAX
-
-[2026-04-16 10:45] Federal Reserve Signals Rate Cut Timeline
-  Source: Reuters | Currencies: BTC, ETH
-
-[2026-04-16 09:30] Major Bitcoin Mining Difficulty Adjustment Coming
+[2026-04-16 12:00] Major Bitcoin Mining Difficulty Adjustment Coming
   Source: Decrypt | Currencies: BTC
 
-5 headlines shown. Full articles: https://cryptopanic.com/news/btc/
+[2026-04-16 11:00] MicroStrategy Adds 5,000 BTC to Holdings
+  Source: Bloomberg | Currencies: BTC
+
+[2026-04-16 10:00] Bitcoin Hash Rate Hits All-Time High
+  Source: The Block | Currencies: BTC
+
+=== General Crypto News (5) ===
+[2026-04-16 12:30] Federal Reserve Signals Rate Cut Timeline
+  Source: Reuters | Currencies: BTC, ETH
+
+[2026-04-16 11:45] EU Passes Comprehensive Crypto Regulation Framework
+  Source: CoinDesk | Currencies: —
+
+[2026-04-16 10:30] Tether Mints $1B USDT on Ethereum
+  Source: Whale Alert | Currencies: USDT, ETH
+
+[2026-04-16 09:00] Binance Announces Fee Restructuring for Futures
+  Source: CoinTelegraph | Currencies: BNB
+
+[2026-04-16 08:00] South Korea Central Bank Explores CBDC Pilot
+  Source: CryptoSlate | Currencies: —
 ```
 
-**Token 估算：** ~300-500 tokens
+**Token 估算：** ~500-700 tokens（10 条标题各 ~50 tokens + FGI ~30 tokens + 标题/页脚 ~70 tokens）
 
 ### 3.2 `get_critical_alerts` — 交易所公告 + 宏观事件
 
@@ -378,11 +400,12 @@ Layer 1（工具引导段）新增：
 
 ```
 get_market_news(filter?) — Get crypto news headlines + Fear & Greed Index.
+  - Returns 10 headlines: 5 for your symbol + 5 general crypto news
   - Use for macro context and market narrative
   - filter: 'rising', 'bullish', 'bearish', 'important' (optional)
   - Fear & Greed extremes (< 20 or > 80) suggest increased caution
   - News confirms or challenges your technical read — never trade on headlines alone
-  - Output ~300-500 tokens
+  - Output ~500-700 tokens
 
 get_critical_alerts(lookback_hours?, lookahead_hours?) — Exchange announcements + upcoming macro events.
   - CHECK BEFORE opening any new position
@@ -406,7 +429,7 @@ get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
 
 | 工具 | 输出 tokens | 对比 |
 |------|------------|------|
-| `get_market_news` | ~300-500 | `get_market_data` ~1000-1200 |
+| `get_market_news` | ~500-700 | `get_market_data` ~1000-1200 |
 | `get_critical_alerts` | ~100-400 | 大部分时候 < 100（空结果） |
 | `get_derivatives_data` | ~150-250 | 最紧凑 |
 
@@ -414,22 +437,22 @@ get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
 
 | 场景 | market_news | critical_alerts | derivatives | 总计 |
 |------|------------|----------------|-------------|------|
-| 典型（各 50% cycle） | 19,200 | 4,800 | 12,000 | ~36,000 |
-| 最差（每 cycle 全调） | 38,400 | 19,200 | 24,000 | ~81,600 |
+| 典型（各 50% cycle） | 28,800 | 4,800 | 12,000 | ~45,600 |
+| 最差（每 cycle 全调） | 57,600 | 19,200 | 24,000 | ~100,800 |
 
-最差情况也不到 1M token 每日预算的 8%，成本可控。
+最差情况约 1M token 每日预算的 10%，成本可控。
 
 ### API 调用量：
 
 | 数据源 | 每日调用量 | 限额 |
 |--------|----------|------|
-| CryptoPanic | 48-96 tool calls（5min 缓存，但 cache key 含 filter，不同 filter 不命中，实际 API 调用可能达 ~100-150） | ~200/day |
+| CryptoPanic | 48-96 tool calls（5min 缓存，单次调用不带 currencies 过滤取 20 条本地分组，cache key 仅含 filter，实际 API 调用 ~20-50） | ~200/day |
 | FGI | 4（6h 缓存） | 无限制 |
 | ForexFactory | 1-4（6h 缓存） | 2 req/5min |
 | OKX 公告 | 48-144（10min 缓存） | 无限制 |
 | ccxt funding/OI | 48-96 | 交易所 API 标准限额 |
 
-**注意：** CryptoPanic 缓存 key 包含 `symbol + filter`，Agent 若在不同 cycle 使用不同 filter 值（如交替用 `rising` 和 `bullish`），缓存命中率会下降。实际 API 调用量可能接近免费额度上限（~200/day），但 15 分钟 cycle 间隔下典型场景仍在安全范围内。
+**注意：** 采用单次 API 调用（不带 `currencies` 过滤、`limit=20`）+ 本地分组方案后，缓存 key 仅含 `filter`（不含 symbol），缓存命中率大幅提高。15 分钟 cycle + 5 分钟缓存 TTL 下，实际 API 调用量远低于免费额度。
 
 ---
 
@@ -498,17 +521,20 @@ tests/test_config.py（扩展）
 
 ---
 
-## 10. 待审阅的开放问题
+## 10. 设计决定（已确认）
 
-1. **标题数量**：默认每次返回 5 条新闻标题 — 太少还是太多？每条增加约 50 tokens。
+1. **标题数量 + 新闻范围**：返回 10 条标题 — 5 条与交易币种相关 + 5 条通用加密货币新闻。单次 API 调用不带 `currencies` 过滤、`limit=20`，本地按是否包含交易币种分组，各取 top 5。币种相关不足 5 条时用通用新闻补齐。
 
-2. **新闻范围**：当前仅按交易币种过滤（如只看 BTC 新闻）。是否应同时包含通用加密货币新闻（不限币种），以捕捉宏观事件？
+2. **Wizard 集成**：初次配置时 wizard 引导用户设置 CryptoPanic API key，允许跳过（FGI 无需 key 仍可工作）。后续启动时检测 key 是否已配置并测试可用性：
+   - 超时 → 重试
+   - HTTP 429（配额耗尽）→ 视为 key 有效但暂时不可用，正常启动
+   - 其他错误（401/403）→ 判定为无效 key，引导用户重新配置
 
-3. **Wizard 集成**：`src/cli/wizard.py` 是否应在初始配置时引导用户设置 CryptoPanic API key？还是仅在文档中标注为可选项？
+3. **宏观日历降级**：ForexFactory feed 是非官方源，如果下线，接受功能暂时不可用。工具返回 "macro calendar unavailable"，Agent 退回到技术分析。不投入备选源（如 FMP）。
 
-4. **宏观日历的降级方案**：ForexFactory feed 是非官方源，如果下线，是否需要一个备选（如 FMP）？还是接受该功能暂时不可用？
-
-5. **OKX 公告过滤规则**：如何区分"合约参数变更"等关键公告和"新品上线活动"等营销内容？需要关键词过滤还是按公告类型分类？
+4. **OKX 公告过滤**：自维护过滤逻辑，只保留对 Agent 决策有影响的公告。实现时调研 OKX 公告 API 返回结构，据此设计过滤规则：
+   - **保留**：合约参数变更、维护停机、下币通知、funding rate 调整、涉及交易币种的重大变更
+   - **过滤掉**：营销活动、返佣推广、新品上线（除非涉及交易币种）、社区活动
 
 ## 11. API 稳定性总评
 
