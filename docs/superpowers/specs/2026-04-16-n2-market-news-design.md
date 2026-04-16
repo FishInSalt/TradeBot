@@ -236,8 +236,7 @@ async def get_critical_alerts(
     """Get critical alerts: exchange announcements and upcoming macro events.
     lookback_hours: how far back to check announcements (default 24h).
     lookahead_hours: how far ahead to check macro events (default 12h).
-    Use before opening positions to check for risks.
-    Output ~100-400 tokens (often empty — no news is good news)."""
+    Output ~100-400 tokens (often empty when no relevant events are scheduled)."""
 ```
 
 **参数：**
@@ -270,7 +269,6 @@ async def get_derivatives_data(
 ) -> str:
     """Get derivatives market data: funding rate, open interest, long/short ratio.
     When symbol is None, uses deps.symbol (the currently traded pair).
-    Essential for perpetual contract trading decisions.
     Output ~150-250 tokens."""
 ```
 
@@ -290,7 +288,7 @@ async def get_derivatives_data(
 ```
 === Derivatives Data (ETH/USDT:USDT) ===
 Funding Rate: +0.0125% (next settlement in 3h 42m)
-  Positive rate — longs pay shorts (bullish bias)
+  Positive rate — longs pay shorts
 Open Interest: $4.82B
 Long/Short Ratio: 1.35 (57.4% long / 42.6% short)
 ```
@@ -303,9 +301,9 @@ Long/Short Ratio: 1.35 (57.4% long / 42.6% short)
 
 | 故障场景 | 行为 |
 |---------|------|
-| `deps.news` 为 None（NewsService 未初始化） | `get_market_news` / `get_critical_alerts` 返回 "News service not configured, rely on technical analysis"。`get_derivatives_data` 不受影响（走 MarketDataService/BaseExchange 路径） |
+| `deps.news` 为 None（NewsService 未初始化） | `get_market_news` / `get_critical_alerts` 返回 "News service not configured"。`get_derivatives_data` 不受影响（走 MarketDataService/BaseExchange 路径） |
 | 某个 API 不可用 / 超时 | 该部分返回 "temporarily unavailable"，其余部分正常返回 |
-| 全部 API 不可用 | 返回 "services currently unavailable, rely on technical analysis" |
+| 全部 API 不可用 | 返回 "News services currently unavailable" |
 | 未配置 API key（CryptoPanic）| 仅返回 FGI + 提示配置 |
 | 网络超时 | 每个 API 调用 5 秒超时，快速失败 |
 | ForexFactory feed 格式变更 | 返回 "macro calendar unavailable"，不影响其他功能 |
@@ -567,9 +565,9 @@ get_market_news(news_filter?) — Get crypto news headlines + Fear & Greed Index
   - Output ~500-700 tokens
 
 get_critical_alerts(lookback_hours?, lookahead_hours?) — Exchange announcements + upcoming macro events.
-  - Valuable to check before opening positions — helps avoid trading into known risk events
+  - Returns events in lookback_hours past / lookahead_hours future windows
   - Shows: contract maintenance, parameter changes, delistings, upcoming FOMC/CPI/NFP with impact level
-  - Often returns empty — no alerts is good news
+  - Often returns empty when no relevant events are scheduled in the window
   - Note: macro calendar covers current week only — Friday evening/weekend may miss next week's early events
   - Output ~100-400 tokens
 
@@ -642,8 +640,12 @@ tests/test_news_service.py
   - test_fgi_cache_ttl                      # 6h TTL
   # 限流保护
   - test_rate_limit_429_extends_ttl         # 收到 429 后 TTL 延长至 30min
-  - test_rate_limit_429_uses_stale_cache    # 429 时继续使用上次缓存数据
+  - test_rate_limit_429_uses_stale_cache    # 429 时复用相同 filter 的过期缓存
+  - test_rate_limit_429_no_cross_filter     # 请求 "bullish" 但只有 "rising" 缓存 → 降级消息
+  - test_rate_limit_429_no_cache_degrades   # 首次 429 且无缓存 → 降级消息
   - test_rate_limit_429_recovery            # 30min 后恢复正常 TTL
+  - test_daily_quota_cap                    # 计数器达 180 后复用同 filter 缓存
+  - test_daily_quota_reset                  # 日期变化后计数器重置
   # 降级
   - test_graceful_degradation_partial       # 单个 API 失败 → 其余正常
   - test_graceful_degradation_total         # 全部失败 → 降级消息
