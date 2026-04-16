@@ -268,10 +268,12 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
     """Step 5: Persona configuration."""
     console.print("\n[bold]Step 5: Persona[/]")
     p = trader_defaults.persona
-    risk = Prompt.ask(
-        "  Personality", choices=["conservative", "moderate", "aggressive"],
-        default=p.risk_tolerance, console=console,
+    personality_default = p.personality if p.personality is not None else "auto"
+    personality_raw = Prompt.ask(
+        "  Personality", choices=["conservative", "moderate", "aggressive", "auto"],
+        default=personality_default, console=console,
     )
+    personality = None if personality_raw == "auto" else personality_raw
     style_default = p.trading_style if p.trading_style is not None else "auto"
     style_raw = Prompt.ask(
         "  Strategy", choices=["trend_following", "swing", "breakout", "auto"],
@@ -279,7 +281,7 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
     )
     style = None if style_raw == "auto" else style_raw
     persona = PersonaConfig(
-        risk_tolerance=risk,
+        personality=personality,
         trading_style=style,
     )
     return {"persona": persona}
@@ -320,8 +322,9 @@ def _show_summary(data: dict, console: Console) -> bool:
     table.add_row("Budget", f"{data['token_budget']:,} tokens/day")
 
     p = data["persona"]
+    personality_display = p.personality or "auto"
     style_display = p.trading_style.replace("_", " ") if p.trading_style else "auto"
-    table.add_row("Persona", f"{p.risk_tolerance} / {style_display}")
+    table.add_row("Persona", f"{personality_display} / {style_display}")
     # Risk Params row removed — numerical params not used in MVP stage.
     # Uncomment when implementing P3 (hard risk controls) for live trading.
     # table.add_row(

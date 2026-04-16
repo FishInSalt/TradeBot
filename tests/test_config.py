@@ -50,7 +50,7 @@ def test_load_trader_config(tmp_path: Path):
     trader_file = tmp_path / "trader.yaml"
     trader_file.write_text("""
 persona:
-  risk_tolerance: aggressive
+  personality: aggressive
   trading_style: swing
   position_sizing: percentage
   max_position_pct: 50
@@ -60,38 +60,22 @@ persona:
 """)
     from src.config import load_trader_config
     config = load_trader_config(trader_file)
-    assert config.persona.risk_tolerance == "aggressive"
+    assert config.persona.personality == "aggressive"
     assert config.persona.trading_style == "swing"
     assert config.persona.preferred_leverage == 5
 
 
-def test_load_trader_config_no_trading_style(tmp_path: Path):
-    """trading_style omitted should default to None."""
+def test_load_trader_config_both_optional(tmp_path: Path):
+    """personality and trading_style omitted should both default to None."""
     trader_file = tmp_path / "trader.yaml"
     trader_file.write_text("""
 persona:
-  risk_tolerance: moderate
+  position_sizing: percentage
 """)
     from src.config import load_trader_config
     config = load_trader_config(trader_file)
-    assert config.persona.risk_tolerance == "moderate"
+    assert config.persona.personality is None
     assert config.persona.trading_style is None
-
-
-def test_persona_config_backward_compat_from_json():
-    """Old DB snapshots with explicit trading_style should deserialize correctly."""
-    import json
-    from src.config import PersonaConfig
-    # Simulate an old-format DB record (pre-N1: trading_style was always set)
-    old_json = '{"risk_tolerance": "aggressive", "trading_style": "trend_following", "position_sizing": "percentage", "max_position_pct": 30.0, "preferred_leverage": 3, "stop_loss_pct": 3.0, "take_profit_pct": 6.0}'
-    config = PersonaConfig(**json.loads(old_json))
-    assert config.risk_tolerance == "aggressive"
-    assert config.trading_style == "trend_following"
-
-    # New-format record (trading_style omitted or null)
-    new_json = '{"risk_tolerance": "moderate"}'
-    config2 = PersonaConfig(**json.loads(new_json))
-    assert config2.trading_style is None
 
 
 def test_settings_missing_env_keys_uses_empty(tmp_path: Path):

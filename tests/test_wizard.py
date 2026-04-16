@@ -231,12 +231,12 @@ def test_step_risk_alerts_off(mock_confirm, mock_int):
 
 # --- Step 5: Persona ---
 
-@patch("src.cli.wizard.Prompt.ask", side_effect=["moderate", "auto"])
+@patch("src.cli.wizard.Prompt.ask", side_effect=["auto", "auto"])
 def test_step_persona_defaults(mock_prompt):
     from src.cli.wizard import _step_persona
     result = _step_persona(TraderConfig(), Console())
     p = result["persona"]
-    assert p.risk_tolerance == "moderate"
+    assert p.personality is None  # "auto" maps to None
     assert p.trading_style is None  # "auto" maps to None
     # Numerical params use code defaults (not asked in wizard)
     assert p.max_position_pct == 30.0
@@ -248,18 +248,28 @@ def test_step_persona_custom(mock_prompt):
     from src.cli.wizard import _step_persona
     result = _step_persona(TraderConfig(), Console())
     p = result["persona"]
-    assert p.risk_tolerance == "aggressive"
+    assert p.personality == "aggressive"
     assert p.trading_style == "breakout"
 
 
 @patch("src.cli.wizard.Prompt.ask", side_effect=["conservative", "auto"])
-def test_step_persona_auto_strategy(mock_prompt):
-    """Selecting 'auto' for strategy should set trading_style to None."""
+def test_step_persona_personality_only(mock_prompt):
+    """Personality set, strategy auto — trading_style should be None."""
     from src.cli.wizard import _step_persona
     result = _step_persona(TraderConfig(), Console())
     p = result["persona"]
-    assert p.risk_tolerance == "conservative"
+    assert p.personality == "conservative"
     assert p.trading_style is None
+
+
+@patch("src.cli.wizard.Prompt.ask", side_effect=["auto", "swing"])
+def test_step_persona_strategy_only(mock_prompt):
+    """Personality auto, strategy set — personality should be None."""
+    from src.cli.wizard import _step_persona
+    result = _step_persona(TraderConfig(), Console())
+    p = result["persona"]
+    assert p.personality is None
+    assert p.trading_style == "swing"
 
 
 # --- Session naming ---
@@ -344,7 +354,7 @@ async def test_run_wizard_full_flow(tmp_path):
     assert result.session_name == "BTC sim"
     assert result.model_config.id == "claude"
     assert result.approval_enabled is False  # sim default
-    assert result.persona.risk_tolerance == "moderate"
+    assert result.persona.personality == "moderate"
     assert result.persona.trading_style is None  # auto = None
 
 

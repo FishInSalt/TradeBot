@@ -61,25 +61,30 @@ You do not need to address every dimension in every cycle. If the market is quie
 
 
 def _build_layer3(config: PersonaConfig) -> str:
-    persona_content = _PERSONA_DESCRIPTIONS.get(
-        config.risk_tolerance, _PERSONA_DESCRIPTIONS["moderate"]
-    )
-    persona_label = config.risk_tolerance.capitalize()
+    sections = ["## Your Trading Approach"]
 
-    sections = [f"## Your Trading Approach\n\n### Personality: {persona_label}\n\n{persona_content}"]
+    if config.personality is not None:
+        persona_content = _PERSONA_DESCRIPTIONS[config.personality]
+        persona_label = config.personality.capitalize()
+        sections.append(f"### Personality: {persona_label}\n\n{persona_content}")
 
-    if config.trading_style is None:
+    if config.trading_style is not None:
+        style_content = _STYLE_DESCRIPTIONS[config.trading_style]
+        style_label = config.trading_style.replace("_", " ").title()
+        sections.append(f"### Strategy Preference: {style_label}\n\n{style_content}")
+
+    if config.personality is None and config.trading_style is None:
+        sections.append(
+            "You have full autonomy over your trading decisions. "
+            "Choose any personality, risk level, and methodology that fits the current "
+            "market conditions. Let the market tell you what approach to use."
+        )
+    elif config.trading_style is None:
         sections.append(
             "You are free to use any trading methodology that fits the current "
             "market conditions — trend following, swing trading, breakout trading, "
             "or any combination. Let the market tell you what approach to use."
         )
-    else:
-        style_content = _STYLE_DESCRIPTIONS.get(
-            config.trading_style, _STYLE_DESCRIPTIONS["trend_following"]
-        )
-        style_label = config.trading_style.replace("_", " ").title()
-        sections.append(f"### Strategy Preference: {style_label}\n\n{style_content}")
 
     return "\n\n".join(sections)
 

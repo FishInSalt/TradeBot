@@ -73,7 +73,7 @@ class Settings(BaseModel):
 
 
 class PersonaConfig(BaseModel):
-    risk_tolerance: Literal["conservative", "moderate", "aggressive"] = "moderate"
+    personality: Literal["conservative", "moderate", "aggressive"] | None = None
     trading_style: Literal["trend_following", "swing", "breakout"] | None = None
     position_sizing: Literal["fixed", "percentage"] = "percentage"
     max_position_pct: float = 30.0

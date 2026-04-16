@@ -3,10 +3,11 @@
 # Changing these values creates a different "trading personality".
 
 persona:
-  risk_tolerance: moderate       # Personality preset (required):
+  # personality: null            # Trader temperament (optional, default: null = agent decides):
                                  #   conservative: patient, capital-preservation-first
                                  #   moderate: balanced, pragmatic
                                  #   aggressive: decisive, action-oriented
+                                 #   null (omit or set to null): agent chooses freely
 
   # trading_style: null          # Strategy preference (optional, default: null = agent decides):
                                  #   trend_following: ride momentum, enter on pullbacks
