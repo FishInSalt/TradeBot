@@ -51,7 +51,7 @@
 **Files:**
 - Create: `src/integrations/news/__init__.py`, `src/integrations/news/models.py`
 - Create: `src/utils/__init__.py`, `src/utils/cache.py`
-- Test: `tests/test_news_models.py` (temporary, merged into test_news_clients.py later), `tests/test_cache.py`
+- Test: `tests/test_cache.py` (includes InformationEvent + extract_base_currency + TTLCache tests)
 
 - [ ] **Step 1: Write tests for InformationEvent and extract_base_currency**
 
@@ -803,7 +803,8 @@ async def test_okx_status_parse():
     assert events[0].source == "okx_status"
     assert events[0].category == "maintenance"
     assert events[0].importance == "high"
-    assert "scheduled" in events[0].title.lower()
+    assert "System upgrade" in events[0].title
+    assert "UTC" in events[0].title
 
 
 async def test_okx_status_queries_both_states():
@@ -993,11 +994,10 @@ class OKXStatusClient:
                 begin_dt = datetime.fromtimestamp(begin_ms / 1000, tz=timezone.utc)
                 end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
                 title_raw = item.get("title", "")
-                state_str = item.get("state", state)
                 title = (
-                    f"[{state_str}] {title_raw} "
-                    f"({begin_dt.strftime('%Y-%m-%d %H:%M')} — "
-                    f"{end_dt.strftime('%H:%M')} UTC)"
+                    f"{title_raw} "
+                    f"{begin_dt.strftime('%Y-%m-%d %H:%M')}-"
+                    f"{end_dt.strftime('%H:%M')} UTC"
                 )
                 events.append(
                     InformationEvent(
@@ -1044,6 +1044,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.integrations.news.models import InformationEvent
+from src.utils.cache import TTLCache
 
 
 def _make_news_event(title="Test", source="cryptopanic", category="news",
@@ -1063,7 +1064,9 @@ def _make_service(api_key="test_key"):
     from src.integrations.news.service import NewsService
 
     svc = NewsService(api_key=api_key)
-    svc._cryptopanic = AsyncMock()
+    svc._http = AsyncMock()  # prevent ResourceWarning from real httpx client
+    if svc._cryptopanic is not None:
+        svc._cryptopanic = AsyncMock()
     svc._fgi = AsyncMock()
     svc._calendar = AsyncMock()
     svc._announcements = AsyncMock()
@@ -1151,14 +1154,21 @@ async def test_daily_quota_cap():
 async def test_daily_quota_uses_stale_cache():
     svc = _make_service()
     svc._cryptopanic.fetch_posts.return_value = [_make_news_event("Old", symbols=["BTC"])]
-    await svc.get_news("BTC/USDT:USDT")  # populate cache
+    # Use a very short TTL so cache expires quickly
+    svc._cache = TTLCache()
+    original_get_or_fetch = svc._cache.get_or_fetch
 
+    async def short_ttl_fetch(key, ttl, fn):
+        return await original_get_or_fetch(key, 0.01, fn)  # 10ms TTL
+
+    svc._cache.get_or_fetch = short_ttl_fetch
+    await svc.get_news("BTC/USDT:USDT")  # populate cache with 10ms TTL
+
+    time.sleep(0.02)  # let cache expire
     svc._cryptopanic_daily_calls = 180
-    # Force cache expiry
-    for key in svc._cache._store:
-        data, created_at, ttl = svc._cache._store[key]
-        svc._cache._store[key] = (data, created_at - 10000, ttl)
 
+    # Restore normal cache behavior for get_stale to work
+    svc._cache.get_or_fetch = original_get_or_fetch
     sym, gen = await svc.get_news("BTC/USDT:USDT")
     assert len(sym) + len(gen) > 0  # stale cache used
 
@@ -1367,8 +1377,9 @@ class NewsService:
             return [], []
 
         async def _fetch() -> list[InformationEvent]:
-            self._cryptopanic_daily_calls += 1
-            return await self._cryptopanic.fetch_posts(news_filter)
+            result = await self._cryptopanic.fetch_posts(news_filter)
+            self._cryptopanic_daily_calls += 1  # count after success (failed calls don't consume quota)
+            return result
 
         try:
             all_posts = await self._cache.get_or_fetch(cache_key, _NEWS_TTL, _fetch)
@@ -1909,43 +1920,26 @@ Expected: FAIL — `MarketDataService has no attribute 'get_funding_rate'`
 
 - [ ] **Step 3: Implement MarketDataService derivatives methods**
 
-Replace the entire `src/integrations/market_data.py`:
+Edit `src/integrations/market_data.py` incrementally (do NOT replace the whole file):
+
+**1) Add imports** — after the existing `from src.integrations.exchange.base import BaseExchange, Ticker` line:
 
 ```python
-from __future__ import annotations
-
-import pandas as pd
-
 from src.integrations.exchange.base import BaseExchange, FundingRate, LongShortRatio, OpenInterest, Ticker
 from src.utils.cache import TTLCache
 
 _DERIVATIVES_TTL = 180.0  # 3 minutes
+```
 
+**2) Add cache field to `__init__`** — after `self._exchange = exchange`:
 
-class MarketDataService:
-    def __init__(self, exchange: BaseExchange):
-        self._exchange = exchange
+```python
         self._derivatives_cache = TTLCache()
+```
 
-    # --- Existing methods (unchanged) ---
+**3) Append three new methods** at the end of the `MarketDataService` class:
 
-    async def get_current_price(self, symbol: str) -> float:
-        ticker = await self._exchange.fetch_ticker(symbol)
-        return ticker.last
-
-    async def get_ticker(self, symbol: str) -> Ticker:
-        return await self._exchange.fetch_ticker(symbol)
-
-    async def get_ohlcv_dataframe(self, symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
-        candles = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        return pd.DataFrame([
-            {"timestamp": c.timestamp, "open": c.open, "high": c.high,
-             "low": c.low, "close": c.close, "volume": c.volume}
-            for c in candles
-        ])
-
-    # --- New: Derivatives data (cached) ---
-
+```python
     async def get_funding_rate(self, symbol: str) -> FundingRate:
         return await self._derivatives_cache.get_or_fetch(
             f"funding:{symbol}", _DERIVATIVES_TTL,
@@ -2675,7 +2669,8 @@ In `src/cli/app.py`, in the `build_services()` function, after `MetricsService` 
     news_service = None
     if settings.news.enabled:
         from src.integrations.news.service import NewsService
-        cp_key = settings.news.cryptopanic_api_key or None
+        # Wizard key takes precedence over settings/env
+        cp_key = getattr(result, 'cryptopanic_api_key', '') or settings.news.cryptopanic_api_key or None
         news_service = NewsService(api_key=cp_key)
         if cp_key:
             sc.print("News: ON (CryptoPanic + FGI + alerts)")
@@ -2733,15 +2728,51 @@ In the shutdown section (after `await exchange.close()`), add:
 In `src/cli/wizard.py`, add a new step function:
 
 ```python
-def _step_news(console: Console) -> dict:
+async def _validate_cryptopanic_key(key: str, console: Console) -> bool:
+    """Test CryptoPanic API key. Returns True if valid or temporarily unavailable."""
+    import httpx
+
+    console.print("  Testing API key...")
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                resp = await http.get(
+                    "https://cryptopanic.com/api/v1/posts/",
+                    params={"auth_token": key, "limit": 1},
+                )
+            if resp.status_code == 200:
+                console.print("  [green]OK[/]")
+                return True
+            if resp.status_code == 429:
+                console.print("  [yellow]Rate limited — key accepted (quota temporarily exhausted)[/]")
+                return True
+            if resp.status_code in (401, 403):
+                console.print(f"  [red]Invalid key (HTTP {resp.status_code})[/]")
+                return False
+            console.print(f"  [yellow]Unexpected HTTP {resp.status_code}, treating as valid[/]")
+            return True
+        except (httpx.TimeoutException, httpx.ConnectError):
+            if attempt == 0:
+                console.print("  [yellow]Timeout, retrying...[/]")
+            else:
+                console.print("  [yellow]Timeout — key accepted (network issue)[/]")
+                return True
+    return True  # unreachable, but satisfy type checker
+
+
+async def _step_news(console: Console) -> dict:
     """Step 6: News configuration (CryptoPanic API key)."""
     console.print("\n[bold]Step 6: News (optional)[/]")
     console.print("  CryptoPanic provides crypto news headlines with sentiment.")
     console.print("  Get a free API key at: https://cryptopanic.com/developers/api/")
     has_key = Confirm.ask("  Configure CryptoPanic API key?", default=False, console=console)
     if has_key:
-        key = Prompt.ask("  API key", password=True, console=console)
-        return {"cryptopanic_api_key": key}
+        while True:
+            key = Prompt.ask("  API key", password=True, console=console)
+            if await _validate_cryptopanic_key(key, console):
+                return {"cryptopanic_api_key": key}
+            if not Confirm.ask("  Try another key?", default=True, console=console):
+                break
     console.print("  [dim]Skipped — Fear & Greed Index and alerts still available[/]")
     return {"cryptopanic_api_key": ""}
 ```
@@ -2780,7 +2811,7 @@ class WizardResult:
 In `run_wizard()`, call the new step and include its data. Add after `persona_data`:
 
 ```python
-            news_data = _step_news(console)
+            news_data = await _step_news(console)
 ```
 
 And include it in the `data` merge:
@@ -2797,35 +2828,23 @@ Also add it to `_show_summary`:
     table.add_row("News", news_str)
 ```
 
-- [ ] **Step 3: Update app.py to use wizard's API key**
-
-In `build_services()`, update the news service initialization to also check the wizard result:
-
-```python
-    # News service
-    news_service = None
-    if settings.news.enabled:
-        from src.integrations.news.service import NewsService
-        # Wizard key takes precedence over settings/env
-        cp_key = getattr(result, 'cryptopanic_api_key', '') or settings.news.cryptopanic_api_key or None
-        news_service = NewsService(api_key=cp_key)
-        if cp_key:
-            sc.print("News: ON (CryptoPanic + FGI + alerts)")
-        else:
-            sc.print("News: ON (FGI + alerts only — no CryptoPanic API key)")
-    else:
-        sc.print("News: OFF")
-```
-
-- [ ] **Step 4: Run full test suite to verify nothing breaks**
+- [ ] **Step 3: Run full test suite to verify nothing breaks**
 
 Run: `pytest --tb=short -q`
 Expected: all tests pass
 
+- [ ] **Step 4: Update .env.example**
+
+Append to `.env.example`:
+
+```
+CRYPTOPANIC_API_KEY=your_cryptopanic_key_here
+```
+
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/cli/app.py src/cli/wizard.py
+git add src/cli/app.py src/cli/wizard.py .env.example
 git commit -m "feat(N2): integrate NewsService in app startup and add wizard news step"
 ```
 

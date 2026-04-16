@@ -387,8 +387,8 @@ class NewsService:
         self._cryptopanic_daily_reset_date: date | None = None  # 上次重置日期（UTC）
 
     # get_market_news 使用
-    async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> list[InformationEvent]
-        """API 请求 limit=20（不带 currencies 过滤），本地按 symbol 分为两组各取 top max_per_group 条。"""
+    async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> tuple[list[InformationEvent], list[InformationEvent]]
+        """API 请求 limit=20（不带 currencies 过滤），本地按 symbol 分为两组各取 top max_per_group 条。返回 (symbol_news, general_news) 二元组，供 tool 分区格式化。"""
     async def get_fear_greed_index(self) -> InformationEvent | None
 
     # get_critical_alerts 使用
