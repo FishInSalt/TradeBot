@@ -23,11 +23,38 @@ def test_prompt_contains_fill_response_guidance():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
     prompt_lower = prompt.lower()
-    # Fill response: prioritize protective orders on fill notification
-    assert "conditional trigger" in prompt_lower
-    assert "protective" in prompt_lower or "stop loss" in prompt_lower
-    # Fill response: review outcome after close
+    # Open fill: set SL/TP using chart structure
+    assert "open fill" in prompt_lower or "opened a position" in prompt_lower
+    assert "stop loss" in prompt_lower and "take profit" in prompt_lower
+    # Close fill: review outcome, save memory
+    assert "close fill" in prompt_lower or "closed a position" in prompt_lower
     assert "review" in prompt_lower and "outcome" in prompt_lower
+
+
+def test_prompt_contains_alert_response_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "alert response" in prompt_lower
+    assert "price level alert" in prompt_lower
+    assert "volatility alert" in prompt_lower
+    assert "trend" in prompt_lower or "noise" in prompt_lower
+
+
+def test_prompt_contains_memory_quality_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "actionable" in prompt_lower
+    assert "not worth saving" in prompt_lower or "not worth" in prompt_lower
+
+
+def test_prompt_contains_anti_overtrading():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "according to plan" in prompt_lower
+    assert "does not need intervention" in prompt_lower
 
 
 def test_prompt_contains_missing_tool_guidance():

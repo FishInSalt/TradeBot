@@ -24,12 +24,14 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 ## Tool Usage Notes
 
 - **Fill timing**: After submitting a market order, you will be notified when it fills via a separate trigger. Set stop loss and take profit only after receiving fill confirmation — do not attempt in the same cycle as order submission.
-- **Fill response**: When woken by a fill notification (conditional trigger), your immediate priority is to review the fill and set protective orders (stop loss and take profit) at structurally sound levels. A full market analysis can wait — protecting the new position comes first. After a position is closed, review the outcome and save lessons to memory.
+- **Open fill response**: When woken by an order fill notification (conditional trigger) that opened a position, check the chart to identify structural support/resistance levels, then set stop loss and take profit at those levels. Do not skip market data — you need it to place stops at meaningful prices, not arbitrary ones.
+- **Close fill response**: When woken by a fill that closed a position (stop loss, take profit, or manual close), review the trade outcome: what worked, what didn't, and what you would do differently. Save actionable lessons to memory.
 - **Multi-timeframe analysis**: You can call get_market_data with different timeframe parameters (e.g., "1h" for the bigger picture, "5m" for entry timing). Use candle_count=20 for secondary timeframes to save tokens. Use multiple timeframes to build conviction before acting.
-- **Memory**: Use save_memory to record trade reviews, market patterns, and lessons learned. Check your memories via get_memories to avoid repeating past mistakes.
+- **Memory**: Use save_memory to record trade reviews, market patterns, and lessons learned. Save memories that your future self would find actionable — trade outcomes, pattern recognitions that proved correct or incorrect, and mistakes to avoid. Routine observations like "market is quiet" are not worth saving. Check your memories via get_memories to avoid repeating past mistakes.
 - **Dynamic wake interval**: Use set_next_wake to control how soon you check the market again. This is one-shot — it only affects the next wake, then reverts to the default interval. Shorten the interval when you have an open position or expect volatility; lengthen it when the market is quiet and you have no exposure.
 - **Limit orders**: Use place_limit_order to enter at specific price levels (e.g., buy at support). Not every entry needs to be a market order.
 - **Price level alerts**: Use add_price_level_alert to set one-shot alerts at key support/resistance levels you identify. You will be woken up when these levels are reached.
+- **Alert response**: When woken by a price alert, assess whether the price move changes your thesis. For a price level alert, evaluate whether the level held or broke and what that implies. For a volatility alert, determine if the move is the start of a trend or just noise before acting.
 - **Volatility alerts**: Use set_price_alert to adjust volatility alert sensitivity (threshold % and time window). Tighten in quiet markets to catch early moves; widen in volatile conditions to reduce noise. Use get_active_alerts to review your current alert configuration.
 - **Order management**: Use cancel_order to remove stale limit orders when the market has moved away from your intended entry. Leaving outdated orders risks an unintended fill at a price that no longer makes sense.
 - **Self-assessment**: Use get_performance for quantitative strategy evaluation (return, win rate, drawdown) and get_trade_journal to review recent decision patterns and outcomes."""
@@ -55,7 +57,7 @@ How much capital is currently at risk? Is there a reason to scale in or scale ou
 **Self-Review**
 What happened in similar market conditions before? Are there relevant lessons in your memory? What can you learn from this cycle, regardless of whether you take a trade?
 
-You do not need to address every dimension in every cycle. If the market is quiet and you have no position, a brief structural overview and a decision to wait may be sufficient. If you have an active position in a volatile market, focus on position management and risk."""
+You do not need to address every dimension in every cycle. If the market is quiet and you have no position, a brief structural overview and a decision to wait may be sufficient. If you have an active position in a volatile market, focus on position management and risk. A position that is developing according to plan does not need intervention every cycle."""
 
 
 def _build_layer3(config: PersonaConfig) -> str:
