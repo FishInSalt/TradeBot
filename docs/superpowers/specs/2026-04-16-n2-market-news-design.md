@@ -308,7 +308,7 @@ Long/Short Ratio: 1.35 (57.4% long / 42.6% short)
 | 未配置 API key（CryptoPanic）| 仅返回 FGI + 提示配置 |
 | 网络超时 | 每个 API 调用 5 秒超时，快速失败 |
 | ForexFactory feed 格式变更 | 返回 "macro calendar unavailable"，不影响其他功能 |
-| CryptoPanic 日配额耗尽（计数器 ≥ 150） | 自动复用最近缓存数据，记录 WARNING |
+| CryptoPanic 日配额耗尽（计数器 ≥ 180） | 自动复用最近缓存数据，记录 WARNING |
 
 ---
 
@@ -378,7 +378,7 @@ class NewsService:
 Agent 行为不可完全预测，可能交替使用不同 `news_filter` 值导致缓存不命中。为防止超过 ~200/day 免费限额，`NewsService` 维护一个**全局日调用计数器**（`_cryptopanic_daily_calls`）：
 - 每次实际调用 CryptoPanic API 时计数 +1
 - 每日 UTC 0:00 重置
-- 当计数达到 150（预留 25% 安全裕量）时，自动复用最近一次任意 filter 的缓存数据，不再发起新的 API 调用
+- 当计数达到 180（预留 10% 安全裕量）时，自动复用最近一次任意 filter 的缓存数据，不再发起新的 API 调用
 - 行为类似 429 处理——使用过期缓存，记录 WARNING 日志
 
 **缓存策略：**
