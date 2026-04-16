@@ -113,7 +113,7 @@ Agent Tool (thin wrapper)
 | 认证 | 无需认证 |
 | 免费额度 | 每 5 分钟 2 次请求 |
 | 响应格式 | JSON 数组，含 `title`, `country`, `date`, `impact`(High/Medium/Low), `forecast`, `previous` |
-| 覆盖范围 | 当周所有经济事件：FOMC、CPI、NFP、PPI、GDP 等 |
+| 覆盖范围 | 当周所有经济事件（全球）。本地过滤规则：`country="USD"` + `impact` 为 `"High"` 或 `"Medium"`。仅保留美国经济事件，因为加密市场与美元政策高度相关（FOMC、CPI、NFP、PPI、GDP 等） |
 | 已知限制 | 仅包含当前一周数据。周五晚间 `lookahead_hours=12` 可能跨入下周，但数据中无下周事件，存在假阴性风险（如漏掉下周一/二的 FOMC）。实际影响有限——高影响力经济事件不在周末发生，且 Agent 下一个工作日会自动获取新一周数据 |
 | **稳定性** | **中低** — 非官方 feed，无文档/SLA，可能随时改格式。但已稳定运行多年，被众多开源项目使用 |
 
@@ -157,7 +157,7 @@ Agent Tool (thin wrapper)
 @agent.tool
 async def get_market_news(
     ctx: RunContext[TradingDeps],
-    news_filter: str | None = None,
+    news_filter: Literal["rising", "bullish", "bearish", "important"] | None = None,
 ) -> str:
     """Get recent crypto news headlines and market sentiment.
     news_filter: 'rising' (trending), 'bullish', 'bearish', 'important'. Default: no filter (latest).
@@ -269,6 +269,7 @@ async def get_derivatives_data(
     symbol: str | None = None,
 ) -> str:
     """Get derivatives market data: funding rate, open interest, long/short ratio.
+    When symbol is None, uses deps.symbol (the currently traded pair).
     Essential for perpetual contract trading decisions.
     Output ~150-250 tokens."""
 ```
@@ -355,8 +356,8 @@ class NewsService:
     def __init__(self, api_key: str | None = None):
         self._api_key = api_key
         self._http = httpx.AsyncClient(timeout=5.0)
-        self._cryptopanic_daily_calls = 0         # 全局日调用计数器
-        self._cryptopanic_daily_reset: float = 0  # 上次重置时间戳
+        self._cryptopanic_daily_calls = 0              # 全局日调用计数器
+        self._cryptopanic_daily_reset_date: date | None = None  # 上次重置日期（UTC）
 
     # get_market_news 使用
     async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> list[InformationEvent]
@@ -377,9 +378,16 @@ class NewsService:
 
 Agent 行为不可完全预测，可能交替使用不同 `news_filter` 值导致缓存不命中。为防止超过 ~200/day 免费限额，`NewsService` 维护一个**全局日调用计数器**（`_cryptopanic_daily_calls`）：
 - 每次实际调用 CryptoPanic API 时计数 +1
-- 每日 UTC 0:00 重置
-- 当计数达到 180（预留 10% 安全裕量）时，自动复用最近一次任意 filter 的缓存数据，不再发起新的 API 调用
-- 行为类似 429 处理——使用过期缓存，记录 WARNING 日志
+- 重置机制：每次调用前 lazy check，`datetime.now(UTC).date() != _cryptopanic_daily_reset_date` 时重置计数器为 0 并更新日期
+- 当计数达到 180（预留 10% 安全裕量）时：
+  - 优先复用**相同 `news_filter`** 的过期缓存（即使 TTL 已过期）
+  - 无匹配缓存时，返回降级消息 "Daily news quota exhausted, news unavailable"
+  - 记录 WARNING 日志
+
+**缓存复用规则（429 和配额耗尽共用）：**
+- 优先复用相同 `news_filter` 的过期缓存
+- 无相同 filter 缓存可用时，返回降级消息（不跨 filter 复用，避免数据与 Agent 意图不匹配）
+- 首次调用就遇到 429 且无任何缓存时，走降级路径返回 "temporarily unavailable"
 
 **缓存策略：**
 
@@ -465,7 +473,7 @@ class MarketDataService:
             lambda: self._exchange.fetch_long_short_ratio(symbol))
 ```
 
-注意：当前 `MarketDataService` 是纯透传（25 行），加入缓存是引入新的架构模式。缓存实现采用与 `NewsService` 相同的 `(data, created_at, ttl)` 三元组结构，通过统一的 `_cached_fetch()` 辅助方法处理 TTL 判断和 429 延长逻辑。
+**MarketDataService 角色变化：** 当前 `MarketDataService` 是纯透传（25 行），加入缓存是引入新的架构模式。明确边界：**仅新增的衍生品方法（`get_funding_rate` / `get_open_interest` / `get_long_short_ratio`）有缓存，现有方法（`get_ticker` / `get_current_price` / `get_ohlcv_dataframe`）保持无缓存透传不变。** 缓存实现采用与 `NewsService` 相同的 `(data, created_at, ttl)` 三元组结构，通过 `_cached_fetch()` 辅助方法处理 TTL 判断和 429 延长逻辑。`_cached_fetch` 定义在 `src/utils/cache.py` 中，供 NewsService 和 MarketDataService 共用，避免两份实现漂移。
 
 数据路径与 `get_market_data` 完全一致（ccxt Python 全部使用 snake_case）：
 ```
@@ -534,6 +542,11 @@ class Settings(BaseModel):
 
 ```python
 def extract_base_currency(symbol: str) -> str:
+    """Extract base currency for CryptoPanic filtering.
+    Only standard tickers are supported (BTC, ETH, SOL, etc.).
+    Non-standard symbols (1000PEPE, kSHIB) may not match CryptoPanic's currency tags —
+    in that case, skip symbol filtering and return general news only.
+    """
     return symbol.split("/")[0]
     # BTC/USDT:USDT → BTC
     # ETH/USDT:USDT → ETH
@@ -548,27 +561,26 @@ Layer 1（工具引导段）新增：
 ```
 get_market_news(news_filter?) — Get crypto news headlines + Fear & Greed Index.
   - Returns 10 headlines: 5 for your symbol + 5 general crypto news
-  - Use for macro context and market narrative
   - Usually call without news_filter (default gives latest headlines, sufficient for most decisions)
   - news_filter only when you need a specific lens: 'rising', 'bullish', 'bearish', 'important'
-  - Fear & Greed extremes (< 20 or > 80) suggest increased caution
-  - News confirms or challenges your technical read — never trade on headlines alone
+  - Fear & Greed Index: 0 = maximum fear, 100 = maximum greed
   - Output ~500-700 tokens
 
 get_critical_alerts(lookback_hours?, lookahead_hours?) — Exchange announcements + upcoming macro events.
   - Valuable to check before opening positions — helps avoid trading into known risk events
-  - Contract maintenance, parameter changes, delistings = immediate risk
-  - FOMC/CPI/NFP within 1h = avoid new entries or reduce size
+  - Shows: contract maintenance, parameter changes, delistings, upcoming FOMC/CPI/NFP with impact level
   - Often returns empty — no alerts is good news
   - Note: macro calendar covers current week only — Friday evening/weekend may miss next week's early events
   - Output ~100-400 tokens
 
 get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
-  - Funding rate extremes signal crowded trades and potential reversals
-  - OI + price divergence = key inflection signal
-  - Use alongside technical analysis for every trade decision
+  - Funding rate: positive means longs pay shorts, negative means shorts pay longs. Settles every 8h
+  - Open interest: total outstanding contracts across the exchange
+  - Long/short ratio: ratio of long vs short account positions
   - Output ~150-250 tokens
 ```
+
+**引导原则：** Layer 1 工具引导仅描述工具功能和输出数据的事实性含义（如 "positive funding rate means longs pay shorts"），不包含交易启发式规则或策略建议（如 "extremes signal reversals"）。Agent 自行决定如何解读和使用这些数据。
 
 ---
 
@@ -584,12 +596,12 @@ get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
 
 ### 每日成本估算（15 分钟周期 = 96 cycles/day）：
 
-| 场景 | market_news | critical_alerts | derivatives | 总计 |
+| 场景 | market_news (700) | critical_alerts (400) | derivatives (250) | 总计 |
 |------|------------|----------------|-------------|------|
-| 典型（各 50% cycle） | 28,800 | 4,800 | 12,000 | ~45,600 |
-| 最差（每 cycle 全调） | 57,600 | 19,200 | 24,000 | ~100,800 |
+| 典型（各 50% cycle） | 33,600 | 9,600 | 12,000 | ~55,200 |
+| 最差（每 cycle 全调） | 67,200 | 38,400 | 24,000 | ~129,600 |
 
-最差情况约 1M token 每日预算的 10%，成本可控。
+最差情况使用各工具输出上限计算。约 1M token 每日预算的 13%，成本可控。
 
 ### API 调用量：
 
