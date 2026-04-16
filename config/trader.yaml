@@ -3,13 +3,17 @@
 # Changing these values creates a different "trading personality".
 
 persona:
-  risk_tolerance: moderate       # conservative: tight stops, small positions
-                                 # moderate: balanced risk/reward
-                                 # aggressive: larger positions when conviction is high
+  # personality: null            # Trader temperament (optional, default: null = agent decides):
+                                 #   conservative: patient, capital-preservation-first
+                                 #   moderate: balanced, pragmatic
+                                 #   aggressive: decisive, action-oriented
+                                 #   null (omit or set to null): agent chooses freely
 
-  trading_style: trend_following # trend_following: ride momentum, enter on pullbacks
-                                 # swing: buy support, sell resistance
-                                 # breakout: act on consolidation breakouts with volume
+  # trading_style: null          # Strategy preference (optional, default: null = agent decides):
+                                 #   trend_following: ride momentum, enter on pullbacks
+                                 #   swing: buy support, sell resistance
+                                 #   breakout: act on consolidation breakouts with volume
+                                 #   null (omit or set to null): agent chooses freely
 
   position_sizing: percentage    # fixed: use a fixed USDT amount per trade
                                  # percentage: use a % of available balance per trade

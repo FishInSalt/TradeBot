@@ -57,7 +57,7 @@ async def test_restore_session_builds_wizard_result(tmp_path):
     from src.config import PersonaConfig
     from src.services.model_manager import ModelConfig
 
-    persona = PersonaConfig(risk_tolerance="aggressive", trading_style="breakout")
+    persona = PersonaConfig(personality="aggressive", trading_style="breakout")
     model_cfg = ModelConfig(id="test-model", provider="openai", model="gpt-4o",
                             api_key="k", base_url=None)
     alert_cfg = json.dumps({"enabled": True, "window": 5, "threshold": 3.0})
@@ -101,7 +101,7 @@ async def test_restore_session_builds_wizard_result(tmp_path):
     assert result.alert_window_min == 5
     assert result.fee_rate == 0.0005
     assert result.token_budget == 300000
-    assert result.persona.risk_tolerance == "aggressive"
+    assert result.persona.personality == "aggressive"
     assert result.session_name == "BTC sim #1"
     assert result.model == mock_model
     await engine.dispose()
@@ -254,7 +254,7 @@ async def test_create_session_from_wizard_result(tmp_path):
         scheduler_interval_min=30, approval_enabled=False,
         alert_enabled=True, alert_window_min=10, alert_threshold_pct=5.0,
         token_budget=300000,
-        persona=PersonaConfig(risk_tolerance="aggressive"),
+        persona=PersonaConfig(personality="aggressive"),
         session_name="ETH sim #1",
     )
 

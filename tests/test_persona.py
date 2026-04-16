@@ -19,6 +19,66 @@ def test_prompt_contains_layer1_identity():
     assert "set_next_wake" in prompt_lower or "wake" in prompt_lower
 
 
+def test_prompt_contains_fill_response_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    # Open fill: set SL/TP using chart structure
+    assert "open fill" in prompt_lower or "opened a position" in prompt_lower
+    assert "stop loss" in prompt_lower and "take profit" in prompt_lower
+    # Close fill: review outcome, save memory
+    assert "close fill" in prompt_lower or "closed a position" in prompt_lower
+    assert "review" in prompt_lower and "outcome" in prompt_lower
+
+
+def test_prompt_contains_alert_response_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "alert response" in prompt_lower
+    assert "price level alert" in prompt_lower
+    assert "volatility alert" in prompt_lower
+    assert "trend" in prompt_lower or "noise" in prompt_lower
+
+
+def test_prompt_contains_memory_quality_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "actionable" in prompt_lower
+    assert "not worth saving" in prompt_lower or "not worth" in prompt_lower
+
+
+def test_prompt_contains_anti_overtrading():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "according to plan" in prompt_lower
+    assert "does not need intervention" in prompt_lower
+
+
+def test_prompt_contains_missing_tool_guidance():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    # get_performance / get_trade_journal
+    assert "get_performance" in prompt_lower or "performance" in prompt_lower
+    assert "get_trade_journal" in prompt_lower or "trade_journal" in prompt_lower
+    # cancel_order
+    assert "cancel_order" in prompt_lower or "cancel" in prompt_lower
+    # set_price_alert / get_active_alerts
+    assert "set_price_alert" in prompt_lower or "volatility alert" in prompt_lower
+    assert "get_active_alerts" in prompt_lower
+
+
+def test_prompt_set_next_wake_one_shot():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    prompt_lower = prompt.lower()
+    assert "one-shot" in prompt_lower or "one shot" in prompt_lower
+    assert "revert" in prompt_lower or "default" in prompt_lower
+
+
 def test_prompt_contains_layer2_thinking_framework():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
@@ -95,20 +155,94 @@ def test_prompt_styles_are_distinct():
     assert p2 != p3
 
 
-def test_prompt_contains_risk_tolerance():
+def test_prompt_no_strategy_when_trading_style_none():
+    """trading_style=None should not inject strategy section but signal freedom."""
     from src.agent.persona import generate_system_prompt
-    prompt = generate_system_prompt(PersonaConfig(risk_tolerance="conservative"))
+    prompt = generate_system_prompt(PersonaConfig(personality="moderate"))
+    assert "Strategy Preference" not in prompt
+    assert "Personality" in prompt
+    assert "free to use any trading methodology" in prompt
+
+
+def test_prompt_has_strategy_when_trading_style_set():
+    """trading_style set should inject strategy section."""
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(trading_style="swing"))
+    assert "Strategy Preference: Swing" in prompt
+
+
+def test_prompt_default_config_full_autonomy():
+    """Default PersonaConfig (both None) should produce full autonomy prompt."""
+    from src.agent.persona import generate_system_prompt
+    config = PersonaConfig()
+    assert config.personality is None
+    assert config.trading_style is None
+    prompt = generate_system_prompt(config)
+    assert "Personality" not in prompt
+    assert "Strategy Preference" not in prompt
+    assert "full autonomy" in prompt.lower()
+
+
+def test_prompt_strategy_only():
+    """Strategy without personality — methodology-focused, no personality section."""
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(trading_style="trend_following"))
+    assert "Strategy Preference: Trend Following" in prompt
+    assert "Personality" not in prompt
+
+
+def test_prompt_personality_only():
+    """Personality without strategy — temperament-focused, free methodology."""
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(personality="aggressive"))
+    assert "Personality: Aggressive" in prompt
+    assert "Strategy Preference" not in prompt
+    assert "free to use any trading methodology" in prompt
+
+
+def test_prompt_both_configured():
+    """Both personality and strategy configured — both sections present."""
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(personality="conservative", trading_style="breakout"))
+    assert "Personality: Conservative" in prompt
+    assert "Strategy Preference: Breakout" in prompt
+    # Should NOT have the "free to use any" text when strategy is set
+    assert "free to use any trading methodology" not in prompt
+
+
+def test_prompt_contains_personality():
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(personality="conservative"))
     prompt_lower = prompt.lower()
     assert "capital preservation" in prompt_lower or "conservative" in prompt_lower
 
 
-def test_prompt_risk_tolerances_are_distinct():
+def test_prompt_personalities_are_distinct():
     from src.agent.persona import generate_system_prompt
-    p1 = generate_system_prompt(PersonaConfig(risk_tolerance="conservative"))
-    p2 = generate_system_prompt(PersonaConfig(risk_tolerance="moderate"))
-    p3 = generate_system_prompt(PersonaConfig(risk_tolerance="aggressive"))
+    p1 = generate_system_prompt(PersonaConfig(personality="conservative"))
+    p2 = generate_system_prompt(PersonaConfig(personality="moderate"))
+    p3 = generate_system_prompt(PersonaConfig(personality="aggressive"))
     assert p1 != p2
     assert p2 != p3
+
+
+def test_prompt_persona_describes_temperament():
+    """Personality descriptions should describe trader temperament, not just risk rules."""
+    from src.agent.persona import generate_system_prompt
+    conservative = generate_system_prompt(PersonaConfig(personality="conservative")).lower()
+    assert "patient" in conservative
+    moderate = generate_system_prompt(PersonaConfig(personality="moderate")).lower()
+    assert "balanced" in moderate or "pragmatic" in moderate
+    aggressive = generate_system_prompt(PersonaConfig(personality="aggressive")).lower()
+    assert "decisive" in aggressive
+
+
+def test_prompt_style_soft_preference():
+    """Strategy descriptions should frame style as a preference, not a rigid rule."""
+    from src.agent.persona import generate_system_prompt
+    for style in ["trend_following", "swing", "breakout"]:
+        prompt = generate_system_prompt(PersonaConfig(trading_style=style)).lower()
+        assert "preference" in prompt or "gravitate" in prompt or "not a rigid rule" in prompt
 
 
 def test_prompt_is_in_english():

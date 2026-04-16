@@ -103,8 +103,7 @@ async def run_agent_cycle(
     prompt = (
         f"You have been woken up by a {trigger_type} trigger.\n"
         f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"
-        "Analyze the current market, check your positions, and decide what to do.\n"
-        "Use your tools to gather data before making a decision."
+        "Assess the situation and decide what to do."
     )
     if trigger_type == "conditional" and context is not None:
         msg = (

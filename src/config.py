@@ -43,7 +43,7 @@ class SchedulerConfig(BaseModel):
 
 
 class LLMBudgetConfig(BaseModel):
-    daily_max_tokens: int = 500000
+    daily_max_tokens: int = 10000000
 
 
 class DatabaseConfig(BaseModel):
@@ -73,8 +73,8 @@ class Settings(BaseModel):
 
 
 class PersonaConfig(BaseModel):
-    risk_tolerance: Literal["conservative", "moderate", "aggressive"] = "moderate"
-    trading_style: Literal["trend_following", "swing", "breakout"] = "trend_following"
+    personality: Literal["conservative", "moderate", "aggressive"] | None = None
+    trading_style: Literal["trend_following", "swing", "breakout"] | None = None
     position_sizing: Literal["fixed", "percentage"] = "percentage"
     max_position_pct: float = 30.0
     preferred_leverage: int = 3
