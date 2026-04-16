@@ -429,10 +429,12 @@ class BaseExchange(ABC):
 class MarketDataService:
     # 现有方法（不变）...
 
-    # 新增：衍生品数据（缓存 TTL 3min，cache key = symbol）
-    # 缓存结构与 NewsService 统一：_cache: dict[str, tuple[data, float, float]]
-    # 存储 (data, created_at, ttl)，429 时将 ttl 覆盖为 1800s
-    _derivatives_cache: dict[str, tuple[Any, float, float]] = field(default_factory=dict)
+    def __init__(self, exchange: BaseExchange):
+        self._exchange = exchange
+        # 新增：衍生品数据缓存（TTL 3min，cache key = symbol）
+        # 缓存结构与 NewsService 统一：dict[key, (data, created_at, ttl)]
+        # 429 时将 ttl 覆盖为 1800s
+        self._derivatives_cache: dict[str, tuple[Any, float, float]] = {}
 
     async def get_funding_rate(self, symbol: str) -> FundingRate:
         return await self._cached_fetch("funding:" + symbol, 180,
@@ -477,7 +479,7 @@ class Settings(BaseModel):
 ### 5.4 集成点
 
 **`src/agent/trader.py`：**
-- `TradingDeps` 新增 `news: object | None = None`
+- `TradingDeps` 新增 `news: NewsService | None = None`（通过 `TYPE_CHECKING` 导入，避免运行时依赖；NewsService 是新模块，不存在循环导入问题）
 - 注册三个新工具
 
 **`src/agent/tools_perception.py`：**
@@ -530,7 +532,8 @@ Layer 1（工具引导段）新增：
 get_market_news(news_filter?) — Get crypto news headlines + Fear & Greed Index.
   - Returns 10 headlines: 5 for your symbol + 5 general crypto news
   - Use for macro context and market narrative
-  - news_filter: 'rising', 'bullish', 'bearish', 'important' (optional)
+  - Usually call without news_filter (default gives latest headlines, sufficient for most decisions)
+  - news_filter only when you need a specific lens: 'rising', 'bullish', 'bearish', 'important'
   - Fear & Greed extremes (< 20 or > 80) suggest increased caution
   - News confirms or challenges your technical read — never trade on headlines alone
   - Output ~500-700 tokens
