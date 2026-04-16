@@ -120,7 +120,7 @@ Agent Tool (thin wrapper)
 
 | 项目 | 详情 |
 |------|------|
-| 端点 | OKX 公开 REST API（非 ccxt 封装） |
+| 端点 | 具体端点待实现时调研确认（OKX 公开 REST API，非 ccxt 封装） |
 | 认证 | 无需认证（公开端点） |
 | 内容 | 合约参数变更、维护停机、上下币公告等 |
 | **稳定性** | **中** — 非标准化，OKX 可能改版。返回内容含营销/运营混杂，需过滤 |
@@ -129,9 +129,10 @@ Agent Tool (thin wrapper)
 
 | 项目 | 详情 |
 |------|------|
-| 方法 | `fetchFundingRate(symbol)`, `fetchOpenInterest(symbol)` |
+| 方法 | `fetch_funding_rate(symbol)`, `fetch_open_interest(symbol)`, `fetch_long_short_ratio(symbol)` |
 | 认证 | 无需认证（公开市场数据端点） |
-| 数据 | funding rate（当前/下期）、OI（全市场持仓量）、多空比 |
+| 数据 | funding rate（当前费率 + 下次结算时间）、OI（全市场持仓量）、多空比（底层调 `/api/v5/rubik/stat/contracts/long-short-account-ratio`） |
+| 注意 | `fetch_funding_rate()` 仅返回当前费率，不含历史均值。计算 8h 均值需额外调用 `fetch_funding_rate_history()`，v1 不做 |
 | **稳定性** | **高** — 官方交易所 API 的标准封装，ccxt 库活跃维护 |
 
 ### 2.6 未选方案及理由
@@ -155,16 +156,16 @@ Agent Tool (thin wrapper)
 @agent.tool
 async def get_market_news(
     ctx: RunContext[TradingDeps],
-    filter: str | None = None,
+    news_filter: str | None = None,
 ) -> str:
     """Get recent crypto news headlines and market sentiment.
-    filter: 'rising' (trending), 'bullish', 'bearish', 'important'. Default: no filter (latest).
+    news_filter: 'rising' (trending), 'bullish', 'bearish', 'important'. Default: no filter (latest).
     Returns 10 headlines (5 symbol-specific + 5 general crypto) + Fear & Greed Index.
     Output ~500-700 tokens."""
 ```
 
 **参数：**
-- `filter`（可选）：CryptoPanic 过滤器 — `rising|bullish|bearish|important|hot`。默认：最新新闻。
+- `news_filter`（可选）：CryptoPanic 过滤器 — `rising|bullish|bearish|important|hot`。默认：最新新闻。避免使用 `filter` 以防遮蔽 Python 内建函数。
 - 币种从 `deps.symbol` 自动提取（如 `BTC/USDT:USDT` → `BTC`）。
 
 **新闻范围：10 条 = 5 币种相关 + 5 通用**
@@ -274,10 +275,11 @@ async def get_derivatives_data(
 **设计决策：** derivatives 数据是全市场公开数据（无需 API key），不是账户数据。无论使用 SimulatedExchange 还是 OKXExchange，都直接从 OKX 获取真实数据。
 
 **实现方式：** 与 `get_market_data` 走完全相同的数据路径——通过 BaseExchange 抽象层：
-- `BaseExchange` 新增 `fetch_funding_rate()` / `fetch_open_interest()` 抽象方法
+- `BaseExchange` 新增 `fetch_funding_rate()` / `fetch_open_interest()` / `fetch_long_short_ratio()` 三个抽象方法
 - `OKXExchange` 用已有的 `self._client`（ccxt）实现
 - `SimulatedExchange` 用已有的 `self._ccxt`（ccxt.pro）实现——和它的 `fetch_ohlcv()` 一样，读的是真实市场数据
 - `MarketDataService` 通过 `self._exchange` 调用，和 `get_ticker()` / `get_ohlcv_dataframe()` 一致
+- 衍生品数据缓存加在 `MarketDataService` 层（TTL 3 分钟，cache key 为 `symbol`），与 NewsService 的缓存同级
 
 不引入额外的 ccxt 客户端，不破坏现有架构。
 
@@ -286,11 +288,12 @@ async def get_derivatives_data(
 ```
 === Derivatives Data (ETH/USDT:USDT) ===
 Funding Rate: +0.0125% (next settlement in 3h 42m)
-  8h avg: +0.0098% — longs pay shorts (bullish bias)
-Open Interest: $4.82B (+3.2% in 24h)
-  OI rising with price rising → new money entering longs
+  Positive rate — longs pay shorts (bullish bias)
+Open Interest: $4.82B
 Long/Short Ratio: 1.35 (57.4% long / 42.6% short)
 ```
+
+注意：v1 仅展示 `fetch_funding_rate()` 返回的当前费率，不包含历史均值。计算 8h 平均需调用 `fetch_funding_rate_history()`，工作量与边际价值不匹配，留待后续迭代。
 
 **Token 估算：** ~150-250 tokens
 
@@ -350,7 +353,8 @@ class NewsService:
         self._http = httpx.AsyncClient(timeout=5.0)
 
     # get_market_news 使用
-    async def get_news(self, symbol: str, filter: str | None, limit: int = 5) -> list[InformationEvent]
+    async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> list[InformationEvent]
+        """API 请求 limit=20（不带 currencies 过滤），本地按 symbol 分为两组各取 top max_per_group 条。"""
     async def get_fear_greed_index(self) -> InformationEvent | None
 
     # get_critical_alerts 使用
@@ -364,7 +368,7 @@ class NewsService:
 
 | 数据源 | Cache Key | 默认 TTL | 理由 |
 |--------|-----------|---------|------|
-| CryptoPanic 新闻 | `filter` 值（如 `"rising"` / `"bullish"` / `None`） | 5 min | 新闻时效性强，但同一 cycle 内不需重复请求。不同 `filter` 返回不同文章集，需分别缓存 |
+| CryptoPanic 新闻 | `news_filter` 值（如 `"rising"` / `"bullish"` / `None`） | 15 min | 与默认 cycle 间隔（15min）对齐，保证每个 cycle 最多触发一次 API 调用。不同 `news_filter` 返回不同文章集，需分别缓存 |
 | FGI | 无（固定 key） | 6 hours | 每日更新一次，高频请求无意义 |
 | ForexFactory 宏观日历 | 无（固定 key） | 6 hours | 按周发布，拉取整周数据后本地按 `lookback/lookahead` 过滤 |
 | OKX 公告 | 无（固定 key） | 10 min | 拉取全部公告后本地过滤，公告更新频率低 |
@@ -376,14 +380,36 @@ class NewsService:
 - 不视为错误，不触发降级消息
 - 自动将该数据源的缓存 TTL **临时延长至 30 分钟**（使用上次缓存的数据继续服务）
 - 记录 WARNING 日志
-- 30 分钟后恢复正常 TTL，重新尝试请求
+- 实现机制：缓存条目记录 `(data, created_at, ttl)` 三元组。正常时 `ttl` 为默认值；收到 429 时将该条目的 `ttl` 覆盖为 1800 秒。下次请求时判断 `now - created_at > ttl`，过期则重新请求并恢复默认 TTL
 
 其他 HTTP 错误（5xx / timeout）仍使用标准降级策略（返回 "temporarily unavailable"）。
 
 衍生品数据不经过 NewsService，走 BaseExchange 抽象层（与 ticker / OHLCV 相同路径）：
 
 ```python
-# src/integrations/exchange/base.py — 新增抽象方法
+# src/integrations/exchange/base.py — 新增抽象方法 + 数据类
+@dataclass
+class FundingRate:
+    symbol: str
+    rate: float               # 当前费率
+    next_funding_time: int     # 下次结算时间戳 (ms)
+    timestamp: int
+
+@dataclass
+class OpenInterest:
+    symbol: str
+    open_interest: float      # 张数或币数
+    open_interest_value: float # USD 价值
+    timestamp: int
+
+@dataclass
+class LongShortRatio:
+    symbol: str
+    long_short_ratio: float   # e.g. 1.35
+    long_account: float       # e.g. 0.574
+    short_account: float      # e.g. 0.426
+    timestamp: int
+
 class BaseExchange(ABC):
     # 现有方法...
 
@@ -393,22 +419,29 @@ class BaseExchange(ABC):
     @abstractmethod
     async def fetch_open_interest(self, symbol: str) -> OpenInterest: ...
 
-# src/integrations/market_data.py — 新增便捷方法
+    @abstractmethod
+    async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio: ...
+
+# src/integrations/market_data.py — 新增便捷方法（含缓存）
 class MarketDataService:
     # 现有方法（不变）...
 
+    # 新增：衍生品数据（缓存 TTL 3min，cache key = symbol）
     async def get_funding_rate(self, symbol: str) -> FundingRate:
         return await self._exchange.fetch_funding_rate(symbol)
 
     async def get_open_interest(self, symbol: str) -> OpenInterest:
         return await self._exchange.fetch_open_interest(symbol)
+
+    async def get_long_short_ratio(self, symbol: str) -> LongShortRatio:
+        return await self._exchange.fetch_long_short_ratio(symbol)
 ```
 
-数据路径与 `get_market_data` 完全一致：
+数据路径与 `get_market_data` 完全一致（ccxt Python 全部使用 snake_case）：
 ```
-tool → MarketDataService → BaseExchange
-  ├─ OKXExchange:       self._client.fetchFundingRate()    (已有 ccxt)
-  └─ SimulatedExchange:  self._ccxt.fetch_funding_rate()   (已有 ccxt.pro，与 fetch_ohlcv 同理)
+tool → MarketDataService (缓存 3min) → BaseExchange
+  ├─ OKXExchange:       self._client.fetch_funding_rate()       (已有 ccxt)
+  └─ SimulatedExchange:  self._ccxt.fetch_funding_rate()        (已有 ccxt.pro，与 fetch_ohlcv 同理)
 ```
 
 ### 5.3 配置变更
@@ -443,19 +476,21 @@ class Settings(BaseModel):
 - 从环境变量加载 `CRYPTOPANIC_API_KEY`
 
 **`src/integrations/exchange/base.py`：**
-- 新增 `FundingRate`、`OpenInterest` 数据类
-- 新增 `fetch_funding_rate()`、`fetch_open_interest()` 抽象方法
+- 新增 `FundingRate`、`OpenInterest`、`LongShortRatio` 数据类
+- 新增 `fetch_funding_rate()`、`fetch_open_interest()`、`fetch_long_short_ratio()` 抽象方法
 
 **`src/integrations/exchange/okx.py`：**
-- 实现 `fetch_funding_rate()` — 调用已有 `self._client.fetchFundingRate()`
-- 实现 `fetch_open_interest()` — 调用已有 `self._client.fetchOpenInterest()`
+- 实现 `fetch_funding_rate()` — 调用 `self._client.fetch_funding_rate()`
+- 实现 `fetch_open_interest()` — 调用 `self._client.fetch_open_interest()`
+- 实现 `fetch_long_short_ratio()` — 调用 `self._client.fetch_long_short_ratio()`
 
 **`src/integrations/exchange/simulated.py`：**
-- 实现 `fetch_funding_rate()` — 调用已有 `self._ccxt.fetch_funding_rate()`（与 `fetch_ohlcv` 同路径）
-- 实现 `fetch_open_interest()` — 调用已有 `self._ccxt.fetch_open_interest()`
+- 实现 `fetch_funding_rate()` — 调用 `self._ccxt.fetch_funding_rate()`（与 `fetch_ohlcv` 同路径）
+- 实现 `fetch_open_interest()` — 调用 `self._ccxt.fetch_open_interest()`
+- 实现 `fetch_long_short_ratio()` — 调用 `self._ccxt.fetch_long_short_ratio()`
 
 **`src/integrations/market_data.py`：**
-- 新增 `get_funding_rate()`、`get_open_interest()` 便捷方法，委托给 `self._exchange`
+- 新增 `get_funding_rate()`、`get_open_interest()`、`get_long_short_ratio()` 便捷方法（含 3min TTL 缓存），委托给 `self._exchange`
 
 **`src/agent/persona.py`：**
 - Layer 1 新增三个工具的引导
@@ -476,10 +511,10 @@ def extract_base_currency(symbol: str) -> str:
 Layer 1（工具引导段）新增：
 
 ```
-get_market_news(filter?) — Get crypto news headlines + Fear & Greed Index.
+get_market_news(news_filter?) — Get crypto news headlines + Fear & Greed Index.
   - Returns 10 headlines: 5 for your symbol + 5 general crypto news
   - Use for macro context and market narrative
-  - filter: 'rising', 'bullish', 'bearish', 'important' (optional)
+  - news_filter: 'rising', 'bullish', 'bearish', 'important' (optional)
   - Fear & Greed extremes (< 20 or > 80) suggest increased caution
   - News confirms or challenges your technical read — never trade on headlines alone
   - Output ~500-700 tokens
@@ -523,13 +558,13 @@ get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
 
 | 数据源 | 每日调用量 | 限额 |
 |--------|----------|------|
-| CryptoPanic | 48-96 tool calls（5min 缓存，单次调用不带 currencies 过滤取 20 条本地分组，cache key 仅含 filter，实际 API 调用 ~20-50） | ~200/day |
+| CryptoPanic | 48-96 tool calls（15min 缓存与 cycle 间隔对齐，每个 cycle 最多触发 1 次 API 调用。最坏情况 ~96/day，典型 ~48/day） | ~200/day |
 | FGI | 4（6h 缓存） | 无限制 |
 | ForexFactory | 1-4（6h 缓存） | 2 req/5min |
 | OKX 公告 | 48-144（10min 缓存） | 无限制 |
 | ccxt funding/OI | 48-96 | 交易所 API 标准限额 |
 
-**注意：** 采用单次 API 调用（不带 `currencies` 过滤、`limit=20`）+ 本地分组方案后，缓存 key 仅含 `filter`（不含 symbol），缓存命中率大幅提高。15 分钟 cycle + 5 分钟缓存 TTL 下，实际 API 调用量远低于免费额度。
+**注意：** 采用单次 API 调用（不带 `currencies` 过滤、`limit=20`）+ 本地分组方案后，缓存 key 仅含 `news_filter`（不含 symbol），且 TTL 与 cycle 间隔对齐（15min），每个 cycle 最多触发 1 次 API 调用。Agent 若交替使用不同 `news_filter` 值，会产生多个缓存条目，但由于 TTL 与 cycle 间隔一致，不会导致缓存穿透。
 
 ---
 
