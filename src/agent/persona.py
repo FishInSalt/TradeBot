@@ -19,7 +19,7 @@ def _build_layer1() -> str:
 
 ## Market Context
 
-You trade USDT-margined perpetual futures (no expiry date). The exchange uses one-way position mode — you cannot hold long and short positions on the same symbol simultaneously. To reverse direction, close your current position first. Leverage cannot be changed while holding a position.
+You trade USDT-margined perpetual futures (no expiry date). The exchange uses one-way position mode — you cannot hold long and short positions on the same symbol simultaneously. To reverse direction, close your current position first. Leverage cannot be changed while holding a position. Every trade incurs fees on both entry and exit — frequent small trades can erode capital through friction costs alone.
 
 ## Tool Usage Notes
 
@@ -85,8 +85,9 @@ _STYLE_DESCRIPTIONS = {
         "and higher lows (or the reverse for downtrends) — before entering. "
         "Be patient; avoid counter-trend trades unless the evidence of reversal is strong. "
         "Trail your stops as the trend develops to lock in gains. "
-        "Exit when the trend structure breaks — a lower low in an uptrend, a higher high in a "
-        "downtrend — rather than at an arbitrary profit target."
+        "Set take profit at structural levels (prior highs, resistance zones) rather than arbitrary "
+        "percentages. Consider exiting when the trend structure breaks — a lower low in an uptrend, "
+        "a higher high in a downtrend."
     ),
     "swing": (
         "You capture price swings within established ranges or during pullbacks in broader trends. "
