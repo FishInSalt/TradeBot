@@ -68,7 +68,13 @@ def _build_layer3(config: PersonaConfig) -> str:
 
     sections = [f"## Your Trading Approach\n\n### Personality: {persona_label}\n\n{persona_content}"]
 
-    if config.trading_style is not None:
+    if config.trading_style is None:
+        sections.append(
+            "You are free to use any trading methodology that fits the current "
+            "market conditions — trend following, swing trading, breakout trading, "
+            "or any combination. Let the market tell you what approach to use."
+        )
+    else:
         style_content = _STYLE_DESCRIPTIONS.get(
             config.trading_style, _STYLE_DESCRIPTIONS["trend_following"]
         )

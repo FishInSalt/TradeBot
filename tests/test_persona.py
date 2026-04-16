@@ -156,12 +156,14 @@ def test_prompt_styles_are_distinct():
 
 
 def test_prompt_no_strategy_when_trading_style_none():
-    """trading_style=None (default) should not inject strategy section."""
+    """trading_style=None (default) should not inject strategy section but signal freedom."""
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
     assert "Strategy Preference" not in prompt
     # Should still have personality section
     assert "Personality" in prompt
+    # Should explicitly tell agent it can choose any methodology
+    assert "free to use any trading methodology" in prompt
 
 
 def test_prompt_has_strategy_when_trading_style_set():

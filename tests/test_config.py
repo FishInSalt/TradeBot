@@ -78,6 +78,22 @@ persona:
     assert config.persona.trading_style is None
 
 
+def test_persona_config_backward_compat_from_json():
+    """Old DB snapshots with explicit trading_style should deserialize correctly."""
+    import json
+    from src.config import PersonaConfig
+    # Simulate an old-format DB record (pre-N1: trading_style was always set)
+    old_json = '{"risk_tolerance": "aggressive", "trading_style": "trend_following", "position_sizing": "percentage", "max_position_pct": 30.0, "preferred_leverage": 3, "stop_loss_pct": 3.0, "take_profit_pct": 6.0}'
+    config = PersonaConfig(**json.loads(old_json))
+    assert config.risk_tolerance == "aggressive"
+    assert config.trading_style == "trend_following"
+
+    # New-format record (trading_style omitted or null)
+    new_json = '{"risk_tolerance": "moderate"}'
+    config2 = PersonaConfig(**json.loads(new_json))
+    assert config2.trading_style is None
+
+
 def test_settings_missing_env_keys_uses_empty(tmp_path: Path):
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("exchange:\n  name: okx\n")
