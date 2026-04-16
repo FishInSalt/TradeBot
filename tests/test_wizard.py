@@ -231,13 +231,13 @@ def test_step_risk_alerts_off(mock_confirm, mock_int):
 
 # --- Step 5: Persona ---
 
-@patch("src.cli.wizard.Prompt.ask", side_effect=["moderate", "trend_following"])
+@patch("src.cli.wizard.Prompt.ask", side_effect=["moderate", "auto"])
 def test_step_persona_defaults(mock_prompt):
     from src.cli.wizard import _step_persona
     result = _step_persona(TraderConfig(), Console())
     p = result["persona"]
     assert p.risk_tolerance == "moderate"
-    assert p.trading_style == "trend_following"
+    assert p.trading_style is None  # "auto" maps to None
     # Numerical params use code defaults (not asked in wizard)
     assert p.max_position_pct == 30.0
     assert p.position_sizing == "percentage"
@@ -250,6 +250,16 @@ def test_step_persona_custom(mock_prompt):
     p = result["persona"]
     assert p.risk_tolerance == "aggressive"
     assert p.trading_style == "breakout"
+
+
+@patch("src.cli.wizard.Prompt.ask", side_effect=["conservative", "auto"])
+def test_step_persona_auto_strategy(mock_prompt):
+    """Selecting 'auto' for strategy should set trading_style to None."""
+    from src.cli.wizard import _step_persona
+    result = _step_persona(TraderConfig(), Console())
+    p = result["persona"]
+    assert p.risk_tolerance == "conservative"
+    assert p.trading_style is None
 
 
 # --- Session naming ---
@@ -307,8 +317,8 @@ async def test_run_wizard_full_flow(tmp_path):
         "sim",               # Step 1: mode
         "BTC/USDT:USDT",    # Step 2: symbol
         "15m",               # Step 2: timeframe
-        "moderate",          # Step 5: risk tolerance
-        "trend_following",   # Step 5: trading style
+        "moderate",          # Step 5: personality
+        "auto",              # Step 5: strategy (auto = no constraint)
         "BTC sim",           # Session name
     ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
         0.05, 100.0,        # Step 1: fee_rate, balance
@@ -335,6 +345,7 @@ async def test_run_wizard_full_flow(tmp_path):
     assert result.model_config.id == "claude"
     assert result.approval_enabled is False  # sim default
     assert result.persona.risk_tolerance == "moderate"
+    assert result.persona.trading_style is None  # auto = None
 
 
 @pytest.mark.asyncio
@@ -347,9 +358,9 @@ async def test_run_wizard_reject_then_confirm(tmp_path):
     # Two full rounds of prompts: first rejected, second confirmed
     with patch("src.cli.wizard.Prompt.ask", side_effect=[
         # Round 1
-        "sim", "BTC/USDT:USDT", "15m", "moderate", "trend_following",
+        "sim", "BTC/USDT:USDT", "15m", "moderate", "auto",
         # Round 2
-        "sim", "ETH/USDT:USDT", "15m", "moderate", "trend_following",
+        "sim", "ETH/USDT:USDT", "15m", "moderate", "auto",
         "ETH sim",           # Session name (only reached on confirm)
     ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
         # Round 1

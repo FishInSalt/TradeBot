@@ -61,7 +61,21 @@ persona:
     from src.config import load_trader_config
     config = load_trader_config(trader_file)
     assert config.persona.risk_tolerance == "aggressive"
+    assert config.persona.trading_style == "swing"
     assert config.persona.preferred_leverage == 5
+
+
+def test_load_trader_config_no_trading_style(tmp_path: Path):
+    """trading_style omitted should default to None."""
+    trader_file = tmp_path / "trader.yaml"
+    trader_file.write_text("""
+persona:
+  risk_tolerance: moderate
+""")
+    from src.config import load_trader_config
+    config = load_trader_config(trader_file)
+    assert config.persona.risk_tolerance == "moderate"
+    assert config.persona.trading_style is None
 
 
 def test_settings_missing_env_keys_uses_empty(tmp_path: Path):

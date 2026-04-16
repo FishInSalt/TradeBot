@@ -269,20 +269,15 @@ def _step_persona(trader_defaults: TraderConfig, console: Console) -> dict:
     console.print("\n[bold]Step 5: Persona[/]")
     p = trader_defaults.persona
     risk = Prompt.ask(
-        "  Risk tolerance", choices=["conservative", "moderate", "aggressive"],
+        "  Personality", choices=["conservative", "moderate", "aggressive"],
         default=p.risk_tolerance, console=console,
     )
-    style = Prompt.ask(
-        "  Trading style", choices=["trend_following", "swing", "breakout"],
-        default=p.trading_style, console=console,
+    style_default = p.trading_style if p.trading_style is not None else "auto"
+    style_raw = Prompt.ask(
+        "  Strategy", choices=["trend_following", "swing", "breakout", "auto"],
+        default=style_default, console=console,
     )
-    # Numerical params commented out — not injected into prompt in MVP stage.
-    # Agent decides position sizing, leverage, SL/TP based on its own analysis.
-    # Uncomment when implementing P3 (hard risk controls) for live trading.
-    # max_pos = FloatPrompt.ask("  Max position (%)", default=p.max_position_pct, console=console)
-    # leverage = IntPrompt.ask("  Leverage", default=p.preferred_leverage, console=console)
-    # stop_loss = FloatPrompt.ask("  Stop loss (%)", default=p.stop_loss_pct, console=console)
-    # take_profit = FloatPrompt.ask("  Take profit (%)", default=p.take_profit_pct, console=console)
+    style = None if style_raw == "auto" else style_raw
     persona = PersonaConfig(
         risk_tolerance=risk,
         trading_style=style,
@@ -325,7 +320,8 @@ def _show_summary(data: dict, console: Console) -> bool:
     table.add_row("Budget", f"{data['token_budget']:,} tokens/day")
 
     p = data["persona"]
-    table.add_row("Persona", f"{p.risk_tolerance} / {p.trading_style}")
+    style_display = p.trading_style.replace("_", " ") if p.trading_style else "auto"
+    table.add_row("Persona", f"{p.risk_tolerance} / {style_display}")
     # Risk Params row removed — numerical params not used in MVP stage.
     # Uncomment when implementing P3 (hard risk controls) for live trading.
     # table.add_row(

@@ -155,6 +155,31 @@ def test_prompt_styles_are_distinct():
     assert p2 != p3
 
 
+def test_prompt_no_strategy_when_trading_style_none():
+    """trading_style=None (default) should not inject strategy section."""
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    assert "Strategy Preference" not in prompt
+    # Should still have personality section
+    assert "Personality" in prompt
+
+
+def test_prompt_has_strategy_when_trading_style_set():
+    """trading_style set should inject strategy section."""
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig(trading_style="swing"))
+    assert "Strategy Preference: Swing" in prompt
+
+
+def test_prompt_default_config_no_strategy():
+    """Default PersonaConfig should produce prompt without strategy constraint."""
+    from src.agent.persona import generate_system_prompt
+    config = PersonaConfig()
+    assert config.trading_style is None
+    prompt = generate_system_prompt(config)
+    assert "Strategy Preference" not in prompt
+
+
 def test_prompt_contains_risk_tolerance():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig(risk_tolerance="conservative"))
@@ -169,6 +194,25 @@ def test_prompt_risk_tolerances_are_distinct():
     p3 = generate_system_prompt(PersonaConfig(risk_tolerance="aggressive"))
     assert p1 != p2
     assert p2 != p3
+
+
+def test_prompt_persona_describes_temperament():
+    """Personality descriptions should describe trader temperament, not just risk rules."""
+    from src.agent.persona import generate_system_prompt
+    conservative = generate_system_prompt(PersonaConfig(risk_tolerance="conservative")).lower()
+    assert "patient" in conservative
+    moderate = generate_system_prompt(PersonaConfig(risk_tolerance="moderate")).lower()
+    assert "balanced" in moderate or "pragmatic" in moderate
+    aggressive = generate_system_prompt(PersonaConfig(risk_tolerance="aggressive")).lower()
+    assert "decisive" in aggressive
+
+
+def test_prompt_style_soft_preference():
+    """Strategy descriptions should frame style as a preference, not a rigid rule."""
+    from src.agent.persona import generate_system_prompt
+    for style in ["trend_following", "swing", "breakout"]:
+        prompt = generate_system_prompt(PersonaConfig(trading_style=style)).lower()
+        assert "preference" in prompt or "gravitate" in prompt or "not a rigid rule" in prompt
 
 
 def test_prompt_is_in_english():
