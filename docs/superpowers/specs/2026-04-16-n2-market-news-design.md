@@ -288,11 +288,6 @@ class NewsService:
     def __init__(self, api_key: str | None = None):
         self._api_key = api_key
         self._http = httpx.AsyncClient(timeout=5.0)
-        # 缓存
-        self._news_cache: ...       # TTL 5 min
-        self._fgi_cache: ...        # TTL 6 hours
-        self._calendar_cache: ...   # TTL 6 hours (周数据，每日刷新足够)
-        self._announce_cache: ...   # TTL 10 min
 
     # get_market_news 使用
     async def get_news(self, symbol: str, filter: str | None, limit: int = 5) -> list[InformationEvent]
@@ -302,6 +297,28 @@ class NewsService:
     async def get_macro_events(self, lookahead_hours: int) -> list[InformationEvent]
     async def get_announcements(self, lookback_hours: int) -> list[InformationEvent]
 ```
+
+**缓存策略：**
+
+所有缓存为内存级别、进程级别，无需持久化。
+
+| 数据源 | Cache Key | 默认 TTL | 理由 |
+|--------|-----------|---------|------|
+| CryptoPanic 新闻 | `filter` 值（如 `"rising"` / `"bullish"` / `None`） | 5 min | 新闻时效性强，但同一 cycle 内不需重复请求。不同 `filter` 返回不同文章集，需分别缓存 |
+| FGI | 无（固定 key） | 6 hours | 每日更新一次，高频请求无意义 |
+| ForexFactory 宏观日历 | 无（固定 key） | 6 hours | 按周发布，拉取整周数据后本地按 `lookback/lookahead` 过滤 |
+| OKX 公告 | 无（固定 key） | 10 min | 拉取全部公告后本地过滤，公告更新频率低 |
+| Derivatives（funding/OI） | `symbol` | 3 min | 不同币种数据不同；funding rate 每 8h 结算一次，3min 缓存已足够 |
+
+**限流保护（Rate Limit Handling）：**
+
+当 API 返回 HTTP 429（Too Many Requests）时：
+- 不视为错误，不触发降级消息
+- 自动将该数据源的缓存 TTL **临时延长至 30 分钟**（使用上次缓存的数据继续服务）
+- 记录 WARNING 日志
+- 30 分钟后恢复正常 TTL，重新尝试请求
+
+其他 HTTP 错误（5xx / timeout）仍使用标准降级策略（返回 "temporarily unavailable"）。
 
 衍生品数据不经过 NewsService，走 BaseExchange 抽象层（与 ticker / OHLCV 相同路径）：
 
