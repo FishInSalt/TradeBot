@@ -166,7 +166,7 @@ async def get_market_news(
 ```
 
 **参数：**
-- `news_filter`（可选）：CryptoPanic 过滤器 — `rising|bullish|bearish|important|hot`。默认：最新新闻。避免使用 `filter` 以防遮蔽 Python 内建函数。
+- `news_filter`（可选）：CryptoPanic 过滤器 — `rising|bullish|bearish|important`。默认：最新新闻（无过滤）。不暴露 `hot`（与 `rising` 重叠度高，减少 filter 变体有助于控制 API 配额）。避免使用 `filter` 以防遮蔽 Python 内建函数。
 - 币种从 `deps.symbol` 自动提取（如 `BTC/USDT:USDT` → `BTC`）。
 
 **新闻范围：10 条 = 5 币种相关 + 5 通用**
@@ -302,11 +302,13 @@ Long/Short Ratio: 1.35 (57.4% long / 42.6% short)
 
 | 故障场景 | 行为 |
 |---------|------|
+| `deps.news` 为 None（NewsService 未初始化） | `get_market_news` / `get_critical_alerts` 返回 "News service not configured, rely on technical analysis"。`get_derivatives_data` 不受影响（走 MarketDataService/BaseExchange 路径） |
 | 某个 API 不可用 / 超时 | 该部分返回 "temporarily unavailable"，其余部分正常返回 |
 | 全部 API 不可用 | 返回 "services currently unavailable, rely on technical analysis" |
 | 未配置 API key（CryptoPanic）| 仅返回 FGI + 提示配置 |
 | 网络超时 | 每个 API 调用 5 秒超时，快速失败 |
 | ForexFactory feed 格式变更 | 返回 "macro calendar unavailable"，不影响其他功能 |
+| CryptoPanic 日配额耗尽（计数器 ≥ 150） | 自动复用最近缓存数据，记录 WARNING |
 
 ---
 
@@ -353,6 +355,8 @@ class NewsService:
     def __init__(self, api_key: str | None = None):
         self._api_key = api_key
         self._http = httpx.AsyncClient(timeout=5.0)
+        self._cryptopanic_daily_calls = 0         # 全局日调用计数器
+        self._cryptopanic_daily_reset: float = 0  # 上次重置时间戳
 
     # get_market_news 使用
     async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> list[InformationEvent]
@@ -362,7 +366,20 @@ class NewsService:
     # get_critical_alerts 使用
     async def get_macro_events(self, lookahead_hours: int) -> list[InformationEvent]
     async def get_announcements(self, lookback_hours: int) -> list[InformationEvent]
+
+    # 生命周期
+    async def close(self) -> None:
+        """关闭 httpx 客户端。在 app.py shutdown 逻辑中调用。"""
+        await self._http.aclose()
 ```
+
+**CryptoPanic 配额保护：**
+
+Agent 行为不可完全预测，可能交替使用不同 `news_filter` 值导致缓存不命中。为防止超过 ~200/day 免费限额，`NewsService` 维护一个**全局日调用计数器**（`_cryptopanic_daily_calls`）：
+- 每次实际调用 CryptoPanic API 时计数 +1
+- 每日 UTC 0:00 重置
+- 当计数达到 150（预留 25% 安全裕量）时，自动复用最近一次任意 filter 的缓存数据，不再发起新的 API 调用
+- 行为类似 429 处理——使用过期缓存，记录 WARNING 日志
 
 **缓存策略：**
 
@@ -478,7 +495,7 @@ class Settings(BaseModel):
 ### 5.4 集成点
 
 **`src/agent/trader.py`：**
-- `TradingDeps` 新增 `news: NewsService | None = None`（通过 `TYPE_CHECKING` 导入，避免运行时依赖；NewsService 是新模块，不存在循环导入问题）
+- `TradingDeps` 新增 `news: NewsService | None = None`（直接导入，与现有 MemoryService / MarketDataService 等保持一致；NewsService 是新模块，不存在循环导入问题）
 - 注册三个新工具
 
 **`src/agent/tools_perception.py`：**
@@ -487,15 +504,16 @@ class Settings(BaseModel):
 **`src/cli/app.py`：**
 - 初始化 `NewsService` 并注入 `TradingDeps`
 - 从环境变量加载 `CRYPTOPANIC_API_KEY`
+- 在 shutdown 逻辑中调用 `news_service.close()`（与 `exchange.close()` 同位置）
 
 **`src/integrations/exchange/base.py`：**
 - 新增 `FundingRate`、`OpenInterest`、`LongShortRatio` 数据类
 - 新增 `fetch_funding_rate()`、`fetch_open_interest()`、`fetch_long_short_ratio()` 抽象方法
 
 **`src/integrations/exchange/okx.py`：**
-- 实现 `fetch_funding_rate()` — 调用 `self._client.fetch_funding_rate()`
-- 实现 `fetch_open_interest()` — 调用 `self._client.fetch_open_interest()`
-- 实现 `fetch_long_short_ratio()` — 内部调用 `self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条，推算 `long_ratio` / `short_ratio`
+- 实现 `fetch_funding_rate()` — 调用 `self._client.fetch_funding_rate()`，使用 `@_retry()` 装饰器（与现有 REST 方法一致）
+- 实现 `fetch_open_interest()` — 调用 `self._client.fetch_open_interest()`，使用 `@_retry()`
+- 实现 `fetch_long_short_ratio()` — 内部调用 `self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条，推算 `long_ratio` / `short_ratio`，使用 `@_retry()`
 
 **`src/integrations/exchange/simulated.py`：**
 - 实现 `fetch_funding_rate()` — 调用 `self._ccxt.fetch_funding_rate()`（与 `fetch_ohlcv` 同路径）
@@ -509,7 +527,7 @@ class Settings(BaseModel):
 - Layer 1 新增三个工具的引导
 
 **`src/cli/wizard.py`：**
-- 新增 CryptoPanic API key 配置步骤（允许跳过）
+- 在现有 Step 5 之后新增 Step 6：CryptoPanic API key 配置（允许跳过，提示 "Press Enter to skip — Fear & Greed Index still works without it"）
 - 启动时校验已有 key：超时重试、429 视为有效、401/403 重新引导
 
 ### 5.5 币种提取
