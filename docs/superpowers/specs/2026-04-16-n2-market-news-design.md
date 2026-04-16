@@ -307,7 +307,7 @@ Long/Short Ratio: 1.35 (57.4% long / 42.6% short)
 | 未配置 API key（CryptoPanic）| 仅返回 FGI + 提示配置 |
 | 网络超时 | 每个 API 调用 5 秒超时，快速失败 |
 | ForexFactory feed 格式变更 | 返回 "macro calendar unavailable"，不影响其他功能 |
-| CryptoPanic 日配额耗尽（计数器 ≥ 180） | 自动复用最近缓存数据，记录 WARNING |
+| CryptoPanic 日配额耗尽（计数器 ≥ 180） | 复用相同 filter 缓存，无匹配则降级，记录 WARNING |
 
 ---
 
