@@ -156,3 +156,75 @@ async def test_sim_fetch_funding_rate_no_ccxt():
     # Don't set _ccxt — simulates not calling start()
     with pytest.raises(RuntimeError, match="not started"):
         await ex.fetch_funding_rate("BTC/USDT:USDT")
+
+
+# --- MarketDataService cached derivatives ---
+
+async def test_market_data_get_funding_rate():
+    from src.integrations.market_data import MarketDataService
+
+    exchange = AsyncMock()
+    exchange.fetch_funding_rate.return_value = FundingRate(
+        symbol="BTC/USDT:USDT", rate=0.0001,
+        next_funding_time=1713265200000, timestamp=1713261600000,
+    )
+    svc = MarketDataService(exchange)
+    result = await svc.get_funding_rate("BTC/USDT:USDT")
+    assert result.rate == 0.0001
+    exchange.fetch_funding_rate.assert_called_once_with("BTC/USDT:USDT")
+
+
+async def test_market_data_get_open_interest():
+    from src.integrations.market_data import MarketDataService
+
+    exchange = AsyncMock()
+    exchange.fetch_open_interest.return_value = OpenInterest(
+        symbol="BTC/USDT:USDT", open_interest=12345.0,
+        open_interest_value=4_820_000_000.0, timestamp=1713261600000,
+    )
+    svc = MarketDataService(exchange)
+    result = await svc.get_open_interest("BTC/USDT:USDT")
+    assert result.open_interest_value == 4_820_000_000.0
+
+
+async def test_market_data_get_long_short_ratio():
+    from src.integrations.market_data import MarketDataService
+
+    exchange = AsyncMock()
+    exchange.fetch_long_short_ratio.return_value = LongShortRatio(
+        symbol="BTC/USDT:USDT", long_short_ratio=1.35,
+        long_ratio=0.574, short_ratio=0.426, timestamp=1713261600000,
+    )
+    svc = MarketDataService(exchange)
+    result = await svc.get_long_short_ratio("BTC/USDT:USDT")
+    assert result.long_short_ratio == 1.35
+
+
+async def test_market_data_derivatives_cache_hit():
+    from src.integrations.market_data import MarketDataService
+
+    exchange = AsyncMock()
+    exchange.fetch_funding_rate.return_value = FundingRate(
+        symbol="BTC/USDT:USDT", rate=0.0001,
+        next_funding_time=1713265200000, timestamp=1713261600000,
+    )
+    svc = MarketDataService(exchange)
+    await svc.get_funding_rate("BTC/USDT:USDT")
+    await svc.get_funding_rate("BTC/USDT:USDT")
+    assert exchange.fetch_funding_rate.call_count == 1  # cache hit
+
+
+async def test_market_data_derivatives_cache_by_symbol():
+    from src.integrations.market_data import MarketDataService
+
+    exchange = AsyncMock()
+    exchange.fetch_funding_rate.side_effect = [
+        FundingRate("BTC/USDT:USDT", 0.0001, 0, 0),
+        FundingRate("ETH/USDT:USDT", 0.0002, 0, 0),
+    ]
+    svc = MarketDataService(exchange)
+    btc = await svc.get_funding_rate("BTC/USDT:USDT")
+    eth = await svc.get_funding_rate("ETH/USDT:USDT")
+    assert btc.rate == 0.0001
+    assert eth.rate == 0.0002
+    assert exchange.fetch_funding_rate.call_count == 2  # independent cache keys
