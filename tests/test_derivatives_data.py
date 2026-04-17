@@ -224,6 +224,20 @@ async def test_sim_fetch_funding_rate_no_ccxt():
         await ex.fetch_funding_rate("BTC/USDT:USDT")
 
 
+async def test_sim_long_short_ratio_converts_not_supported():
+    """Mirrors the OKXExchange regression test — both exchange paths must
+    convert ccxt.NotSupported to NotImplementedError so a future ccxt
+    upgrade withdrawing the capability surfaces the same precise error
+    regardless of simulated vs live path."""
+    import ccxt.async_support as ccxt
+
+    ex = _make_sim_exchange()
+    ex._ccxt.fetch_long_short_ratio_history.side_effect = ccxt.NotSupported("gone")
+    with pytest.raises(NotImplementedError, match="long/short ratio history"):
+        await ex.fetch_long_short_ratio("BTC/USDT:USDT")
+    assert ex._ccxt.fetch_long_short_ratio_history.call_count == 1
+
+
 # --- MarketDataService cached derivatives ---
 
 async def test_market_data_get_funding_rate():

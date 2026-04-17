@@ -154,6 +154,46 @@ async def test_fgi_empty_data_returns_none():
         assert await client.fetch() is None
 
 
+async def test_fgi_schema_drift_returns_none():
+    """Upstream dropped/renamed 'value' or 'value_classification' → return
+    None rather than raising a KeyError, so NewsService's None contract
+    reports a cleaner 'unavailable' instead of masking a schema change."""
+    from src.integrations.news.fear_greed import FearGreedClient
+
+    missing_value = {"data": [{"value_classification": "Extreme Fear", "timestamp": "1713225600"}]}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=missing_value))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = FearGreedClient(http)
+        assert await client.fetch() is None
+
+    missing_class = {"data": [{"value": "23", "timestamp": "1713225600"}]}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=missing_class))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = FearGreedClient(http)
+        assert await client.fetch() is None
+
+
+async def test_fgi_bad_timestamp_falls_back_to_now():
+    """Non-numeric timestamp should not discard an otherwise-valid FGI
+    reading — mirrors coindesk.py's fallback pattern."""
+    from src.integrations.news.fear_greed import FearGreedClient
+
+    bad_ts_payload = {"data": [{
+        "value": "50", "value_classification": "Neutral",
+        "timestamp": "not-a-number",
+    }]}
+    before = datetime.now(timezone.utc)
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=bad_ts_payload))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = FearGreedClient(http)
+        event = await client.fetch()
+    after = datetime.now(timezone.utc)
+
+    assert event is not None
+    assert event.title == "50 / 100 — Neutral"
+    assert before <= event.timestamp <= after
+
+
 # ===== ForexFactory Calendar =====
 
 FOREXFACTORY_RESPONSE = [

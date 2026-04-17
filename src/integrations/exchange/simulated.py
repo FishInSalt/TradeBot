@@ -1002,6 +1002,15 @@ class SimulatedExchange(BaseExchange):
             history = await self._ccxt.fetch_long_short_ratio_history(symbol, "5m", limit=1)
         except ccxt.RateLimitExceeded as e:
             raise RateLimitHit(f"Sim long/short ratio: {e}") from e
+        except ccxt.NotSupported as e:
+            # Mirrors okx.py: surface a precise error if a future ccxt
+            # upgrade withdraws the fetch_long_short_ratio_history
+            # capability, rather than leaking ccxt.NotSupported to the
+            # tool layer where it would flatten into "temporarily
+            # unavailable".
+            raise NotImplementedError(
+                f"ccxt no longer exposes long/short ratio history for {symbol}: {e}"
+            ) from e
         if not history:
             raise ValueError(f"No long/short ratio data for {symbol}")
         entry = history[0]

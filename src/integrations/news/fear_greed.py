@@ -26,14 +26,21 @@ class FearGreedClient:
             return None
 
         item = items[0]
-        value = item["value"]
-        classification = item["value_classification"]
+        # Defensive lookups — if alternative.me ever renames/drops these
+        # fields, return None rather than raising a KeyError that makes
+        # the whole FGI path appear "temporarily unavailable" to the Agent.
+        value = item.get("value")
+        classification = item.get("value_classification")
+        if not value or not classification:
+            return None
+
         raw_ts = item.get("timestamp")
-        ts = (
-            datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
-            if raw_ts
-            else datetime.now(timezone.utc)
-        )
+        try:
+            ts = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
+        except (TypeError, ValueError):
+            # Matches coindesk.py's fallback: a bad timestamp shouldn't
+            # discard the otherwise-valid FGI reading.
+            ts = datetime.now(timezone.utc)
         return InformationEvent(
             timestamp=ts,
             source="alternative_me",
