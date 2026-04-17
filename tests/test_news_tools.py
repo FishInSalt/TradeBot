@@ -225,8 +225,9 @@ async def test_critical_alerts_services_unavailable():
 
     assert "Exchange announcements service temporarily unavailable" in result
     assert "Macro events service temporarily unavailable" in result
-    # Footer still rendered so the Agent still sees the calendar-scope reminder
-    assert "macro calendar covers current week only" in result
+    # Footer skipped when macro source is unavailable — the calendar-scope
+    # caveat is meaningless without a result to qualify (spec §3.2 rationale).
+    assert "macro calendar covers current week only" not in result
 
 
 async def test_critical_alerts_mixed_unavailable_and_empty():

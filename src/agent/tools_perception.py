@@ -511,12 +511,13 @@ async def get_critical_alerts(
             "No upcoming macro events."
         )
 
-    # Footer: calendar scope reminder (spec §3.2). Kept unconditional so the
-    # Agent doesn't need weekday-awareness to understand the limitation.
-    sections.append(
-        "Note: macro calendar covers current week only; "
-        "Friday evening / weekend calls may miss next week's early events."
-    )
+    # Footer: calendar scope reminder (spec §3.2). Skip when macro source is
+    # fully unavailable — the caveat is meaningless without a result to qualify.
+    if macro_events is not None:
+        sections.append(
+            "Note: macro calendar covers current week only; "
+            "Friday evening / weekend calls may miss next week's early events."
+        )
 
     return "\n\n".join(sections)
 

@@ -28,6 +28,9 @@ class TTLCache:
         default_ttl: float,
         fetch_fn: Callable[[], Awaitable[Any]],
     ) -> Any:
+        # Caller must not invoke get_or_fetch concurrently for the same key:
+        # inflight requests are not de-duplicated, so two concurrent misses
+        # will each run fetch_fn. Safe under pydantic-ai's serial tool execution.
         entry = self._store.get(key)
         if entry is not None:
             data, created_at, ttl = entry
