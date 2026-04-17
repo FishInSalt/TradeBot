@@ -3024,7 +3024,7 @@ In `src/agent/persona.py`, append to the end of `_build_layer1()` return string,
 ```
 - **Market news**: Use get_market_news to check crypto news headlines + Fear & Greed Index (0 = max fear, 100 = max greed). Returns 10 headlines (5 symbol-specific + 5 general). Usually call without news_filter; use 'positive' / 'negative' / 'neutral' when you want a specific sentiment lens.
 - **Critical alerts**: Use get_critical_alerts before trading to scan exchange announcements (maintenance, delistings, parameter changes) over the past lookback_hours and upcoming macro events (FOMC, CPI, NFP with impact level) within the next lookahead_hours. Often empty when nothing is scheduled. Macro calendar covers the current week only — Friday evening / weekend calls may miss next week's early events.
-- **Derivatives structure**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Positive funding rate means longs pay shorts, negative means shorts pay longs (settles every 8h). Open interest is total outstanding contracts. Long/short ratio is the ratio of long vs short account positions.
+- **Derivatives structure**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Positive funding rate means longs pay shorts, negative means shorts pay longs (settlement interval varies by contract — see next settlement time in output). Open interest is total outstanding contracts. Long/short ratio is the ratio of long vs short account positions.
 ```
 
 - [ ] **Step 4: Run all tests to verify nothing breaks**

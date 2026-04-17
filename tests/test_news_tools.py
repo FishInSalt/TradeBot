@@ -178,7 +178,8 @@ async def test_critical_alerts_format():
     assert "Impact: High" in result
     # Previous/Forecast line should appear below the event per spec §3.2
     assert "Previous: N/A | Forecast: N/A" in result
-    # Calendar scope reminder should always be present (spec §3.2)
+    # Calendar scope reminder is rendered whenever macro_events returns a list
+    # (spec §3.2); only suppressed when macro source itself is unavailable.
     assert "macro calendar covers current week only" in result
 
 
@@ -243,6 +244,28 @@ async def test_critical_alerts_mixed_unavailable_and_empty():
 
     assert "Exchange announcements service temporarily unavailable" in result
     assert "No upcoming macro events" in result
+    # macro_events is [] (reachable, just empty) → footer still qualifies
+    # the scope of the empty calendar result.
+    assert "macro calendar covers current week only" in result
+
+
+async def test_critical_alerts_announcements_only_macro_unavailable():
+    """Announcements present + macro unavailable → footer suppressed because
+    the scope caveat has no macro result to qualify."""
+    from src.agent.tools_perception import get_critical_alerts
+
+    news_svc = AsyncMock()
+    news_svc.get_announcements.return_value = [
+        _event("Delisting XYZ", source="okx_announcement", category="announcement"),
+    ]
+    news_svc.get_macro_events.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_critical_alerts(deps)
+
+    assert "Delisting XYZ" in result
+    assert "Macro events service temporarily unavailable" in result
+    assert "macro calendar covers current week only" not in result
 
 
 # ===== get_derivatives_data =====
