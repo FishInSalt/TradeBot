@@ -286,6 +286,8 @@ async def get_critical_alerts(
 - `lookback_hours`：回看多久的交易所公告（默认 24h）
 - `lookahead_hours`：前瞻多久的宏观事件（默认 12h）
 
+**实现方式：** 工具层内部对 `NewsService.get_announcements()` 和 `NewsService.get_macro_events()` 使用 `asyncio.gather(..., return_exceptions=True)` 并行调用——两者的上游、缓存条目都独立，没有串行的必要。NewsService 内部各方法已做 per-source 降级（某上游失败返空列表），`gather` 的 `return_exceptions` 仅作为防御性兜底。
+
 **输出格式：**
 
 ```
@@ -325,6 +327,7 @@ async def get_derivatives_data(
 - `SimulatedExchange` 用已有的 `self._ccxt`（ccxt.pro）实现——和它的 `fetch_ohlcv()` 一样，读的是真实市场数据
 - `MarketDataService` 通过 `self._exchange` 调用，和 `get_ticker()` / `get_ohlcv_dataframe()` 一致
 - 衍生品数据缓存加在 `MarketDataService` 层（TTL 3 分钟，cache key 为 `symbol`），与 NewsService 的缓存同级
+- **工具层并行**：`get_derivatives_data` 的三个 method（funding / OI / LSR）通过 `asyncio.gather(..., return_exceptions=True)` 并行调用——每个 method 走独立缓存/独立 ccxt 请求，无共享状态。串行实现会把 3× round-trip 延迟堆到用户侧；并行让 wall-clock 等于最慢那一路。partial failure（某个 method 抛异常）由 §3.4 的"单个 method 失败"分支处理
 
 不引入额外的 ccxt 客户端，不破坏现有架构。
 
@@ -728,7 +731,7 @@ get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
 | OKX 公告 + 系统状态 | 192–384（2 个 cache 条目 × 48–96 miss 次/day × 每次 miss 内部 2 个 HTTP 调用 = 4 HTTP per full refresh） | ~5 req/s（安全默认值） |
 | ccxt 衍生品（funding / OI / LSR） | 144–288（每工具 3 个 method，每 method 独立 3min 缓存，3min < 15min 每 cycle 均 miss；× 3 methods × 48–96 cycles） | 交易所 API 标准限额 |
 
-**注意：** 缓存 key 仅含 `news_filter`（不含 symbol，因 symbol 是会话级固定值且分组在 cache 外），且 TTL 与 cycle 间隔对齐。Agent 若交替使用不同 `news_filter` 值会产生多个缓存条目，但由于 TTL 与 cycle 间隔一致，不会导致缓存穿透。
+**注意（CoinDesk 专用）：** CoinDesk 的缓存 key 是 `news:{news_filter}`，不含 symbol——因为 symbol 是会话级固定值且分组在 cache 之外进行，同一 session 内 cache 命中返回的 raw posts 对当前 symbol 一定正确。TTL 与 cycle 间隔对齐（15min），Agent 若交替使用不同 `news_filter` 值会产生多个缓存条目，但由于 TTL 与 cycle 一致，不会导致缓存穿透。其他数据源（FGI / ForexFactory / OKX 公告 / 衍生品）的 cache key 结构见 §5.2 缓存表——各有带前缀的独立 key。
 
 ---
 
@@ -848,11 +851,16 @@ tests/test_config.py（扩展）
    - **端点 A（`/support/announcements`）**：通过 `annType` 参数过滤，仅拉取 `announcements-delistings`（下币）和 `trading-updates-us-aus`（交易规则/合约参数变更），跳过 `announcements-new-listings`（新上币对已持仓币种无直接影响）
    - **端点 B（`/system/status`）**：拉取 `state=scheduled` 和 `state=ongoing`，保留影响交易功能的维护事件
 
-5. **ccxt 衍生品方法（待验证）**：spec §2.5 断言 ccxt OKX 的 `has.fetchLongShortRatio == False`，需用 `fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条；且 `fetch_funding_rate` / `fetch_open_interest` 可用。Pre-work 只覆盖了 HTTP API，**未用 Python 验证过 ccxt 方法**。**Task 5 实现前必须先跑一次验证：**
-   ```bash
-   python -c "import ccxt; ex = ccxt.okx(); print({k: ex.has.get(k) for k in ['fetchFundingRate', 'fetchOpenInterest', 'fetchLongShortRatio', 'fetchLongShortRatioHistory']})"
-   ```
-   期望输出：`fetchFundingRate=True`、`fetchOpenInterest=True`、`fetchLongShortRatioHistory=True`。如果结构发生变化（例如 `fetchLongShortRatio` 变为 `True`，或 `fetchLongShortRatioHistory` 不再支持），需调整 Task 5 的 OKX/Sim 实现。
+5. **ccxt 衍生品方法（待验证）**：spec §2.5 断言 ccxt OKX 的 `has.fetchLongShortRatio == False`，需用 `fetch_long_short_ratio_history(symbol, "5m", limit=1)` 取最新一条；且 `fetch_funding_rate` / `fetch_open_interest` 可用。Pre-work 只覆盖了 HTTP API，**未用 Python 验证过 ccxt 方法**。
+
+   **Task 5 实现前必须先跑一次完整验证**（详细命令见 plan Pre-work P5）。概括：
+
+   - `has` 表查询：`ex.has.get('fetchLongShortRatioHistory')` 应为 `True`
+   - **实际调通**：`await ex.fetch_long_short_ratio_history('BTC/USDT:USDT', '5m', limit=1)` 应返回非空列表（`has` 是声明，runtime 才是证据）
+   - `await ex.fetch_funding_rate('BTC/USDT:USDT')` 应返回含 `fundingRate` 的 dict
+   - `await ex.fetch_open_interest('BTC/USDT:USDT')` 应返回含 `openInterestValue` 的 dict
+
+   如果任一 runtime 调用抛 `ccxt.NotSupported` / `ccxt.ExchangeError`（即使 `has` 表为 True），需调整 Task 5 实现或回退到 OKX REST `/api/v5/rubik/stat/contracts/long-short-account-ratio-contract`。
 
 ## 11. API 稳定性总评
 
