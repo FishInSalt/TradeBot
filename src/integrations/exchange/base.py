@@ -90,6 +90,12 @@ class BaseExchange(ABC):
     async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]: ...
     @abstractmethod
     async def cancel_order(self, order_id: str, symbol: str) -> None: ...
+    @abstractmethod
+    async def fetch_funding_rate(self, symbol: str) -> 'FundingRate': ...
+    @abstractmethod
+    async def fetch_open_interest(self, symbol: str) -> 'OpenInterest': ...
+    @abstractmethod
+    async def fetch_long_short_ratio(self, symbol: str) -> 'LongShortRatio': ...
 
     async def start(self) -> None:
         """启动 WebSocket 等后台任务。默认空实现。"""
@@ -183,4 +189,29 @@ class PriceLevelAlertInfo:
     direction: str          # "above" / "below"
     current_price: float
     reasoning: str
+    timestamp: int
+
+
+@dataclass
+class FundingRate:
+    symbol: str
+    rate: float  # current funding rate (e.g., 0.000125 = 0.0125%)
+    next_funding_time: int  # next settlement timestamp (ms)
+    timestamp: int
+
+
+@dataclass
+class OpenInterest:
+    symbol: str
+    open_interest: float  # base-currency amount (per ccxt unified `openInterestAmount`)
+    open_interest_value: float  # USD value
+    timestamp: int
+
+
+@dataclass
+class LongShortRatio:
+    symbol: str
+    long_short_ratio: float  # raw ratio (e.g., 1.35)
+    long_ratio: float  # derived: ratio / (1 + ratio)
+    short_ratio: float  # derived: 1 / (1 + ratio)
     timestamp: int
