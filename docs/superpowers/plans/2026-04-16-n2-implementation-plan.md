@@ -2785,9 +2785,24 @@ async def _validate_cryptopanic_key(key: str, console: Console) -> bool:
     return True  # unreachable, but satisfy type checker
 
 
-async def _step_news(console: Console) -> dict:
-    """Step 6: News configuration (CryptoPanic API key)."""
+async def _step_news(config_dir: Path, console: Console) -> dict:
+    """Step 6: News configuration (CryptoPanic API key).
+
+    Reuses the .credentials file (same as OKX credentials) for persistence.
+    Loaded key is validated before reuse; saved after successful new entry.
+    """
     console.print("\n[bold]Step 6: News (optional)[/]")
+
+    # Try saved credentials first
+    saved = _load_credentials(config_dir)
+    if "cryptopanic" in saved:
+        console.print("  [dim]Saved CryptoPanic credentials found[/]")
+        if Confirm.ask("  Use saved CryptoPanic API key?", default=True, console=console):
+            saved_key = saved["cryptopanic"].get("api_key", "")
+            if saved_key and await _validate_cryptopanic_key(saved_key, console):
+                return {"cryptopanic_api_key": saved_key}
+            console.print("  [yellow]Saved key invalid, please reconfigure[/]")
+
     console.print("  CryptoPanic provides crypto news headlines with sentiment.")
     console.print("  Get a free API key at: https://cryptopanic.com/developers/api/")
     has_key = Confirm.ask("  Configure CryptoPanic API key?", default=False, console=console)
@@ -2795,12 +2810,16 @@ async def _step_news(console: Console) -> dict:
         while True:
             key = Prompt.ask("  API key", password=True, console=console)
             if await _validate_cryptopanic_key(key, console):
+                _save_credentials(config_dir, "cryptopanic", {"api_key": key})
+                console.print("  [green]Saved to config/.credentials[/]")
                 return {"cryptopanic_api_key": key}
             if not Confirm.ask("  Try another key?", default=True, console=console):
                 break
     console.print("  [dim]Skipped — Fear & Greed Index and alerts still available[/]")
     return {"cryptopanic_api_key": ""}
 ```
+
+Note: `_load_credentials()` and `_save_credentials()` already exist in `wizard.py` (used for OKX credentials) and work with arbitrary service names as dict keys — no changes to those helpers needed.
 
 Add `cryptopanic_api_key` field to `WizardResult`:
 
@@ -2837,7 +2856,7 @@ In `run_wizard()`, insert the new step call **after `persona_data = _step_person
 
 ```python
             persona_data = _step_persona(trader_defaults, console)
-            news_data = await _step_news(console)  # NEW — inserts as Step 6
+            news_data = await _step_news(config_dir, console)  # NEW — inserts as Step 6
 ```
 
 And include it in the `data` merge (replace the existing line that builds `data`):
@@ -2863,9 +2882,10 @@ Expected: all tests pass
 
 - [ ] **Step 4: Update .env.example**
 
-Append to `.env.example`:
+Append to `.env.example` (optional non-interactive override; wizard persists to `config/.credentials` by default):
 
 ```
+# Optional: CryptoPanic API key (overrides config/.credentials if both set)
 CRYPTOPANIC_API_KEY=your_cryptopanic_key_here
 ```
 
