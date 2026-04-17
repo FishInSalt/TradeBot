@@ -150,8 +150,9 @@ Agent Tool (thin wrapper)
 |------|------|
 | 认证 | 无需认证 |
 | 参数 | `state`（`scheduled` / `ongoing` / `completed` / `canceled`） |
-| 响应字段 | `title`, `state`, `begin`(开始时间 ms), `end`(结束时间 ms), `maintType`, `serviceType`, `system` |
+| 响应字段（基于 OKX 文档） | `title`, `state`, `begin`(开始时间 ms), `end`(结束时间 ms), `maintType`, `serviceType`, `system` |
 | 用途 | 计划内维护停机、进行中故障——与业务公告互补 |
+| **⚠️ Schema 待验证** | Pre-work P4 探测时 `state=scheduled`/`ongoing` 返回空数组（当前没有排期维护），无法 100% 确认嵌套结构。**Task 3 实现前建议用 `state=completed` 拉历史数据验证**（历史维护一定有记录）——若发现像 `/support/announcements` 一样嵌套成 `data[0].details[*]`，parser 需同步调整 |
 
 **共同特性：**
 
@@ -358,7 +359,7 @@ Data as of: 2026-04-16 14:30 UTC
 |---------|------|
 | `deps.news` 为 None（NewsService 未初始化） | 返回 "News service not configured" |
 | 单个上游 API 不可用 / 超时 / 5xx | 该 section 返回 "temporarily unavailable"，其余 section 正常 |
-| NewsService 聚合的所有上游 API 都不可用 | 返回 "News/alerts services currently unavailable" |
+| 该 tool 覆盖的所有上游 API 都不可用（`get_market_news`: CoinDesk + FGI；`get_critical_alerts`: OKX announcements + OKX status + ForexFactory） | 返回 "News/alerts services currently unavailable" |
 | 任何上游 API 返回 HTTP 429 | `TTLCache` 将该条目 TTL 延长至 30min、返回 stale 缓存；若无缓存则 section 降级 |
 | ForexFactory feed 格式变更 | `get_critical_alerts` 的 macro section 返回 "macro calendar unavailable"，公告 section 不受影响 |
 
@@ -390,9 +391,17 @@ class InformationEvent:
 
     `content` (source-specific free-form metadata; NOT article full text):
       - coindesk       → original media name (e.g. "CoinTelegraph")
-      - alternative_me → classification string (e.g. "Extreme Fear")
+      - alternative_me → classification only (e.g. "Extreme Fear")
       - forexfactory   → "Previous: X | Forecast: Y" for macro events
       - okx_announcement / okx_status → unused (empty string)
+
+    `title` is the human-readable display line per source:
+      - coindesk       → article title as-is
+      - alternative_me → composite "{value} / 100 — {classification}" (e.g. "23 / 100 — Extreme Fear")
+      - forexfactory   → event name (e.g. "FOMC Meeting Minutes")
+      - okx_announcement → announcement title
+      - okx_status     → maintenance title + inline time range
+                         (e.g. "System upgrade 2026-04-17 02:00-04:00 UTC")
 
     `url`:
       - coindesk           → article URL
@@ -535,7 +544,7 @@ class FundingRate:
 @dataclass
 class OpenInterest:
     symbol: str
-    open_interest: float      # 张数或币数
+    open_interest: float      # base-currency amount (per ccxt unified `openInterestAmount`)
     open_interest_value: float # USD 价值
     timestamp: int
 
@@ -625,8 +634,8 @@ class Settings(BaseModel):
 
 **`src/cli/app.py`：**
 - 初始化 `NewsService`（无参数——无 key 需要）并注入 `TradingDeps`
-- `build_services()` 的返回值扩展为 `(exchange, deps, agent, budget, news_service)`，让 `run()` 能保住 `news_service` 引用直到关停
-- 在 `run()` 的 shutdown 段、`await exchange.close()` **之后**新增 `if news_service is not None: await news_service.close()`——位置选在 exchange 之后是为了先让 WebSocket 停，再关 HTTP client，减少 pending request
+- `build_services()` 返回值**不扩展**；`news_service` 引用存在 `deps.news` 里即可（与 `deps.memory` / `deps.metrics` / `deps.technical` 同惯例——这些 service 也都没单独返回）
+- 在 `run()` 的 shutdown 段、`await exchange.close()` **之后**新增 `if deps.news is not None: await deps.news.close()`——位置选在 exchange 之后是为了先让 WebSocket 停，再关 HTTP client，减少 pending request
 
 **`src/integrations/exchange/base.py`：**
 - 新增 `FundingRate`、`OpenInterest`、`LongShortRatio` 数据类
@@ -651,6 +660,9 @@ class Settings(BaseModel):
 **`src/cli/wizard.py`：**
 - **无改动**。所有新闻/情报数据源均无需 key，wizard 不新增任何步骤。（早期设计曾有 Step 6 给 CryptoPanic 配 key，切换到 CoinDesk 后删除。）
 
+**`tests/test_tools.py`：**
+- `MockDeps` dataclass 追加 `news: object = None` 字段，保持与 `TradingDeps` 新字段对称，避免现有 tool 测试因缺字段报错。
+
 ### 5.5 币种提取
 
 定义在 `src/integrations/news/models.py`（与 `InformationEvent` 同文件，models 层公共工具）。NewsService 和 tool 层都会导入它。
@@ -659,13 +671,29 @@ class Settings(BaseModel):
 def extract_base_currency(symbol: str) -> str:
     """Extract base currency for matching against CoinDesk CATEGORY_DATA.
 
-    Only standard tickers are supported (BTC, ETH, SOL, etc.).
-    Non-standard symbols (1000PEPE, kSHIB) may not appear in CoinDesk's categories —
-    in that case symbol-specific news is empty; general news backfills the slot.
+    OKX uses multiplier-prefixed contracts for low-price memecoins (1000PEPE,
+    1000SHIB, kBONK) — the prefix is a contract-size scaling convention, not
+    part of the asset identity. CoinDesk's CATEGORY_DATA uses the underlying
+    asset code (PEPE / SHIB / BONK), so we strip `1000` / `k` prefixes to get
+    the real match target. Without this, those symbols would silently fall
+    through to general-only news.
+
+    Still best-effort: truly non-standard tickers not in CoinDesk's taxonomy
+    just get empty symbol-specific news (general news backfills).
     """
-    return symbol.split("/")[0]
-    # BTC/USDT:USDT → BTC
-    # ETH/USDT:USDT → ETH
+    base = symbol.split("/")[0]
+    # Strip OKX multiplier prefixes so "1000PEPE" → "PEPE", "kSHIB" → "SHIB".
+    # Only strip when the remainder is all-alpha, to avoid false positives like "k9".
+    for prefix in ("1000", "k"):
+        if base.startswith(prefix):
+            remainder = base[len(prefix):]
+            if remainder and remainder.isalpha():
+                return remainder
+    return base
+    # BTC/USDT:USDT        → BTC
+    # ETH/USDT:USDT        → ETH
+    # 1000PEPE/USDT:USDT   → PEPE
+    # kSHIB/USDT:USDT      → SHIB
 ```
 
 ---
@@ -860,7 +888,24 @@ tests/test_config.py（扩展）
    - `await ex.fetch_funding_rate('BTC/USDT:USDT')` 应返回含 `fundingRate` 的 dict
    - `await ex.fetch_open_interest('BTC/USDT:USDT')` 应返回含 `openInterestValue` 的 dict
 
-   如果任一 runtime 调用抛 `ccxt.NotSupported` / `ccxt.ExchangeError`（即使 `has` 表为 True），需调整 Task 5 实现或回退到 OKX REST `/api/v5/rubik/stat/contracts/long-short-account-ratio-contract`。
+   如果任一 runtime 调用抛 `ccxt.NotSupported` / `ccxt.ExchangeError`（即使 `has` 表为 True），需调整 Task 5 实现或回退到 OKX REST。
+
+   **REST fallback 字段映射**（仅 long/short ratio 需要 fallback；funding rate / OI 由 ccxt 标准方法覆盖，无 fallback 需求）：
+
+   - 端点：`GET https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId=BTC-USDT-SWAP&period=5m&limit=1`
+   - 响应：`{"code":"0","data":[[ts, longShortRatio], ...]}`，`data` 是时间序列数组，每条 `[ts(ms 字符串), longShortRatio(字符串)]`
+
+   映射到 `LongShortRatio` dataclass：
+
+   | OKX REST 字段 | `LongShortRatio` 字段 | 计算 |
+   |---|---|---|
+   | `data[0][0]` | `timestamp` | `int(...)`（ms） |
+   | `data[0][1]` | `long_short_ratio` | `float(...)`（如 "1.35"） |
+   | 推算 | `long_ratio` | `r / (1 + r)` |
+   | 推算 | `short_ratio` | `1 / (1 + r)` |
+   | 传入 | `symbol` | 调用方（`OKXExchange.fetch_long_short_ratio(symbol)` 的参数） |
+
+   注意：REST 端点参数 `instId` 用的是 `BTC-USDT-SWAP` 格式，不是 ccxt 的 `BTC/USDT:USDT`。fallback 实现时需要从 ccxt symbol 映射到 OKX instId（`self._client.market(symbol)['id']` 可以拿到）。
 
 ## 11. API 稳定性总评
 

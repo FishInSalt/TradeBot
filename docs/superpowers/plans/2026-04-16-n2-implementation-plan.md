@@ -73,7 +73,13 @@ Pre-work was completed on 2026-04-17. Findings are recorded here so the implemen
    curl -s "https://www.okx.com/api/v5/system/status?state=scheduled" | jq '.data[0] // "no scheduled maintenance"'
    ```
    **Schema drift**: items live under `response.data[0].details[*]`, not `response.data[*]`. Field names inside each item match spec (`annType`, `title`, `url`, `pTime`, `businessPTime`). Task 3's `OKXAnnouncementsClient.fetch()` accounts for this nesting.
-   **System status**: endpoint returns `code:"0"`, data array empty when no scheduled maintenance — can't fully verify schema until real data appears. Task 3 proceeds with spec field names (`title`, `state`, `begin`, `end`).
+   **System status**: endpoint returns `code:"0"`, data array empty when no scheduled maintenance — can't fully verify schema from live `state=scheduled` alone.
+
+   **Before Task 3 implementation**, re-run with `state=completed` to probe historical data (completed maintenance is always archived):
+   ```bash
+   curl -s "https://www.okx.com/api/v5/system/status?state=completed" | jq '.data[0] | to_entries | map({key, type: (.value | type)})'
+   ```
+   If the structure is nested like `/support/announcements` (i.e., `data[0].details[*]`) instead of `data[*]`, `OKXStatusClient.fetch()` needs the same nested-parse pattern as `OKXAnnouncementsClient`. If it's flat `data[*]` with the expected fields, the current plan works as-is.
 
 - [ ] **P5: ccxt OKX derivatives methods (MUST run before Task 5)**
 
@@ -187,6 +193,29 @@ def test_extract_base_currency_eth():
 def test_extract_base_currency_sol():
     from src.integrations.news.models import extract_base_currency
     assert extract_base_currency("SOL/USDT:USDT") == "SOL"
+
+
+def test_extract_base_currency_strips_1000_prefix():
+    """OKX uses 1000PEPE / 1000SHIB multiplier contracts — strip so CoinDesk
+    CATEGORY_DATA match still works (CoinDesk tags use PEPE, not 1000PEPE)."""
+    from src.integrations.news.models import extract_base_currency
+    assert extract_base_currency("1000PEPE/USDT:USDT") == "PEPE"
+    assert extract_base_currency("1000SHIB/USDT:USDT") == "SHIB"
+
+
+def test_extract_base_currency_strips_k_prefix():
+    from src.integrations.news.models import extract_base_currency
+    assert extract_base_currency("kSHIB/USDT:USDT") == "SHIB"
+    assert extract_base_currency("kBONK/USDT:USDT") == "BONK"
+
+
+def test_extract_base_currency_does_not_strip_false_positives():
+    """Don't strip when the remainder isn't all-letters."""
+    from src.integrations.news.models import extract_base_currency
+    # "1000" alone (no letters) — leave as-is
+    assert extract_base_currency("1000/USDT:USDT") == "1000"
+    # "k" alone — leave as-is
+    assert extract_base_currency("k/USDT:USDT") == "k"
 
 
 # --- TTLCache ---
@@ -346,11 +375,23 @@ class InformationEvent:
 
 
 def extract_base_currency(symbol: str) -> str:
-    """Extract base currency from a trading pair symbol.
+    """Extract base currency for matching against CoinDesk CATEGORY_DATA.
 
-    BTC/USDT:USDT → BTC, ETH/USDT:USDT → ETH.
+    Strips OKX multiplier prefixes (1000PEPE → PEPE, kSHIB → SHIB) so those
+    symbols aren't silently excluded from symbol-specific news.
+
+    BTC/USDT:USDT      → BTC
+    ETH/USDT:USDT      → ETH
+    1000PEPE/USDT:USDT → PEPE
+    kSHIB/USDT:USDT    → SHIB
     """
-    return symbol.split("/")[0]
+    base = symbol.split("/")[0]
+    for prefix in ("1000", "k"):
+        if base.startswith(prefix):
+            remainder = base[len(prefix):]
+            if remainder and remainder.isalpha():
+                return remainder
+    return base
 ```
 
 - [ ] **Step 4: Implement TTLCache**
@@ -1797,7 +1838,7 @@ class FundingRate:
 @dataclass
 class OpenInterest:
     symbol: str
-    open_interest: float  # contracts or base currency units
+    open_interest: float  # base-currency amount (per ccxt unified `openInterestAmount`)
     open_interest_value: float  # USD value
     timestamp: int
 
@@ -2900,28 +2941,16 @@ In the `TradingDeps(...)` constructor call, add the `news` field:
     )
 ```
 
-Update `build_services` return to include news_service so it can be closed:
+`build_services` return tuple stays unchanged — `deps.news` already holds the `NewsService` reference, consistent with how `deps.memory` / `deps.metrics` / `deps.technical` are kept (none of them are in the return tuple).
 
-Change the return statement to:
-
-```python
-    return exchange, deps, agent, budget, news_service
-```
-
-In the `run()` function, update the unpacking:
+In the shutdown section, after `await exchange.close()`, add:
 
 ```python
-    exchange, deps, agent, budget, news_service = build_services(
-        result, engine, session_id, sc, settings,
-    )
+    if deps.news is not None:
+        await deps.news.close()
 ```
 
-In the shutdown section (after `await exchange.close()`), add:
-
-```python
-    if news_service is not None:
-        await news_service.close()
-```
+Order rationale: close `exchange` first so its WebSocket drains, then close `news` (which closes the HTTP client). Avoids pending HTTP requests during shutdown.
 
 - [ ] **Step 2: Run full test suite to verify nothing breaks**
 
