@@ -51,12 +51,15 @@ class NewsService:
         symbol: str,
         news_filter: str | None = None,
         max_per_group: int = 5,
-    ) -> tuple[list[InformationEvent], list[InformationEvent]]:
+    ) -> tuple[list[InformationEvent], list[InformationEvent]] | None:
         """Fetch news headlines, split into (symbol_news, general_news).
 
         Returns two lists: symbol-specific headlines and general crypto news.
         If symbol_news < max_per_group, general_news gets extra slots (total = max_per_group * 2).
-        On any upstream error returns ([], []).
+
+        Returns None when the upstream (CoinDesk) errored and there is no
+        stale cache to fall back on — mirrors the None-on-outage contract
+        used by get_announcements / get_macro_events (spec §3.5).
         """
         cache_key = f"news:{news_filter}"
 
@@ -68,10 +71,10 @@ class NewsService:
         except RateLimitHit:
             # TTLCache already tried stale cache and didn't have any
             logger.warning("CoinDesk 429 with no cache, degrading")
-            return [], []
+            return None
         except Exception:
             logger.warning("CoinDesk fetch failed", exc_info=True)
-            return [], []
+            return None
 
         return self._split_news(all_posts, symbol, max_per_group)
 

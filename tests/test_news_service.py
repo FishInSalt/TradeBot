@@ -76,11 +76,12 @@ async def test_get_news_passes_filter():
 
 # --- get_news: error paths ---
 
-async def test_get_news_api_failure_returns_empty():
+async def test_get_news_api_failure_returns_none():
+    """Upstream errored → signal unavailability via None (spec §3.5)."""
     svc = _make_service()
     svc._news.fetch_posts.side_effect = Exception("API down")
-    sym, gen = await svc.get_news("BTC/USDT:USDT")
-    assert sym == [] and gen == []
+    result = await svc.get_news("BTC/USDT:USDT")
+    assert result is None
 
 
 # --- get_news: caching ---
@@ -116,20 +117,30 @@ async def test_get_news_429_uses_stale_cache():
     for key, (data, _created_at, ttl) in list(svc._cache._store.items()):
         svc._cache._store[key] = (data, 0.0, ttl)
 
-    # Next fetch raises 429 → TTLCache returns stale
+    # Next fetch raises 429 → TTLCache returns stale → get_news returns tuple
     svc._news.fetch_posts.side_effect = RateLimitHit("429")
-    sym, gen = await svc.get_news("BTC/USDT:USDT")
+    result = await svc.get_news("BTC/USDT:USDT")
+    assert result is not None
+    sym, gen = result
     assert len(sym) + len(gen) > 0  # stale cache used
 
 
-async def test_get_news_429_no_cache_degrades():
-    """First call is 429 with no cached data → returns empty."""
+async def test_get_news_429_no_cache_returns_none():
+    """First call is 429 with no cached data → None (spec §3.5)."""
     from src.utils.cache import RateLimitHit
 
     svc = _make_service()
     svc._news.fetch_posts.side_effect = RateLimitHit("429")
-    sym, gen = await svc.get_news("BTC/USDT:USDT")
-    assert sym == [] and gen == []
+    result = await svc.get_news("BTC/USDT:USDT")
+    assert result is None
+
+
+async def test_get_news_empty_posts_is_not_none():
+    """Upstream reachable but returned no articles → ([], []), NOT None."""
+    svc = _make_service()
+    svc._news.fetch_posts.return_value = []
+    result = await svc.get_news("BTC/USDT:USDT")
+    assert result == ([], [])
 
 
 # --- get_fear_greed_index ---

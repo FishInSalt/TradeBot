@@ -391,9 +391,14 @@ async def get_market_news(
         deps.news.get_fear_greed_index(),
         return_exceptions=True,
     )
-    if isinstance(news_result, Exception):
+    # NewsService.get_news contract: tuple[list, list] on success (possibly
+    # empty), None when CoinDesk errored with no stale cache. gather adds a
+    # third state (Exception) as belt-and-suspenders against contract drift.
+    if isinstance(news_result, Exception) or news_result is None:
+        news_down = True
         symbol_news, general_news = [], []
     else:
+        news_down = False
         symbol_news, general_news = news_result
     fgi = None if isinstance(fgi_result, Exception) else fgi_result
 
@@ -433,8 +438,10 @@ async def get_market_news(
                 f"=== General Crypto News ({len(general_news)}) ===\n"
                 + "\n\n".join(lines)
             )
+    elif news_down:
+        sections.append("=== News ===\nNews service temporarily unavailable.")
     else:
-        sections.append("=== News ===\nNo recent headlines (or news service temporarily unavailable).")
+        sections.append("=== News ===\nNo recent headlines.")
 
     return "\n\n".join(sections)
 

@@ -75,7 +75,7 @@ async def test_market_news_format():
 
 
 async def test_market_news_empty_results():
-    """News service is configured but all upstream returned empty — show graceful message."""
+    """get_news returns ([], []) → genuinely empty window, NOT an outage."""
     from src.agent.tools_perception import get_market_news
 
     news_svc = AsyncMock()
@@ -87,7 +87,26 @@ async def test_market_news_empty_results():
     deps = _make_deps(news=news_svc)
     result = await get_market_news(deps)
     assert "Fear & Greed Index" in result
-    assert "No recent headlines" in result or "temporarily unavailable" in result.lower()
+    assert "No recent headlines" in result
+    # Must not claim unavailability when the service actually answered
+    assert "News service temporarily unavailable" not in result
+
+
+async def test_market_news_service_unavailable():
+    """get_news returns None (spec §3.5) → distinct 'temporarily unavailable'
+    message so the Agent can distinguish a quiet window from an outage."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    news_svc.get_news.return_value = None
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+    assert "News service temporarily unavailable" in result
+    # Since FGI is also down here, FGI section also renders its own
+    # unavailable message — they should be separate sections.
+    assert "FGI service temporarily unavailable" in result
 
 
 async def test_market_news_passes_filter():
