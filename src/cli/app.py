@@ -454,7 +454,10 @@ async def run(
     await scheduler_task
     await exchange.close()
     if deps.news is not None:
-        await deps.news.close()
+        try:
+            await deps.news.close()
+        except Exception:
+            logger.warning("Failed to close news service", exc_info=True)
 
     # Update session status to paused on graceful shutdown
     async with get_session(engine) as db_sess:
