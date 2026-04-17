@@ -58,7 +58,7 @@
 ```python
 # tests/test_cache.py
 """Tests for TTLCache and InformationEvent model."""
-import time
+import asyncio
 
 import pytest
 from unittest.mock import AsyncMock
@@ -158,7 +158,7 @@ async def test_cache_expires():
     r1 = await cache.get_or_fetch("key", 0.01, fetch)  # 10ms TTL
     assert r1 == "data_1"
 
-    time.sleep(0.02)
+    await asyncio.sleep(0.02)
     r2 = await cache.get_or_fetch("key", 0.01, fetch)
     assert r2 == "data_2"
 
@@ -169,7 +169,7 @@ async def test_cache_429_extends_ttl_with_stale():
     cache = TTLCache()
     await cache.get_or_fetch("key", 0.01, AsyncMock(return_value="good"))
 
-    time.sleep(0.02)  # let it expire
+    await asyncio.sleep(0.02)  # let it expire
 
     async def fetch_429():
         raise RateLimitHit("429")
@@ -196,7 +196,7 @@ async def test_cache_429_extended_ttl_persists():
 
     cache = TTLCache()
     await cache.get_or_fetch("key", 0.01, AsyncMock(return_value="good"))
-    time.sleep(0.02)
+    await asyncio.sleep(0.02)
 
     async def fetch_429():
         raise RateLimitHit("429")
@@ -215,7 +215,7 @@ async def test_get_stale_returns_expired_data():
 
     cache = TTLCache()
     await cache.get_or_fetch("key", 0.01, AsyncMock(return_value="data"))
-    time.sleep(0.02)
+    await asyncio.sleep(0.02)
     assert cache.get_stale("key") == "data"
 
 
@@ -981,6 +981,11 @@ class OKXStatusClient:
     async def fetch(self) -> list[InformationEvent]:
         from datetime import datetime, timezone
 
+        # Use fetch time as the observation timestamp so these pass
+        # NewsService's lookback filter (past N hours = recently observed).
+        # The actual maintenance begin/end goes into the title for display.
+        now = datetime.now(timezone.utc)
+
         events: list[InformationEvent] = []
         for state in ("scheduled", "ongoing"):
             resp = await self._http.get(_OKX_STATUS_URL, params={"state": state})
@@ -1001,7 +1006,7 @@ class OKXStatusClient:
                 )
                 events.append(
                     InformationEvent(
-                        timestamp=begin_dt,
+                        timestamp=now,
                         source="okx_status",
                         category="maintenance",
                         importance="high",
@@ -1037,7 +1042,6 @@ git commit -m "feat(N2): add ForexFactory, OKX announcements, and OKX status cli
 ```python
 # tests/test_news_service.py
 """Tests for NewsService — aggregation, caching, quota, degradation."""
-import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1060,11 +1064,12 @@ def _make_news_event(title="Test", source="cryptopanic", category="news",
 
 
 def _make_service(api_key="test_key"):
-    """Build a NewsService with mocked HTTP clients."""
+    """Build a NewsService with mocked HTTP clients and injected mock httpx."""
     from src.integrations.news.service import NewsService
 
-    svc = NewsService(api_key=api_key)
-    svc._http = AsyncMock()  # prevent ResourceWarning from real httpx client
+    # Inject a mock http client — prevents a real httpx.AsyncClient from being
+    # created and leaked as an orphan (which would trigger ResourceWarning).
+    svc = NewsService(api_key=api_key, http=AsyncMock())
     if svc._cryptopanic is not None:
         svc._cryptopanic = AsyncMock()
     svc._fgi = AsyncMock()
@@ -1144,6 +1149,7 @@ async def test_daily_quota_cap():
     svc = _make_service()
     svc._cryptopanic.fetch_posts.return_value = [_make_news_event("News")]
     svc._cryptopanic_daily_calls = 180  # at limit
+    svc._cryptopanic_daily_reset_date = datetime.now(timezone.utc).date()  # prevent reset
 
     # Should return stale cache if available, else empty
     sym, gen = await svc.get_news("BTC/USDT:USDT")
@@ -1154,21 +1160,16 @@ async def test_daily_quota_cap():
 async def test_daily_quota_uses_stale_cache():
     svc = _make_service()
     svc._cryptopanic.fetch_posts.return_value = [_make_news_event("Old", symbols=["BTC"])]
-    # Use a very short TTL so cache expires quickly
-    svc._cache = TTLCache()
-    original_get_or_fetch = svc._cache.get_or_fetch
+    await svc.get_news("BTC/USDT:USDT")  # populate cache
 
-    async def short_ttl_fetch(key, ttl, fn):
-        return await original_get_or_fetch(key, 0.01, fn)  # 10ms TTL
+    # Manually expire the cache entry (direct _store access is the cleanest way
+    # to simulate time passing without actual sleeps or TTL monkey-patching).
+    for key, (data, _created_at, ttl) in list(svc._cache._store.items()):
+        svc._cache._store[key] = (data, 0.0, ttl)  # created_at=0 → always expired
 
-    svc._cache.get_or_fetch = short_ttl_fetch
-    await svc.get_news("BTC/USDT:USDT")  # populate cache with 10ms TTL
-
-    time.sleep(0.02)  # let cache expire
     svc._cryptopanic_daily_calls = 180
+    svc._cryptopanic_daily_reset_date = datetime.now(timezone.utc).date()
 
-    # Restore normal cache behavior for get_stale to work
-    svc._cache.get_or_fetch = original_get_or_fetch
     sym, gen = await svc.get_news("BTC/USDT:USDT")
     assert len(sym) + len(gen) > 0  # stale cache used
 
@@ -1281,11 +1282,28 @@ async def test_get_macro_events_failure_returns_empty():
 
 # --- close ---
 
-async def test_close():
-    svc = _make_service()
-    svc._http = AsyncMock()
+async def test_close_injected_http_not_closed():
+    """Injected http client is owned by the caller — NewsService must NOT close it."""
+    svc = _make_service()  # injects AsyncMock as http
     await svc.close()
-    svc._http.aclose.assert_called_once()
+    svc._http.aclose.assert_not_called()
+
+
+async def test_close_owned_http_closes():
+    """When NewsService creates its own http client, close() should close it."""
+    from src.integrations.news.service import NewsService
+
+    svc = NewsService(api_key=None)  # no injection → creates its own
+    try:
+        mock_http = AsyncMock()
+        # Replace with mock to verify close is called on owned client
+        await svc._http.aclose()  # close the real one to avoid leak
+        svc._http = mock_http
+        svc._owns_http = True
+        await svc.close()
+        mock_http.aclose.assert_called_once()
+    finally:
+        pass
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1300,7 +1318,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'src.integrations.news.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
@@ -1326,8 +1344,14 @@ _DAILY_QUOTA_LIMIT = 180
 class NewsService:
     """Aggregates all news/alert data sources with caching and quota protection."""
 
-    def __init__(self, api_key: str | None = None) -> None:
-        self._http = httpx.AsyncClient(timeout=5.0)
+    def __init__(
+        self,
+        api_key: str | None = None,
+        http: httpx.AsyncClient | None = None,
+    ) -> None:
+        # Accept injected http client for testability; default to real one otherwise.
+        self._http = http if http is not None else httpx.AsyncClient(timeout=5.0)
+        self._owns_http = http is None  # only close http if we created it
         self._cache = TTLCache()
         self._api_key = api_key
 
@@ -1342,7 +1366,7 @@ class NewsService:
 
         # CryptoPanic daily quota tracking
         self._cryptopanic_daily_calls = 0
-        self._cryptopanic_daily_reset_date: object | None = None  # date object
+        self._cryptopanic_daily_reset_date: date | None = None
 
     def _check_quota_reset(self) -> None:
         today = datetime.now(timezone.utc).date()
@@ -1448,7 +1472,8 @@ class NewsService:
         return [e for e in results if e.timestamp >= cutoff]
 
     async def close(self) -> None:
-        await self._http.aclose()
+        if self._owns_http:
+            await self._http.aclose()
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -2169,7 +2194,7 @@ async def test_market_news_no_api_key():
     deps = _make_deps(news=news_svc)
     result = await get_market_news(deps)
     assert "Fear & Greed Index" in result
-    assert "no CryptoPanic API key" in result.lower() or "disabled" in result.lower()
+    assert "disabled" in result.lower() and "cryptopanic" in result.lower()
 
 
 async def test_market_news_passes_filter():
@@ -2808,17 +2833,20 @@ class WizardResult:
     session_name: str = ""
 ```
 
-In `run_wizard()`, call the new step and include its data. Add after `persona_data`:
+In `run_wizard()`, insert the new step call **after `persona_data = _step_persona(...)` and before the `_show_summary` block** (i.e., as the last step inside the `while True:` loop before the summary):
 
 ```python
-            news_data = await _step_news(console)
+            persona_data = _step_persona(trader_defaults, console)
+            news_data = await _step_news(console)  # NEW — inserts as Step 6
 ```
 
-And include it in the `data` merge:
+And include it in the `data` merge (replace the existing line that builds `data`):
 
 ```python
             data = {**exchange_data, **trading_data, **model_data, **risk_data, **persona_data, **news_data}
 ```
+
+Note: `run_wizard()` is already declared `async def` (because `_step_model` is async), so `await _step_news(...)` works without changing the function signature.
 
 Also add it to `_show_summary`:
 
