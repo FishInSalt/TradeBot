@@ -37,8 +37,13 @@ class ForexFactoryClient:
             date_str = item.get("date", "")
             try:
                 ts = datetime.fromisoformat(date_str)
+                # ForexFactory feed encodes times with ET offset (e.g. -04:00).
+                # Normalize to UTC so downstream strftime yields UTC, matching
+                # every other source and spec §3.1's UTC-only contract.
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
+                else:
+                    ts = ts.astimezone(timezone.utc)
             except (ValueError, AttributeError):
                 continue
 

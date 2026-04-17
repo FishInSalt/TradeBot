@@ -435,29 +435,39 @@ async def run(
         await scheduler.trigger("alert", context=alert_info)
     exchange.on_alert(handle_alert)
 
-    await exchange.start()
+    # Wrap startup → main loop → shutdown in try/finally so that an error
+    # anywhere after build_services (exchange.start failures, scheduler
+    # setup, etc.) still triggers resource cleanup. Without this, a failing
+    # exchange.start() would leak the NewsService's httpx client and the
+    # exchange's WebSocket connections until GC.
+    try:
+        await exchange.start()
 
-    # Initial metrics
-    positions = await exchange.fetch_positions(result.symbol)
-    pos_str = f"{positions[0].side} {positions[0].contracts}" if positions else "none"
-    metrics = await deps.metrics.compute(current_position=pos_str)
-    display_metrics(metrics, console=sc)
+        # Initial metrics
+        positions = await exchange.fetch_positions(result.symbol)
+        pos_str = f"{positions[0].side} {positions[0].contracts}" if positions else "none"
+        metrics = await deps.metrics.compute(current_position=pos_str)
+        display_metrics(metrics, console=sc)
 
-    sc.print(f"\n[bold]Scheduler: every {result.scheduler_interval_min} min[/]")
-    sc.print(f"[bold]LLM Budget: {result.token_budget:,} tokens/day[/]")
-    sc.print("[dim]Press Ctrl+C to stop[/]\n")
+        sc.print(f"\n[bold]Scheduler: every {result.scheduler_interval_min} min[/]")
+        sc.print(f"[bold]LLM Budget: {result.token_budget:,} tokens/day[/]")
+        sc.print("[dim]Press Ctrl+C to stop[/]\n")
 
-    scheduler_task = asyncio.create_task(scheduler.start())
-    await shutdown_event.wait()
+        scheduler_task = asyncio.create_task(scheduler.start())
+        await shutdown_event.wait()
 
-    scheduler.stop()
-    await scheduler_task
-    await exchange.close()
-    if deps.news is not None:
+        scheduler.stop()
+        await scheduler_task
+    finally:
         try:
-            await deps.news.close()
+            await exchange.close()
         except Exception:
-            logger.warning("Failed to close news service", exc_info=True)
+            logger.warning("Failed to close exchange", exc_info=True)
+        if deps.news is not None:
+            try:
+                await deps.news.close()
+            except Exception:
+                logger.warning("Failed to close news service", exc_info=True)
 
     # Update session status to paused on graceful shutdown
     async with get_session(engine) as db_sess:

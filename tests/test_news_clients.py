@@ -211,6 +211,14 @@ async def test_calendar_parse_response():
     assert events[1].title == "US Initial Jobless Claims"
     assert events[1].importance == "medium"
     assert events[1].content == "Previous: 215K | Forecast: 220K"
+    # Timestamps must be normalized to UTC (feed ships ET offset). FOMC input
+    # "2026-04-16T18:00:00-04:00" → UTC 22:00, so the hour component changes.
+    assert events[0].timestamp.tzinfo == timezone.utc
+    assert events[0].timestamp.hour == 22
+    assert events[1].timestamp.tzinfo == timezone.utc
+    # "2026-04-16T20:30:00-04:00" → UTC next-day 00:30
+    assert events[1].timestamp.hour == 0
+    assert events[1].timestamp.day == 17
 
 
 async def test_calendar_empty_response():
