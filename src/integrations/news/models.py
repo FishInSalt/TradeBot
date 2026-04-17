@@ -1,8 +1,28 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
+
+# Collapse any run of whitespace (including \n, \r, \t) into a single space,
+# and drop the other C0/C1 control characters. Applied to free-form upstream
+# strings (news titles, OKX announcement titles, FGI classification, etc.)
+# so they don't accidentally break the section structure rendered to the LLM
+# or — in the worst case — inject fake headers the Agent might trust.
+_WHITESPACE_RUN = re.compile(r"\s+")
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_MAX_FREEFORM_LEN = 300
+
+
+def _sanitize_freeform(text: str) -> str:
+    if not text:
+        return text
+    cleaned = _CONTROL_CHARS.sub("", text)
+    cleaned = _WHITESPACE_RUN.sub(" ", cleaned).strip()
+    if len(cleaned) > _MAX_FREEFORM_LEN:
+        cleaned = cleaned[: _MAX_FREEFORM_LEN - 1].rstrip() + "…"
+    return cleaned
 
 
 @dataclass
@@ -19,6 +39,11 @@ class InformationEvent:
     Each tool section formats events from a single source, so the per-source
     convention is safe in practice. If a new tool ever renders mixed sources,
     add a dedicated field rather than overloading `content` further.
+
+    `title` and `content` are sanitized on construction: whitespace runs
+    collapse to single spaces, control characters are stripped, and the
+    result is capped at 300 chars. This protects the LLM-facing formatter
+    from upstream strings that contain newlines or pathological lengths.
     """
 
     timestamp: datetime
@@ -29,6 +54,10 @@ class InformationEvent:
     content: str = ""
     url: str = ""
     symbols: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.title = _sanitize_freeform(self.title)
+        self.content = _sanitize_freeform(self.content)
 
 
 def extract_base_currency(symbol: str) -> str:

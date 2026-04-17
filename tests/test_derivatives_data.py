@@ -94,6 +94,56 @@ async def test_okx_long_short_ratio_empty_raises():
         await exchange.fetch_long_short_ratio("BTC/USDT:USDT")
 
 
+# --- RateLimitExceeded → RateLimitHit architectural regression tests ---
+#
+# ccxt.RateLimitExceeded is a subclass of ccxt.NetworkError. The @_retry()
+# decorator on OKXExchange methods catches NetworkError and retries up to 3
+# times. If the inner try/except ever stops converting RateLimitExceeded →
+# RateLimitHit, 429s would be silently retried instead of propagating to
+# TTLCache for stale-cache fallback — breaking spec §3.5 contract.
+# These tests pin the invariant.
+
+
+async def test_okx_funding_rate_converts_rate_limit_exceeded():
+    import ccxt.async_support as ccxt
+    from src.integrations.exchange.okx import OKXExchange
+    from src.utils.cache import RateLimitHit
+
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = AsyncMock()
+    exchange._client.fetch_funding_rate.side_effect = ccxt.RateLimitExceeded("429")
+    with pytest.raises(RateLimitHit):
+        await exchange.fetch_funding_rate("BTC/USDT:USDT")
+    # _retry() must NOT have retried — one call, then surfaced RateLimitHit.
+    assert exchange._client.fetch_funding_rate.call_count == 1
+
+
+async def test_okx_open_interest_converts_rate_limit_exceeded():
+    import ccxt.async_support as ccxt
+    from src.integrations.exchange.okx import OKXExchange
+    from src.utils.cache import RateLimitHit
+
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = AsyncMock()
+    exchange._client.fetch_open_interest.side_effect = ccxt.RateLimitExceeded("429")
+    with pytest.raises(RateLimitHit):
+        await exchange.fetch_open_interest("BTC/USDT:USDT")
+    assert exchange._client.fetch_open_interest.call_count == 1
+
+
+async def test_okx_long_short_ratio_converts_rate_limit_exceeded():
+    import ccxt.async_support as ccxt
+    from src.integrations.exchange.okx import OKXExchange
+    from src.utils.cache import RateLimitHit
+
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = AsyncMock()
+    exchange._client.fetch_long_short_ratio_history.side_effect = ccxt.RateLimitExceeded("429")
+    with pytest.raises(RateLimitHit):
+        await exchange.fetch_long_short_ratio("BTC/USDT:USDT")
+    assert exchange._client.fetch_long_short_ratio_history.call_count == 1
+
+
 # --- SimulatedExchange derivatives tests ---
 
 def _make_sim_exchange(symbol="BTC/USDT:USDT"):
