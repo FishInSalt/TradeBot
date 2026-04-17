@@ -13,3 +13,4 @@ config/models.json
 config/.credentials
 logs/
 .working/
+.DS_Store
