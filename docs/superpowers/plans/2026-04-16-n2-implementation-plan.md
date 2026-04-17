@@ -20,12 +20,12 @@
 | `src/utils/cache.py` | Create | `TTLCache` + `RateLimitHit` — shared TTL cache with 429 stale-fallback |
 | `src/integrations/news/__init__.py` | Create | Package init |
 | `src/integrations/news/models.py` | Create | `InformationEvent` dataclass + `extract_base_currency()` |
-| `src/integrations/news/cryptopanic.py` | Create | CryptoPanic API client — news headlines |
+| `src/integrations/news/coindesk.py` | Create | CoinDesk Data News API client — news headlines with sentiment |
 | `src/integrations/news/fear_greed.py` | Create | Alternative.me FGI client |
 | `src/integrations/news/calendar.py` | Create | ForexFactory macro calendar client |
 | `src/integrations/news/okx_announcements.py` | Create | OKX `/support/announcements` client |
 | `src/integrations/news/okx_status.py` | Create | OKX `/system/status` client |
-| `src/integrations/news/service.py` | Create | `NewsService` — aggregation, caching, quota protection |
+| `src/integrations/news/service.py` | Create | `NewsService` — aggregation + caching (no quota/keys; all sources are keyless) |
 | `src/integrations/exchange/base.py` | Modify | Add `FundingRate`, `OpenInterest`, `LongShortRatio` dataclasses + 3 abstract methods |
 | `src/integrations/exchange/okx.py` | Modify | Implement 3 derivatives methods with `@_retry()` |
 | `src/integrations/exchange/simulated.py` | Modify | Implement 3 derivatives methods via `self._ccxt` |
@@ -35,7 +35,7 @@
 | `src/agent/trader.py` | Modify | Add `news` field to `TradingDeps`, register 3 new tool wrappers |
 | `src/agent/persona.py` | Modify | Add 3-tool guidance to Layer 1 |
 | `src/cli/app.py` | Modify | Initialize `NewsService`, inject into deps, close on shutdown |
-| `src/cli/wizard.py` | Modify | Add Step 6: CryptoPanic API key configuration |
+| `src/cli/wizard.py` | (no change) | All news sources are keyless — no new wizard step |
 | `tests/test_cache.py` | Create | TTLCache unit tests |
 | `tests/test_news_clients.py` | Create | All 5 client unit tests |
 | `tests/test_news_service.py` | Create | NewsService integration tests |
@@ -48,48 +48,34 @@
 
 ## Pre-work Verification (run before Task 1)
 
-External APIs can drift from what the spec describes. Run these curl checks before implementation to confirm response shapes are still valid — adjust parsers in Task 2/3 if fields have changed.
+Pre-work was completed on 2026-04-17. Findings are recorded here so the implementer can validate assumptions without re-running everything. Re-run the curls if any significant time has passed.
 
-- [ ] **P1: Verify httpx is already a project dependency**
+- [x] **P1: httpx is in pyproject.toml** — `httpx>=0.27` already declared (line 15). No `uv add` needed.
 
-`httpx>=0.27` is already declared in `pyproject.toml` (verified on 2026-04-17). No `uv add` needed. If a future refactor removes it, run:
-```bash
-grep '^"httpx' pyproject.toml  # must return a match
-```
+- [x] **P2: CoinDesk Data News API verified**
+   ```bash
+   curl -s "https://data-api.coindesk.com/news/v1/article/list?lang=EN&limit=2" | jq '.Data[0] | {TITLE, PUBLISHED_ON, URL, source: .SOURCE_DATA.NAME, categories: [.CATEGORY_DATA[].NAME], SENTIMENT}'
+   ```
+   **Confirmed fields**: `TITLE`, `PUBLISHED_ON` (Unix 秒), `URL`, `SOURCE_DATA.NAME`, `CATEGORY_DATA[].NAME`, `SENTIMENT` ∈ {"POSITIVE", "NEGATIVE", "NEUTRAL"}.
+   **Confirmed params**: `lang=EN`, `limit=N`, `categories=BTC`, `sentiment=POSITIVE|NEGATIVE|NEUTRAL`.
+   **No key needed, no observed rate limit** (10 consecutive 200s, no X-RateLimit-* headers).
+   **`SCORE` is always 0** (don't rely on it for sort; `news_filter` omits `trending`).
 
-- [ ] **P2: Verify CryptoPanic v1 API schema**
+- [x] **P3: ForexFactory calendar feed verified**
+   ```bash
+   curl -s "https://nfs.faireconomy.media/ff_calendar_thisweek.json" | jq '.[0] | {title, country, date, impact, forecast, previous}'
+   ```
+   All spec fields present (`title`, `country`, `date`, `impact`, `forecast`, `previous`); this week had 108 entries, 8 USD High/Medium after local filter.
 
-CryptoPanic migrated some users to a "Developer API v2" in late 2024; the free `/api/v1/posts/` path may now return different field names. Run with a real `auth_token`:
-```bash
-curl -s "https://cryptopanic.com/api/v1/posts/?auth_token=$CRYPTOPANIC_API_KEY&limit=1&filter=rising" | jq '.results[0] | {title, published_at, url, source_title: .source.title, currencies}'
-```
-Expected shape per spec §2.1:
-- `title` (str)
-- `published_at` (ISO8601 str with `Z`)
-- `url` (str)
-- `source.title` (str) — original media name
-- `currencies` (list of `{code, title}` or `null`)
+- [x] **P4: OKX announcements + system status verified (⚠️ nesting drift)**
+   ```bash
+   curl -s "https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings" | jq '.data[0].details[0] | {annType, title, url, pTime, businessPTime}'
+   curl -s "https://www.okx.com/api/v5/system/status?state=scheduled" | jq '.data[0] // "no scheduled maintenance"'
+   ```
+   **Schema drift**: items live under `response.data[0].details[*]`, not `response.data[*]`. Field names inside each item match spec (`annType`, `title`, `url`, `pTime`, `businessPTime`). Task 3's `OKXAnnouncementsClient.fetch()` accounts for this nesting.
+   **System status**: endpoint returns `code:"0"`, data array empty when no scheduled maintenance — can't fully verify schema until real data appears. Task 3 proceeds with spec field names (`title`, `state`, `begin`, `end`).
 
-If any field moved (e.g. under `metadata.` or renamed), update `CryptoPanicClient._parse` in Task 2 Step 3 accordingly. If the endpoint returns 404/410, CryptoPanic may have retired v1 for new keys — pivot to v2 or degrade the feature.
-
-- [ ] **P3: Verify ForexFactory calendar feed**
-
-Non-official feed, no SLA. Run:
-```bash
-curl -s "https://nfs.faireconomy.media/ff_calendar_thisweek.json" | jq '.[0] | {title, country, date, impact, forecast, previous}'
-```
-Expected: `title`, `country` (e.g. "USD"), `date` (ISO8601), `impact` (High/Medium/Low), `forecast`, `previous`. If the feed is 404/unreachable, accept graceful degradation as designed (spec §3.4), but note that all calendar tests in Task 3 will be mock-only — **no integration smoke test** is possible.
-
-- [ ] **P4: Verify OKX public endpoints**
-
-Both endpoints are public (no auth). Confirm they still exist:
-```bash
-curl -s "https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings" | jq '.data[0] | {title, url, annType, pTime}'
-curl -s "https://www.okx.com/api/v5/system/status?state=scheduled" | jq '.data[0] | {title, state, begin, end}'
-```
-Expected fields listed in spec §2.4. If `code` is not `"0"` or the schema changed, update clients in Task 3.
-
-**Proceed to Task 1 only after all four checks pass (or you've noted and handled the drift).**
+**All four checks are done.** Proceed to Task 1.
 
 ---
 
@@ -119,12 +105,12 @@ def test_information_event_creation():
 
     event = InformationEvent(
         timestamp=datetime(2026, 4, 16, 12, 0, tzinfo=timezone.utc),
-        source="cryptopanic",
+        source="coindesk",
         category="news",
         importance="medium",
         title="Test headline",
     )
-    assert event.source == "cryptopanic"
+    assert event.source == "coindesk"
     assert event.symbols == []
     assert event.content == ""
     assert event.url == ""
@@ -136,7 +122,7 @@ def test_information_event_with_all_fields():
 
     event = InformationEvent(
         timestamp=datetime(2026, 4, 16, 12, 0, tzinfo=timezone.utc),
-        source="cryptopanic",
+        source="coindesk",
         category="news",
         importance="high",
         title="BTC Rally",
@@ -299,9 +285,9 @@ class InformationEvent:
 
     The `content` field is source-specific free-form metadata used by the
     formatter for that section. Conventions:
-      - cryptopanic   → original media name (e.g. "CoinDesk")
+      - coindesk       → original media name (e.g. "CoinTelegraph")
       - alternative_me → classification string (e.g. "Extreme Fear")
-      - forexfactory  → "Previous: X | Forecast: Y" for macro events
+      - forexfactory   → "Previous: X | Forecast: Y" for macro events
       - okx_announcement / okx_status → unused (empty string)
 
     Each tool section formats events from a single source, so the per-source
@@ -310,7 +296,7 @@ class InformationEvent:
     """
 
     timestamp: datetime
-    source: str  # "cryptopanic" / "alternative_me" / "okx_announcement" / "okx_status" / "forexfactory"
+    source: str  # "coindesk" / "alternative_me" / "okx_announcement" / "okx_status" / "forexfactory"
     category: str  # "news" / "fgi" / "announcement" / "maintenance" / "macro_event"
     importance: Literal["low", "medium", "high"]
     title: str
@@ -411,13 +397,13 @@ git commit -m "feat(N2): add InformationEvent model, TTLCache, and extract_base_
 
 ---
 
-### Task 2: News Data Clients — CryptoPanic + Fear & Greed
+### Task 2: News Data Clients — CoinDesk + Fear & Greed
 
 **Files:**
-- Create: `src/integrations/news/cryptopanic.py`, `src/integrations/news/fear_greed.py`
+- Create: `src/integrations/news/coindesk.py`, `src/integrations/news/fear_greed.py`
 - Test: `tests/test_news_clients.py`
 
-- [ ] **Step 1: Write tests for CryptoPanic client**
+- [ ] **Step 1: Write tests for CoinDesk News client**
 
 ```python
 # tests/test_news_clients.py
@@ -430,92 +416,113 @@ import pytest
 from src.utils.cache import RateLimitHit
 
 
-# ===== CryptoPanic =====
+# ===== CoinDesk News =====
 
-CRYPTOPANIC_RESPONSE = {
-    "results": [
+COINDESK_RESPONSE = {
+    "Data": [
         {
-            "title": "Bitcoin Breaks $90K as Institutional Inflows Surge",
-            "published_at": "2026-04-16T14:30:00Z",
-            "source": {"title": "CoinTelegraph"},
-            "currencies": [
-                {"code": "BTC", "title": "Bitcoin"},
-                {"code": "ETH", "title": "Ethereum"},
+            "TYPE": "122",
+            "ID": 60622154,
+            "GUID": "https://example.com/guid-1",
+            "PUBLISHED_ON": 1776398458,
+            "TITLE": "Bitcoin Breaks $90K as Institutional Inflows Surge",
+            "URL": "https://example.com/btc-90k",
+            "BODY": "Full article body...",
+            "KEYWORDS": "Bitcoin|btc|ETF",
+            "LANG": "EN",
+            "SENTIMENT": "POSITIVE",
+            "SCORE": 0,
+            "SOURCE_DATA": {"NAME": "CoinTelegraph", "URL": "https://cointelegraph.com/", "LANG": "EN"},
+            "CATEGORY_DATA": [
+                {"TYPE": "122", "ID": 14, "NAME": "BTC", "CATEGORY": "BTC"},
+                {"TYPE": "122", "ID": 24, "NAME": "ETH", "CATEGORY": "ETH"},
+                {"TYPE": "122", "ID": 37, "NAME": "MARKET", "CATEGORY": "MARKET"},
             ],
-            "url": "https://example.com/btc-90k",
         },
         {
-            "title": "EU Passes Crypto Regulation",
-            "published_at": "2026-04-16T12:00:00Z",
-            "source": {"title": "CoinDesk"},
-            "currencies": None,
-            "url": "https://example.com/eu-crypto",
+            "TYPE": "122",
+            "ID": 60622155,
+            "GUID": "https://example.com/guid-2",
+            "PUBLISHED_ON": 1776397000,
+            "TITLE": "EU Passes Crypto Regulation",
+            "URL": "https://example.com/eu-crypto",
+            "BODY": "Details of the regulation...",
+            "KEYWORDS": "Europe|regulation",
+            "LANG": "EN",
+            "SENTIMENT": "NEUTRAL",
+            "SCORE": 0,
+            "SOURCE_DATA": {"NAME": "CoinDesk", "URL": "https://www.coindesk.com/", "LANG": "EN"},
+            "CATEGORY_DATA": [],  # no specific crypto categories
         },
     ],
+    "Err": {},
 }
 
 
-async def test_cryptopanic_parse_response():
-    from src.integrations.news.cryptopanic import CryptoPanicClient
+async def test_coindesk_parse_response():
+    from src.integrations.news.coindesk import CoinDeskNewsClient
 
-    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=CRYPTOPANIC_RESPONSE))
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=COINDESK_RESPONSE))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = CryptoPanicClient(http, "test_key")
+        client = CoinDeskNewsClient(http)
         events = await client.fetch_posts()
 
     assert len(events) == 2
-    assert events[0].title == "Bitcoin Breaks $90K as Institutional Inflows Surge"
-    assert events[0].source == "cryptopanic"
-    assert events[0].category == "news"
-    assert events[0].symbols == ["BTC", "ETH"]
-    assert events[0].content == "CoinTelegraph"  # original source name
-    assert events[0].url == "https://example.com/btc-90k"
-    # No currencies → empty list
+    e0 = events[0]
+    assert e0.title == "Bitcoin Breaks $90K as Institutional Inflows Surge"
+    assert e0.source == "coindesk"
+    assert e0.category == "news"
+    assert e0.symbols == ["BTC", "ETH", "MARKET"]
+    assert e0.content == "CoinTelegraph"  # original media name from SOURCE_DATA.NAME
+    assert e0.url == "https://example.com/btc-90k"
+    # Timestamp parsed from Unix seconds
+    assert e0.timestamp == datetime.fromtimestamp(1776398458, tz=timezone.utc)
+    # No CATEGORY_DATA → empty symbols
     assert events[1].symbols == []
 
 
-async def test_cryptopanic_filter_param():
-    from src.integrations.news.cryptopanic import CryptoPanicClient
+async def test_coindesk_sentiment_param():
+    from src.integrations.news.coindesk import CoinDeskNewsClient
 
     captured_params: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_params.update(dict(request.url.params))
-        return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json={"Data": [], "Err": {}})
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = CryptoPanicClient(http, "my_key")
-        await client.fetch_posts(news_filter="bullish")
+        client = CoinDeskNewsClient(http)
+        await client.fetch_posts(news_filter="positive")
 
-    assert captured_params["auth_token"] == "my_key"
-    assert captured_params["filter"] == "bullish"
+    assert captured_params["lang"] == "EN"
     assert captured_params["limit"] == "20"
+    assert captured_params["sentiment"] == "POSITIVE"
 
 
-async def test_cryptopanic_no_filter_omits_param():
-    from src.integrations.news.cryptopanic import CryptoPanicClient
+async def test_coindesk_no_filter_omits_sentiment():
+    from src.integrations.news.coindesk import CoinDeskNewsClient
 
     captured_params: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_params.update(dict(request.url.params))
-        return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json={"Data": [], "Err": {}})
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        client = CryptoPanicClient(http, "key")
+        client = CoinDeskNewsClient(http)
         await client.fetch_posts(news_filter=None)
 
-    assert "filter" not in captured_params
+    assert "sentiment" not in captured_params
 
 
-async def test_cryptopanic_429_raises_rate_limit():
-    from src.integrations.news.cryptopanic import CryptoPanicClient
+async def test_coindesk_429_raises_rate_limit():
+    from src.integrations.news.coindesk import CoinDeskNewsClient
 
     transport = httpx.MockTransport(lambda req: httpx.Response(429))
     async with httpx.AsyncClient(transport=transport) as http:
-        client = CryptoPanicClient(http, "key")
+        client = CoinDeskNewsClient(http)
         with pytest.raises(RateLimitHit):
             await client.fetch_posts()
 
@@ -560,13 +567,13 @@ async def test_fgi_empty_data_returns_none():
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `pytest tests/test_news_clients.py -v -k "cryptopanic or fgi"`
+Run: `pytest tests/test_news_clients.py -v -k "coindesk or fgi"`
 Expected: FAIL — `ModuleNotFoundError`
 
-- [ ] **Step 3: Implement CryptoPanic client**
+- [ ] **Step 3: Implement CoinDesk News client**
 
 ```python
-# src/integrations/news/cryptopanic.py
+# src/integrations/news/coindesk.py
 from __future__ import annotations
 
 import httpx
@@ -574,24 +581,36 @@ import httpx
 from src.integrations.news.models import InformationEvent
 from src.utils.cache import RateLimitHit
 
-_CRYPTOPANIC_URL = "https://cryptopanic.com/api/v1/posts/"
+_COINDESK_URL = "https://data-api.coindesk.com/news/v1/article/list"
+
+# Map user-facing filter → CoinDesk sentiment values
+_SENTIMENT_MAP = {
+    "positive": "POSITIVE",
+    "negative": "NEGATIVE",
+    "neutral": "NEUTRAL",
+}
 
 
-class CryptoPanicClient:
-    """CryptoPanic API client — crypto news headlines with sentiment filtering."""
+class CoinDeskNewsClient:
+    """CoinDesk Data News API client — crypto news headlines with sentiment.
 
-    def __init__(self, http: httpx.AsyncClient, api_key: str) -> None:
+    No auth required. Response shape:
+      { "Data": [ {TITLE, PUBLISHED_ON, URL, SOURCE_DATA.NAME, CATEGORY_DATA[], SENTIMENT, ...}, ... ], "Err": {} }
+    """
+
+    def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
-        self._api_key = api_key
 
     async def fetch_posts(self, news_filter: str | None = None) -> list[InformationEvent]:
-        params: dict[str, str | int] = {"auth_token": self._api_key, "limit": 20}
+        params: dict[str, str | int] = {"lang": "EN", "limit": 20}
         if news_filter is not None:
-            params["filter"] = news_filter
+            mapped = _SENTIMENT_MAP.get(news_filter)
+            if mapped is not None:
+                params["sentiment"] = mapped
 
-        resp = await self._http.get(_CRYPTOPANIC_URL, params=params)
+        resp = await self._http.get(_COINDESK_URL, params=params)
         if resp.status_code == 429:
-            raise RateLimitHit("CryptoPanic rate limited")
+            raise RateLimitHit("CoinDesk rate limited")
         resp.raise_for_status()
 
         return self._parse(resp.json())
@@ -601,24 +620,26 @@ class CryptoPanicClient:
         from datetime import datetime, timezone
 
         events: list[InformationEvent] = []
-        for post in data.get("results", []):
-            raw_currencies = post.get("currencies") or []
-            symbols = [c["code"] for c in raw_currencies if "code" in c]
-            source_name = (post.get("source") or {}).get("title", "")
-            pub = post.get("published_at", "")
+        for article in data.get("Data", []):
+            raw_cats = article.get("CATEGORY_DATA") or []
+            symbols = [c.get("NAME", "") for c in raw_cats if c.get("NAME")]
+            source_name = (article.get("SOURCE_DATA") or {}).get("NAME", "")
+
+            pub_raw = article.get("PUBLISHED_ON")
             try:
-                ts = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
+                ts = datetime.fromtimestamp(int(pub_raw), tz=timezone.utc)
+            except (TypeError, ValueError):
                 ts = datetime.now(timezone.utc)
+
             events.append(
                 InformationEvent(
                     timestamp=ts,
-                    source="cryptopanic",
+                    source="coindesk",
                     category="news",
                     importance="medium",
-                    title=post.get("title", ""),
+                    title=article.get("TITLE", ""),
                     content=source_name,
-                    url=post.get("url", ""),
+                    url=article.get("URL", ""),
                     symbols=symbols,
                 )
             )
@@ -674,15 +695,15 @@ class FearGreedClient:
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `pytest tests/test_news_clients.py -v -k "cryptopanic or fgi"`
+Run: `pytest tests/test_news_clients.py -v -k "coindesk or fgi"`
 Expected: all PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/integrations/news/cryptopanic.py src/integrations/news/fear_greed.py \
+git add src/integrations/news/coindesk.py src/integrations/news/fear_greed.py \
        tests/test_news_clients.py
-git commit -m "feat(N2): add CryptoPanic and Fear & Greed Index clients"
+git commit -m "feat(N2): add CoinDesk News and Fear & Greed Index clients"
 ```
 
 ---
@@ -1111,7 +1132,7 @@ git commit -m "feat(N2): add ForexFactory, OKX announcements, and OKX status cli
 
 ---
 
-### Task 4: NewsService — Aggregation + Caching + Quota Protection
+### Task 4: NewsService — Aggregation + Caching
 
 **Files:**
 - Create: `src/integrations/news/service.py`
@@ -1121,9 +1142,9 @@ git commit -m "feat(N2): add ForexFactory, OKX announcements, and OKX status cli
 
 ```python
 # tests/test_news_service.py
-"""Tests for NewsService — aggregation, caching, quota, degradation."""
+"""Tests for NewsService — aggregation, caching, degradation."""
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1131,7 +1152,7 @@ from src.integrations.news.models import InformationEvent
 from src.utils.cache import TTLCache
 
 
-def _make_news_event(title="Test", source="cryptopanic", category="news",
+def _make_news_event(title="Test", source="coindesk", category="news",
                      symbols=None, hours_ago=0):
     return InformationEvent(
         timestamp=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
@@ -1143,15 +1164,13 @@ def _make_news_event(title="Test", source="cryptopanic", category="news",
     )
 
 
-def _make_service(api_key="test_key"):
-    """Build a NewsService with mocked HTTP clients and injected mock httpx."""
+def _make_service():
+    """Build a NewsService with all data-source clients mocked."""
     from src.integrations.news.service import NewsService
 
-    # Inject a mock http client — prevents a real httpx.AsyncClient from being
-    # created and leaked as an orphan (which would trigger ResourceWarning).
-    svc = NewsService(api_key=api_key, http=AsyncMock())
-    if svc._cryptopanic is not None:
-        svc._cryptopanic = AsyncMock()
+    # Inject a mock http client to avoid a real httpx.AsyncClient being orphaned.
+    svc = NewsService(http=AsyncMock())
+    svc._news = AsyncMock()
     svc._fgi = AsyncMock()
     svc._calendar = AsyncMock()
     svc._announcements = AsyncMock()
@@ -1163,7 +1182,7 @@ def _make_service(api_key="test_key"):
 
 async def test_get_news_splits_by_symbol():
     svc = _make_service()
-    svc._cryptopanic.fetch_posts.return_value = [
+    svc._news.fetch_posts.return_value = [
         _make_news_event("BTC up", symbols=["BTC"]),
         _make_news_event("BTC mining", symbols=["BTC"]),
         _make_news_event("ETH news", symbols=["ETH"]),
@@ -1182,7 +1201,7 @@ async def test_get_news_fills_from_general_when_symbol_short():
     # Only 1 BTC article, 8 general
     posts = [_make_news_event("BTC", symbols=["BTC"])]
     posts += [_make_news_event(f"Gen {i}") for i in range(8)]
-    svc._cryptopanic.fetch_posts.return_value = posts
+    svc._news.fetch_posts.return_value = posts
     sym, gen = await svc.get_news("BTC/USDT:USDT", max_per_group=5)
     assert len(sym) == 1
     assert len(gen) == 8  # fill up to 9 total (10 - 1)
@@ -1190,78 +1209,67 @@ async def test_get_news_fills_from_general_when_symbol_short():
 
 async def test_get_news_passes_filter():
     svc = _make_service()
-    svc._cryptopanic.fetch_posts.return_value = []
-    await svc.get_news("BTC/USDT:USDT", news_filter="bullish")
-    svc._cryptopanic.fetch_posts.assert_called_once_with("bullish")
+    svc._news.fetch_posts.return_value = []
+    await svc.get_news("BTC/USDT:USDT", news_filter="positive")
+    svc._news.fetch_posts.assert_called_once_with("positive")
 
 
-# --- get_news: no API key ---
+# --- get_news: error paths ---
 
-async def test_get_news_no_api_key():
-    svc = _make_service(api_key=None)
+async def test_get_news_api_failure_returns_empty():
+    svc = _make_service()
+    svc._news.fetch_posts.side_effect = Exception("API down")
     sym, gen = await svc.get_news("BTC/USDT:USDT")
-    assert sym == []
-    assert gen == []
+    assert sym == [] and gen == []
 
 
 # --- get_news: caching ---
 
 async def test_get_news_cache_hit():
     svc = _make_service()
-    svc._cryptopanic.fetch_posts.return_value = [_make_news_event("Cached")]
+    svc._news.fetch_posts.return_value = [_make_news_event("Cached")]
     await svc.get_news("BTC/USDT:USDT")
     await svc.get_news("BTC/USDT:USDT")
     # fetch_posts called only once (second call is cache hit)
-    assert svc._cryptopanic.fetch_posts.call_count == 1
+    assert svc._news.fetch_posts.call_count == 1
 
 
 async def test_get_news_different_filters_separate_cache():
     svc = _make_service()
-    svc._cryptopanic.fetch_posts.return_value = []
-    await svc.get_news("BTC/USDT:USDT", news_filter="bullish")
-    await svc.get_news("BTC/USDT:USDT", news_filter="bearish")
-    assert svc._cryptopanic.fetch_posts.call_count == 2
+    svc._news.fetch_posts.return_value = []
+    await svc.get_news("BTC/USDT:USDT", news_filter="positive")
+    await svc.get_news("BTC/USDT:USDT", news_filter="negative")
+    assert svc._news.fetch_posts.call_count == 2
 
 
-# --- get_news: quota ---
+# --- get_news: rate limit handled by TTLCache ---
 
-async def test_daily_quota_cap():
+async def test_get_news_429_uses_stale_cache():
+    """TTLCache should return stale data on RateLimitHit."""
+    from src.utils.cache import RateLimitHit
+
     svc = _make_service()
-    svc._cryptopanic.fetch_posts.return_value = [_make_news_event("News")]
-    svc._cryptopanic_daily_calls = svc._cryptopanic_daily_quota  # at limit
-    svc._cryptopanic_daily_reset_date = datetime.now(timezone.utc).date()  # prevent reset
-
-    # Should return stale cache if available, else empty
-    sym, gen = await svc.get_news("BTC/USDT:USDT")
-    assert sym == [] and gen == []
-    svc._cryptopanic.fetch_posts.assert_not_called()
-
-
-async def test_daily_quota_uses_stale_cache():
-    svc = _make_service()
-    svc._cryptopanic.fetch_posts.return_value = [_make_news_event("Old", symbols=["BTC"])]
+    svc._news.fetch_posts.return_value = [_make_news_event("Old", symbols=["BTC"])]
     await svc.get_news("BTC/USDT:USDT")  # populate cache
 
-    # Manually expire the cache entry (direct _store access is the cleanest way
-    # to simulate time passing without actual sleeps or TTL monkey-patching).
+    # Expire the cache entry
     for key, (data, _created_at, ttl) in list(svc._cache._store.items()):
-        svc._cache._store[key] = (data, 0.0, ttl)  # created_at=0 → always expired
+        svc._cache._store[key] = (data, 0.0, ttl)
 
-    svc._cryptopanic_daily_calls = svc._cryptopanic_daily_quota  # at limit
-    svc._cryptopanic_daily_reset_date = datetime.now(timezone.utc).date()
-
+    # Next fetch raises 429 → TTLCache returns stale
+    svc._news.fetch_posts.side_effect = RateLimitHit("429")
     sym, gen = await svc.get_news("BTC/USDT:USDT")
     assert len(sym) + len(gen) > 0  # stale cache used
 
 
-async def test_daily_quota_resets_on_new_day():
+async def test_get_news_429_no_cache_degrades():
+    """First call is 429 with no cached data → returns empty."""
+    from src.utils.cache import RateLimitHit
+
     svc = _make_service()
-    svc._cryptopanic_daily_calls = svc._cryptopanic_daily_quota  # at limit
-    svc._cryptopanic_daily_reset_date = (datetime.now(timezone.utc) - timedelta(days=1)).date()
-    svc._cryptopanic.fetch_posts.return_value = []
-    await svc.get_news("BTC/USDT:USDT")
-    # Counter should have reset and fetch should have been called
-    assert svc._cryptopanic.fetch_posts.call_count == 1
+    svc._news.fetch_posts.side_effect = RateLimitHit("429")
+    sym, gen = await svc.get_news("BTC/USDT:USDT")
+    assert sym == [] and gen == []
 
 
 # --- get_fear_greed_index ---
@@ -1398,12 +1406,12 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'src.integrations.news.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from src.integrations.news.calendar import ForexFactoryClient
-from src.integrations.news.cryptopanic import CryptoPanicClient
+from src.integrations.news.coindesk import CoinDeskNewsClient
 from src.integrations.news.fear_greed import FearGreedClient
 from src.integrations.news.models import InformationEvent, extract_base_currency
 from src.integrations.news.okx_announcements import OKXAnnouncementsClient
@@ -1418,48 +1426,30 @@ _FGI_TTL = 21600.0  # 6 hours
 _CALENDAR_TTL = 21600.0  # 6 hours
 _OKX_TTL = 600.0  # 10 min
 
-_DEFAULT_DAILY_QUOTA = 180  # CryptoPanic free tier: 200/day, 10% safety margin
-
 
 class NewsService:
-    """Aggregates all news/alert data sources with caching and quota protection."""
+    """Aggregates all news/alert data sources with caching.
+
+    All upstream sources are keyless (CoinDesk News, FGI, ForexFactory, OKX).
+    No quota tracking — if a source returns HTTP 429, TTLCache serves stale
+    data if present; otherwise the get_* method returns an empty result.
+    """
 
     def __init__(
         self,
-        api_key: str | None = None,
         http: httpx.AsyncClient | None = None,
-        daily_quota: int = _DEFAULT_DAILY_QUOTA,
     ) -> None:
         # Accept injected http client for testability; default to real one otherwise.
         self._http = http if http is not None else httpx.AsyncClient(timeout=5.0)
         self._owns_http = http is None  # only close http if we created it
         self._cache = TTLCache()
-        self._api_key = api_key
 
-        # Clients
-        self._cryptopanic: CryptoPanicClient | None = (
-            CryptoPanicClient(self._http, api_key) if api_key else None
-        )
+        # Clients (all keyless)
+        self._news = CoinDeskNewsClient(self._http)
         self._fgi = FearGreedClient(self._http)
         self._calendar = ForexFactoryClient(self._http)
         self._announcements = OKXAnnouncementsClient(self._http)
         self._status = OKXStatusClient(self._http)
-
-        # CryptoPanic daily quota tracking
-        self._cryptopanic_daily_quota = daily_quota
-        self._cryptopanic_daily_calls = 0
-        self._cryptopanic_daily_reset_date: date | None = None
-
-    @property
-    def has_cryptopanic(self) -> bool:
-        """True when a CryptoPanic API key is configured and the client is live."""
-        return self._cryptopanic is not None
-
-    def _check_quota_reset(self) -> None:
-        today = datetime.now(timezone.utc).date()
-        if self._cryptopanic_daily_reset_date != today:
-            self._cryptopanic_daily_calls = 0
-            self._cryptopanic_daily_reset_date = today
 
     async def get_news(
         self,
@@ -1471,35 +1461,21 @@ class NewsService:
 
         Returns two lists: symbol-specific headlines and general crypto news.
         If symbol_news < max_per_group, general_news gets extra slots (total = max_per_group * 2).
+        On any upstream error returns ([], []).
         """
-        if self._cryptopanic is None:
-            return [], []
-
-        self._check_quota_reset()
         cache_key = f"news:{news_filter}"
 
-        # Quota check — before any API call
-        if self._cryptopanic_daily_calls >= self._cryptopanic_daily_quota:
-            stale = self._cache.get_stale(cache_key)
-            if stale is not None:
-                logger.warning("CryptoPanic daily quota reached, using stale cache")
-                return self._split_news(stale, symbol, max_per_group)
-            logger.warning("CryptoPanic daily quota reached, no cache available")
-            return [], []
-
-        async def _fetch() -> list[InformationEvent]:
-            result = await self._cryptopanic.fetch_posts(news_filter)
-            self._cryptopanic_daily_calls += 1  # count after success (failed calls don't consume quota)
-            return result
-
         try:
-            all_posts = await self._cache.get_or_fetch(cache_key, _NEWS_TTL, _fetch)
+            all_posts = await self._cache.get_or_fetch(
+                cache_key, _NEWS_TTL,
+                lambda: self._news.fetch_posts(news_filter),
+            )
         except RateLimitHit:
             # TTLCache already tried stale cache and didn't have any
-            logger.warning("CryptoPanic 429 with no cache, degrading")
+            logger.warning("CoinDesk 429 with no cache, degrading")
             return [], []
         except Exception:
-            logger.warning("CryptoPanic fetch failed", exc_info=True)
+            logger.warning("CoinDesk fetch failed", exc_info=True)
             return [], []
 
         return self._split_news(all_posts, symbol, max_per_group)
@@ -1577,7 +1553,7 @@ Expected: 417+ tests pass, 0 failures
 
 ```bash
 git add src/integrations/news/service.py tests/test_news_service.py
-git commit -m "feat(N2): add NewsService with caching, quota protection, and degradation"
+git commit -m "feat(N2): add NewsService with caching and graceful degradation"
 ```
 
 ---
@@ -2107,24 +2083,10 @@ def test_news_config_defaults():
     from src.config import NewsConfig
     config = NewsConfig()
     assert config.enabled is True
-    assert config.cryptopanic_daily_quota == 180
-
-
-def test_news_config_custom_quota(tmp_path: Path):
-    """Paid-tier users can raise the quota."""
-    settings_file = tmp_path / "settings.yaml"
-    settings_file.write_text("""
-exchange:
-  name: okx
-news:
-  cryptopanic_daily_quota: 500
-""")
-    from src.config import load_settings
-    settings = load_settings(settings_file, env_overrides={})
-    assert settings.news.cryptopanic_daily_quota == 500
 
 
 def test_settings_with_news(tmp_path: Path):
+    """news.enabled=false disables NewsService initialization."""
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("""
 exchange:
@@ -2138,13 +2100,12 @@ news:
 
 
 def test_settings_without_news(tmp_path: Path):
-    """news section is optional."""
+    """news section is optional and defaults to enabled."""
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("exchange:\n  name: okx\n")
     from src.config import load_settings
     settings = load_settings(settings_file, env_overrides={})
     assert settings.news.enabled is True
-    assert settings.news.cryptopanic_daily_quota == 180
 ```
 
 - [ ] **Step 2: Run config tests to verify new ones fail**
@@ -2159,12 +2120,9 @@ In `src/config.py`, add `NewsConfig` class (after `AlertsConfig`):
 ```python
 class NewsConfig(BaseModel):
     enabled: bool = True
-    # Free tier: ~200/day. Default 180 = 10% safety margin.
-    # Raise this if you have a paid CryptoPanic plan.
-    cryptopanic_daily_quota: int = 180
 ```
 
-Note: API key is NOT a config field. It's persisted separately in `config/.credentials` by the wizard (see Task 9 Step 2). Keeping it out of `Settings` avoids multi-path confusion — there's exactly one place to edit the key (run the wizard).
+All news data sources (CoinDesk News / FGI / ForexFactory / OKX announcements) are keyless. `NewsConfig` is just a feature toggle — when `enabled=False`, `NewsService` is not initialized and the three news-related tools return "News service not configured".
 
 Add field to `Settings` class:
 
@@ -2181,7 +2139,7 @@ class Settings(BaseModel):
     news: NewsConfig = NewsConfig()
 ```
 
-`load_settings()` needs no change related to news config (no env loading for CryptoPanic — key lives in `.credentials` only).
+`load_settings()` needs no change related to news config.
 
 - [ ] **Step 4: Run config tests to verify they pass**
 
@@ -2226,7 +2184,7 @@ def _make_deps(**overrides):
     return MockDeps(**overrides)
 
 
-def _event(title="News", source="cryptopanic", symbols=None, hours_ago=0,
+def _event(title="News", source="coindesk", symbols=None, hours_ago=0,
            category="news", content="", importance="medium"):
     return InformationEvent(
         timestamp=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
@@ -2268,7 +2226,8 @@ async def test_market_news_format():
     assert "EU Regulation" in result
 
 
-async def test_market_news_no_api_key():
+async def test_market_news_empty_results():
+    """News service is configured but all upstream returned empty — show graceful message."""
     from src.agent.tools_perception import get_market_news
 
     news_svc = AsyncMock()
@@ -2276,12 +2235,11 @@ async def test_market_news_no_api_key():
     news_svc.get_fear_greed_index.return_value = _event(
         "50 / 100 — Neutral", source="alternative_me", category="fgi",
     )
-    news_svc.has_cryptopanic = False
 
     deps = _make_deps(news=news_svc)
     result = await get_market_news(deps)
     assert "Fear & Greed Index" in result
-    assert "unavailable" in result.lower() and "cryptopanic" in result.lower()
+    assert "No recent headlines" in result or "temporarily unavailable" in result.lower()
 
 
 async def test_market_news_passes_filter():
@@ -2290,11 +2248,10 @@ async def test_market_news_passes_filter():
     news_svc = AsyncMock()
     news_svc.get_news.return_value = ([], [])
     news_svc.get_fear_greed_index.return_value = None
-    news_svc.has_cryptopanic = True
 
     deps = _make_deps(news=news_svc)
-    await get_market_news(deps, news_filter="bullish")
-    news_svc.get_news.assert_called_once_with("BTC/USDT:USDT", "bullish")
+    await get_market_news(deps, news_filter="positive")
+    news_svc.get_news.assert_called_once_with("BTC/USDT:USDT", "positive")
 
 
 # ===== get_critical_alerts =====
@@ -2464,7 +2421,7 @@ Then append the three tool functions at the end of the file:
 ```python
 async def get_market_news(
     deps: TradingDeps,
-    news_filter: Literal["rising", "bullish", "bearish", "important"] | None = None,
+    news_filter: Literal["positive", "negative", "neutral"] | None = None,
 ) -> str:
     """Get crypto news headlines + Fear & Greed Index."""
     if deps.news is None:
@@ -2518,10 +2475,7 @@ async def get_market_news(
                 + "\n\n".join(lines)
             )
     else:
-        if deps.news.has_cryptopanic:
-            sections.append("=== News ===\nNo recent headlines.")
-        else:
-            sections.append("=== News ===\nCryptoPanic API key not configured — headlines unavailable.")
+        sections.append("=== News ===\nNo recent headlines (or news service temporarily unavailable).")
 
     return "\n\n".join(sections)
 
@@ -2683,10 +2637,10 @@ In `create_trader_agent()`, add three new tool registrations after `get_performa
     @agent.tool
     async def get_market_news(
         ctx: RunContext[TradingDeps],
-        news_filter: Literal["rising", "bullish", "bearish", "important"] | None = None,
+        news_filter: Literal["positive", "negative", "neutral"] | None = None,
     ) -> str:
         """Get recent crypto news headlines and market sentiment.
-        news_filter: 'rising' (trending), 'bullish', 'bearish', 'important'. Default: no filter (latest).
+        news_filter: 'positive', 'negative', 'neutral'. Default: no filter (latest mix).
         Returns 10 headlines (5 symbol-specific + 5 general crypto) + Fear & Greed Index.
         Output ~500-700 tokens."""
         from src.agent.tools_perception import get_market_news as _impl
@@ -2750,7 +2704,7 @@ class MockDeps:
 In `src/agent/persona.py`, append to the end of `_build_layer1()` return string, before the closing `"""`, add:
 
 ```
-- **Market news**: Use get_market_news to check news headlines and Fear & Greed sentiment. Usually call without news_filter — the default gives latest headlines sufficient for most decisions. Only use news_filter when you need a specific lens: 'rising' (trending), 'bullish', 'bearish', 'important'. The Fear & Greed Index ranges from 0 (maximum fear) to 100 (maximum greed).
+- **Market news**: Use get_market_news to check news headlines and Fear & Greed sentiment. Usually call without news_filter — the default gives latest headlines sufficient for most decisions. Only use news_filter when you need a specific lens: 'positive', 'negative', 'neutral'. The Fear & Greed Index ranges from 0 (maximum fear) to 100 (maximum greed).
 - **Critical alerts**: Use get_critical_alerts before placing trades to check for exchange announcements (delistings, contract maintenance, parameter changes) and upcoming macro events (FOMC, CPI, NFP with impact level). Often returns empty when no relevant events are scheduled. Note: the macro calendar covers the current week only — Friday evening/weekend may miss next week's early events.
 - **Derivatives data**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Funding rate: positive means longs pay shorts, negative means shorts pay longs (settles every 8h). Open interest is total outstanding contracts. Long/short ratio shows account position distribution.
 ```
@@ -2769,30 +2723,23 @@ git commit -m "feat(N2): register market intelligence tools and update system pr
 
 ---
 
-### Task 9: App Integration + Wizard
+### Task 9: App Integration
 
 **Files:**
 - Modify: `src/cli/app.py` (initialize NewsService, inject into deps, close on shutdown)
-- Modify: `src/cli/wizard.py` (add Step 6 for CryptoPanic API key)
+- Wizard: **no change** — all news sources are keyless, no Step 6 needed.
 
 - [ ] **Step 1: Integrate NewsService in app.py**
 
 In `src/cli/app.py`, in the `build_services()` function, after `MetricsService` initialization (around line 280), add:
 
 ```python
-    # News service — API key comes exclusively from the wizard (persisted in .credentials).
+    # News service — all upstream sources are keyless (CoinDesk, FGI, ForexFactory, OKX).
     news_service = None
     if settings.news.enabled:
         from src.integrations.news.service import NewsService
-        cp_key = getattr(result, 'cryptopanic_api_key', '') or None
-        news_service = NewsService(
-            api_key=cp_key,
-            daily_quota=settings.news.cryptopanic_daily_quota,
-        )
-        if cp_key:
-            sc.print("News: ON (CryptoPanic + FGI + alerts)")
-        else:
-            sc.print("News: ON (FGI + alerts only — no CryptoPanic API key)")
+        news_service = NewsService()
+        sc.print("News: ON (CoinDesk News + FGI + alerts)")
     else:
         sc.print("News: OFF")
 ```
@@ -2840,156 +2787,24 @@ In the shutdown section (after `await exchange.close()`), add:
         await news_service.close()
 ```
 
-- [ ] **Step 2: Add Wizard Step 6 for CryptoPanic API key**
-
-In `src/cli/wizard.py`, add a new step function:
-
-```python
-async def _validate_cryptopanic_key(key: str, console: Console) -> bool:
-    """Test CryptoPanic API key. Returns True if valid or temporarily unavailable."""
-    import httpx
-
-    console.print("  Testing API key...")
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as http:
-                resp = await http.get(
-                    "https://cryptopanic.com/api/v1/posts/",
-                    params={"auth_token": key, "limit": 1},
-                )
-            if resp.status_code == 200:
-                console.print("  [green]OK[/]")
-                return True
-            if resp.status_code == 429:
-                console.print("  [yellow]Rate limited — key accepted (quota temporarily exhausted)[/]")
-                return True
-            if resp.status_code in (401, 403):
-                console.print(f"  [red]Invalid key (HTTP {resp.status_code})[/]")
-                return False
-            console.print(f"  [yellow]Unexpected HTTP {resp.status_code}, treating as valid[/]")
-            return True
-        except (httpx.TimeoutException, httpx.ConnectError):
-            if attempt == 0:
-                console.print("  [yellow]Timeout, retrying...[/]")
-            else:
-                console.print("  [yellow]Timeout — key accepted (network issue)[/]")
-                return True
-    return True  # unreachable, but satisfy type checker
-
-
-async def _step_news(config_dir: Path, console: Console) -> dict:
-    """Step 6: News configuration (CryptoPanic API key).
-
-    The key lives exclusively in `config/.credentials` (same file/mechanism as
-    exchange credentials). No env var support — one place to look, one way to
-    change it. Invalid saved keys are cleared to avoid re-prompting the same
-    failure on every startup.
-    """
-    console.print("\n[bold]Step 6: News (optional)[/]")
-
-    # Try saved credentials
-    saved = _load_credentials(config_dir)
-    saved_entry = saved.get("cryptopanic", {})
-    saved_key = saved_entry.get("api_key", "")
-    if saved_key:
-        console.print("  [dim]Saved CryptoPanic credentials found[/]")
-        if Confirm.ask("  Use saved CryptoPanic API key?", default=True, console=console):
-            if await _validate_cryptopanic_key(saved_key, console):
-                return {"cryptopanic_api_key": saved_key}
-            # Invalid — clear it so we don't re-prompt the same broken key next startup
-            _save_credentials(config_dir, "cryptopanic", {"api_key": ""})
-            console.print("  [yellow]Saved key invalid, removed from .credentials[/]")
-
-    console.print("  CryptoPanic provides crypto news headlines with sentiment.")
-    console.print("  Get a free API key at: https://cryptopanic.com/developers/api/")
-    has_key = Confirm.ask("  Configure CryptoPanic API key?", default=False, console=console)
-    if has_key:
-        while True:
-            key = Prompt.ask("  API key", password=True, console=console)
-            if await _validate_cryptopanic_key(key, console):
-                _save_credentials(config_dir, "cryptopanic", {"api_key": key})
-                console.print("  [green]Saved to config/.credentials[/]")
-                return {"cryptopanic_api_key": key}
-            if not Confirm.ask("  Try another key?", default=True, console=console):
-                break
-    console.print("  [dim]Skipped — Fear & Greed Index and alerts still available[/]")
-    return {"cryptopanic_api_key": ""}
-```
-
-Note: `_load_credentials()` and `_save_credentials()` already exist in `wizard.py` (used for OKX credentials) and work with arbitrary service names as dict keys — no changes to those helpers needed.
-
-Add `cryptopanic_api_key` field to `WizardResult`:
-
-```python
-@dataclass
-class WizardResult:
-    # Exchange
-    exchange_type: str
-    fee_rate: float | None
-    initial_balance: float
-    api_credentials: dict | None
-    # Trading pair
-    symbol: str
-    timeframe: str
-    # Model
-    model_config: ModelConfig
-    model: Any
-    # Risk & scheduling
-    scheduler_interval_min: int
-    approval_enabled: bool
-    alert_enabled: bool
-    alert_window_min: int | None
-    alert_threshold_pct: float | None
-    token_budget: int
-    # Persona
-    persona: PersonaConfig
-    # News
-    cryptopanic_api_key: str = ""
-    # Session
-    session_name: str = ""
-```
-
-In `run_wizard()`, insert the new step call **after `persona_data = _step_persona(...)` and before the `_show_summary` block** (i.e., as the last step inside the `while True:` loop before the summary):
-
-```python
-            persona_data = _step_persona(trader_defaults, console)
-            news_data = await _step_news(config_dir, console)  # NEW — inserts as Step 6
-```
-
-And include it in the `data` merge (replace the existing line that builds `data`):
-
-```python
-            data = {**exchange_data, **trading_data, **model_data, **risk_data, **persona_data, **news_data}
-```
-
-Note: `run_wizard()` is already declared `async def` (because `_step_model` is async), so `await _step_news(...)` works without changing the function signature.
-
-Also add it to `_show_summary`:
-
-```python
-    cp_key = data.get("cryptopanic_api_key", "")
-    news_str = "ON (CryptoPanic + FGI)" if cp_key else "ON (FGI only)"
-    table.add_row("News", news_str)
-```
-
-- [ ] **Step 3: Run full test suite to verify nothing breaks**
+- [ ] **Step 2: Run full test suite to verify nothing breaks**
 
 Run: `pytest --tb=short -q`
 Expected: all tests pass
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add src/cli/app.py src/cli/wizard.py
-git commit -m "feat(N2): integrate NewsService in app startup and add wizard news step"
+git add src/cli/app.py
+git commit -m "feat(N2): wire NewsService into app startup and shutdown"
 ```
 
-- [ ] **Step 5: Run full test suite one final time**
+- [ ] **Step 4: Run full test suite one final time**
 
 Run: `pytest --tb=short -q`
 Expected: all tests pass (original 417 + new tests)
 
-- [ ] **Step 6: Final commit (if any remaining changes)**
+- [ ] **Step 5: Final commit (if any remaining changes)**
 
 ```bash
 git status
