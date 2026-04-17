@@ -8,15 +8,21 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable
 
+import ccxt.async_support as ccxt  # new top-level import (for RateLimitExceeded)
+
 from src.integrations.exchange.base import (
     Balance,
     BaseExchange,
     Candle,
     FillEvent,
+    FundingRate,
+    LongShortRatio,
+    OpenInterest,
     Order,
     Position,
     Ticker,
 )
+from src.utils.cache import RateLimitHit
 
 logger = logging.getLogger(__name__)
 
@@ -955,6 +961,67 @@ class SimulatedExchange(BaseExchange):
                 await session.execute(stmt)
 
             await session.commit()
+
+    # --- Derivatives ---
+
+    async def fetch_funding_rate(self, symbol: str) -> FundingRate:
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            data = await self._ccxt.fetch_funding_rate(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim funding rate: {e}") from e
+        return FundingRate(
+            symbol=data["symbol"],
+            rate=float(data["fundingRate"]),
+            next_funding_time=int(data.get("fundingTimestamp") or 0),
+            timestamp=int(data.get("timestamp") or 0),
+        )
+
+    async def fetch_open_interest(self, symbol: str) -> OpenInterest:
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            data = await self._ccxt.fetch_open_interest(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim open interest: {e}") from e
+        return OpenInterest(
+            symbol=data["symbol"],
+            open_interest=float(data.get("openInterestAmount") or 0),
+            open_interest_value=float(data.get("openInterestValue") or 0),
+            timestamp=int(data.get("timestamp") or 0),
+        )
+
+    async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            history = await self._ccxt.fetch_long_short_ratio_history(symbol, "5m", limit=1)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim long/short ratio: {e}") from e
+        except ccxt.NotSupported as e:
+            # Mirrors okx.py: surface a precise error if a future ccxt
+            # upgrade withdraws the fetch_long_short_ratio_history
+            # capability, rather than leaking ccxt.NotSupported to the
+            # tool layer where it would flatten into "temporarily
+            # unavailable".
+            raise NotImplementedError(
+                f"ccxt no longer exposes long/short ratio history for {symbol}: {e}"
+            ) from e
+        if not history:
+            raise ValueError(f"No long/short ratio data for {symbol}")
+        entry = history[0]
+        ratio = float(entry["longShortRatio"])
+        return LongShortRatio(
+            symbol=symbol,
+            long_short_ratio=ratio,
+            long_ratio=ratio / (1 + ratio),
+            short_ratio=1.0 / (1 + ratio),
+            timestamp=int(entry.get("timestamp") or 0),
+        )
 
     # --- Lifecycle ---
 

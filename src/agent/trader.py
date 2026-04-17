@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic_ai import Agent, RunContext
 
@@ -30,6 +31,7 @@ class TradingDeps:
     set_next_wake_fn: Callable[[int], None] | None = None
     initial_balance: float = 10000.0
     metrics: object | None = None  # MetricsService, typed as object to avoid circular import
+    news: object | None = None  # NewsService, typed as object to avoid circular import
 
 
 def create_trader_agent(
@@ -104,6 +106,45 @@ def create_trader_agent(
         from src.agent.tools_perception import get_performance as _impl
 
         return await _impl(ctx.deps)
+
+    @agent.tool
+    async def get_market_news(
+        ctx: RunContext[TradingDeps],
+        news_filter: Literal["positive", "negative", "neutral"] | None = None,
+    ) -> str:
+        """Get recent crypto news headlines and market sentiment.
+        news_filter: 'positive', 'negative', 'neutral'. Default: no filter (latest mix).
+        Returns up to 10 headlines total (up to 5 symbol-specific, remainder general crypto); total may be fewer if upstream has limited recent posts. Plus Fear & Greed Index.
+        Output ~500-700 tokens."""
+        from src.agent.tools_perception import get_market_news as _impl
+
+        return await _impl(ctx.deps, news_filter)
+
+    @agent.tool
+    async def get_critical_alerts(
+        ctx: RunContext[TradingDeps],
+        lookback_hours: int = 24,
+        lookahead_hours: int = 12,
+    ) -> str:
+        """Get critical alerts: exchange announcements and upcoming macro events.
+        lookback_hours: how far back to check announcements (default 24h).
+        lookahead_hours: how far ahead to check macro events (default 12h).
+        Output ~100-400 tokens (often empty when no relevant events are scheduled)."""
+        from src.agent.tools_perception import get_critical_alerts as _impl
+
+        return await _impl(ctx.deps, lookback_hours, lookahead_hours)
+
+    @agent.tool
+    async def get_derivatives_data(
+        ctx: RunContext[TradingDeps],
+        symbol: str | None = None,
+    ) -> str:
+        """Get derivatives market data: funding rate, open interest, long/short ratio.
+        When symbol is None, uses the currently traded pair.
+        Output ~150-250 tokens."""
+        from src.agent.tools_perception import get_derivatives_data as _impl
+
+        return await _impl(ctx.deps, symbol)
 
     # === Execution Tools ===
 

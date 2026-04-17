@@ -61,6 +61,10 @@ class AlertsConfig(BaseModel):
     threshold_pct: float = 5.0
 
 
+class NewsConfig(BaseModel):
+    enabled: bool = True
+
+
 class Settings(BaseModel):
     exchange: ExchangeConfig = ExchangeConfig()
     trading: TradingConfig = TradingConfig()
@@ -70,6 +74,7 @@ class Settings(BaseModel):
     database: DatabaseConfig = DatabaseConfig()
     approval: ApprovalConfig = ApprovalConfig()
     alerts: AlertsConfig = AlertsConfig()
+    news: NewsConfig = NewsConfig()
 
 
 class PersonaConfig(BaseModel):

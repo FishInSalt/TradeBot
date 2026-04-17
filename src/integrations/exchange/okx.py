@@ -14,10 +14,14 @@ from src.integrations.exchange.base import (
     BaseExchange,
     Candle,
     FillEvent,
+    FundingRate,
+    LongShortRatio,
+    OpenInterest,
     Order,
     Position,
     Ticker,
 )
+from src.utils.cache import RateLimitHit
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +400,69 @@ class OKXExchange(BaseExchange):
     @_retry()
     async def cancel_order(self, order_id: str, symbol: str) -> None:  # type: ignore[override]
         await self._client.cancel_order(order_id, symbol)
+
+    # ── Derivatives market-structure fetches ──
+    # ccxt.RateLimitExceeded is a subclass of ccxt.NetworkError, and @_retry()
+    # catches NetworkError for up to 3 retries. If we converted 429 to
+    # RateLimitHit outside the decorated body, the decorator would swallow
+    # the 429 and retry silently — defeating TTLCache's stale-cache
+    # fallback (spec §3.5). Keeping the try/except inside the function body
+    # ensures RateLimitHit (not a ccxt type) escapes the decorator untouched
+    # and propagates up to TTLCache.get_or_fetch.
+
+    @_retry()
+    async def fetch_funding_rate(self, symbol: str) -> FundingRate:
+        try:
+            data = await self._client.fetch_funding_rate(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX funding rate: {e}") from e
+        return FundingRate(
+            symbol=data["symbol"],
+            rate=float(data["fundingRate"]),
+            next_funding_time=int(data.get("fundingTimestamp") or 0),
+            timestamp=int(data.get("timestamp") or 0),
+        )
+
+    @_retry()
+    async def fetch_open_interest(self, symbol: str) -> OpenInterest:
+        try:
+            data = await self._client.fetch_open_interest(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX open interest: {e}") from e
+        return OpenInterest(
+            symbol=data["symbol"],
+            open_interest=float(data.get("openInterestAmount") or 0),
+            open_interest_value=float(data.get("openInterestValue") or 0),
+            timestamp=int(data.get("timestamp") or 0),
+        )
+
+    @_retry()
+    async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
+        try:
+            history = await self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX long/short ratio: {e}") from e
+        except ccxt.NotSupported as e:
+            # Pre-work P5 confirmed `has['fetchLongShortRatioHistory']=True`
+            # at time of implementation, but a future ccxt upgrade could
+            # withdraw capability. Surface a precise error so the tool-layer
+            # "temporarily unavailable" message is not misread as a 429 / network
+            # blip. Spec §9.5 calls for a REST /rubik/stat/... fallback if
+            # this ever fires in production; tracked as follow-up.
+            raise NotImplementedError(
+                f"ccxt no longer exposes long/short ratio history for {symbol}: {e}"
+            ) from e
+        if not history:
+            raise ValueError(f"No long/short ratio data for {symbol}")
+        entry = history[0]
+        ratio = float(entry["longShortRatio"])
+        return LongShortRatio(
+            symbol=symbol,
+            long_short_ratio=ratio,
+            long_ratio=ratio / (1 + ratio),
+            short_ratio=1.0 / (1 + ratio),
+            timestamp=int(entry.get("timestamp") or 0),
+        )
 
     async def close(self) -> None:
         logger.info("OKX exchange closing")

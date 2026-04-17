@@ -186,3 +186,32 @@ models:
     settings = load_settings(settings_file, env_overrides={})
     assert settings.models is not None
     assert settings.models.strong == "anthropic:claude-opus-4-6"
+
+
+def test_news_config_defaults():
+    from src.config import NewsConfig
+    config = NewsConfig()
+    assert config.enabled is True
+
+
+def test_settings_with_news(tmp_path: Path):
+    """news.enabled=false disables NewsService initialization."""
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("""
+exchange:
+  name: okx
+news:
+  enabled: false
+""")
+    from src.config import load_settings
+    settings = load_settings(settings_file, env_overrides={})
+    assert settings.news.enabled is False
+
+
+def test_settings_without_news(tmp_path: Path):
+    """news section is optional and defaults to enabled."""
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("exchange:\n  name: okx\n")
+    from src.config import load_settings
+    settings = load_settings(settings_file, env_overrides={})
+    assert settings.news.enabled is True

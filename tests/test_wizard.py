@@ -454,6 +454,74 @@ def test_build_services_sim_path():
     MockSim.assert_called_once()
 
 
+def _build_news_wiring_result():
+    from src.cli.wizard import WizardResult
+
+    return WizardResult(
+        exchange_type="simulated", fee_rate=0.0005, initial_balance=100.0,
+        api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
+        model_config=ModelConfig(id="t", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(), scheduler_interval_min=15, approval_enabled=False,
+        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
+        token_budget=500000, persona=PersonaConfig(),
+        session_name="test",
+    )
+
+
+def test_build_services_wires_news_when_enabled():
+    """settings.news.enabled=True → deps.news is a NewsService instance."""
+    from src.cli.app import build_services
+
+    result = _build_news_wiring_result()
+    mock_engine = MagicMock()
+    mock_sc = MagicMock()
+    mock_settings = MagicMock()
+    mock_settings.approval.timeout_seconds = 300
+    mock_settings.news.enabled = True
+
+    with patch("src.integrations.exchange.simulated.SimulatedExchange") as MockSim, \
+         patch("src.cli.app.MarketDataService"), \
+         patch("src.cli.app.MemoryService"), \
+         patch("src.cli.app.create_trader_agent") as mock_agent, \
+         patch("src.integrations.news.service.NewsService") as MockNewsService:
+        MockSim.return_value = MagicMock()
+        mock_agent.return_value = MagicMock()
+        news_instance = MagicMock()
+        MockNewsService.return_value = news_instance
+        _, deps, _, _ = build_services(
+            result, mock_engine, "sid", mock_sc, mock_settings,
+        )
+
+    MockNewsService.assert_called_once_with()
+    assert deps.news is news_instance
+
+
+def test_build_services_omits_news_when_disabled():
+    """settings.news.enabled=False → deps.news is None and NewsService not constructed."""
+    from src.cli.app import build_services
+
+    result = _build_news_wiring_result()
+    mock_engine = MagicMock()
+    mock_sc = MagicMock()
+    mock_settings = MagicMock()
+    mock_settings.approval.timeout_seconds = 300
+    mock_settings.news.enabled = False
+
+    with patch("src.integrations.exchange.simulated.SimulatedExchange") as MockSim, \
+         patch("src.cli.app.MarketDataService"), \
+         patch("src.cli.app.MemoryService"), \
+         patch("src.cli.app.create_trader_agent") as mock_agent, \
+         patch("src.integrations.news.service.NewsService") as MockNewsService:
+        MockSim.return_value = MagicMock()
+        mock_agent.return_value = MagicMock()
+        _, deps, _, _ = build_services(
+            result, mock_engine, "sid", mock_sc, mock_settings,
+        )
+
+    MockNewsService.assert_not_called()
+    assert deps.news is None
+
+
 @pytest.mark.asyncio
 async def test_run_wizard_uses_name_generator_callback():
     """When name_generator is provided, wizard uses it instead of internal _generate_session_name."""

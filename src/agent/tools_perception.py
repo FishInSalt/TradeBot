@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
@@ -354,3 +354,253 @@ async def get_performance(deps: TradingDeps) -> str:
         f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}%\n"
         f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT"
     )
+
+
+# Display-layer filter for CoinDesk CATEGORY_DATA — strips thematic tags
+# (MARKET / CRYPTOCURRENCY / ...) from the "Currencies" line rendered to
+# the Agent. Tags stay in InformationEvent.symbols for matching logic;
+# this only affects display.
+_NON_CURRENCY_CATEGORIES = frozenset({
+    "ALTCOIN", "BUSINESS", "CRYPTOCURRENCY", "EXCHANGE", "FIAT",
+    "MACROECONOMICS", "MARKET", "REGULATION", "TECHNOLOGY", "TRADING",
+})
+
+
+def _fmt_currencies(syms: list[str]) -> str:
+    filtered = [s for s in syms if s not in _NON_CURRENCY_CATEGORIES]
+    return ", ".join(filtered) if filtered else "—"
+
+
+async def get_market_news(
+    deps: TradingDeps,
+    news_filter: Literal["positive", "negative", "neutral"] | None = None,
+) -> str:
+    """Get crypto news headlines + Fear & Greed Index."""
+    import asyncio
+
+    if deps.news is None:
+        return "News service not configured."
+
+    from src.integrations.news.models import extract_base_currency
+
+    base = extract_base_currency(deps.symbol)
+
+    # Fetch news + FGI concurrently (independent upstreams, independent caches).
+    news_result, fgi_result = await asyncio.gather(
+        deps.news.get_news(deps.symbol, news_filter),
+        deps.news.get_fear_greed_index(),
+        return_exceptions=True,
+    )
+    # NewsService.get_news contract: tuple[list, list] on success (possibly
+    # empty), None when CoinDesk errored with no stale cache. gather adds a
+    # third state (Exception) as belt-and-suspenders against contract drift.
+    if isinstance(news_result, Exception) or news_result is None:
+        news_down = True
+        symbol_news, general_news = [], []
+    else:
+        news_down = False
+        symbol_news, general_news = news_result
+    fgi = None if isinstance(fgi_result, Exception) else fgi_result
+
+    sections: list[str] = []
+
+    # FGI section
+    if fgi is not None:
+        date_str = fgi.timestamp.strftime("%Y-%m-%d")
+        sections.append(
+            f"=== Fear & Greed Index ===\n"
+            f"Value: {fgi.title}\n"
+            f"(Updated: {date_str})"
+        )
+    else:
+        sections.append("=== Fear & Greed Index ===\nFGI service temporarily unavailable.")
+
+    has_news = bool(symbol_news or general_news)
+    if has_news:
+        if symbol_news:
+            lines: list[str] = []
+            for e in symbol_news:
+                ts = e.timestamp.strftime("%Y-%m-%d %H:%M")
+                source_name = e.content if e.content else e.source
+                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {_fmt_currencies(e.symbols)}")
+            sections.append(
+                f"=== Symbol News ({base}, {len(symbol_news)}) ===\n"
+                + "\n\n".join(lines)
+            )
+
+        if general_news:
+            lines = []
+            for e in general_news:
+                ts = e.timestamp.strftime("%Y-%m-%d %H:%M")
+                source_name = e.content if e.content else e.source
+                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {_fmt_currencies(e.symbols)}")
+            sections.append(
+                f"=== General Crypto News ({len(general_news)}) ===\n"
+                + "\n\n".join(lines)
+            )
+    elif news_down:
+        sections.append("=== News ===\nNews service temporarily unavailable.")
+    else:
+        sections.append("=== News ===\nNo recent headlines.")
+
+    return "\n\n".join(sections)
+
+
+async def get_critical_alerts(
+    deps: TradingDeps,
+    lookback_hours: int = 24,
+    lookahead_hours: int = 12,
+) -> str:
+    """Get critical alerts: exchange announcements + upcoming macro events."""
+    import asyncio
+
+    if deps.news is None:
+        return "News service not configured."
+
+    # Parallelize announcements + macro events to minimize wall-clock latency.
+    # Each call has independent upstream sources and caches, so gather is safe.
+    announcements, macro_events = await asyncio.gather(
+        deps.news.get_announcements(lookback_hours),
+        deps.news.get_macro_events(lookahead_hours),
+        return_exceptions=True,
+    )
+    # NewsService contract: list for success (may be empty); None when every
+    # upstream source errored, so the Agent can distinguish "quiet window" from
+    # "services unavailable" (spec §3.5). gather(return_exceptions=True) is a
+    # belt-and-suspenders guard in case the service contract ever changes.
+    if isinstance(announcements, Exception):
+        announcements = None
+    if isinstance(macro_events, Exception):
+        macro_events = None
+
+    sections: list[str] = []
+
+    # Announcements
+    if announcements is None:
+        sections.append(
+            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
+            "Exchange announcements service temporarily unavailable."
+        )
+    elif announcements:
+        lines = [e.timestamp.strftime("[%Y-%m-%d %H:%M] ") + e.title for e in announcements]
+        sections.append(
+            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
+            + "\n".join(lines)
+        )
+    else:
+        sections.append(
+            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
+            "No exchange announcements."
+        )
+
+    # Macro events
+    if macro_events is None:
+        sections.append(
+            f"=== Upcoming Macro Events (next {lookahead_hours}h) ===\n"
+            "Macro events service temporarily unavailable."
+        )
+    elif macro_events:
+        lines = []
+        for e in macro_events:
+            ts = e.timestamp.strftime("%Y-%m-%d %H:%M")
+            impact = e.importance.capitalize()
+            line = f"[{ts}] {e.title} — Impact: {impact}"
+            if e.content:
+                line += f"\n  {e.content}"
+            lines.append(line)
+        sections.append(
+            f"=== Upcoming Macro Events (next {lookahead_hours}h) ===\n"
+            + "\n".join(lines)
+        )
+    else:
+        sections.append(
+            f"=== Upcoming Macro Events (next {lookahead_hours}h) ===\n"
+            "No upcoming macro events."
+        )
+
+    # Footer: calendar scope reminder (spec §3.2). Skip when macro source is
+    # fully unavailable — the caveat is meaningless without a result to qualify.
+    if macro_events is not None:
+        sections.append(
+            "Note: macro calendar covers current week only; "
+            "Friday evening / weekend calls may miss next week's early events."
+        )
+
+    return "\n\n".join(sections)
+
+
+async def get_derivatives_data(
+    deps: TradingDeps,
+    symbol: str | None = None,
+) -> str:
+    """Get derivatives market data: funding rate, open interest, long/short ratio."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    symbol = symbol or deps.symbol
+    sections = [f"=== Derivatives Data ({symbol}) ==="]
+    errors: list[str] = []
+    timestamps_ms: list[int] = []
+
+    # Fetch all three concurrently — each has independent cache + upstream.
+    # gather(return_exceptions=True) gives us per-method success/failure.
+    funding, oi, lsr = await asyncio.gather(
+        deps.market_data.get_funding_rate(symbol),
+        deps.market_data.get_open_interest(symbol),
+        deps.market_data.get_long_short_ratio(symbol),
+        return_exceptions=True,
+    )
+
+    # Funding rate
+    if isinstance(funding, Exception):
+        errors.append("Funding rate temporarily unavailable")
+    else:
+        direction = "longs pay shorts" if funding.rate >= 0 else "shorts pay longs"
+        sign = "Positive rate" if funding.rate >= 0 else "Negative rate"
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        remaining_ms = max(0, funding.next_funding_time - now_ms)
+        hours = remaining_ms // (3600 * 1000)
+        minutes = (remaining_ms % (3600 * 1000)) // (60 * 1000)
+        sections.append(
+            f"Funding Rate: {funding.rate:+.4%} (next settlement in {hours}h {minutes}m)\n"
+            f"  {sign} — {direction}"
+        )
+        if funding.timestamp:
+            timestamps_ms.append(funding.timestamp)
+
+    # Open interest
+    if isinstance(oi, Exception):
+        errors.append("Open interest temporarily unavailable")
+    else:
+        if oi.open_interest_value >= 1e9:
+            oi_str = f"${oi.open_interest_value / 1e9:.2f}B"
+        elif oi.open_interest_value >= 1e6:
+            oi_str = f"${oi.open_interest_value / 1e6:.2f}M"
+        else:
+            oi_str = f"${oi.open_interest_value:,.0f}"
+        sections.append(f"Open Interest: {oi_str}")
+        if oi.timestamp:
+            timestamps_ms.append(oi.timestamp)
+
+    # Long/short ratio
+    if isinstance(lsr, Exception):
+        errors.append("Long/short ratio temporarily unavailable")
+    else:
+        sections.append(
+            f"Long/Short Ratio: {lsr.long_short_ratio:.2f} "
+            f"({lsr.long_ratio:.1%} long / {lsr.short_ratio:.1%} short)"
+        )
+        if lsr.timestamp:
+            timestamps_ms.append(lsr.timestamp)
+
+    sections.extend(errors)
+
+    # Show the oldest upstream timestamp across the 3 fetches — this is the
+    # lower bound of data age (i.e. "at least one slice is this old"), giving
+    # the Agent a worst-case freshness signal. It reflects upstream response
+    # age, not whether TTLCache served an extended stale-fallback entry.
+    if timestamps_ms:
+        oldest_dt = datetime.fromtimestamp(min(timestamps_ms) / 1000, tz=timezone.utc)
+        sections.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
+
+    return "\n".join(sections)

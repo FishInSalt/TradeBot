@@ -23,6 +23,7 @@ class MockDeps:
     set_next_wake_fn: object = None
     initial_balance: float = 10000.0
     metrics: object = None
+    news: object = None
 
 
 @pytest.fixture
