@@ -282,6 +282,15 @@ def build_services(
         initial_balance=result.initial_balance,
     )
 
+    # News service — all upstream sources are keyless (CoinDesk, FGI, ForexFactory, OKX).
+    news_service = None
+    if settings.news.enabled:
+        from src.integrations.news.service import NewsService
+        news_service = NewsService()
+        sc.print("News: ON (CoinDesk News + FGI + alerts)")
+    else:
+        sc.print("News: OFF")
+
     deps = TradingDeps(
         symbol=result.symbol,
         timeframe=result.timeframe,
@@ -295,6 +304,7 @@ def build_services(
         approval_enabled=result.approval_enabled,
         initial_balance=result.initial_balance,
         metrics=metrics_service,
+        news=news_service,
     )
 
     # Alert service
@@ -443,6 +453,8 @@ async def run(
     scheduler.stop()
     await scheduler_task
     await exchange.close()
+    if deps.news is not None:
+        await deps.news.close()
 
     # Update session status to paused on graceful shutdown
     async with get_session(engine) as db_sess:
