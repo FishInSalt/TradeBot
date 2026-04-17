@@ -144,6 +144,22 @@ async def test_okx_long_short_ratio_converts_rate_limit_exceeded():
     assert exchange._client.fetch_long_short_ratio_history.call_count == 1
 
 
+async def test_okx_long_short_ratio_converts_not_supported():
+    """If a future ccxt upgrade withdraws capability, surface a precise
+    NotImplementedError rather than leaking ccxt.NotSupported (which the
+    tool layer would flatten into a generic "temporarily unavailable")."""
+    import ccxt.async_support as ccxt
+    from src.integrations.exchange.okx import OKXExchange
+
+    exchange = OKXExchange.__new__(OKXExchange)
+    exchange._client = AsyncMock()
+    exchange._client.fetch_long_short_ratio_history.side_effect = ccxt.NotSupported("gone")
+    with pytest.raises(NotImplementedError, match="long/short ratio history"):
+        await exchange.fetch_long_short_ratio("BTC/USDT:USDT")
+    # _retry() catches NetworkError but NOT NotSupported, so one call only.
+    assert exchange._client.fetch_long_short_ratio_history.call_count == 1
+
+
 # --- SimulatedExchange derivatives tests ---
 
 def _make_sim_exchange(symbol="BTC/USDT:USDT"):

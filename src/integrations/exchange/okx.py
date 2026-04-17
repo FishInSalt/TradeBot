@@ -401,10 +401,17 @@ class OKXExchange(BaseExchange):
     async def cancel_order(self, order_id: str, symbol: str) -> None:  # type: ignore[override]
         await self._client.cancel_order(order_id, symbol)
 
+    # ── Derivatives market-structure fetches ──
+    # ccxt.RateLimitExceeded is a subclass of ccxt.NetworkError, and @_retry()
+    # catches NetworkError for up to 3 retries. If we converted 429 to
+    # RateLimitHit outside the decorated body, the decorator would swallow
+    # the 429 and retry silently — defeating TTLCache's stale-cache
+    # fallback (spec §3.5). Keeping the try/except inside the function body
+    # ensures RateLimitHit (not a ccxt type) escapes the decorator untouched
+    # and propagates up to TTLCache.get_or_fetch.
+
     @_retry()
     async def fetch_funding_rate(self, symbol: str) -> FundingRate:
-        # Must convert RateLimitExceeded → RateLimitHit INSIDE the function
-        # body; see note above about the ccxt subclass hierarchy.
         try:
             data = await self._client.fetch_funding_rate(symbol)
         except ccxt.RateLimitExceeded as e:
@@ -435,6 +442,16 @@ class OKXExchange(BaseExchange):
             history = await self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)
         except ccxt.RateLimitExceeded as e:
             raise RateLimitHit(f"OKX long/short ratio: {e}") from e
+        except ccxt.NotSupported as e:
+            # Pre-work P5 confirmed `has['fetchLongShortRatioHistory']=True`
+            # at time of implementation, but a future ccxt upgrade could
+            # withdraw capability. Surface a precise error so the tool-layer
+            # "temporarily unavailable" message is not misread as a 429 / network
+            # blip. Spec §9.5 calls for a REST /rubik/stat/... fallback if
+            # this ever fires in production; tracked as follow-up.
+            raise NotImplementedError(
+                f"ccxt no longer exposes long/short ratio history for {symbol}: {e}"
+            ) from e
         if not history:
             raise ValueError(f"No long/short ratio data for {symbol}")
         entry = history[0]

@@ -16,8 +16,9 @@ _MAX_FREEFORM_LEN = 300
 
 
 def _sanitize_freeform(text: str) -> str:
-    if not text:
-        return text
+    # Idempotent over the empty string: "" → "" without the earlier
+    # truthiness short-circuit (which also accepted None and lied about the
+    # signature). Callers stay str in, str out.
     cleaned = _CONTROL_CHARS.sub("", text)
     cleaned = _WHITESPACE_RUN.sub(" ", cleaned).strip()
     if len(cleaned) > _MAX_FREEFORM_LEN:

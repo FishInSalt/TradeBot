@@ -114,7 +114,7 @@ def create_trader_agent(
     ) -> str:
         """Get recent crypto news headlines and market sentiment.
         news_filter: 'positive', 'negative', 'neutral'. Default: no filter (latest mix).
-        Returns up to 10 headlines (up to 5 symbol-specific, remainder general crypto) + Fear & Greed Index.
+        Returns up to 10 headlines total (up to 5 symbol-specific, remainder general crypto); total may be fewer if upstream has limited recent posts. Plus Fear & Greed Index.
         Output ~500-700 tokens."""
         from src.agent.tools_perception import get_market_news as _impl
 
