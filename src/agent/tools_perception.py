@@ -595,7 +595,9 @@ async def get_derivatives_data(
 
     sections.extend(errors)
 
-    # Show oldest timestamp — lets the Agent detect stale-cache fallback data.
+    # Show the oldest upstream timestamp — this reflects the age of the
+    # freshest OKX response seen, not whether TTLCache served an extended
+    # stale-fallback entry. Agent uses it as a rough data-age signal.
     if timestamps_ms:
         oldest_dt = datetime.fromtimestamp(min(timestamps_ms) / 1000, tz=timezone.utc)
         sections.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")

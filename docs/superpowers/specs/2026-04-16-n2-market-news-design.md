@@ -481,16 +481,16 @@ class NewsService:
         self._cache = TTLCache()
 
     # get_market_news 使用
-    async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> tuple[list[InformationEvent], list[InformationEvent]]
-        """API 请求 limit=20（不带 categories 过滤），本地按 CATEGORY_DATA 是否含交易币种分为两组各取 top max_per_group 条。返回 (symbol_news, general_news) 二元组，供 tool 分区格式化。
+    async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> tuple[list[InformationEvent], list[InformationEvent]] | None
+        """API 请求 limit=20（不带 categories 过滤），本地按 CATEGORY_DATA 是否含交易币种分为两组各取 top max_per_group 条。返回 (symbol_news, general_news) 二元组，供 tool 分区格式化。上游完全不可用（RateLimitHit 无 stale cache 或其他异常）时返回 None，与 get_announcements / get_macro_events 的 §3.5 契约一致，让 tool 层能区分"安静窗口"和"outage"。
 
         缓存策略：缓存层存"未分组"的 posts，具体是**已 parse 为 `list[InformationEvent]`** 的结果（不是原始 JSON dict），cache hit 时零解析开销。cache key = `news:{news_filter}`，不含 symbol——symbol 分组在每次调用时基于当前 `symbol` 即时完成。这样 cache hit 不会返回陈旧的错误分组，符合 deps.symbol 是会话级固定值的假设，也为未来多 symbol 并行做好了准备。"""
     async def get_fear_greed_index(self) -> InformationEvent | None
 
     # get_critical_alerts 使用
-    async def get_macro_events(self, lookahead_hours: int) -> list[InformationEvent]
-    async def get_announcements(self, lookback_hours: int) -> list[InformationEvent]
-        """聚合两个 OKX 端点：/support/announcements（下币、交易规则变更）+ /system/status（维护停机）。"""
+    async def get_macro_events(self, lookahead_hours: int) -> list[InformationEvent] | None
+    async def get_announcements(self, lookback_hours: int) -> list[InformationEvent] | None
+        """聚合两个 OKX 端点：/support/announcements（下币、交易规则变更）+ /system/status（维护停机）。两者都失败时返回 None（§3.5），让 tool 层渲染"temporarily unavailable"；至少一个成功则返回 list（可能为空）。"""
 
     # 生命周期
     async def close(self) -> None:

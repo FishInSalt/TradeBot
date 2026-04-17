@@ -231,6 +231,32 @@ async def test_calendar_empty_response():
     assert events == []
 
 
+async def test_calendar_naive_timestamp_treated_as_ET():
+    """Defensive: if the feed ever ships a naive date string (no observed
+    occurrence in pre-work P3), assume ET — the feed's native timezone —
+    rather than silently treating it as UTC (which would land the Agent
+    4 hours off for macro events)."""
+    from src.integrations.news.calendar import ForexFactoryClient
+
+    naive_payload = [{
+        "title": "FOMC Naive",
+        "country": "USD",
+        "date": "2026-04-16T18:00:00",  # no offset
+        "impact": "High",
+        "forecast": "",
+        "previous": "",
+    }]
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=naive_payload))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = ForexFactoryClient(http)
+        events = await client.fetch_events()
+
+    assert len(events) == 1
+    # 18:00 ET = 22:00 UTC (DST) or 23:00 UTC (standard time). April is DST.
+    assert events[0].timestamp.tzinfo == timezone.utc
+    assert events[0].timestamp.hour == 22
+
+
 # ===== OKX Announcements =====
 
 OKX_DELISTINGS_RESPONSE = {

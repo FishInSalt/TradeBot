@@ -39,11 +39,15 @@ class ForexFactoryClient:
                 ts = datetime.fromisoformat(date_str)
                 # ForexFactory feed encodes times with ET offset (e.g. -04:00).
                 # Normalize to UTC so downstream strftime yields UTC, matching
-                # every other source and spec §3.1's UTC-only contract.
+                # every other source and spec §3.1's UTC-only contract. If
+                # the feed ever ships a naive timestamp (no observed cases in
+                # pre-work P3, but defensive), assume ET — the feed's native
+                # timezone — rather than silently treating as UTC and landing
+                # the Agent 4 hours off for macro events.
                 if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                else:
-                    ts = ts.astimezone(timezone.utc)
+                    from zoneinfo import ZoneInfo
+                    ts = ts.replace(tzinfo=ZoneInfo("America/New_York"))
+                ts = ts.astimezone(timezone.utc)
             except (ValueError, AttributeError):
                 continue
 

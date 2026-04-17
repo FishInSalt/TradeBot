@@ -98,6 +98,9 @@ class NewsService:
     async def get_fear_greed_index(self) -> InformationEvent | None:
         try:
             return await self._cache.get_or_fetch("fgi", _FGI_TTL, self._fgi.fetch)
+        except RateLimitHit:
+            logger.warning("FGI 429 with no cache, degrading")
+            return None
         except Exception:
             logger.warning("FGI fetch failed", exc_info=True)
             return None
