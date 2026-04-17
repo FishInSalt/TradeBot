@@ -75,7 +75,17 @@ Pre-work was completed on 2026-04-17. Findings are recorded here so the implemen
    **Schema drift**: items live under `response.data[0].details[*]`, not `response.data[*]`. Field names inside each item match spec (`annType`, `title`, `url`, `pTime`, `businessPTime`). Task 3's `OKXAnnouncementsClient.fetch()` accounts for this nesting.
    **System status**: endpoint returns `code:"0"`, data array empty when no scheduled maintenance — can't fully verify schema until real data appears. Task 3 proceeds with spec field names (`title`, `state`, `begin`, `end`).
 
-**All four checks are done.** Proceed to Task 1.
+- [ ] **P5: ccxt OKX derivatives methods (MUST run before Task 5)**
+
+   ccxt is Python-only, not curl-verifiable. Run before Task 5:
+   ```bash
+   python -c "import ccxt; ex = ccxt.okx(); print({k: ex.has.get(k) for k in ['fetchFundingRate', 'fetchOpenInterest', 'fetchLongShortRatio', 'fetchLongShortRatioHistory']})"
+   ```
+   **Expected**: `{'fetchFundingRate': True, 'fetchOpenInterest': True, 'fetchLongShortRatio': False, 'fetchLongShortRatioHistory': True}`.
+   - If `fetchLongShortRatio` is `True`: Task 5 can simplify — call `fetch_long_short_ratio(symbol)` directly instead of `fetch_long_short_ratio_history(symbol, "5m", limit=1)`.
+   - If `fetchLongShortRatioHistory` is `False`: blocker — plan needs revision (fallback to OKX REST `/api/v5/rubik/stat/contracts/long-short-account-ratio-contract`).
+
+**P1–P4 done; P5 deferred to Task 5 prep (requires Python env).** Proceed to Task 1.
 
 ---
 
@@ -655,6 +665,7 @@ from __future__ import annotations
 import httpx
 
 from src.integrations.news.models import InformationEvent
+from src.utils.cache import RateLimitHit
 
 _FGI_URL = "https://api.alternative.me/fng/"
 
@@ -669,6 +680,8 @@ class FearGreedClient:
         from datetime import datetime, timezone
 
         resp = await self._http.get(_FGI_URL)
+        if resp.status_code == 429:
+            raise RateLimitHit("FGI rate limited")
         resp.raise_for_status()
         items = resp.json().get("data", [])
         if not items:
@@ -952,6 +965,7 @@ import logging
 import httpx
 
 from src.integrations.news.models import InformationEvent
+from src.utils.cache import RateLimitHit
 
 logger = logging.getLogger(__name__)
 
@@ -968,6 +982,8 @@ class ForexFactoryClient:
         from datetime import datetime, timezone
 
         resp = await self._http.get(_FOREXFACTORY_URL)
+        if resp.status_code == 429:
+            raise RateLimitHit("ForexFactory rate limited")
         resp.raise_for_status()
 
         events: list[InformationEvent] = []
@@ -1795,12 +1811,21 @@ from src.integrations.exchange.base import (
 )
 ```
 
-Then add three methods to `OKXExchange`, before the `close()` method:
+Also add import for `RateLimitHit` at the top:
+
+```python
+from src.utils.cache import RateLimitHit
+```
+
+Then add three methods to `OKXExchange`, before the `close()` method. Each wraps the ccxt call in try/except to convert `ccxt.RateLimitExceeded` → `RateLimitHit` (so `TTLCache` in `MarketDataService` can do stale-fallback uniformly with news sources):
 
 ```python
     @_retry()
     async def fetch_funding_rate(self, symbol: str) -> FundingRate:
-        data = await self._client.fetch_funding_rate(symbol)
+        try:
+            data = await self._client.fetch_funding_rate(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX funding rate: {e}") from e
         return FundingRate(
             symbol=data["symbol"],
             rate=float(data["fundingRate"]),
@@ -1810,7 +1835,10 @@ Then add three methods to `OKXExchange`, before the `close()` method:
 
     @_retry()
     async def fetch_open_interest(self, symbol: str) -> OpenInterest:
-        data = await self._client.fetch_open_interest(symbol)
+        try:
+            data = await self._client.fetch_open_interest(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX open interest: {e}") from e
         return OpenInterest(
             symbol=data["symbol"],
             open_interest=float(data.get("openInterestAmount") or 0),
@@ -1820,7 +1848,10 @@ Then add three methods to `OKXExchange`, before the `close()` method:
 
     @_retry()
     async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
-        history = await self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)
+        try:
+            history = await self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX long/short ratio: {e}") from e
         if not history:
             raise ValueError(f"No long/short ratio data for {symbol}")
         entry = history[0]
@@ -1833,6 +1864,8 @@ Then add three methods to `OKXExchange`, before the `close()` method:
             timestamp=int(entry.get("timestamp") or 0),
         )
 ```
+
+Note: `@_retry()` does not catch `RateLimitExceeded` (only `NetworkError`, `ExchangeNotAvailable`, `TimeoutError`), so the `RateLimitHit` propagates through to `MarketDataService.get_*`, where `TTLCache.get_or_fetch` catches it for stale-cache fallback.
 
 - [ ] **Step 5: Implement derivatives in SimulatedExchange**
 
@@ -1853,14 +1886,24 @@ from src.integrations.exchange.base import (
 )
 ```
 
-Then add three methods to `SimulatedExchange`, before the `start()` method:
+Also add imports for `ccxt` (already used elsewhere in the file; confirm it's imported) and `RateLimitHit`:
+
+```python
+import ccxt  # already present; verify it's ccxt.async_support or equivalent
+from src.utils.cache import RateLimitHit
+```
+
+Then add three methods to `SimulatedExchange`, before the `start()` method. Each wraps the ccxt.pro call and converts `ccxt.RateLimitExceeded` → `RateLimitHit`:
 
 ```python
     async def fetch_funding_rate(self, symbol: str) -> FundingRate:
         self._validate_symbol(symbol)
         if not hasattr(self, "_ccxt"):
             raise RuntimeError("Exchange not started — call start() first")
-        data = await self._ccxt.fetch_funding_rate(symbol)
+        try:
+            data = await self._ccxt.fetch_funding_rate(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim funding rate: {e}") from e
         return FundingRate(
             symbol=data["symbol"],
             rate=float(data["fundingRate"]),
@@ -1872,7 +1915,10 @@ Then add three methods to `SimulatedExchange`, before the `start()` method:
         self._validate_symbol(symbol)
         if not hasattr(self, "_ccxt"):
             raise RuntimeError("Exchange not started — call start() first")
-        data = await self._ccxt.fetch_open_interest(symbol)
+        try:
+            data = await self._ccxt.fetch_open_interest(symbol)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim open interest: {e}") from e
         return OpenInterest(
             symbol=data["symbol"],
             open_interest=float(data.get("openInterestAmount") or 0),
@@ -1884,7 +1930,10 @@ Then add three methods to `SimulatedExchange`, before the `start()` method:
         self._validate_symbol(symbol)
         if not hasattr(self, "_ccxt"):
             raise RuntimeError("Exchange not started — call start() first")
-        history = await self._ccxt.fetch_long_short_ratio_history(symbol, "5m", limit=1)
+        try:
+            history = await self._ccxt.fetch_long_short_ratio_history(symbol, "5m", limit=1)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim long/short ratio: {e}") from e
         if not history:
             raise ValueError(f"No long/short ratio data for {symbol}")
         entry = history[0]
@@ -2283,6 +2332,8 @@ async def test_critical_alerts_format():
     assert "Upcoming Macro Events" in result
     assert "FOMC Meeting" in result
     assert "Impact: High" in result
+    # Calendar scope reminder should always be present (spec §3.2)
+    assert "macro calendar covers current week only" in result
 
 
 async def test_critical_alerts_empty():
@@ -2297,6 +2348,8 @@ async def test_critical_alerts_empty():
 
     assert "No exchange announcements" in result
     assert "No upcoming macro events" in result
+    # Footer still there even when both sections are empty
+    assert "macro calendar covers current week only" in result
 
 
 async def test_critical_alerts_passes_params():
@@ -2317,19 +2370,20 @@ async def test_critical_alerts_passes_params():
 async def test_derivatives_data_format():
     from src.agent.tools_perception import get_derivatives_data
 
+    ts_ms = int(datetime(2026, 4, 16, 14, 30, tzinfo=timezone.utc).timestamp() * 1000)
     market_data = AsyncMock()
     market_data.get_funding_rate.return_value = FundingRate(
         symbol="BTC/USDT:USDT", rate=0.000125,
         next_funding_time=int((datetime.now(timezone.utc) + timedelta(hours=3, minutes=42)).timestamp() * 1000),
-        timestamp=0,
+        timestamp=ts_ms,
     )
     market_data.get_open_interest.return_value = OpenInterest(
         symbol="BTC/USDT:USDT", open_interest=12345.0,
-        open_interest_value=4_820_000_000.0, timestamp=0,
+        open_interest_value=4_820_000_000.0, timestamp=ts_ms,
     )
     market_data.get_long_short_ratio.return_value = LongShortRatio(
         symbol="BTC/USDT:USDT", long_short_ratio=1.35,
-        long_ratio=0.574, short_ratio=0.426, timestamp=0,
+        long_ratio=0.574, short_ratio=0.426, timestamp=ts_ms,
     )
 
     deps = _make_deps(market_data=market_data)
@@ -2344,6 +2398,8 @@ async def test_derivatives_data_format():
     assert "Long/Short Ratio" in result
     assert "1.35" in result
     assert "57.4%" in result
+    # Data freshness indicator present (spec §3.3)
+    assert "Data as of: 2026-04-16 14:30 UTC" in result
 
 
 async def test_derivatives_data_negative_funding():
@@ -2527,6 +2583,13 @@ async def get_critical_alerts(
             "No upcoming macro events."
         )
 
+    # Footer: calendar scope reminder (spec §3.2). Kept unconditional so the
+    # Agent doesn't need weekday-awareness to understand the limitation.
+    sections.append(
+        "Note: macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+
     return "\n\n".join(sections)
 
 
@@ -2540,6 +2603,7 @@ async def get_derivatives_data(
     symbol = symbol or deps.symbol
     sections = [f"=== Derivatives Data ({symbol}) ==="]
     errors: list[str] = []
+    timestamps_ms: list[int] = []  # collect to show oldest as "Data as of"
 
     # Funding rate
     try:
@@ -2554,6 +2618,8 @@ async def get_derivatives_data(
             f"Funding Rate: {funding.rate:+.4%} (next settlement in {hours}h {minutes}m)\n"
             f"  {sign} — {direction}"
         )
+        if funding.timestamp:
+            timestamps_ms.append(funding.timestamp)
     except Exception:
         errors.append("Funding rate temporarily unavailable")
 
@@ -2567,6 +2633,8 @@ async def get_derivatives_data(
         else:
             oi_str = f"${oi.open_interest_value:,.0f}"
         sections.append(f"Open Interest: {oi_str}")
+        if oi.timestamp:
+            timestamps_ms.append(oi.timestamp)
     except Exception:
         errors.append("Open interest temporarily unavailable")
 
@@ -2577,10 +2645,18 @@ async def get_derivatives_data(
             f"Long/Short Ratio: {lsr.long_short_ratio:.2f} "
             f"({lsr.long_ratio:.1%} long / {lsr.short_ratio:.1%} short)"
         )
+        if lsr.timestamp:
+            timestamps_ms.append(lsr.timestamp)
     except Exception:
         errors.append("Long/short ratio temporarily unavailable")
 
     sections.extend(errors)
+
+    # Show oldest timestamp — lets the Agent detect stale-cache fallback data.
+    if timestamps_ms:
+        oldest_dt = datetime.fromtimestamp(min(timestamps_ms) / 1000, tz=timezone.utc)
+        sections.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
+
     return "\n".join(sections)
 ```
 
