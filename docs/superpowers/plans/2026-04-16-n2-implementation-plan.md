@@ -248,7 +248,19 @@ from typing import Literal
 
 @dataclass
 class InformationEvent:
-    """Unified data model for all market intelligence events."""
+    """Unified data model for all market intelligence events.
+
+    The `content` field is source-specific free-form metadata used by the
+    formatter for that section. Conventions:
+      - cryptopanic   → original media name (e.g. "CoinDesk")
+      - alternative_me → classification string (e.g. "Extreme Fear")
+      - forexfactory  → "Previous: X | Forecast: Y" for macro events
+      - okx_announcement / okx_status → unused (empty string)
+
+    Each tool section formats events from a single source, so the per-source
+    convention is safe in practice. If a new tool ever renders mixed sources,
+    add a dedicated field rather than overloading `content` further.
+    """
 
     timestamp: datetime
     source: str  # "cryptopanic" / "alternative_me" / "okx_announcement" / "okx_status" / "forexfactory"
@@ -1148,7 +1160,7 @@ async def test_get_news_different_filters_separate_cache():
 async def test_daily_quota_cap():
     svc = _make_service()
     svc._cryptopanic.fetch_posts.return_value = [_make_news_event("News")]
-    svc._cryptopanic_daily_calls = 180  # at limit
+    svc._cryptopanic_daily_calls = svc._cryptopanic_daily_quota  # at limit
     svc._cryptopanic_daily_reset_date = datetime.now(timezone.utc).date()  # prevent reset
 
     # Should return stale cache if available, else empty
@@ -1167,7 +1179,7 @@ async def test_daily_quota_uses_stale_cache():
     for key, (data, _created_at, ttl) in list(svc._cache._store.items()):
         svc._cache._store[key] = (data, 0.0, ttl)  # created_at=0 → always expired
 
-    svc._cryptopanic_daily_calls = 180
+    svc._cryptopanic_daily_calls = svc._cryptopanic_daily_quota  # at limit
     svc._cryptopanic_daily_reset_date = datetime.now(timezone.utc).date()
 
     sym, gen = await svc.get_news("BTC/USDT:USDT")
@@ -1176,7 +1188,7 @@ async def test_daily_quota_uses_stale_cache():
 
 async def test_daily_quota_resets_on_new_day():
     svc = _make_service()
-    svc._cryptopanic_daily_calls = 180
+    svc._cryptopanic_daily_calls = svc._cryptopanic_daily_quota  # at limit
     svc._cryptopanic_daily_reset_date = (datetime.now(timezone.utc) - timedelta(days=1)).date()
     svc._cryptopanic.fetch_posts.return_value = []
     await svc.get_news("BTC/USDT:USDT")
@@ -1338,7 +1350,7 @@ _FGI_TTL = 21600.0  # 6 hours
 _CALENDAR_TTL = 21600.0  # 6 hours
 _OKX_TTL = 600.0  # 10 min
 
-_DAILY_QUOTA_LIMIT = 180
+_DEFAULT_DAILY_QUOTA = 180  # CryptoPanic free tier: 200/day, 10% safety margin
 
 
 class NewsService:
@@ -1348,6 +1360,7 @@ class NewsService:
         self,
         api_key: str | None = None,
         http: httpx.AsyncClient | None = None,
+        daily_quota: int = _DEFAULT_DAILY_QUOTA,
     ) -> None:
         # Accept injected http client for testability; default to real one otherwise.
         self._http = http if http is not None else httpx.AsyncClient(timeout=5.0)
@@ -1365,6 +1378,7 @@ class NewsService:
         self._status = OKXStatusClient(self._http)
 
         # CryptoPanic daily quota tracking
+        self._cryptopanic_daily_quota = daily_quota
         self._cryptopanic_daily_calls = 0
         self._cryptopanic_daily_reset_date: date | None = None
 
@@ -1392,7 +1406,7 @@ class NewsService:
         cache_key = f"news:{news_filter}"
 
         # Quota check — before any API call
-        if self._cryptopanic_daily_calls >= _DAILY_QUOTA_LIMIT:
+        if self._cryptopanic_daily_calls >= self._cryptopanic_daily_quota:
             stale = self._cache.get_stale(cache_key)
             if stale is not None:
                 logger.warning("CryptoPanic daily quota reached, using stale cache")
@@ -2021,6 +2035,21 @@ def test_news_config_defaults():
     config = NewsConfig()
     assert config.enabled is True
     assert config.cryptopanic_api_key == ""
+    assert config.cryptopanic_daily_quota == 180
+
+
+def test_news_config_custom_quota(tmp_path: Path):
+    """Paid-tier users can raise the quota."""
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("""
+exchange:
+  name: okx
+news:
+  cryptopanic_daily_quota: 500
+""")
+    from src.config import load_settings
+    settings = load_settings(settings_file, env_overrides={})
+    assert settings.news.cryptopanic_daily_quota == 500
 
 
 def test_settings_with_news(tmp_path: Path):
@@ -2068,6 +2097,9 @@ In `src/config.py`, add `NewsConfig` class (after `AlertsConfig`):
 class NewsConfig(BaseModel):
     enabled: bool = True
     cryptopanic_api_key: str = ""
+    # Free tier: ~200/day. Default 180 = 10% safety margin.
+    # Raise this if you have a paid CryptoPanic plan.
+    cryptopanic_daily_quota: int = 180
 ```
 
 Add field to `Settings` class:
@@ -2696,7 +2728,10 @@ In `src/cli/app.py`, in the `build_services()` function, after `MetricsService` 
         from src.integrations.news.service import NewsService
         # Wizard key takes precedence over settings/env
         cp_key = getattr(result, 'cryptopanic_api_key', '') or settings.news.cryptopanic_api_key or None
-        news_service = NewsService(api_key=cp_key)
+        news_service = NewsService(
+            api_key=cp_key,
+            daily_quota=settings.news.cryptopanic_daily_quota,
+        )
         if cp_key:
             sc.print("News: ON (CryptoPanic + FGI + alerts)")
         else:
