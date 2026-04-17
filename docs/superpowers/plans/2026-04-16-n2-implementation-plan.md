@@ -862,10 +862,11 @@ async def test_calendar_parse_response():
     assert events[0].source == "forexfactory"
     assert events[0].category == "macro_event"
     assert events[0].importance == "high"
+    # Empty previous/forecast must render as "N/A" per spec §3.2 output sample
+    assert events[0].content == "Previous: N/A | Forecast: N/A"
     assert events[1].title == "US Initial Jobless Claims"
     assert events[1].importance == "medium"
-    assert "Previous: 215K" in events[1].content
-    assert "Forecast: 220K" in events[1].content
+    assert events[1].content == "Previous: 215K | Forecast: 220K"
 
 
 async def test_calendar_empty_response():
@@ -974,31 +975,38 @@ async def test_okx_announcements_429():
 
 
 # ===== OKX System Status =====
+# Pre-work P4b left the schema unconfirmed. Cover both shapes so whichever
+# one the live probe reveals, OKXStatusClient still parses correctly.
 
-OKX_STATUS_RESPONSE = {
-    "code": "0",
-    "data": [
-        {
-            "title": "System upgrade",
-            "state": "scheduled",
-            "begin": "1713308400000",
-            "end": "1713315600000",
-            "maintType": "0",
-            "serviceType": "1",
-            "system": "trading",
-        },
-    ],
+_OKX_STATUS_ITEM = {
+    "title": "System upgrade",
+    "state": "scheduled",
+    "begin": "1713308400000",
+    "end": "1713315600000",
+    "maintType": "0",
+    "serviceType": "1",
+    "system": "trading",
 }
 
+OKX_STATUS_RESPONSE_FLAT = {"code": "0", "data": [_OKX_STATUS_ITEM]}
+OKX_STATUS_RESPONSE_NESTED = {"code": "0", "data": [{"details": [_OKX_STATUS_ITEM]}]}
 
-async def test_okx_status_parse():
+
+@pytest.mark.parametrize(
+    "payload",
+    [OKX_STATUS_RESPONSE_FLAT, OKX_STATUS_RESPONSE_NESTED],
+    ids=["flat", "nested"],
+)
+async def test_okx_status_parse(payload):
     from src.integrations.news.okx_status import OKXStatusClient
 
-    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=OKX_STATUS_RESPONSE))
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
     async with httpx.AsyncClient(transport=transport) as http:
         client = OKXStatusClient(http)
         events = await client.fetch()
 
+    # Both schemas should yield at least one event per state fetched
+    # (each call pulls scheduled + ongoing; ongoing returns the same payload).
     assert len(events) >= 1
     assert events[0].source == "okx_status"
     assert events[0].category == "maintenance"
@@ -1088,11 +1096,12 @@ class ForexFactoryClient:
             except (ValueError, AttributeError):
                 continue
 
-            content_parts: list[str] = []
-            if item.get("previous"):
-                content_parts.append(f"Previous: {item['previous']}")
-            if item.get("forecast"):
-                content_parts.append(f"Forecast: {item['forecast']}")
+            # spec §3.2 output always shows "Previous: X | Forecast: Y"; use
+            # "N/A" when ForexFactory returns an empty string so the macro
+            # event section's second line stays consistent for every event.
+            previous = item.get("previous") or "N/A"
+            forecast = item.get("forecast") or "N/A"
+            content = f"Previous: {previous} | Forecast: {forecast}"
 
             events.append(
                 InformationEvent(
@@ -1101,7 +1110,7 @@ class ForexFactoryClient:
                     category="macro_event",
                     importance="high" if impact == "High" else "medium",
                     title=item.get("title", ""),
-                    content=" | ".join(content_parts),
+                    content=content,
                 )
             )
         return events
@@ -1186,7 +1195,17 @@ _OKX_STATUS_URL = "https://www.okx.com/api/v5/system/status"
 
 
 class OKXStatusClient:
-    """OKX /system/status client — scheduled maintenance + ongoing incidents."""
+    """OKX /system/status client — scheduled maintenance + ongoing incidents.
+
+    Pre-work P4b left the response schema unconfirmed (live probe returned
+    empty arrays). `_extract_items` handles both layouts so the client stays
+    correct regardless of which one P4b ultimately reveals:
+      - flat    → `data[*]`                  (current spec assumption)
+      - nested  → `data[0].details[*]`       (same shape as /support/announcements)
+
+    If P4b probe (state=completed) confirms one layout, the branch for the
+    other stays as cheap defense; no plan update needed.
+    """
 
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
@@ -1206,7 +1225,7 @@ class OKXStatusClient:
                 raise RateLimitHit("OKX status rate limited")
             resp.raise_for_status()
 
-            for item in resp.json().get("data", []):
+            for item in self._extract_items(resp.json()):
                 begin_ms = int(item.get("begin", 0))
                 end_ms = int(item.get("end", 0))
                 begin_dt = datetime.fromtimestamp(begin_ms / 1000, tz=timezone.utc)
@@ -1227,6 +1246,21 @@ class OKXStatusClient:
                     )
                 )
         return events
+
+    @staticmethod
+    def _extract_items(body: dict) -> list[dict]:
+        """Accept both flat `data[*]` and nested `data[0].details[*]` layouts.
+
+        Detection rule: if the first `data` element is a dict whose `details`
+        value is a list, treat it as the nested per-page wrapper (same shape
+        OKX uses for /support/announcements). Otherwise treat the array as
+        flat maintenance items. This keeps the client resilient whether or
+        not Pre-work P4b confirms nesting.
+        """
+        data = body.get("data") or []
+        if data and isinstance(data[0], dict) and isinstance(data[0].get("details"), list):
+            return data[0]["details"]
+        return [item for item in data if isinstance(item, dict)]
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
@@ -1318,7 +1352,9 @@ async def test_get_news_fills_from_general_when_symbol_short():
     svc._news.fetch_posts.return_value = posts
     sym, gen = await svc.get_news("BTC/USDT:USDT", max_per_group=5)
     assert len(sym) == 1
-    assert len(gen) == 8  # fill up to 9 total (10 - 1)
+    # gen_count budget = max_per_group * 2 - sym_count = 10 - 1 = 9 slots,
+    # only 8 general posts available → gen=8. Total = 1 + 8 = 9.
+    assert len(gen) == 8
 
 
 async def test_get_news_passes_filter():
@@ -1913,11 +1949,24 @@ Also add import for `RateLimitHit` at the top:
 from src.utils.cache import RateLimitHit
 ```
 
-Then add three methods to `OKXExchange`, before the `close()` method. Each wraps the ccxt call in try/except to convert `ccxt.RateLimitExceeded` → `RateLimitHit` (so `TTLCache` in `MarketDataService` can do stale-fallback uniformly with news sources):
+Then add three methods to `OKXExchange`, before the `close()` method.
+
+> **Why the inner `try/except ccxt.RateLimitExceeded` matters:** ccxt's class
+> hierarchy makes `RateLimitExceeded` a subclass of `NetworkError` (verified
+> via `ccxt.RateLimitExceeded.__mro__`). The `@_retry()` decorator catches
+> `NetworkError`, so if the cast to `RateLimitHit` happened *outside* the
+> decorator, 429 responses would be silently retried up to 3 times before
+> bubbling up — defeating the stale-cache fallback in `TTLCache`. Keep the
+> try/except **inside** the function body so `RateLimitHit` (which is not a
+> ccxt type) escapes the decorator uncaught and reaches
+> `MarketDataService.get_*` → `TTLCache.get_or_fetch`. Do not refactor this
+> without also adjusting `_retry()`.
 
 ```python
     @_retry()
     async def fetch_funding_rate(self, symbol: str) -> FundingRate:
+        # Must convert RateLimitExceeded → RateLimitHit INSIDE the function
+        # body; see note above about the ccxt subclass hierarchy.
         try:
             data = await self._client.fetch_funding_rate(symbol)
         except ccxt.RateLimitExceeded as e:
@@ -1961,7 +2010,13 @@ Then add three methods to `OKXExchange`, before the `close()` method. Each wraps
         )
 ```
 
-Note: `@_retry()` does not catch `RateLimitExceeded` (only `NetworkError`, `ExchangeNotAvailable`, `TimeoutError`), so the `RateLimitHit` propagates through to `MarketDataService.get_*`, where `TTLCache.get_or_fetch` catches it for stale-cache fallback.
+Note on error flow: `@_retry()`'s `except` clause lists `NetworkError` —
+and `ccxt.RateLimitExceeded` is a subclass of `NetworkError`, so a raw 429
+**would** get retried 3 times by `_retry()` if we didn't intercept it first.
+The inner try/except converts it to `RateLimitHit` before the decorator's
+`except` sees it; `RateLimitHit` is not a ccxt type, so it propagates
+through `_retry()` untouched and lands in `MarketDataService.get_*` →
+`TTLCache.get_or_fetch`, which performs the stale-cache fallback.
 
 - [ ] **Step 5: Implement derivatives in SimulatedExchange**
 
@@ -2473,6 +2528,8 @@ async def test_critical_alerts_format():
     assert "Upcoming Macro Events" in result
     assert "FOMC Meeting" in result
     assert "Impact: High" in result
+    # Previous/Forecast line should appear below the event per spec §3.2
+    assert "Previous: N/A | Forecast: N/A" in result
     # Calendar scope reminder should always be present (spec §3.2)
     assert "macro calendar covers current week only" in result
 

@@ -729,7 +729,7 @@ Layer 1（工具引导段）在末尾追加，紧接现有 `- **Self-assessment*
 ```
 - **Market news**: Use get_market_news to check crypto news headlines + Fear & Greed Index (0 = max fear, 100 = max greed). Returns 10 headlines (5 symbol-specific + 5 general). Usually call without news_filter; use 'positive' / 'negative' / 'neutral' when you want a specific sentiment lens.
 - **Critical alerts**: Use get_critical_alerts before trading to scan exchange announcements (maintenance, delistings, parameter changes) over the past lookback_hours and upcoming macro events (FOMC, CPI, NFP with impact level) within the next lookahead_hours. Often empty when nothing is scheduled. Macro calendar covers the current week only — Friday evening / weekend calls may miss next week's early events.
-- **Derivatives structure**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Positive funding rate means longs pay shorts (settles every 8h). Open interest is total outstanding contracts. Long/short ratio is the ratio of long vs short account positions.
+- **Derivatives structure**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Positive funding rate means longs pay shorts, negative means shorts pay longs (settles every 8h). Open interest is total outstanding contracts. Long/short ratio is the ratio of long vs short account positions.
 ```
 
 **引导原则：** Layer 1 工具引导仅描述工具功能和输出数据的事实性含义（如 "positive funding rate means longs pay shorts"），不包含交易启发式规则或策略建议（如 "extremes signal reversals"）。Agent 自行决定如何解读和使用这些数据。
