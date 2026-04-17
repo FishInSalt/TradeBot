@@ -207,7 +207,7 @@ async def get_market_news(
 - `news_filter`（可选）：按情绪过滤——`positive` / `negative` / `neutral`（映射到 CoinDesk `sentiment` 参数）。默认不过滤。避免使用 Python 内建名 `filter`。
 - 币种从 `deps.symbol` 自动提取（如 `BTC/USDT:USDT` → `BTC`）。
 
-**新闻范围：目标 10 条 = 5 币种相关 + 5 通用（以下简称"5+5"）**
+**新闻范围：目标 10 条 = 5 币种相关 + 5 通用**
 
 单次 API 调用不带 `categories` 过滤、`limit=20`，返回后在本地按 `CATEGORY_DATA[].NAME` 是否包含交易币种分为两组，各取 top 5。好处：
 - 只用 1 次 API 调用
@@ -264,6 +264,8 @@ Value: 23 / 100 — Extreme Fear
 ```
 
 **Token 估算：** ~500-700 tokens（10 条标题各 ~50 tokens + FGI ~30 tokens + 标题/页脚 ~70 tokens）
+
+**时区约定：** 所有输出的 `[YYYY-MM-DD HH:MM]` 时间戳均为 **UTC**（与 `get_market_data` 一致）。`InformationEvent.timestamp` 是带时区的 `datetime`，tool 层统一用 `.strftime("%Y-%m-%d %H:%M")` 格式化；不显示 "UTC" 后缀以节省 tokens，但约定不变。
 
 ### 3.2 `get_critical_alerts` — 交易所公告 + 宏观事件
 
@@ -380,15 +382,22 @@ Data as of: 2026-04-16 14:30 UTC
 class InformationEvent:
     """Unified data model for all market intelligence events.
 
-    `content` is source-specific free-form metadata (NOT article full text).
-    Conventions per source:
+    Per-source conventions (each tool section only formats one source so
+    these are safe in practice):
+
+    `content` (source-specific free-form metadata; NOT article full text):
       - coindesk       → original media name (e.g. "CoinTelegraph")
       - alternative_me → classification string (e.g. "Extreme Fear")
       - forexfactory   → "Previous: X | Forecast: Y" for macro events
       - okx_announcement / okx_status → unused (empty string)
-    Each tool section formats events from a single source, so the per-source
-    convention is safe. If a new tool ever renders mixed sources, add a
-    dedicated field rather than overloading `content`.
+
+    `url`:
+      - coindesk           → article URL
+      - okx_announcement   → OKX announcement detail URL
+      - alternative_me / forexfactory / okx_status → empty (no stable detail URL)
+
+    If a new tool ever renders mixed sources, add a dedicated field rather
+    than overloading `content`.
     """
     timestamp: datetime
     source: str           # "coindesk" / "alternative_me" / "okx_announcement" / "okx_status" / "forexfactory"
@@ -461,13 +470,39 @@ class NewsService:
 
 所有缓存为内存级别、进程级别，无需持久化。
 
-| 数据源 | Cache Key | 默认 TTL | 理由 |
-|--------|-----------|---------|------|
-| CoinDesk 新闻 | `news_filter` 值（如 `"positive"` / `"negative"` / `None`） | 15 min | 与默认 cycle 间隔（15min）对齐，保证每个 cycle 最多触发一次 API 调用。不同 `news_filter` 返回不同文章集，需分别缓存 |
-| FGI | 无（固定 key） | 6 hours | 每日更新一次，高频请求无意义 |
-| ForexFactory 宏观日历 | 无（固定 key） | 6 hours | 按周发布，拉取整周数据后本地按 `lookback/lookahead` 过滤 |
-| OKX 公告 + 系统状态 | 无（固定 key，两端点各一个缓存条目） | 10 min | 按 annType 过滤拉取，公告更新频率低 |
-| Derivatives（funding/OI） | `symbol` | 3 min | 不同币种数据不同；funding rate 每 8h 结算一次，3min 缓存已足够 |
+**所有 cache key 都带来源前缀**，避免不同数据源在同一 `TTLCache` 里撞 key：
+
+| 数据源 | Cache Key 格式 | 默认 TTL | 理由 |
+|--------|--------------|---------|------|
+| CoinDesk 新闻 | `news:{news_filter}`（如 `news:positive` / `news:None`） | 15 min | 与默认 cycle 间隔对齐。不同 `news_filter` 产生独立 cache 条目。Service 层接受小写 `positive/negative/neutral`，client 内 `.upper()` 转为 CoinDesk 的 `POSITIVE/NEGATIVE/NEUTRAL` 后作为 `?sentiment=` 透传 |
+| FGI | `fgi`（固定 key） | 6 hours | 每日更新一次，高频请求无意义 |
+| ForexFactory 宏观日历 | `macro_calendar`（固定 key） | 6 hours | 按周发布，拉取整周数据后本地按 `lookback/lookahead` 过滤 |
+| OKX 公告 + 系统状态 | `okx_ann` / `okx_status`（2 个固定 key；每个 fetch 内部做 2 次 HTTP 合并——announcements 遍历 2 个 annTypes、status 遍历 2 个 states） | 10 min | 公告更新频率低；2 个 cache 条目粒度足够，不需要拆成 4 条 |
+| Derivatives | `funding:{symbol}` / `oi:{symbol}` / `lsr:{symbol}`（3 个 key，每 symbol） | 3 min | 不同币种数据不同；funding rate 每 8h 结算一次，3min 缓存已足够 |
+
+**`TTLCache` 接口（定义在 `src/utils/cache.py`）：**
+
+```python
+class RateLimitHit(Exception):
+    """所有 client 把 HTTP 429 / ccxt.RateLimitExceeded 转成这个异常。"""
+
+
+class TTLCache:
+    async def get_or_fetch(
+        self,
+        key: str,
+        default_ttl: float,  # seconds
+        fetch_fn: Callable[[], Awaitable[T]],  # async callable, no args
+    ) -> T: ...
+    # Cache miss / expired → call fetch_fn; store (data, now, default_ttl).
+    # RateLimitHit: 有 stale data 则延长 TTL 至 1800s 返 stale；否则再抛出。
+    # 其他异常不捕获，透传给 caller。
+
+    def get_stale(self, key: str) -> Any | None: ...
+    # 无 TTL 检查，存在就返回；不存在返回 None。测试/降级用。
+```
+
+NewsService 和 MarketDataService 各自持有一个 `TTLCache` 实例。
 
 **限流保护（Rate Limit Handling）：**
 
@@ -587,7 +622,8 @@ class Settings(BaseModel):
 
 **`src/cli/app.py`：**
 - 初始化 `NewsService`（无参数——无 key 需要）并注入 `TradingDeps`
-- 在 shutdown 逻辑中调用 `news_service.close()`（与 `exchange.close()` 同位置）
+- `build_services()` 的返回值扩展为 `(exchange, deps, agent, budget, news_service)`，让 `run()` 能保住 `news_service` 引用直到关停
+- 在 `run()` 的 shutdown 段、`await exchange.close()` **之后**新增 `if news_service is not None: await news_service.close()`——位置选在 exchange 之后是为了先让 WebSocket 停，再关 HTTP client，减少 pending request
 
 **`src/integrations/exchange/base.py`：**
 - 新增 `FundingRate`、`OpenInterest`、`LongShortRatio` 数据类
@@ -613,6 +649,8 @@ class Settings(BaseModel):
 - **无改动**。所有新闻/情报数据源均无需 key，wizard 不新增任何步骤。（早期设计曾有 Step 6 给 CryptoPanic 配 key，切换到 CoinDesk 后删除。）
 
 ### 5.5 币种提取
+
+定义在 `src/integrations/news/models.py`（与 `InformationEvent` 同文件，models 层公共工具）。NewsService 和 tool 层都会导入它。
 
 ```python
 def extract_base_currency(symbol: str) -> str:
@@ -676,7 +714,7 @@ get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
 | 典型（各 50% cycle） | 33,600 | 9,600 | 12,000 | ~55,200 |
 | 最差（每 cycle 全调） | 67,200 | 38,400 | 24,000 | ~129,600 |
 
-最差情况使用各工具输出上限计算。约 1M token 每日预算的 13%，成本可控。
+最差情况使用各工具输出上限计算。`settings.yaml` 默认 `daily_max_tokens: 10000000`（10M），129,600 / 10M ≈ **1.3%**，成本可控。（若用户自定义 1M 预算，占比升至 ~13%，仍属可接受范围。）
 
 ### API 调用量：
 
@@ -687,7 +725,7 @@ get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
 | CoinDesk News | 48–96（15min 缓存与 cycle 对齐，每 cycle 触发 ≤1 次调用。`news_filter` 不同值会产生独立缓存条目） | 无明确限额（pre-work 验证无限速迹象） |
 | FGI | ≤4（6h 缓存） | 无限制 |
 | ForexFactory | ≤4（6h 缓存） | 2 req/5min |
-| OKX 公告 + 系统状态 | 96–192（10min 缓存 < 15min cycle，近似每 cycle 都 miss；× 2 endpoints） | ~5 req/s（安全默认值） |
+| OKX 公告 + 系统状态 | 192–384（2 个 cache 条目 × 48–96 miss 次/day × 每次 miss 内部 2 个 HTTP 调用 = 4 HTTP per full refresh） | ~5 req/s（安全默认值） |
 | ccxt 衍生品（funding / OI / LSR） | 144–288（每工具 3 个 method，每 method 独立 3min 缓存，3min < 15min 每 cycle 均 miss；× 3 methods × 48–96 cycles） | 交易所 API 标准限额 |
 
 **注意：** 缓存 key 仅含 `news_filter`（不含 symbol，因 symbol 是会话级固定值且分组在 cache 外），且 TTL 与 cycle 间隔对齐。Agent 若交替使用不同 `news_filter` 值会产生多个缓存条目，但由于 TTL 与 cycle 间隔一致，不会导致缓存穿透。

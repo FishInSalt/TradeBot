@@ -77,13 +77,43 @@ Pre-work was completed on 2026-04-17. Findings are recorded here so the implemen
 
 - [ ] **P5: ccxt OKX derivatives methods (MUST run before Task 5)**
 
-   ccxt is Python-only, not curl-verifiable. Run before Task 5:
+   ccxt is Python-only, not curl-verifiable. The `has` table is ccxt's declared capability — not a runtime guarantee, so also make an actual call. Run before Task 5:
+
    ```bash
-   python -c "import ccxt; ex = ccxt.okx(); print({k: ex.has.get(k) for k in ['fetchFundingRate', 'fetchOpenInterest', 'fetchLongShortRatio', 'fetchLongShortRatioHistory']})"
+   python - <<'PY'
+   import asyncio
+   import ccxt.async_support as ccxt
+
+   async def main():
+       ex = ccxt.okx()
+       try:
+           # 1. declarative capability
+           has = {k: ex.has.get(k) for k in [
+               'fetchFundingRate', 'fetchOpenInterest',
+               'fetchLongShortRatio', 'fetchLongShortRatioHistory',
+           ]}
+           print("has:", has)
+
+           # 2. runtime probes — each should return data, not raise NotSupported
+           fr = await ex.fetch_funding_rate('BTC/USDT:USDT')
+           print("funding_rate OK:", fr.get('fundingRate'))
+
+           oi = await ex.fetch_open_interest('BTC/USDT:USDT')
+           print("open_interest OK:", oi.get('openInterestValue'))
+
+           lsr = await ex.fetch_long_short_ratio_history('BTC/USDT:USDT', '5m', limit=1)
+           print("lsr_history OK:", (lsr[0] if lsr else 'empty'))
+       finally:
+           await ex.close()
+
+   asyncio.run(main())
+   PY
    ```
-   **Expected**: `{'fetchFundingRate': True, 'fetchOpenInterest': True, 'fetchLongShortRatio': False, 'fetchLongShortRatioHistory': True}`.
-   - If `fetchLongShortRatio` is `True`: Task 5 can simplify — call `fetch_long_short_ratio(symbol)` directly instead of `fetch_long_short_ratio_history(symbol, "5m", limit=1)`.
-   - If `fetchLongShortRatioHistory` is `False`: blocker — plan needs revision (fallback to OKX REST `/api/v5/rubik/stat/contracts/long-short-account-ratio-contract`).
+
+   **Expected `has` table**: `{'fetchFundingRate': True, 'fetchOpenInterest': True, 'fetchLongShortRatio': False, 'fetchLongShortRatioHistory': True}`.
+   **Expected runtime**: all three calls return data without `ccxt.NotSupported` / `ccxt.ExchangeError`.
+   - If `fetchLongShortRatio` capability becomes `True` AND the simpler call works: Task 5 can simplify — call `fetch_long_short_ratio(symbol)` directly.
+   - If `fetch_long_short_ratio_history` raises `NotSupported` at runtime (regardless of `has`): blocker — plan needs revision (fallback to OKX REST `/api/v5/rubik/stat/contracts/long-short-account-ratio-contract`).
 
 **P1–P4 done; P5 deferred to Task 5 prep (requires Python env).** Proceed to Task 1.
 
@@ -2480,6 +2510,8 @@ async def get_market_news(
     news_filter: Literal["positive", "negative", "neutral"] | None = None,
 ) -> str:
     """Get crypto news headlines + Fear & Greed Index."""
+    import asyncio
+
     if deps.news is None:
         return "News service not configured."
 
@@ -2487,9 +2519,17 @@ async def get_market_news(
 
     base = extract_base_currency(deps.symbol)
 
-    # Fetch news + FGI
-    symbol_news, general_news = await deps.news.get_news(deps.symbol, news_filter)
-    fgi = await deps.news.get_fear_greed_index()
+    # Fetch news + FGI concurrently (independent upstreams, independent caches).
+    news_result, fgi_result = await asyncio.gather(
+        deps.news.get_news(deps.symbol, news_filter),
+        deps.news.get_fear_greed_index(),
+        return_exceptions=True,
+    )
+    if isinstance(news_result, Exception):
+        symbol_news, general_news = [], []
+    else:
+        symbol_news, general_news = news_result
+    fgi = None if isinstance(fgi_result, Exception) else fgi_result
 
     sections: list[str] = []
 
@@ -2542,11 +2582,24 @@ async def get_critical_alerts(
     lookahead_hours: int = 12,
 ) -> str:
     """Get critical alerts: exchange announcements + upcoming macro events."""
+    import asyncio
+
     if deps.news is None:
         return "News service not configured."
 
-    announcements = await deps.news.get_announcements(lookback_hours)
-    macro_events = await deps.news.get_macro_events(lookahead_hours)
+    # Parallelize announcements + macro events to minimize wall-clock latency.
+    # Each call has independent upstream sources and caches, so gather is safe.
+    announcements, macro_events = await asyncio.gather(
+        deps.news.get_announcements(lookback_hours),
+        deps.news.get_macro_events(lookahead_hours),
+        return_exceptions=True,
+    )
+    # NewsService methods already swallow per-source errors and return [],
+    # but gather isolates cross-method failures if the Service contract changes.
+    if isinstance(announcements, Exception):
+        announcements = []
+    if isinstance(macro_events, Exception):
+        macro_events = []
 
     sections: list[str] = []
 
@@ -2598,16 +2651,27 @@ async def get_derivatives_data(
     symbol: str | None = None,
 ) -> str:
     """Get derivatives market data: funding rate, open interest, long/short ratio."""
+    import asyncio
     from datetime import datetime, timezone
 
     symbol = symbol or deps.symbol
     sections = [f"=== Derivatives Data ({symbol}) ==="]
     errors: list[str] = []
-    timestamps_ms: list[int] = []  # collect to show oldest as "Data as of"
+    timestamps_ms: list[int] = []
+
+    # Fetch all three concurrently — each has independent cache + upstream.
+    # gather(return_exceptions=True) gives us per-method success/failure.
+    funding, oi, lsr = await asyncio.gather(
+        deps.market_data.get_funding_rate(symbol),
+        deps.market_data.get_open_interest(symbol),
+        deps.market_data.get_long_short_ratio(symbol),
+        return_exceptions=True,
+    )
 
     # Funding rate
-    try:
-        funding = await deps.market_data.get_funding_rate(symbol)
+    if isinstance(funding, Exception):
+        errors.append("Funding rate temporarily unavailable")
+    else:
         direction = "longs pay shorts" if funding.rate >= 0 else "shorts pay longs"
         sign = "Positive rate" if funding.rate >= 0 else "Negative rate"
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -2620,12 +2684,11 @@ async def get_derivatives_data(
         )
         if funding.timestamp:
             timestamps_ms.append(funding.timestamp)
-    except Exception:
-        errors.append("Funding rate temporarily unavailable")
 
     # Open interest
-    try:
-        oi = await deps.market_data.get_open_interest(symbol)
+    if isinstance(oi, Exception):
+        errors.append("Open interest temporarily unavailable")
+    else:
         if oi.open_interest_value >= 1e9:
             oi_str = f"${oi.open_interest_value / 1e9:.2f}B"
         elif oi.open_interest_value >= 1e6:
@@ -2635,20 +2698,17 @@ async def get_derivatives_data(
         sections.append(f"Open Interest: {oi_str}")
         if oi.timestamp:
             timestamps_ms.append(oi.timestamp)
-    except Exception:
-        errors.append("Open interest temporarily unavailable")
 
     # Long/short ratio
-    try:
-        lsr = await deps.market_data.get_long_short_ratio(symbol)
+    if isinstance(lsr, Exception):
+        errors.append("Long/short ratio temporarily unavailable")
+    else:
         sections.append(
             f"Long/Short Ratio: {lsr.long_short_ratio:.2f} "
             f"({lsr.long_ratio:.1%} long / {lsr.short_ratio:.1%} short)"
         )
         if lsr.timestamp:
             timestamps_ms.append(lsr.timestamp)
-    except Exception:
-        errors.append("Long/short ratio temporarily unavailable")
 
     sections.extend(errors)
 
