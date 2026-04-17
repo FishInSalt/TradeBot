@@ -2374,6 +2374,51 @@ async def test_market_news_passes_filter():
     news_svc.get_news.assert_called_once_with("BTC/USDT:USDT", "positive")
 
 
+async def test_market_news_filters_non_currency_tags():
+    """CoinDesk CATEGORY_DATA mixes tickers and thematic tags;
+    the display layer should show only currency tickers."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    # symbols contains both real tickers and thematic tags — formatter
+    # must strip the thematic ones so the "Currencies" line stays clean.
+    noisy_event = _event(
+        "BTC Rally",
+        symbols=["BTC", "ETH", "MARKET", "MACROECONOMICS", "CRYPTOCURRENCY"],
+        content="CoinDesk",
+    )
+    news_svc.get_news.return_value = ([noisy_event], [])
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+
+    # Tickers appear
+    assert "Currencies: BTC, ETH" in result
+    # Thematic tags do NOT leak into Currencies line
+    assert "MARKET" not in result
+    assert "MACROECONOMICS" not in result
+    assert "CRYPTOCURRENCY" not in result
+
+
+async def test_market_news_all_non_currency_tags_shows_dash():
+    """When every tag is a thematic label, render em-dash."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    only_themes = _event(
+        "General regulation news",
+        symbols=["MARKET", "REGULATION", "MACROECONOMICS"],
+        content="Reuters",
+    )
+    news_svc.get_news.return_value = ([], [only_themes])
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+    assert "Currencies: —" in result
+
+
 # ===== get_critical_alerts =====
 
 async def test_critical_alerts_no_service():
@@ -2586,15 +2631,27 @@ async def get_market_news(
         sections.append("=== Fear & Greed Index ===\nFGI service temporarily unavailable.")
 
     # News sections
+    # Display-layer filter: CoinDesk CATEGORY_DATA mixes crypto tickers
+    # (BTC/ETH/SOL/...) with thematic tags (MARKET/CRYPTOCURRENCY/...). We
+    # keep all tags in InformationEvent.symbols for matching logic, but
+    # filter noise out when rendering "Currencies: ..." for the user.
+    _NON_CURRENCY_CATEGORIES = frozenset({
+        "ALTCOIN", "BUSINESS", "CRYPTOCURRENCY", "EXCHANGE", "FIAT",
+        "MACROECONOMICS", "MARKET", "REGULATION", "TECHNOLOGY", "TRADING",
+    })
+
+    def _fmt_currencies(syms: list[str]) -> str:
+        filtered = [s for s in syms if s not in _NON_CURRENCY_CATEGORIES]
+        return ", ".join(filtered) if filtered else "—"
+
     has_news = bool(symbol_news or general_news)
     if has_news:
         if symbol_news:
             lines: list[str] = []
             for e in symbol_news:
                 ts = e.timestamp.strftime("%Y-%m-%d %H:%M")
-                currencies = ", ".join(e.symbols) if e.symbols else "—"
                 source_name = e.content if e.content else e.source
-                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {currencies}")
+                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {_fmt_currencies(e.symbols)}")
             sections.append(
                 f"=== Symbol News ({base}, {len(symbol_news)}) ===\n"
                 + "\n\n".join(lines)
@@ -2604,9 +2661,8 @@ async def get_market_news(
             lines = []
             for e in general_news:
                 ts = e.timestamp.strftime("%Y-%m-%d %H:%M")
-                currencies = ", ".join(e.symbols) if e.symbols else "—"
                 source_name = e.content if e.content else e.source
-                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {currencies}")
+                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {_fmt_currencies(e.symbols)}")
             sections.append(
                 f"=== General Crypto News ({len(general_news)}) ===\n"
                 + "\n\n".join(lines)

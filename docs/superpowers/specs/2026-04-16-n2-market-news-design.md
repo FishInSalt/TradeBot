@@ -124,7 +124,7 @@ Agent Tool (thin wrapper)
 | 端点 | `GET https://nfs.faireconomy.media/ff_calendar_thisweek.json` |
 | 认证 | 无需认证 |
 | 免费额度 | 每 5 分钟 2 次请求 |
-| 响应格式 | JSON 数组，含 `title`, `country`, `date`, `impact`(High/Medium/Low), `forecast`, `previous` |
+| 响应格式 | JSON 数组，含 `title`, `country`, `date`(ISO8601 带时区偏移，如 `"2026-04-14T08:30:00-04:00"`), `impact`(High/Medium/Low), `forecast`, `previous`（预测/前值 pre-work 确认都是字符串，可能为空字符串 `""`） |
 | 覆盖范围 | 当周所有经济事件（全球）。本地过滤规则：`country="USD"` + `impact` 为 `"High"` 或 `"Medium"`。仅保留美国经济事件，因为加密市场与美元政策高度相关（FOMC、CPI、NFP、PPI、GDP 等） |
 | 已知限制 | 仅包含当前一周数据。周五晚间 `lookahead_hours=12` 可能跨入下周，但数据中无下周事件，存在假阴性风险（如漏掉下周一/二的 FOMC）。实际影响有限——高影响力经济事件不在周末发生，且 Agent 下一个工作日会自动获取新一周数据 |
 | **稳定性** | **中低** — 非官方 feed，无文档/SLA，可能随时改格式。但已稳定运行多年，被众多开源项目使用 |
@@ -224,6 +224,8 @@ async def get_market_news(
 - Agent 一次调用即获完整宏观视图
 - 不值得为一个数字单独占一个 tool call
 
+**实现方式：** 工具层对 `NewsService.get_news()` 和 `NewsService.get_fear_greed_index()` 使用 `asyncio.gather(..., return_exceptions=True)` 并行调用——两者的上游、缓存条目、HTTP client 都独立。串行的话，新闻慢时 FGI 跟着陪跑；并行能把 wall-clock 压到 max(news, fgi) 而不是 sum。与 §3.2 / §3.3 的并行策略一致。
+
 **输出格式：**
 
 ```
@@ -305,7 +307,7 @@ async def get_critical_alerts(
 Note: macro calendar covers current week only; Friday evening / weekend calls may miss next week's early events.
 ```
 
-末尾固定的 `Note:` 行让 Agent 始终知道日历作用域边界，而不必依赖上下文推断是否临近周末。大部分时候返回较短甚至为空（"No exchange announcements" / "No upcoming macro events"），token 成本极低。
+末尾固定的 `Note:` 行让 Agent 始终知道日历作用域边界，而不必依赖上下文推断是否临近周末。**即使 macro events section 返回 "No upcoming macro events"，这行 Note 仍然保留**——它解释的是"为什么可能看不到事件"（日历只覆盖当前一周），这正是空结果需要的语境。大部分时候返回较短甚至为空，加上 ~30 tokens 的 Note 后 token 成本仍可忽略。
 
 ### 3.3 `get_derivatives_data` — 衍生品市场数据
 
@@ -389,24 +391,46 @@ class InformationEvent:
     Per-source conventions (each tool section only formats one source so
     these are safe in practice):
 
-    `content` (source-specific free-form metadata; NOT article full text):
-      - coindesk       → original media name (e.g. "CoinTelegraph")
-      - alternative_me → classification only (e.g. "Extreme Fear")
-      - forexfactory   → "Previous: X | Forecast: Y" for macro events
-      - okx_announcement / okx_status → unused (empty string)
+    `timestamp` — the time a lookback/lookahead filter compares against:
+      - coindesk         → article PUBLISHED_ON (Unix 秒 → UTC datetime)
+      - alternative_me   → FGI timestamp (Unix 秒 → UTC datetime)
+      - forexfactory     → event `date` (ISO8601 → UTC datetime)
+      - okx_announcement → `pTime` (发布时间戳 ms；**不用 `businessPTime`**，lookback 语义是"最近发布"而非"生效时间")
+      - okx_status       → `datetime.now(UTC)`（发现时刻，**不用 `begin`**；maintenance 是未来时间，
+                           用 begin 会使所有未来维护永远通过 "past N hours" 过滤——参见 §3.4 降级讨论）
 
-    `title` is the human-readable display line per source:
-      - coindesk       → article title as-is
-      - alternative_me → composite "{value} / 100 — {classification}" (e.g. "23 / 100 — Extreme Fear")
-      - forexfactory   → event name (e.g. "FOMC Meeting Minutes")
-      - okx_announcement → announcement title
-      - okx_status     → maintenance title + inline time range
-                         (e.g. "System upgrade 2026-04-17 02:00-04:00 UTC")
+    `importance` (required Literal["low","medium","high"]) per source:
+      - coindesk         → "medium"（CoinDesk API 无 impact 字段，统一中等）
+      - alternative_me   → "low"（FGI 是数值指数，分 tier 价值有限）
+      - forexfactory     → 直接映射：`impact == "High"` → "high"，否则 "medium"（已过滤掉 Low）
+      - okx_announcement → "high"（我们只拉下币 + 交易规则变更，本质都是重要事件）
+      - okx_status       → "high"（维护影响交易）
+
+    `title` — 人类可读展示行：
+      - coindesk         → 文章标题原样
+      - alternative_me   → 合成串 `"{value} / 100 — {classification}"`（例 `"23 / 100 — Extreme Fear"`）
+      - forexfactory     → 事件名（例 `"FOMC Meeting Minutes"`）
+      - okx_announcement → 公告标题
+      - okx_status       → `"{title} {begin:YYYY-MM-DD HH:MM}-{end:HH:MM} UTC"` 合成串
+
+    `content` (source-specific free-form metadata; NOT article full text):
+      - coindesk         → 原始媒体名（`SOURCE_DATA.NAME`，如 "CoinTelegraph"）
+      - alternative_me   → classification 字符串（如 "Extreme Fear"，不含数值）
+      - forexfactory     → `"Previous: X | Forecast: Y"`（供宏观事件 section 显示）
+      - okx_announcement / okx_status → 空字符串
 
     `url`:
-      - coindesk           → article URL
-      - okx_announcement   → OKX announcement detail URL
-      - alternative_me / forexfactory / okx_status → empty (no stable detail URL)
+      - coindesk         → 文章 URL
+      - okx_announcement → OKX 公告详情 URL
+      - alternative_me / forexfactory / okx_status → 空串（无稳定 detail URL）
+
+    `symbols` — 用于 `get_market_news` 的 "symbol-specific vs general" 分组匹配：
+      - coindesk         → 保留 `CATEGORY_DATA[].NAME` 中**所有条目**（包括主题标签 MARKET/CRYPTOCURRENCY 等，
+                           因为它们不影响 `base in symbols` 判断——base 只会是 BTC/ETH 这类 ticker）。
+                           **显示层**由 tool formatter 过滤非币种标签（denylist：MARKET / MACROECONOMICS /
+                           CRYPTOCURRENCY / FIAT / EXCHANGE / TRADING / REGULATION / BUSINESS / TECHNOLOGY /
+                           ALTCOIN），保持 "Currencies: BTC, ETH" 干净输出
+      - alternative_me / forexfactory / okx_announcement / okx_status → 空列表
 
     If a new tool ever renders mixed sources, add a dedicated field rather
     than overloading `content`.
@@ -458,7 +482,7 @@ class NewsService:
     async def get_news(self, symbol: str, news_filter: str | None, max_per_group: int = 5) -> tuple[list[InformationEvent], list[InformationEvent]]
         """API 请求 limit=20（不带 categories 过滤），本地按 CATEGORY_DATA 是否含交易币种分为两组各取 top max_per_group 条。返回 (symbol_news, general_news) 二元组，供 tool 分区格式化。
 
-        缓存策略：缓存层存"未分组"的原始 posts（cache key = `news:{news_filter}`，不含 symbol），symbol 分组在每次调用时基于当前 `symbol` 即时完成。这样 cache hit 不会返回陈旧的错误分组，符合 deps.symbol 是会话级固定值的假设，也为未来多 symbol 并行做好了准备。"""
+        缓存策略：缓存层存"未分组"的 posts，具体是**已 parse 为 `list[InformationEvent]`** 的结果（不是原始 JSON dict），cache hit 时零解析开销。cache key = `news:{news_filter}`，不含 symbol——symbol 分组在每次调用时基于当前 `symbol` 即时完成。这样 cache hit 不会返回陈旧的错误分组，符合 deps.symbol 是会话级固定值的假设，也为未来多 symbol 并行做好了准备。"""
     async def get_fear_greed_index(self) -> InformationEvent | None
 
     # get_critical_alerts 使用
@@ -633,7 +657,7 @@ class Settings(BaseModel):
 - 新增 `get_market_news()`、`get_critical_alerts()`、`get_derivatives_data()` 实现
 
 **`src/cli/app.py`：**
-- 初始化 `NewsService`（无参数——无 key 需要）并注入 `TradingDeps`
+- 在 `build_services()` 中 gate 初始化：`news_service = NewsService() if settings.news.enabled else None`。`enabled=False` 时 `TradingDeps.news=None`，三个新闻相关 tool 返回 "News service not configured"（见 §3.4）
 - `build_services()` 返回值**不扩展**；`news_service` 引用存在 `deps.news` 里即可（与 `deps.memory` / `deps.metrics` / `deps.technical` 同惯例——这些 service 也都没单独返回）
 - 在 `run()` 的 shutdown 段、`await exchange.close()` **之后**新增 `if deps.news is not None: await deps.news.close()`——位置选在 exchange 之后是为了先让 WebSocket 停，再关 HTTP client，减少 pending request
 
@@ -700,28 +724,12 @@ def extract_base_currency(symbol: str) -> str:
 
 ## 6. System Prompt 更新
 
-Layer 1（工具引导段）新增：
+Layer 1（工具引导段）在末尾追加，紧接现有 `- **Self-assessment**: ...` 之后。格式**必须**与既有 bullet 一致：单行 `- **Name**: ...`，不换行、不嵌套子项：
 
 ```
-get_market_news(news_filter?) — Get crypto news headlines + Fear & Greed Index.
-  - Returns 10 headlines: 5 for your symbol + 5 general crypto news
-  - Usually call without news_filter (default gives latest headlines, sufficient for most decisions)
-  - news_filter only when you need a specific lens: 'positive', 'negative', 'neutral'
-  - Fear & Greed Index: 0 = maximum fear, 100 = maximum greed
-  - Output ~500-700 tokens
-
-get_critical_alerts(lookback_hours?, lookahead_hours?) — Exchange announcements + upcoming macro events.
-  - Returns events in lookback_hours past / lookahead_hours future windows
-  - Shows: contract maintenance, parameter changes, delistings, upcoming FOMC/CPI/NFP with impact level
-  - Often returns empty when no relevant events are scheduled in the window
-  - Note: macro calendar covers current week only — Friday evening/weekend may miss next week's early events
-  - Output ~100-400 tokens
-
-get_derivatives_data(symbol?) — Funding rate, open interest, long/short ratio.
-  - Funding rate: positive means longs pay shorts, negative means shorts pay longs. Settles every 8h
-  - Open interest: total outstanding contracts across the exchange
-  - Long/short ratio: ratio of long vs short account positions
-  - Output ~150-250 tokens
+- **Market news**: Use get_market_news to check crypto news headlines + Fear & Greed Index (0 = max fear, 100 = max greed). Returns 10 headlines (5 symbol-specific + 5 general). Usually call without news_filter; use 'positive' / 'negative' / 'neutral' when you want a specific sentiment lens.
+- **Critical alerts**: Use get_critical_alerts before trading to scan exchange announcements (maintenance, delistings, parameter changes) over the past lookback_hours and upcoming macro events (FOMC, CPI, NFP with impact level) within the next lookahead_hours. Often empty when nothing is scheduled. Macro calendar covers the current week only — Friday evening / weekend calls may miss next week's early events.
+- **Derivatives structure**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Positive funding rate means longs pay shorts (settles every 8h). Open interest is total outstanding contracts. Long/short ratio is the ratio of long vs short account positions.
 ```
 
 **引导原则：** Layer 1 工具引导仅描述工具功能和输出数据的事实性含义（如 "positive funding rate means longs pay shorts"），不包含交易启发式规则或策略建议（如 "extremes signal reversals"）。Agent 自行决定如何解读和使用这些数据。
@@ -851,13 +859,15 @@ tests/test_config.py（扩展）
 
 ## 9. 实现成本汇总
 
-| 工具 | 代码量（含测试） | 时间 | 风险 |
-|------|----------------|------|------|
-| `get_market_news` | ~380 行 | ~1 天 | 低 — 数据源成熟 |
-| `get_critical_alerts` | ~450 行 | ~1.5 天 | 中 — ForexFactory 非官方、OKX 需两个端点（announcements + system/status） |
-| `get_derivatives_data` | ~250 行 | ~0.5 天 | 低 — ccxt 原生支持，走 BaseExchange 抽象（新增抽象方法 + 两个 exchange 实现 + MarketDataService 便捷方法） |
-| 共享基础设施 | ~100 行 | 含在上述 | InformationEvent 模型、配置、persona 更新 |
-| **合计** | **~1130 行** | **~3 天** | |
+拆分为**实现**（src/）与**测试**（tests/）两列，后者明显更大：
+
+| 组件 | 实现行数 | 测试行数 | 时间 | 风险 |
+|------|--------|--------|------|------|
+| `get_market_news` | ~160 | ~280 | ~1 天 | 低 — 数据源成熟（CoinDesk pre-work 已验证） |
+| `get_critical_alerts` | ~260 | ~350 | ~1.5 天 | 中 — ForexFactory 非官方、OKX `/system/status` schema 未完全验证（见 §2.4 caveat） |
+| `get_derivatives_data` | ~180 | ~280 | ~0.5 天 | 中 — ccxt `fetch_long_short_ratio_history` runtime 待 Task 5 前验证（P5） |
+| 共享基础设施 | ~100 | ~120 | 含在上述 | `InformationEvent` / `TTLCache` / `RateLimitHit` / `extract_base_currency` / `NewsConfig` |
+| **合计** | **~700 行** | **~1030 行** | **~3 天** | 约 60+ 测试用例 |
 
 单个 PR，主题：`feat(N2): add market intelligence tools — news, alerts, derivatives`
 
@@ -905,7 +915,22 @@ tests/test_config.py（扩展）
    | 推算 | `short_ratio` | `1 / (1 + r)` |
    | 传入 | `symbol` | 调用方（`OKXExchange.fetch_long_short_ratio(symbol)` 的参数） |
 
-   注意：REST 端点参数 `instId` 用的是 `BTC-USDT-SWAP` 格式，不是 ccxt 的 `BTC/USDT:USDT`。fallback 实现时需要从 ccxt symbol 映射到 OKX instId（`self._client.market(symbol)['id']` 可以拿到）。
+   注意：REST 端点参数 `instId` 用的是 `BTC-USDT-SWAP` 格式，不是 ccxt 的 `BTC/USDT:USDT`。fallback 实现时需要从 ccxt symbol 映射到 OKX instId。
+
+   **ccxt `market()` 需要 markets 已加载**，但 `OKXExchange.__init__` 不自动 `load_markets()`。fallback 实现必须先显式加载，否则首次调用抛 `BadSymbol`：
+
+   ```python
+   async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
+       try:
+           history = await self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)
+           # ... parse ccxt response
+       except ccxt.NotSupported:
+           # fallback path: OKX REST
+           if not self._client.markets:
+               await self._client.load_markets()  # 无害；ccxt 内部缓存，重复调用零代价
+           inst_id = self._client.market(symbol)['id']  # "BTC-USDT-SWAP"
+           # ... GET /api/v5/rubik/stat/contracts/long-short-account-ratio-contract
+   ```
 
 ## 11. API 稳定性总评
 
