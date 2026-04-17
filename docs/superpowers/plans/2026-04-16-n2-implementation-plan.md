@@ -67,19 +67,25 @@ Pre-work was completed on 2026-04-17. Findings are recorded here so the implemen
    ```
    All spec fields present (`title`, `country`, `date`, `impact`, `forecast`, `previous`); this week had 108 entries, 8 USD High/Medium after local filter.
 
-- [x] **P4: OKX announcements + system status verified (⚠️ nesting drift)**
+- [x] **P4a: OKX `/support/announcements` verified (nested schema confirmed)**
    ```bash
    curl -s "https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings" | jq '.data[0].details[0] | {annType, title, url, pTime, businessPTime}'
+   ```
+   **Schema**: items live under `response.data[0].details[*]`, **not** `response.data[*]`. Field names inside each item match spec (`annType`, `title`, `url`, `pTime`, `businessPTime`). Task 3's `OKXAnnouncementsClient.fetch()` must parse this nesting — mock fixtures and the `_parse()` code below both use `data[0].details[*]`.
+
+- [ ] **P4b: OKX `/system/status` schema validation (BLOCKER — must run before Task 3 Step 5)**
+
+   Initial probe returned empty (no live scheduled maintenance), so nesting is unconfirmed:
+   ```bash
    curl -s "https://www.okx.com/api/v5/system/status?state=scheduled" | jq '.data[0] // "no scheduled maintenance"'
    ```
-   **Schema drift**: items live under `response.data[0].details[*]`, not `response.data[*]`. Field names inside each item match spec (`annType`, `title`, `url`, `pTime`, `businessPTime`). Task 3's `OKXAnnouncementsClient.fetch()` accounts for this nesting.
-   **System status**: endpoint returns `code:"0"`, data array empty when no scheduled maintenance — can't fully verify schema from live `state=scheduled` alone.
 
-   **Before Task 3 implementation**, re-run with `state=completed` to probe historical data (completed maintenance is always archived):
+   Re-run with `state=completed` before implementing `OKXStatusClient` — completed maintenance is always archived:
    ```bash
    curl -s "https://www.okx.com/api/v5/system/status?state=completed" | jq '.data[0] | to_entries | map({key, type: (.value | type)})'
    ```
-   If the structure is nested like `/support/announcements` (i.e., `data[0].details[*]`) instead of `data[*]`, `OKXStatusClient.fetch()` needs the same nested-parse pattern as `OKXAnnouncementsClient`. If it's flat `data[*]` with the expected fields, the current plan works as-is.
+   - If the response is **flat** `data[*]` with fields `title / state / begin / end / maintType / serviceType / system`: the plan's `OKXStatusClient.fetch()` below works as-is.
+   - If the response is **nested** `data[0].details[*]` like `/support/announcements`: apply the same nested-parse pattern to `OKXStatusClient.fetch()` (extract `data[0].get("details", [])` before iterating) and update the `OKX_STATUS_RESPONSE` test fixture to match.
 
 - [ ] **P5: ccxt OKX derivatives methods (MUST run before Task 5)**
 
@@ -257,11 +263,12 @@ async def test_cache_expires():
         call_count += 1
         return f"data_{call_count}"
 
-    r1 = await cache.get_or_fetch("key", 0.01, fetch)  # 10ms TTL
+    # TTL and sleep kept small but generous enough to avoid flakes on busy CI.
+    r1 = await cache.get_or_fetch("key", 0.05, fetch)  # 50ms TTL
     assert r1 == "data_1"
 
-    await asyncio.sleep(0.02)
-    r2 = await cache.get_or_fetch("key", 0.01, fetch)
+    await asyncio.sleep(0.1)  # well past the 50ms TTL
+    r2 = await cache.get_or_fetch("key", 0.05, fetch)
     assert r2 == "data_2"
 
 
@@ -269,9 +276,9 @@ async def test_cache_429_extends_ttl_with_stale():
     from src.utils.cache import TTLCache, RateLimitHit
 
     cache = TTLCache()
-    await cache.get_or_fetch("key", 0.01, AsyncMock(return_value="good"))
+    await cache.get_or_fetch("key", 0.05, AsyncMock(return_value="good"))
 
-    await asyncio.sleep(0.02)  # let it expire
+    await asyncio.sleep(0.1)  # let it expire (TTL 50ms)
 
     async def fetch_429():
         raise RateLimitHit("429")
@@ -297,17 +304,17 @@ async def test_cache_429_extended_ttl_persists():
     from src.utils.cache import TTLCache, RateLimitHit
 
     cache = TTLCache()
-    await cache.get_or_fetch("key", 0.01, AsyncMock(return_value="good"))
-    await asyncio.sleep(0.02)
+    await cache.get_or_fetch("key", 0.05, AsyncMock(return_value="good"))
+    await asyncio.sleep(0.1)  # expire the 50ms TTL
 
     async def fetch_429():
         raise RateLimitHit("429")
 
-    await cache.get_or_fetch("key", 0.01, fetch_429)
+    await cache.get_or_fetch("key", 0.05, fetch_429)
 
     # Now cache should be valid (30min TTL) — new fetch should not be called
     spy = AsyncMock(return_value="new")
-    result = await cache.get_or_fetch("key", 0.01, spy)
+    result = await cache.get_or_fetch("key", 0.05, spy)
     assert result == "good"
     spy.assert_not_called()
 
@@ -316,8 +323,8 @@ async def test_get_stale_returns_expired_data():
     from src.utils.cache import TTLCache
 
     cache = TTLCache()
-    await cache.get_or_fetch("key", 0.01, AsyncMock(return_value="data"))
-    await asyncio.sleep(0.02)
+    await cache.get_or_fetch("key", 0.05, AsyncMock(return_value="data"))
+    await asyncio.sleep(0.1)
     assert cache.get_stale("key") == "data"
 
 
@@ -877,16 +884,20 @@ OKX_DELISTINGS_RESPONSE = {
     "code": "0",
     "data": [
         {
-            "title": "Delisting of XYZ/USDT perpetual",
-            "url": "https://www.okx.com/ann/123",
-            "annType": "announcements-delistings",
-            "pTime": "1713265200000",
-        },
-        {
-            "title": "Old announcement",
-            "url": "https://www.okx.com/ann/100",
-            "annType": "announcements-delistings",
-            "pTime": "1612000000000",  # very old
+            "details": [
+                {
+                    "title": "Delisting of XYZ/USDT perpetual",
+                    "url": "https://www.okx.com/ann/123",
+                    "annType": "announcements-delistings",
+                    "pTime": "1713265200000",
+                },
+                {
+                    "title": "Old announcement",
+                    "url": "https://www.okx.com/ann/100",
+                    "annType": "announcements-delistings",
+                    "pTime": "1612000000000",  # very old
+                },
+            ],
         },
     ],
 }
@@ -894,10 +905,14 @@ OKX_TRADING_UPDATES_RESPONSE = {
     "code": "0",
     "data": [
         {
-            "title": "Contract parameter change — ETH/USDT",
-            "url": "https://www.okx.com/ann/200",
-            "annType": "trading-updates-us-aus",
-            "pTime": "1713300000000",
+            "details": [
+                {
+                    "title": "Contract parameter change — ETH/USDT",
+                    "url": "https://www.okx.com/ann/200",
+                    "annType": "trading-updates-us-aus",
+                    "pTime": "1713300000000",
+                },
+            ],
         },
     ],
 }
@@ -1112,7 +1127,12 @@ _ANN_TYPES = ("announcements-delistings", "trading-updates-us-aus")
 
 
 class OKXAnnouncementsClient:
-    """OKX /support/announcements client — delistings + trading rule changes."""
+    """OKX /support/announcements client — delistings + trading rule changes.
+
+    Response schema (verified in Pre-work P4a): items are nested under
+    `data[0].details[*]`, not `data[*]`. The flat layer is per-page metadata;
+    the actual announcement items live in the `details` array.
+    """
 
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
@@ -1127,8 +1147,13 @@ class OKXAnnouncementsClient:
                 raise RateLimitHit("OKX announcements rate limited")
             resp.raise_for_status()
 
-            for item in resp.json().get("data", []):
-                p_time = int(item.get("pTime", 0))
+            data_arr = resp.json().get("data") or []
+            if not data_arr or not isinstance(data_arr[0], dict):
+                continue
+            details = data_arr[0].get("details") or []
+
+            for item in details:
+                p_time = int(item.get("pTime") or 0)
                 events.append(
                     InformationEvent(
                         timestamp=datetime.fromtimestamp(p_time / 1000, tz=timezone.utc),
@@ -1279,7 +1304,9 @@ async def test_get_news_splits_by_symbol():
     ]
     sym, gen = await svc.get_news("BTC/USDT:USDT")
     assert len(sym) == 2  # only 2 BTC articles
-    assert len(gen) == 3  # general fills remaining (total target=10, but only 4 general available)
+    # general_news has 4 items (ETH + 3x General). gen_count request = 10 - 2 = 8,
+    # so all 4 available general articles are selected (total = 6, below target 10).
+    assert len(gen) == 4
     assert all("BTC" in e.symbols for e in sym)
 
 
@@ -1468,17 +1495,15 @@ async def test_close_owned_http_closes():
     """When NewsService creates its own http client, close() should close it."""
     from src.integrations.news.service import NewsService
 
-    svc = NewsService(api_key=None)  # no injection → creates its own
-    try:
-        mock_http = AsyncMock()
-        # Replace with mock to verify close is called on owned client
-        await svc._http.aclose()  # close the real one to avoid leak
-        svc._http = mock_http
-        svc._owns_http = True
-        await svc.close()
-        mock_http.aclose.assert_called_once()
-    finally:
-        pass
+    svc = NewsService()  # no injection → creates its own httpx.AsyncClient
+    # Close the real client first to avoid a resource leak, then swap in a mock
+    # so we can verify close() dispatches aclose() on the owned client.
+    await svc._http.aclose()
+    mock_http = AsyncMock()
+    svc._http = mock_http
+    assert svc._owns_http is True  # should already be True from __init__
+    await svc.close()
+    mock_http.aclose.assert_called_once()
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1957,10 +1982,10 @@ from src.integrations.exchange.base import (
 )
 ```
 
-Also add imports for `ccxt` (already used elsewhere in the file; confirm it's imported) and `RateLimitHit`:
+Also add a **new** top-level `ccxt` import and `RateLimitHit`. Note: `src/integrations/exchange/simulated.py` currently does **not** import `ccxt` at module level — it only does a dynamic `import ccxt.pro as ccxtpro` inside `start()`. We need `ccxt.RateLimitExceeded` available in the method bodies below, so add:
 
 ```python
-import ccxt  # already present; verify it's ccxt.async_support or equivalent
+import ccxt.async_support as ccxt  # new top-level import (for RateLimitExceeded)
 from src.utils.cache import RateLimitHit
 ```
 
@@ -2588,9 +2613,26 @@ from typing import TYPE_CHECKING
 from typing import TYPE_CHECKING, Literal
 ```
 
-Then append the three tool functions at the end of the file:
+Then append the three tool functions at the end of the file. The
+`_NON_CURRENCY_CATEGORIES` frozenset is a module-level constant so it is
+built once rather than on every tool invocation:
 
 ```python
+# Display-layer filter for CoinDesk CATEGORY_DATA — strips thematic tags
+# (MARKET / CRYPTOCURRENCY / ...) from the "Currencies" line rendered to
+# the Agent. Tags stay in InformationEvent.symbols for matching logic;
+# this only affects display.
+_NON_CURRENCY_CATEGORIES = frozenset({
+    "ALTCOIN", "BUSINESS", "CRYPTOCURRENCY", "EXCHANGE", "FIAT",
+    "MACROECONOMICS", "MARKET", "REGULATION", "TECHNOLOGY", "TRADING",
+})
+
+
+def _fmt_currencies(syms: list[str]) -> str:
+    filtered = [s for s in syms if s not in _NON_CURRENCY_CATEGORIES]
+    return ", ".join(filtered) if filtered else "—"
+
+
 async def get_market_news(
     deps: TradingDeps,
     news_filter: Literal["positive", "negative", "neutral"] | None = None,
@@ -2629,20 +2671,6 @@ async def get_market_news(
         )
     else:
         sections.append("=== Fear & Greed Index ===\nFGI service temporarily unavailable.")
-
-    # News sections
-    # Display-layer filter: CoinDesk CATEGORY_DATA mixes crypto tickers
-    # (BTC/ETH/SOL/...) with thematic tags (MARKET/CRYPTOCURRENCY/...). We
-    # keep all tags in InformationEvent.symbols for matching logic, but
-    # filter noise out when rendering "Currencies: ..." for the user.
-    _NON_CURRENCY_CATEGORIES = frozenset({
-        "ALTCOIN", "BUSINESS", "CRYPTOCURRENCY", "EXCHANGE", "FIAT",
-        "MACROECONOMICS", "MARKET", "REGULATION", "TECHNOLOGY", "TRADING",
-    })
-
-    def _fmt_currencies(syms: list[str]) -> str:
-        filtered = [s for s in syms if s not in _NON_CURRENCY_CATEGORIES]
-        return ", ".join(filtered) if filtered else "—"
 
     has_news = bool(symbol_news or general_news)
     if has_news:
@@ -2937,9 +2965,9 @@ class MockDeps:
 In `src/agent/persona.py`, append to the end of `_build_layer1()` return string, before the closing `"""`, add:
 
 ```
-- **Market news**: Use get_market_news to check news headlines and Fear & Greed sentiment. Usually call without news_filter — the default gives latest headlines sufficient for most decisions. Only use news_filter when you need a specific lens: 'positive', 'negative', 'neutral'. The Fear & Greed Index ranges from 0 (maximum fear) to 100 (maximum greed).
-- **Critical alerts**: Use get_critical_alerts before placing trades to check for exchange announcements (delistings, contract maintenance, parameter changes) and upcoming macro events (FOMC, CPI, NFP with impact level). Often returns empty when no relevant events are scheduled. Note: the macro calendar covers the current week only — Friday evening/weekend may miss next week's early events.
-- **Derivatives data**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Funding rate: positive means longs pay shorts, negative means shorts pay longs (settles every 8h). Open interest is total outstanding contracts. Long/short ratio shows account position distribution.
+- **Market news**: Use get_market_news to check crypto news headlines + Fear & Greed Index (0 = max fear, 100 = max greed). Returns 10 headlines (5 symbol-specific + 5 general). Usually call without news_filter; use 'positive' / 'negative' / 'neutral' when you want a specific sentiment lens.
+- **Critical alerts**: Use get_critical_alerts before trading to scan exchange announcements (maintenance, delistings, parameter changes) over the past lookback_hours and upcoming macro events (FOMC, CPI, NFP with impact level) within the next lookahead_hours. Often empty when nothing is scheduled. Macro calendar covers the current week only — Friday evening / weekend calls may miss next week's early events.
+- **Derivatives structure**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Positive funding rate means longs pay shorts, negative means shorts pay longs (settles every 8h). Open interest is total outstanding contracts. Long/short ratio is the ratio of long vs short account positions.
 ```
 
 - [ ] **Step 4: Run all tests to verify nothing breaks**
