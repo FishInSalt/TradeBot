@@ -2107,7 +2107,6 @@ def test_news_config_defaults():
     from src.config import NewsConfig
     config = NewsConfig()
     assert config.enabled is True
-    assert config.cryptopanic_api_key == ""
     assert config.cryptopanic_daily_quota == 180
 
 
@@ -2131,30 +2130,21 @@ def test_settings_with_news(tmp_path: Path):
 exchange:
   name: okx
 news:
-  enabled: true
-  cryptopanic_api_key: my_key
+  enabled: false
 """)
     from src.config import load_settings
     settings = load_settings(settings_file, env_overrides={})
-    assert settings.news.enabled is True
-    assert settings.news.cryptopanic_api_key == "my_key"
+    assert settings.news.enabled is False
 
 
 def test_settings_without_news(tmp_path: Path):
+    """news section is optional."""
     settings_file = tmp_path / "settings.yaml"
     settings_file.write_text("exchange:\n  name: okx\n")
     from src.config import load_settings
     settings = load_settings(settings_file, env_overrides={})
     assert settings.news.enabled is True
-    assert settings.news.cryptopanic_api_key == ""
-
-
-def test_settings_news_env_override(tmp_path: Path):
-    settings_file = tmp_path / "settings.yaml"
-    settings_file.write_text("exchange:\n  name: okx\n")
-    from src.config import load_settings
-    settings = load_settings(settings_file, env_overrides={"CRYPTOPANIC_API_KEY": "env_key"})
-    assert settings.news.cryptopanic_api_key == "env_key"
+    assert settings.news.cryptopanic_daily_quota == 180
 ```
 
 - [ ] **Step 2: Run config tests to verify new ones fail**
@@ -2169,11 +2159,12 @@ In `src/config.py`, add `NewsConfig` class (after `AlertsConfig`):
 ```python
 class NewsConfig(BaseModel):
     enabled: bool = True
-    cryptopanic_api_key: str = ""
     # Free tier: ~200/day. Default 180 = 10% safety margin.
     # Raise this if you have a paid CryptoPanic plan.
     cryptopanic_daily_quota: int = 180
 ```
+
+Note: API key is NOT a config field. It's persisted separately in `config/.credentials` by the wizard (see Task 9 Step 2). Keeping it out of `Settings` avoids multi-path confusion — there's exactly one place to edit the key (run the wizard).
 
 Add field to `Settings` class:
 
@@ -2190,16 +2181,7 @@ class Settings(BaseModel):
     news: NewsConfig = NewsConfig()
 ```
 
-In `load_settings()`, add env override for CryptoPanic API key, after the exchange env overrides:
-
-```python
-    # News config: env override for API key
-    news = data.get("news", {})
-    cp_key = env_overrides.get("CRYPTOPANIC_API_KEY", "")
-    if cp_key:
-        news["cryptopanic_api_key"] = cp_key
-    data["news"] = news
-```
+`load_settings()` needs no change related to news config (no env loading for CryptoPanic — key lives in `.credentials` only).
 
 - [ ] **Step 4: Run config tests to verify they pass**
 
@@ -2798,13 +2780,11 @@ git commit -m "feat(N2): register market intelligence tools and update system pr
 In `src/cli/app.py`, in the `build_services()` function, after `MetricsService` initialization (around line 280), add:
 
 ```python
-    # News service
+    # News service — API key comes exclusively from the wizard (persisted in .credentials).
     news_service = None
     if settings.news.enabled:
         from src.integrations.news.service import NewsService
-        # Priority (per spec §10.2): env CRYPTOPANIC_API_KEY > .credentials file > none
-        # settings.news.cryptopanic_api_key already holds the env value (or empty) from load_settings.
-        cp_key = settings.news.cryptopanic_api_key or getattr(result, 'cryptopanic_api_key', '') or None
+        cp_key = getattr(result, 'cryptopanic_api_key', '') or None
         news_service = NewsService(
             api_key=cp_key,
             daily_quota=settings.news.cryptopanic_daily_quota,
@@ -2900,19 +2880,12 @@ async def _validate_cryptopanic_key(key: str, console: Console) -> bool:
 async def _step_news(config_dir: Path, console: Console) -> dict:
     """Step 6: News configuration (CryptoPanic API key).
 
-    Priority (per spec §10.2): env CRYPTOPANIC_API_KEY > .credentials > none.
-    Reuses the .credentials file (same as OKX credentials) for persistence.
-    Loaded key is validated before reuse; saved after successful new entry.
-    Invalid saved keys are cleared to avoid re-prompting the same failure.
+    The key lives exclusively in `config/.credentials` (same file/mechanism as
+    exchange credentials). No env var support — one place to look, one way to
+    change it. Invalid saved keys are cleared to avoid re-prompting the same
+    failure on every startup.
     """
-    import os
-
     console.print("\n[bold]Step 6: News (optional)[/]")
-
-    # Env var takes priority — skip interactive; let load_settings/app wire it.
-    if os.getenv("CRYPTOPANIC_API_KEY", "").strip():
-        console.print("  [dim]Using CRYPTOPANIC_API_KEY from environment[/]")
-        return {"cryptopanic_api_key": ""}
 
     # Try saved credentials
     saved = _load_credentials(config_dir)
@@ -3004,28 +2977,19 @@ Also add it to `_show_summary`:
 Run: `pytest --tb=short -q`
 Expected: all tests pass
 
-- [ ] **Step 4: Update .env.example**
-
-Append to `.env.example` (optional non-interactive override; wizard persists to `config/.credentials` by default):
-
-```
-# Optional: CryptoPanic API key (overrides config/.credentials if both set)
-CRYPTOPANIC_API_KEY=your_cryptopanic_key_here
-```
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/cli/app.py src/cli/wizard.py .env.example
+git add src/cli/app.py src/cli/wizard.py
 git commit -m "feat(N2): integrate NewsService in app startup and add wizard news step"
 ```
 
-- [ ] **Step 6: Run full test suite one final time**
+- [ ] **Step 5: Run full test suite one final time**
 
 Run: `pytest --tb=short -q`
 Expected: all tests pass (original 417 + new tests)
 
-- [ ] **Step 7: Final commit (if any remaining changes)**
+- [ ] **Step 6: Final commit (if any remaining changes)**
 
 ```bash
 git status

@@ -520,10 +520,11 @@ tool → MarketDataService (缓存 3min) → BaseExchange
 ```python
 class NewsConfig(BaseModel):
     enabled: bool = True
-    cryptopanic_api_key: str = ""   # 从环境变量 CRYPTOPANIC_API_KEY 加载
     # 免费版 ~200/day，默认 180 留 10% 安全裕量；付费档位可调高
     cryptopanic_daily_quota: int = 180
 ```
+
+API key 由 wizard 管理，持久化在 `config/.credentials`（与交易所凭据同机制）。不走环境变量——多路径配置对用户和开发者都是认知成本，且与 OKX/ANTHROPIC 不同，CryptoPanic 没有 SDK 层的 env 约定需要兼容。
 
 **`Settings` 模型** — 新增字段：
 
@@ -733,12 +734,11 @@ tests/test_config.py（扩展）
 1. **标题数量 + 新闻范围**：返回 10 条标题 — 5 条与交易币种相关 + 5 条通用加密货币新闻。单次 API 调用不带 `currencies` 过滤、`limit=20`，本地按是否包含交易币种分组，各取 top 5。币种相关不足 5 条时用通用新闻补齐。
 
 2. **Wizard 集成**：初次配置时 wizard 引导用户设置 CryptoPanic API key，允许跳过（FGI 无需 key 仍可工作）。
-   - **持久化**：采用与交易所凭据相同的 `config/.credentials` 文件（`chmod 0o600`），以 `"cryptopanic"` 为 key 存储 `{"api_key": "..."}`。首次保存后，后续启动自动复用，免重复输入。
-   - **优先级**：环境变量 `CRYPTOPANIC_API_KEY` > `.credentials` 文件 > 无 key（仅 FGI）。非交互场景（CI/Docker）可用环境变量覆盖。
-   - **启动校验**：检测 key 是否已配置并测试可用性：
+   - **单一来源**：API key 仅持久化在 `config/.credentials`（`chmod 0o600`），以 `"cryptopanic"` 为 key 存储 `{"api_key": "..."}`。不支持环境变量——多路径配置对用户和开发者都是认知成本，CryptoPanic 也没有 SDK 层的 env 约定（不像 `ANTHROPIC_API_KEY`）。CI/Docker 场景可预置 `.credentials` 文件。
+   - **启动校验**：检测 saved key 可用性，按场景处理：
      - 超时 → 重试
      - HTTP 429（配额耗尽）→ 视为 key 有效但暂时不可用，正常启动
-     - 其他错误（401/403）→ 判定为无效 key，引导用户重新配置
+     - HTTP 401/403 → 判定为无效 key，清除 `.credentials` 里的该条目并引导用户重新输入（避免每次启动重复校验同一个坏 key）
 
 3. **宏观日历降级**：ForexFactory feed 是非官方源，如果下线，接受功能暂时不可用。工具返回 "macro calendar unavailable"，Agent 退回到技术分析。不投入备选源（如 FMP）。
 
