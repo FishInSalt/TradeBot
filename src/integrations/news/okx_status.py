@@ -31,10 +31,10 @@ class OKXStatusClient:
     async def fetch(self) -> list[InformationEvent]:
         from datetime import datetime, timezone
 
-        # Use fetch time as the observation timestamp so these pass
-        # NewsService's lookback filter (past N hours = recently observed).
-        # The actual maintenance begin/end goes into the title for display.
-        now = datetime.now(timezone.utc)
+        # Timestamp reflects the maintenance BEGIN time (scheduled → future,
+        # ongoing → recent past). The OKX API's `state=scheduled|ongoing`
+        # param already gates staleness, so NewsService does NOT apply a
+        # lookback filter to these events (see service.get_announcements).
 
         events: list[InformationEvent] = []
         for state in ("scheduled", "ongoing"):
@@ -54,9 +54,11 @@ class OKXStatusClient:
                     f"{begin_dt.strftime('%Y-%m-%d %H:%M')}-"
                     f"{end_dt.strftime('%H:%M')} UTC"
                 )
+                # Fallback to fetch time only if begin is missing / 0 (anomaly).
+                event_ts = begin_dt if begin_ms > 0 else datetime.now(timezone.utc)
                 events.append(
                     InformationEvent(
-                        timestamp=now,
+                        timestamp=event_ts,
                         source="okx_status",
                         category="maintenance",
                         importance="high",

@@ -116,27 +116,44 @@ class NewsService:
 
     async def get_announcements(self, lookback_hours: int) -> list[InformationEvent] | None:
         """Returns None only when every OKX source errored (announcements AND status),
-        so callers can distinguish a genuinely quiet window from a full outage."""
+        so callers can distinguish a genuinely quiet window from a full outage.
+
+        Per-source filtering:
+          - okx_announcements: publish-time lookback (past `lookback_hours`)
+          - okx_status: no filter — the OKX API already scopes results via
+            `state=scheduled|ongoing`, and `timestamp` reflects maintenance
+            begin time which may legitimately lie in the future.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
         results: list[InformationEvent] = []
         success_count = 0
-        for cache_key, fetch_fn in [
-            ("okx_ann", self._announcements.fetch),
-            ("okx_status", self._status.fetch),
-        ]:
-            try:
-                events = await self._cache.get_or_fetch(cache_key, _OKX_TTL, fetch_fn)
-                results.extend(events)
-                success_count += 1
-            except RateLimitHit:
-                logger.warning("OKX rate limited for %s", cache_key)
-            except Exception:
-                logger.warning("OKX fetch failed for %s", cache_key, exc_info=True)
+
+        try:
+            ann_events = await self._cache.get_or_fetch(
+                "okx_ann", _OKX_TTL, self._announcements.fetch
+            )
+            results.extend(e for e in ann_events if e.timestamp >= cutoff)
+            success_count += 1
+        except RateLimitHit:
+            logger.warning("OKX rate limited for okx_ann")
+        except Exception:
+            logger.warning("OKX fetch failed for okx_ann", exc_info=True)
+
+        try:
+            status_events = await self._cache.get_or_fetch(
+                "okx_status", _OKX_TTL, self._status.fetch
+            )
+            results.extend(status_events)
+            success_count += 1
+        except RateLimitHit:
+            logger.warning("OKX rate limited for okx_status")
+        except Exception:
+            logger.warning("OKX fetch failed for okx_status", exc_info=True)
 
         if success_count == 0:
             return None
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-        return [e for e in results if e.timestamp >= cutoff]
+        return results
 
     async def close(self) -> None:
         if self._owns_http:

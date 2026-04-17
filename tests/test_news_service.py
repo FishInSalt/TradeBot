@@ -172,7 +172,9 @@ async def test_get_announcements_combines_both_sources():
     assert len(result) == 2
 
 
-async def test_get_announcements_filters_by_lookback():
+async def test_get_announcements_filters_announcements_by_lookback():
+    """okx_announcements events are filtered by publish-time lookback; older
+    than `lookback_hours` are dropped."""
     svc = _make_service()
     svc._announcements.fetch.return_value = [
         _make_news_event("Recent", source="okx_announcement", hours_ago=1),
@@ -182,6 +184,42 @@ async def test_get_announcements_filters_by_lookback():
     result = await svc.get_announcements(lookback_hours=24)
     assert len(result) == 1
     assert result[0].title == "Recent"
+
+
+async def test_get_announcements_status_bypasses_lookback():
+    """okx_status events are NOT filtered by lookback — the OKX API already
+    scopes results via state=scheduled|ongoing, and timestamps may be future
+    (scheduled) or recent past (ongoing). Both must reach the caller."""
+    svc = _make_service()
+    svc._announcements.fetch.return_value = []
+    # One far-future scheduled maintenance + one ancient ongoing anomaly.
+    svc._status.fetch.return_value = [
+        _make_news_event("Future scheduled", source="okx_status",
+                         category="maintenance", hours_ago=-48),  # 48h in future
+        _make_news_event("Very old", source="okx_status",
+                         category="maintenance", hours_ago=240),  # 10d in past
+    ]
+    result = await svc.get_announcements(lookback_hours=24)
+    assert len(result) == 2
+    titles = {e.title for e in result}
+    assert titles == {"Future scheduled", "Very old"}
+
+
+async def test_get_announcements_mixed_per_source_filtering():
+    """Mixed inputs: okx_ann filtered by lookback; okx_status passed through."""
+    svc = _make_service()
+    svc._announcements.fetch.return_value = [
+        _make_news_event("Recent ann", source="okx_announcement", hours_ago=1),
+        _make_news_event("Old ann", source="okx_announcement", hours_ago=48),
+    ]
+    svc._status.fetch.return_value = [
+        _make_news_event("Future maintenance", source="okx_status",
+                         category="maintenance", hours_ago=-6),
+    ]
+    result = await svc.get_announcements(lookback_hours=24)
+    titles = {e.title for e in result}
+    # "Old ann" dropped (outside lookback); the future maintenance survives.
+    assert titles == {"Recent ann", "Future maintenance"}
 
 
 async def test_get_announcements_partial_failure():

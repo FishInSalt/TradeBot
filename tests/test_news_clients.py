@@ -1,5 +1,5 @@
 """Tests for individual news/alert API clients."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -357,6 +357,53 @@ async def test_okx_status_parse(payload):
     assert events[0].importance == "high"
     assert "System upgrade" in events[0].title
     assert "UTC" in events[0].title
+    # Timestamp reflects the maintenance BEGIN time, not fetch time —
+    # so the Agent sees the real event time, and NewsService can route
+    # scheduled (future) vs ongoing (recent past) consistently.
+    expected_begin = datetime.fromtimestamp(1713308400, tz=timezone.utc)
+    assert events[0].timestamp == expected_begin
+
+
+async def test_okx_status_uses_begin_even_when_in_future():
+    """Scheduled maintenance has begin in the future; timestamp must reflect
+    that truthfully (NewsService no longer applies a past-only lookback)."""
+    from src.integrations.news.okx_status import OKXStatusClient
+
+    future_begin_ms = int((datetime.now(timezone.utc) + timedelta(hours=6)).timestamp() * 1000)
+    future_end_ms = future_begin_ms + 3_600_000  # +1h
+    payload = {"code": "0", "data": [{
+        "title": "Future upgrade",
+        "state": "scheduled",
+        "begin": str(future_begin_ms),
+        "end": str(future_end_ms),
+        "maintType": "0", "serviceType": "1", "system": "trading",
+    }]}
+
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OKXStatusClient(http)
+        events = await client.fetch()
+
+    assert events[0].timestamp > datetime.now(timezone.utc)
+
+
+async def test_okx_status_falls_back_to_now_when_begin_missing():
+    """If upstream sends begin=0 (anomaly), timestamp falls back to fetch time
+    so the event is still surfaced rather than dropped or mis-dated to 1970."""
+    from src.integrations.news.okx_status import OKXStatusClient
+
+    payload = {"code": "0", "data": [{
+        "title": "Anomalous item", "state": "ongoing",
+        "begin": "0", "end": "0",
+    }]}
+    before = datetime.now(timezone.utc)
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = OKXStatusClient(http)
+        events = await client.fetch()
+    after = datetime.now(timezone.utc)
+
+    assert before <= events[0].timestamp <= after
 
 
 async def test_okx_status_queries_both_states():

@@ -396,8 +396,10 @@ class InformationEvent:
       - alternative_me   → FGI timestamp (Unix 秒 → UTC datetime)
       - forexfactory     → event `date` (ISO8601 → UTC datetime)
       - okx_announcement → `pTime` (发布时间戳 ms；**不用 `businessPTime`**，lookback 语义是"最近发布"而非"生效时间")
-      - okx_status       → `datetime.now(UTC)`（发现时刻，**不用 `begin`**；maintenance 是未来时间，
-                           用 begin 会使所有未来维护永远通过 "past N hours" 过滤——参见 §3.4 降级讨论）
+      - okx_status       → `begin`(ms → UTC datetime)：真实维护开始时间，scheduled 事件在未来，
+                           ongoing 事件在近过去。**NewsService.get_announcements 对 okx_status 不做
+                           lookback 过滤**（OKX API 的 `state=scheduled|ongoing` 已限定"相关事件"），
+                           所以未来 begin 不会被滤掉。begin=0 异常时回退 `datetime.now(UTC)`。
 
     `importance` (required Literal["low","medium","high"]) per source:
       - coindesk         → "medium"（CoinDesk API 无 impact 字段，统一中等）
