@@ -484,24 +484,27 @@ class MarketDataService:
     def __init__(self, exchange: BaseExchange):
         self._exchange = exchange
         # 新增：衍生品数据缓存（TTL 3min，cache key = symbol）
-        # 缓存结构与 NewsService 统一：dict[key, (data, created_at, ttl)]
-        # 429 时将 ttl 覆盖为 1800s
-        self._derivatives_cache: dict[str, tuple[Any, float, float]] = {}
+        # 使用 src/utils/cache.py 中的 TTLCache 抽象，封装 (data, created_at, ttl) 三元组
+        # 以及 429 时将 ttl 延长至 1800s 的逻辑。NewsService 也使用同一 TTLCache。
+        self._derivatives_cache = TTLCache()
 
     async def get_funding_rate(self, symbol: str) -> FundingRate:
-        return await self._cached_fetch("funding:" + symbol, 180,
+        return await self._derivatives_cache.get_or_fetch(
+            f"funding:{symbol}", 180,
             lambda: self._exchange.fetch_funding_rate(symbol))
 
     async def get_open_interest(self, symbol: str) -> OpenInterest:
-        return await self._cached_fetch("oi:" + symbol, 180,
+        return await self._derivatives_cache.get_or_fetch(
+            f"oi:{symbol}", 180,
             lambda: self._exchange.fetch_open_interest(symbol))
 
     async def get_long_short_ratio(self, symbol: str) -> LongShortRatio:
-        return await self._cached_fetch("lsr:" + symbol, 180,
+        return await self._derivatives_cache.get_or_fetch(
+            f"lsr:{symbol}", 180,
             lambda: self._exchange.fetch_long_short_ratio(symbol))
 ```
 
-**MarketDataService 角色变化：** 当前 `MarketDataService` 是纯透传（25 行），加入缓存是引入新的架构模式。明确边界：**仅新增的衍生品方法（`get_funding_rate` / `get_open_interest` / `get_long_short_ratio`）有缓存，现有方法（`get_ticker` / `get_current_price` / `get_ohlcv_dataframe`）保持无缓存透传不变。** 缓存实现采用与 `NewsService` 相同的 `(data, created_at, ttl)` 三元组结构，通过 `_cached_fetch()` 辅助方法处理 TTL 判断和 429 延长逻辑。`_cached_fetch` 定义在 `src/utils/cache.py` 中，供 NewsService 和 MarketDataService 共用，避免两份实现漂移。
+**MarketDataService 角色变化：** 当前 `MarketDataService` 是纯透传（25 行），加入缓存是引入新的架构模式。明确边界：**仅新增的衍生品方法（`get_funding_rate` / `get_open_interest` / `get_long_short_ratio`）有缓存，现有方法（`get_ticker` / `get_current_price` / `get_ohlcv_dataframe`）保持无缓存透传不变。** 缓存实现统一使用 `src/utils/cache.py` 中的 `TTLCache` 类，封装 `(data, created_at, ttl)` 三元组结构以及 TTL 判断、429 延长、stale fallback 逻辑。`TTLCache` 同时被 NewsService 和 MarketDataService 复用，避免两份实现漂移。
 
 数据路径与 `get_market_data` 完全一致（ccxt Python 全部使用 snake_case）：
 ```
@@ -518,6 +521,8 @@ tool → MarketDataService (缓存 3min) → BaseExchange
 class NewsConfig(BaseModel):
     enabled: bool = True
     cryptopanic_api_key: str = ""   # 从环境变量 CRYPTOPANIC_API_KEY 加载
+    # 免费版 ~200/day，默认 180 留 10% 安全裕量；付费档位可调高
+    cryptopanic_daily_quota: int = 180
 ```
 
 **`Settings` 模型** — 新增字段：

@@ -46,6 +46,53 @@
 
 ---
 
+## Pre-work Verification (run before Task 1)
+
+External APIs can drift from what the spec describes. Run these curl checks before implementation to confirm response shapes are still valid — adjust parsers in Task 2/3 if fields have changed.
+
+- [ ] **P1: Verify httpx is already a project dependency**
+
+`httpx>=0.27` is already declared in `pyproject.toml` (verified on 2026-04-17). No `uv add` needed. If a future refactor removes it, run:
+```bash
+grep '^"httpx' pyproject.toml  # must return a match
+```
+
+- [ ] **P2: Verify CryptoPanic v1 API schema**
+
+CryptoPanic migrated some users to a "Developer API v2" in late 2024; the free `/api/v1/posts/` path may now return different field names. Run with a real `auth_token`:
+```bash
+curl -s "https://cryptopanic.com/api/v1/posts/?auth_token=$CRYPTOPANIC_API_KEY&limit=1&filter=rising" | jq '.results[0] | {title, published_at, url, source_title: .source.title, currencies}'
+```
+Expected shape per spec §2.1:
+- `title` (str)
+- `published_at` (ISO8601 str with `Z`)
+- `url` (str)
+- `source.title` (str) — original media name
+- `currencies` (list of `{code, title}` or `null`)
+
+If any field moved (e.g. under `metadata.` or renamed), update `CryptoPanicClient._parse` in Task 2 Step 3 accordingly. If the endpoint returns 404/410, CryptoPanic may have retired v1 for new keys — pivot to v2 or degrade the feature.
+
+- [ ] **P3: Verify ForexFactory calendar feed**
+
+Non-official feed, no SLA. Run:
+```bash
+curl -s "https://nfs.faireconomy.media/ff_calendar_thisweek.json" | jq '.[0] | {title, country, date, impact, forecast, previous}'
+```
+Expected: `title`, `country` (e.g. "USD"), `date` (ISO8601), `impact` (High/Medium/Low), `forecast`, `previous`. If the feed is 404/unreachable, accept graceful degradation as designed (spec §3.4), but note that all calendar tests in Task 3 will be mock-only — **no integration smoke test** is possible.
+
+- [ ] **P4: Verify OKX public endpoints**
+
+Both endpoints are public (no auth). Confirm they still exist:
+```bash
+curl -s "https://www.okx.com/api/v5/support/announcements?annType=announcements-delistings" | jq '.data[0] | {title, url, annType, pTime}'
+curl -s "https://www.okx.com/api/v5/system/status?state=scheduled" | jq '.data[0] | {title, state, begin, end}'
+```
+Expected fields listed in spec §2.4. If `code` is not `"0"` or the schema changed, update clients in Task 3.
+
+**Proceed to Task 1 only after all four checks pass (or you've noted and handled the drift).**
+
+---
+
 ### Task 1: Infrastructure — Data Model + Cache Utility
 
 **Files:**
@@ -721,7 +768,7 @@ async def test_calendar_empty_response():
 
 # ===== OKX Announcements =====
 
-OKX_ANNOUNCEMENTS_RESPONSE = {
+OKX_DELISTINGS_RESPONSE = {
     "code": "0",
     "data": [
         {
@@ -738,23 +785,44 @@ OKX_ANNOUNCEMENTS_RESPONSE = {
         },
     ],
 }
+OKX_TRADING_UPDATES_RESPONSE = {
+    "code": "0",
+    "data": [
+        {
+            "title": "Contract parameter change — ETH/USDT",
+            "url": "https://www.okx.com/ann/200",
+            "annType": "trading-updates-us-aus",
+            "pTime": "1713300000000",
+        },
+    ],
+}
 
 
 async def test_okx_announcements_parse():
     from src.integrations.news.okx_announcements import OKXAnnouncementsClient
 
-    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=OKX_ANNOUNCEMENTS_RESPONSE))
+    # Client fetches once per annType; respond per annType with distinct payloads.
+    def handler(request: httpx.Request) -> httpx.Response:
+        ann_type = dict(request.url.params).get("annType", "")
+        if ann_type == "announcements-delistings":
+            return httpx.Response(200, json=OKX_DELISTINGS_RESPONSE)
+        if ann_type == "trading-updates-us-aus":
+            return httpx.Response(200, json=OKX_TRADING_UPDATES_RESPONSE)
+        return httpx.Response(200, json={"code": "0", "data": []})
+
+    transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
         client = OKXAnnouncementsClient(http)
         events = await client.fetch()
 
-    # Should return all items (no time filtering — that's NewsService's job)
-    assert len(events) == 2
-    assert events[0].title == "Delisting of XYZ/USDT perpetual"
-    assert events[0].source == "okx_announcement"
-    assert events[0].category == "announcement"
-    assert events[0].importance == "high"
-    assert events[0].url == "https://www.okx.com/ann/123"
+    # 2 delistings + 1 trading update = 3 events (no time filtering — that's NewsService's job)
+    assert len(events) == 3
+    titles = {e.title for e in events}
+    assert "Delisting of XYZ/USDT perpetual" in titles
+    assert "Contract parameter change — ETH/USDT" in titles
+    assert all(e.source == "okx_announcement" for e in events)
+    assert all(e.category == "announcement" for e in events)
+    assert all(e.importance == "high" for e in events)
 
 
 async def test_okx_announcements_queries_correct_types():
@@ -1381,6 +1449,11 @@ class NewsService:
         self._cryptopanic_daily_quota = daily_quota
         self._cryptopanic_daily_calls = 0
         self._cryptopanic_daily_reset_date: date | None = None
+
+    @property
+    def has_cryptopanic(self) -> bool:
+        """True when a CryptoPanic API key is configured and the client is live."""
+        return self._cryptopanic is not None
 
     def _check_quota_reset(self) -> None:
         today = datetime.now(timezone.utc).date()
@@ -2221,12 +2294,12 @@ async def test_market_news_no_api_key():
     news_svc.get_fear_greed_index.return_value = _event(
         "50 / 100 — Neutral", source="alternative_me", category="fgi",
     )
-    news_svc._api_key = None
+    news_svc.has_cryptopanic = False
 
     deps = _make_deps(news=news_svc)
     result = await get_market_news(deps)
     assert "Fear & Greed Index" in result
-    assert "disabled" in result.lower() and "cryptopanic" in result.lower()
+    assert "unavailable" in result.lower() and "cryptopanic" in result.lower()
 
 
 async def test_market_news_passes_filter():
@@ -2235,7 +2308,7 @@ async def test_market_news_passes_filter():
     news_svc = AsyncMock()
     news_svc.get_news.return_value = ([], [])
     news_svc.get_fear_greed_index.return_value = None
-    news_svc._api_key = "key"
+    news_svc.has_cryptopanic = True
 
     deps = _make_deps(news=news_svc)
     await get_market_news(deps, news_filter="bullish")
@@ -2395,9 +2468,12 @@ Expected: FAIL — `ImportError: cannot import name 'get_market_news'`
 
 - [ ] **Step 7: Implement tool functions in tools_perception.py**
 
-Add this import at the top of `src/agent/tools_perception.py` (after existing imports):
+The file already has `from typing import TYPE_CHECKING` at the top. Update that line to include `Literal`:
 
 ```python
+# Change from:
+from typing import TYPE_CHECKING
+# To:
 from typing import TYPE_CHECKING, Literal
 ```
 
@@ -2431,7 +2507,7 @@ async def get_market_news(
             f"(Updated: {date_str})"
         )
     else:
-        sections.append("=== Fear & Greed Index ===\nTemporarily unavailable")
+        sections.append("=== Fear & Greed Index ===\nFGI service temporarily unavailable.")
 
     # News sections
     has_news = bool(symbol_news or general_news)
@@ -2460,10 +2536,10 @@ async def get_market_news(
                 + "\n\n".join(lines)
             )
     else:
-        if deps.news._api_key:
-            sections.append("No recent news.")
+        if deps.news.has_cryptopanic:
+            sections.append("=== News ===\nNo recent headlines.")
         else:
-            sections.append("News headlines disabled (no CryptoPanic API key configured).")
+            sections.append("=== News ===\nCryptoPanic API key not configured — headlines unavailable.")
 
     return "\n\n".join(sections)
 
@@ -2726,8 +2802,9 @@ In `src/cli/app.py`, in the `build_services()` function, after `MetricsService` 
     news_service = None
     if settings.news.enabled:
         from src.integrations.news.service import NewsService
-        # Wizard key takes precedence over settings/env
-        cp_key = getattr(result, 'cryptopanic_api_key', '') or settings.news.cryptopanic_api_key or None
+        # Priority (per spec §10.2): env CRYPTOPANIC_API_KEY > .credentials file > none
+        # settings.news.cryptopanic_api_key already holds the env value (or empty) from load_settings.
+        cp_key = settings.news.cryptopanic_api_key or getattr(result, 'cryptopanic_api_key', '') or None
         news_service = NewsService(
             api_key=cp_key,
             daily_quota=settings.news.cryptopanic_daily_quota,
@@ -2823,20 +2900,32 @@ async def _validate_cryptopanic_key(key: str, console: Console) -> bool:
 async def _step_news(config_dir: Path, console: Console) -> dict:
     """Step 6: News configuration (CryptoPanic API key).
 
+    Priority (per spec §10.2): env CRYPTOPANIC_API_KEY > .credentials > none.
     Reuses the .credentials file (same as OKX credentials) for persistence.
     Loaded key is validated before reuse; saved after successful new entry.
+    Invalid saved keys are cleared to avoid re-prompting the same failure.
     """
+    import os
+
     console.print("\n[bold]Step 6: News (optional)[/]")
 
-    # Try saved credentials first
+    # Env var takes priority — skip interactive; let load_settings/app wire it.
+    if os.getenv("CRYPTOPANIC_API_KEY", "").strip():
+        console.print("  [dim]Using CRYPTOPANIC_API_KEY from environment[/]")
+        return {"cryptopanic_api_key": ""}
+
+    # Try saved credentials
     saved = _load_credentials(config_dir)
-    if "cryptopanic" in saved:
+    saved_entry = saved.get("cryptopanic", {})
+    saved_key = saved_entry.get("api_key", "")
+    if saved_key:
         console.print("  [dim]Saved CryptoPanic credentials found[/]")
         if Confirm.ask("  Use saved CryptoPanic API key?", default=True, console=console):
-            saved_key = saved["cryptopanic"].get("api_key", "")
-            if saved_key and await _validate_cryptopanic_key(saved_key, console):
+            if await _validate_cryptopanic_key(saved_key, console):
                 return {"cryptopanic_api_key": saved_key}
-            console.print("  [yellow]Saved key invalid, please reconfigure[/]")
+            # Invalid — clear it so we don't re-prompt the same broken key next startup
+            _save_credentials(config_dir, "cryptopanic", {"api_key": ""})
+            console.print("  [yellow]Saved key invalid, removed from .credentials[/]")
 
     console.print("  CryptoPanic provides crypto news headlines with sentiment.")
     console.print("  Get a free API key at: https://cryptopanic.com/developers/api/")
