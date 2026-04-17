@@ -211,6 +211,39 @@ async def test_critical_alerts_passes_params():
     news_svc.get_macro_events.assert_called_once_with(24)
 
 
+async def test_critical_alerts_services_unavailable():
+    """NewsService returns None → render 'temporarily unavailable' per section
+    so the Agent distinguishes a quiet window from an outage (spec §3.5)."""
+    from src.agent.tools_perception import get_critical_alerts
+
+    news_svc = AsyncMock()
+    news_svc.get_announcements.return_value = None
+    news_svc.get_macro_events.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_critical_alerts(deps)
+
+    assert "Exchange announcements service temporarily unavailable" in result
+    assert "Macro events service temporarily unavailable" in result
+    # Footer still rendered so the Agent still sees the calendar-scope reminder
+    assert "macro calendar covers current week only" in result
+
+
+async def test_critical_alerts_mixed_unavailable_and_empty():
+    """One section unavailable, the other simply empty — distinct rendering."""
+    from src.agent.tools_perception import get_critical_alerts
+
+    news_svc = AsyncMock()
+    news_svc.get_announcements.return_value = None
+    news_svc.get_macro_events.return_value = []
+
+    deps = _make_deps(news=news_svc)
+    result = await get_critical_alerts(deps)
+
+    assert "Exchange announcements service temporarily unavailable" in result
+    assert "No upcoming macro events" in result
+
+
 # ===== get_derivatives_data =====
 
 async def test_derivatives_data_format():

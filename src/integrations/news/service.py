@@ -99,21 +99,26 @@ class NewsService:
             logger.warning("FGI fetch failed", exc_info=True)
             return None
 
-    async def get_macro_events(self, lookahead_hours: int) -> list[InformationEvent]:
+    async def get_macro_events(self, lookahead_hours: int) -> list[InformationEvent] | None:
+        """Returns None when the ForexFactory feed is unavailable so callers can
+        distinguish a genuinely empty window from an upstream outage."""
         try:
             all_events: list[InformationEvent] = await self._cache.get_or_fetch(
                 "macro_calendar", _CALENDAR_TTL, self._calendar.fetch_events
             )
         except Exception:
             logger.warning("ForexFactory fetch failed", exc_info=True)
-            return []
+            return None
 
         now = datetime.now(timezone.utc)
         cutoff = now + timedelta(hours=lookahead_hours)
         return [e for e in all_events if now <= e.timestamp <= cutoff]
 
-    async def get_announcements(self, lookback_hours: int) -> list[InformationEvent]:
+    async def get_announcements(self, lookback_hours: int) -> list[InformationEvent] | None:
+        """Returns None only when every OKX source errored (announcements AND status),
+        so callers can distinguish a genuinely quiet window from a full outage."""
         results: list[InformationEvent] = []
+        success_count = 0
         for cache_key, fetch_fn in [
             ("okx_ann", self._announcements.fetch),
             ("okx_status", self._status.fetch),
@@ -121,10 +126,14 @@ class NewsService:
             try:
                 events = await self._cache.get_or_fetch(cache_key, _OKX_TTL, fetch_fn)
                 results.extend(events)
+                success_count += 1
             except RateLimitHit:
                 logger.warning("OKX rate limited for %s", cache_key)
             except Exception:
                 logger.warning("OKX fetch failed for %s", cache_key, exc_info=True)
+
+        if success_count == 0:
+            return None
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
         return [e for e in results if e.timestamp >= cutoff]

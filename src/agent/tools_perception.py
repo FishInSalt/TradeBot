@@ -457,17 +457,24 @@ async def get_critical_alerts(
         deps.news.get_macro_events(lookahead_hours),
         return_exceptions=True,
     )
-    # NewsService methods already swallow per-source errors and return [],
-    # but gather isolates cross-method failures if the Service contract changes.
+    # NewsService contract: list for success (may be empty); None when every
+    # upstream source errored, so the Agent can distinguish "quiet window" from
+    # "services unavailable" (spec §3.5). gather(return_exceptions=True) is a
+    # belt-and-suspenders guard in case the service contract ever changes.
     if isinstance(announcements, Exception):
-        announcements = []
+        announcements = None
     if isinstance(macro_events, Exception):
-        macro_events = []
+        macro_events = None
 
     sections: list[str] = []
 
     # Announcements
-    if announcements:
+    if announcements is None:
+        sections.append(
+            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
+            "Exchange announcements service temporarily unavailable."
+        )
+    elif announcements:
         lines = [e.timestamp.strftime("[%Y-%m-%d %H:%M] ") + e.title for e in announcements]
         sections.append(
             f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
@@ -480,7 +487,12 @@ async def get_critical_alerts(
         )
 
     # Macro events
-    if macro_events:
+    if macro_events is None:
+        sections.append(
+            f"=== Upcoming Macro Events (next {lookahead_hours}h) ===\n"
+            "Macro events service temporarily unavailable."
+        )
+    elif macro_events:
         lines = []
         for e in macro_events:
             ts = e.timestamp.strftime("%Y-%m-%d %H:%M")

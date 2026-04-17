@@ -194,6 +194,24 @@ async def test_get_announcements_partial_failure():
     assert len(result) == 1
 
 
+async def test_get_announcements_all_sources_down_returns_none():
+    """Both OKX sources errored → signal unavailability via None (spec §3.5)."""
+    svc = _make_service()
+    svc._announcements.fetch.side_effect = Exception("down")
+    svc._status.fetch.side_effect = Exception("down too")
+    result = await svc.get_announcements(lookback_hours=24)
+    assert result is None
+
+
+async def test_get_announcements_empty_is_not_none():
+    """Both OKX sources return empty lists → empty list, NOT None (quiet window)."""
+    svc = _make_service()
+    svc._announcements.fetch.return_value = []
+    svc._status.fetch.return_value = []
+    result = await svc.get_announcements(lookback_hours=24)
+    assert result == []
+
+
 # --- get_macro_events ---
 
 async def test_get_macro_events_filters_by_lookahead():
@@ -221,9 +239,18 @@ async def test_get_macro_events_filters_by_lookahead():
     assert result[0].title == "FOMC Soon"
 
 
-async def test_get_macro_events_failure_returns_empty():
+async def test_get_macro_events_failure_returns_none():
+    """ForexFactory feed down → signal unavailability via None (spec §3.5)."""
     svc = _make_service()
     svc._calendar.fetch_events.side_effect = Exception("feed down")
+    result = await svc.get_macro_events(lookahead_hours=12)
+    assert result is None
+
+
+async def test_get_macro_events_empty_is_not_none():
+    """Feed reachable but no events in window → empty list, NOT None."""
+    svc = _make_service()
+    svc._calendar.fetch_events.return_value = []
     result = await svc.get_macro_events(lookahead_hours=12)
     assert result == []
 
