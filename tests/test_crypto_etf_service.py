@@ -169,6 +169,19 @@ async def test_cache_key_scoped_by_symbol():
     assert calls == ["BTC", "ETH"]
 
 
+async def test_malformed_numeric_field_returns_none():
+    """A row with None for cum_net_inflow should degrade to None (outage),
+    not propagate TypeError uncaught."""
+    svc = _make_service()
+    svc._client.fetch_summary_history.return_value = [
+        {"date": "2026-04-17", "cum_net_inflow": None,
+         "total_net_inflow": 0.0, "total_net_assets": 1e11},
+        _row("2026-04-16", cum=1000.0),
+    ]
+    flows = await svc.get_etf_flows("BTC", days=1)
+    assert flows is None
+
+
 async def test_close_closes_http_when_owned():
     from src.integrations.crypto_etf.service import CryptoEtfService
     svc = CryptoEtfService(api_key="k")  # http=None → owned

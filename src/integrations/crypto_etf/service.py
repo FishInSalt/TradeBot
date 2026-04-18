@@ -86,16 +86,23 @@ class CryptoEtfService:
             return []
 
         flows: list[ETFFlowEntry] = []
-        for i in range(days):
-            today = sorted_desc[i]
-            yest = sorted_desc[i + 1]
-            flows.append(ETFFlowEntry(
-                date=today["date"],
-                net_inflow_usd=float(today["cum_net_inflow"])
-                               - float(yest["cum_net_inflow"]),
-                cumulative_usd=float(today["cum_net_inflow"]),
-                aum_usd=float(today["total_net_assets"]),
-            ))
+        try:
+            for i in range(days):
+                today = sorted_desc[i]
+                yest = sorted_desc[i + 1]
+                flows.append(ETFFlowEntry(
+                    date=today["date"],
+                    net_inflow_usd=float(today["cum_net_inflow"])
+                                   - float(yest["cum_net_inflow"]),
+                    cumulative_usd=float(today["cum_net_inflow"]),
+                    aum_usd=float(today["total_net_assets"]),
+                ))
+        except (TypeError, ValueError, KeyError):
+            logger.warning(
+                "Malformed %s ETF row — missing/non-numeric field", symbol,
+                exc_info=True,
+            )
+            return None
         return flows
 
     async def close(self) -> None:
