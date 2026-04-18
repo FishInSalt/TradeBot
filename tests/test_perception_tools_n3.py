@@ -373,6 +373,30 @@ async def test_etf_insufficient_data_renders_distinct_from_outage():
     assert "7-day net:" in result
 
 
+async def test_etf_renders_aum_on_first_row():
+    """First-row suffix shows both cumulative inflow AND end-of-day AUM.
+    `ETFFlowEntry.aum_usd` is set from SoSoValue's total_net_assets; the
+    previous rendering stored but never surfaced it."""
+    from src.agent.tools_perception import get_etf_flows
+    svc = AsyncMock()
+
+    async def fake_flows(symbol, days):
+        return _flows(days)
+
+    svc.get_etf_flows.side_effect = fake_flows
+    deps = _make_deps(crypto_etf=svc)
+    result = await get_etf_flows(deps, days=3)
+
+    # _flows() uses aum_usd=1.0e11 = $100B
+    assert "AUM: $100.00B" in result
+    # First-row suffix co-renders cum + AUM, so expect both tokens on the top
+    # data line inside the BTC section
+    btc_section = result.split("=== ETH")[0]
+    first_data_line = [L for L in btc_section.splitlines() if L.startswith("2026-04-")][0]
+    assert "cum:" in first_data_line
+    assert "AUM:" in first_data_line
+
+
 async def test_etf_footer_suppressed_on_mixed_outage_and_data_gap():
     """PR#14 review I3: if one side is None (outage) and the other is []
     (data-gap), neither rendered actual flow rows, so the T+1 revision

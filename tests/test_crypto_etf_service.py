@@ -130,6 +130,17 @@ async def test_fetch_failure_returns_none():
     assert flows is None
 
 
+async def test_empty_raw_response_treated_as_outage():
+    """SoSoValue returning `data: []` is more likely schema drift / silent
+    upstream failure than a genuinely empty history window. Return None
+    (outage) rather than [] (data-gap) so the tool renders "temporarily
+    unavailable" instead of the reassuring "insufficient data" message."""
+    svc = _make_service()
+    svc._client.fetch_summary_history.return_value = []
+    flows = await svc.get_etf_flows("BTC", days=7)
+    assert flows is None
+
+
 async def test_rate_limit_with_no_stale_returns_none():
     """RateLimitHit without stale cache → None (service outage branch)."""
     from src.utils.cache import RateLimitHit

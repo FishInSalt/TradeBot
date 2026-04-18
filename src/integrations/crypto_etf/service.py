@@ -58,6 +58,19 @@ class CryptoEtfService:
             logger.warning("SoSoValue fetch failed for %s", symbol, exc_info=True)
             return None
 
+        # A genuinely empty response is not a short-window problem — SoSoValue
+        # has continuous BTC/ETH ETF history since the Jan-2024 launch, so an
+        # empty `data` array almost always signals schema drift, a silent 401,
+        # or upstream outage rather than "the requested window lacks history".
+        # Return None (outage) rather than [] (data-gap) so the tool layer
+        # renders "temporarily unavailable", not a reassuring "insufficient data".
+        if not raw:
+            logger.warning(
+                "SoSoValue returned empty response for %s — likely schema drift "
+                "or silent upstream failure", symbol,
+            )
+            return None
+
         # Dedup by date — first occurrence wins. cum_net_inflow AND
         # total_net_assets are cross-row identical for same-date rows
         # (smoke-test verified), so first occurrence reflects the canonical

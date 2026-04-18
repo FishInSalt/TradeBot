@@ -838,7 +838,13 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
         lines = [f"=== {label} Spot ETF Flows (US) ==="]
         net_total = 0.0
         for i, entry in enumerate(flows):
-            suffix = f"  (cum: {_fmt_big_usd(entry.cumulative_usd)})" if i == 0 else ""
+            # First row also shows cumulative net-inflow and end-of-day AUM
+            # (total net assets). Both are fields on ETFFlowEntry sourced from
+            # SoSoValue — AUM lets the agent gauge fund size alongside flow.
+            suffix = (
+                f"  (cum: {_fmt_big_usd(entry.cumulative_usd)}, "
+                f"AUM: {_fmt_big_usd(entry.aum_usd)})"
+            ) if i == 0 else ""
             lines.append(
                 f"{entry.date}: {_fmt_signed_dollars(entry.net_inflow_usd)}{suffix}"
             )
