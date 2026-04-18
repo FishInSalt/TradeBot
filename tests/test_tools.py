@@ -24,6 +24,9 @@ class MockDeps:
     initial_balance: float = 10000.0
     metrics: object = None
     news: object = None
+    macro: object = None
+    crypto_etf: object = None
+    onchain: object = None
 
 
 @pytest.fixture

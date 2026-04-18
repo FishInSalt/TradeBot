@@ -65,6 +65,22 @@ class NewsConfig(BaseModel):
     enabled: bool = True
 
 
+class MacroConfig(BaseModel):
+    enabled: bool = True
+    fred_api_key: str = ""              # env FRED_API_KEY
+    alpha_vantage_api_key: str = ""     # env ALPHA_VANTAGE_API_KEY
+    coingecko_demo_api_key: str = ""    # env COINGECKO_DEMO_API_KEY
+
+
+class CryptoEtfConfig(BaseModel):
+    enabled: bool = True
+    sosovalue_api_key: str = ""         # env SOSOVALUE_API_KEY
+
+
+class OnchainConfig(BaseModel):
+    enabled: bool = True
+
+
 class Settings(BaseModel):
     exchange: ExchangeConfig = ExchangeConfig()
     trading: TradingConfig = TradingConfig()
@@ -75,6 +91,9 @@ class Settings(BaseModel):
     approval: ApprovalConfig = ApprovalConfig()
     alerts: AlertsConfig = AlertsConfig()
     news: NewsConfig = NewsConfig()
+    macro: MacroConfig = MacroConfig()
+    crypto_etf: CryptoEtfConfig = CryptoEtfConfig()
+    onchain: OnchainConfig = OnchainConfig()
 
 
 class PersonaConfig(BaseModel):
@@ -107,6 +126,20 @@ def load_settings(
     exchange.setdefault("secret", env_overrides.get("OKX_SECRET", ""))
     exchange.setdefault("password", env_overrides.get("OKX_PASSWORD", ""))
     data["exchange"] = exchange
+
+    # N3: macro + crypto_etf env overrides (YAML values take precedence)
+    macro = data.get("macro", {})
+    macro.setdefault("fred_api_key", env_overrides.get("FRED_API_KEY", ""))
+    macro.setdefault("alpha_vantage_api_key",
+                     env_overrides.get("ALPHA_VANTAGE_API_KEY", ""))
+    macro.setdefault("coingecko_demo_api_key",
+                     env_overrides.get("COINGECKO_DEMO_API_KEY", ""))
+    data["macro"] = macro
+
+    crypto_etf = data.get("crypto_etf", {})
+    crypto_etf.setdefault("sosovalue_api_key",
+                          env_overrides.get("SOSOVALUE_API_KEY", ""))
+    data["crypto_etf"] = crypto_etf
 
     return Settings(**data)
 

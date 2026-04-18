@@ -54,3 +54,22 @@ class TTLCache:
         """Return cached data ignoring TTL, or None if key was never stored."""
         entry = self._store.get(key)
         return entry[0] if entry is not None else None
+
+    def invalidate_stale(self, key: str, max_age: float) -> None:
+        """Drop the cached entry for `key` if it is older than `max_age` seconds.
+
+        Callers whose TTL varies across calls (e.g. time-of-day caching) use
+        this to prevent a long-TTL write from sticking past a state transition
+        that reduces the acceptable age. Example: Alpha Vantage SPY/QQQ write
+        on Sunday with TTL=12h would otherwise survive through Monday 9:30-11
+        market open, serving Friday close during active trading.
+
+        Tradeoff: after invalidation, a subsequent `get_or_fetch` that hits
+        RateLimitHit cannot fall back to the (just-dropped) stale data — the
+        exception propagates instead. This is intentional: past a TTL state
+        transition, stale data is no longer considered an acceptable answer;
+        callers must either re-fetch successfully or degrade to None.
+        """
+        entry = self._store.get(key)
+        if entry is not None and time.monotonic() - entry[1] > max_age:
+            self._store.pop(key, None)

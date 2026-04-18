@@ -32,6 +32,9 @@ class TradingDeps:
     initial_balance: float = 10000.0
     metrics: object | None = None  # MetricsService, typed as object to avoid circular import
     news: object | None = None  # NewsService, typed as object to avoid circular import
+    macro: object | None = None  # MacroService; typed as object to avoid circular import
+    crypto_etf: object | None = None  # CryptoEtfService; typed as object to avoid circular import
+    onchain: object | None = None  # OnchainService; typed as object to avoid circular import
 
 
 def create_trader_agent(
@@ -145,6 +148,44 @@ def create_trader_agent(
         from src.agent.tools_perception import get_derivatives_data as _impl
 
         return await _impl(ctx.deps, symbol)
+
+    @agent.tool
+    async def get_higher_timeframe_view(
+        ctx: RunContext[TradingDeps],
+        timeframe: Literal["4h", "1d", "1w", "1M"],
+    ) -> str:
+        """Get long-period structure: MA50/100/200 distances and range position.
+        timeframe: '4h' bridges LTF and 1d; '1d'/'1w'/'1M' for swing/position context.
+        Output ~250 tokens. No default — explicitly pick the timeframe you need."""
+        from src.agent.tools_perception import get_higher_timeframe_view as _impl
+
+        return await _impl(ctx.deps, timeframe)
+
+    @agent.tool
+    async def get_macro_context(ctx: RunContext[TradingDeps]) -> str:
+        """Get cross-market macro snapshot: BTC/ETH dominance, Total Crypto Mcap, USD
+        Trade-Weighted Index (FRED DTWEXBGS; NOT ICE DXY), VIX, 10Y Treasury, 2s10s spread,
+        10Y inflation expectation, and SPY/QQQ. Output ~200 tokens."""
+        from src.agent.tools_perception import get_macro_context as _impl
+
+        return await _impl(ctx.deps)
+
+    @agent.tool
+    async def get_etf_flows(ctx: RunContext[TradingDeps], days: int = 7) -> str:
+        """Get US BTC + ETH spot ETF daily net flows + cumulative AUM for the past `days`
+        trading days (1-14, default 7). Today's value may be revised T+1.
+        Output ~300 tokens."""
+        from src.agent.tools_perception import get_etf_flows as _impl
+
+        return await _impl(ctx.deps, days)
+
+    @agent.tool
+    async def get_stablecoin_supply(ctx: RunContext[TradingDeps]) -> str:
+        """Get USDT + USDC current total supply and 7-day change.
+        Data sourced from DefiLlama (on-chain circulating supply). Output ~80 tokens."""
+        from src.agent.tools_perception import get_stablecoin_supply as _impl
+
+        return await _impl(ctx.deps)
 
     # === Execution Tools ===
 

@@ -215,3 +215,66 @@ def test_settings_without_news(tmp_path: Path):
     from src.config import load_settings
     settings = load_settings(settings_file, env_overrides={})
     assert settings.news.enabled is True
+
+
+# --- N3 config ---
+
+def test_macro_config_defaults():
+    from src.config import MacroConfig
+    cfg = MacroConfig()
+    assert cfg.enabled is True
+    assert cfg.fred_api_key == ""
+    assert cfg.alpha_vantage_api_key == ""
+    assert cfg.coingecko_demo_api_key == ""
+
+
+def test_crypto_etf_config_defaults():
+    from src.config import CryptoEtfConfig
+    cfg = CryptoEtfConfig()
+    assert cfg.enabled is True
+    assert cfg.sosovalue_api_key == ""
+
+
+def test_onchain_config_defaults():
+    from src.config import OnchainConfig
+    cfg = OnchainConfig()
+    assert cfg.enabled is True
+
+
+def test_settings_includes_n3_configs():
+    from src.config import Settings
+    s = Settings()
+    assert s.macro.enabled is True
+    assert s.crypto_etf.enabled is True
+    assert s.onchain.enabled is True
+
+
+def test_load_settings_env_overrides_n3_keys(tmp_path):
+    """4 new env vars should populate config when the YAML leaves them blank."""
+    from src.config import load_settings
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text("trading:\n  symbol: 'BTC/USDT:USDT'\n")
+    env = {
+        "FRED_API_KEY": "fred-test",
+        "ALPHA_VANTAGE_API_KEY": "av-test",
+        "COINGECKO_DEMO_API_KEY": "cg-test",
+        "SOSOVALUE_API_KEY": "soso-test",
+    }
+    settings = load_settings(path=yaml_path, env_overrides=env)
+    assert settings.macro.fred_api_key == "fred-test"
+    assert settings.macro.alpha_vantage_api_key == "av-test"
+    assert settings.macro.coingecko_demo_api_key == "cg-test"
+    assert settings.crypto_etf.sosovalue_api_key == "soso-test"
+
+
+def test_load_settings_yaml_overrides_n3_keys_wins(tmp_path):
+    """YAML values take precedence over env vars."""
+    from src.config import load_settings
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text(
+        "macro:\n"
+        "  fred_api_key: 'yaml-fred'\n"
+    )
+    env = {"FRED_API_KEY": "env-fred"}
+    settings = load_settings(path=yaml_path, env_overrides=env)
+    assert settings.macro.fred_api_key == "yaml-fred"

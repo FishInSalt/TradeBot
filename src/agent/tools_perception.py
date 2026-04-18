@@ -604,3 +604,320 @@ async def get_derivatives_data(
         sections.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
 
     return "\n".join(sections)
+
+
+# Unit label for "N periods ago" rendered below range highs/lows.
+_UNIT_LABEL = {"4h": "4h-bars", "1d": "days", "1w": "weeks", "1M": "months"}
+
+
+async def get_higher_timeframe_view(
+    deps: TradingDeps,
+    timeframe: Literal["4h", "1d", "1w", "1M"],
+) -> str:
+    """Show long-period MAs and range position for a higher timeframe.
+
+    Output is fact-only per spec §3.1: MA distances as percentages, range
+    position as 0-100%, no labels like 'uptrend' / 'strong' / 'upper third'.
+    ~250 tokens total.
+    """
+    symbol = deps.symbol
+
+    try:
+        df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=250)
+    except Exception:
+        logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
+        return "Higher timeframe view: temporarily unavailable"
+
+    if df.empty:
+        return "Higher timeframe view: temporarily unavailable"
+
+    last_close = float(df["close"].iloc[-1])
+
+    sections: list[str] = [
+        f"=== Higher Timeframe View ({timeframe}, {symbol}) ===",
+        f"Current Price: {last_close:,.2f}",
+        "",
+        "=== MA Distances ===",
+    ]
+
+    def _ma(period: int) -> float | None:
+        if len(df) < period:
+            return None
+        return float(df["close"].rolling(period).mean().iloc[-1])
+
+    for period in (50, 100, 200):
+        ma = _ma(period)
+        if ma is None:
+            sections.append(f"MA{period}: insufficient data (need {period} candles)")
+            continue
+        dist_pct = (last_close - ma) / ma * 100.0
+        sections.append(
+            f"MA{period}: {ma:,.2f} (price {dist_pct:+.1f}%)"
+        )
+
+    unit = _UNIT_LABEL[timeframe]
+
+    # Range: last 100 periods. Reset index to 0-based integers so .idxmax()
+    # returns a position, not a timestamp — defensive if market_data ever
+    # switches to a timestamp index.
+    if len(df) >= 100:
+        last_100 = df.iloc[-100:].reset_index(drop=True)
+        hi100_idx = int(last_100["high"].idxmax())
+        lo100_idx = int(last_100["low"].idxmin())
+        hi100 = float(last_100["high"].max())
+        lo100 = float(last_100["low"].min())
+        hi_ago = 99 - hi100_idx
+        lo_ago = 99 - lo100_idx
+        rng_pos = 0.0 if hi100 == lo100 else (last_close - lo100) / (hi100 - lo100) * 100.0
+        sections.extend([
+            "",
+            "=== Range Position ===",
+            f"100-period High: {hi100:,.2f} ({hi_ago} {unit} ago)",
+            f"100-period Low:  {lo100:,.2f} ({lo_ago} {unit} ago)",
+            f"Current price within range: {rng_pos:.1f}%",
+        ])
+
+    # 20-period band.
+    if len(df) >= 20:
+        last_20 = df.iloc[-20:]
+        hi20 = float(last_20["high"].max())
+        lo20 = float(last_20["low"].min())
+        width_pct = 0.0 if lo20 == 0 else (hi20 - lo20) / lo20 * 100.0
+        sections.extend([
+            "",
+            f"20-period High: {hi20:,.2f}",
+            f"20-period Low:  {lo20:,.2f}",
+            f"20-period range width: {width_pct:.1f}%",
+        ])
+
+    return "\n".join(sections)
+
+
+def _fmt_signed_dollars(v: float) -> str:
+    """Format a signed dollar amount in $M or $B (spec §3.3 output format)."""
+    abs_v = abs(v)
+    sign = "+" if v >= 0 else "-"
+    if abs_v >= 1e9:
+        return f"{sign}${abs_v / 1e9:,.2f}B"
+    if abs_v >= 1e6:
+        return f"{sign}${abs_v / 1e6:,.2f}M"
+    return f"{sign}${abs_v:,.0f}"
+
+
+def _fmt_big_usd(v: float) -> str:
+    """Positive-only T/B/M formatter for cumulative AUM, totals."""
+    if v >= 1e12:
+        return f"${v / 1e12:.2f}T"
+    if v >= 1e9:
+        return f"${v / 1e9:.2f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.2f}M"
+    return f"${v:,.0f}"
+
+
+async def get_macro_context(deps: TradingDeps) -> str:
+    """Cross-market macro snapshot: crypto totals + FRED + US equities.
+
+    Output is fact-only (spec §3.2): no 'strong dollar' / 'risk-on' labels.
+    FRED values include `as of YYYY-MM-DD` so the Agent sees each reading's
+    real observation date (DTWEXBGS has ~1-week report delay).
+    """
+    if deps.macro is None:
+        return "Macro service not configured."
+
+    try:
+        snap = await deps.macro.get_snapshot()
+    except Exception:
+        logger.warning("Macro snapshot fetch failed", exc_info=True)
+        return "Macro context: temporarily unavailable"
+
+    sections: list[str] = []
+    any_available = False
+
+    # Crypto Market
+    cg_fields = (snap.btc_dominance, snap.eth_dominance,
+                 snap.total_mcap_usd, snap.mcap_change_24h_pct)
+    if all(v is None for v in cg_fields):
+        sections.append("=== Crypto Market ===\nTemporarily unavailable.")
+    else:
+        any_available = True
+        btc = f"{snap.btc_dominance:.2f}%" if snap.btc_dominance is not None else "N/A"
+        eth = f"{snap.eth_dominance:.2f}%" if snap.eth_dominance is not None else "N/A"
+        mcap = _fmt_big_usd(snap.total_mcap_usd) if snap.total_mcap_usd else "N/A"
+        chg = f"{snap.mcap_change_24h_pct:+.2f}%" if snap.mcap_change_24h_pct is not None else "N/A"
+        sections.append(
+            "=== Crypto Market ===\n"
+            f"BTC.D: {btc} | ETH.D: {eth} | Total Mcap: {mcap} (24h: {chg})"
+        )
+
+    # US Macro (FRED)
+    fred_fields = (snap.usd_index_broad_tw, snap.vix, snap.treasury_10y,
+                   snap.spread_10y_2y, snap.inflation_10y)
+    if all(v is None for v in fred_fields):
+        sections.append("=== US Macro (FRED) ===\nTemporarily unavailable.")
+    else:
+        any_available = True
+        lines = ["=== US Macro (FRED) ==="]
+        if snap.usd_index_broad_tw is not None:
+            o = snap.usd_index_broad_tw
+            lines.append(f"USD Index (Broad TW): {o.value:.2f} (as of {o.date})")
+        if snap.vix is not None:
+            o = snap.vix
+            lines.append(f"VIX: {o.value:.2f} (as of {o.date})")
+        if snap.treasury_10y is not None:
+            o = snap.treasury_10y
+            lines.append(f"10Y Treasury: {o.value:.2f}% (as of {o.date})")
+        if snap.spread_10y_2y is not None:
+            o = snap.spread_10y_2y
+            lines.append(f"2s10s Spread: {o.value:+.2f}% (as of {o.date})")
+        if snap.inflation_10y is not None:
+            o = snap.inflation_10y
+            lines.append(f"10Y Inflation Expectation: {o.value:.2f}% (as of {o.date})")
+        sections.append("\n".join(lines))
+
+    # US Equities (Alpha Vantage)
+    # AV's change percent is close-to-previous-close for the latest trading
+    # day (NOT a rolling 24h window — weekends/holidays would render Friday
+    # vs Thursday). Drop the misleading "24h:" label and include the actual
+    # trading day via `as of`, matching the FRED section's freshness anchor.
+    if snap.spy is None and snap.qqq is None:
+        sections.append("=== US Equities (Alpha Vantage) ===\nTemporarily unavailable.")
+    else:
+        any_available = True
+        lines = ["=== US Equities (Alpha Vantage) ==="]
+        if snap.spy is not None:
+            lines.append(
+                f"SPY: ${snap.spy.price:,.2f} "
+                f"({snap.spy.change_pct:+.2f}%, as of {snap.spy.latest_trading_day})"
+            )
+        if snap.qqq is not None:
+            lines.append(
+                f"QQQ: ${snap.qqq.price:,.2f} "
+                f"({snap.qqq.change_pct:+.2f}%, as of {snap.qqq.latest_trading_day})"
+            )
+        sections.append("\n".join(lines))
+
+    if not any_available:
+        return "Macro context: all sources temporarily unavailable"
+
+    return "\n\n".join(sections)
+
+
+async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
+    """US BTC + ETH spot ETF daily net flows + cumulative AUM.
+
+    Emits a trailing footer reminding the Agent that today's value may be
+    revised T+1 — this is an operational fact (spec §3.6) needed in-context
+    to avoid misreading same-day values.
+    """
+    if deps.crypto_etf is None:
+        return "ETF flows service not configured."
+
+    # Clamp mirrors CryptoEtfService.get_etf_flows (spec §3.3). Duplicated here
+    # so the footer's "Past N trading days" line uses the same value the
+    # service actually honors — otherwise a call like days=30 would render 14
+    # rows but claim "Past 30 trading days" in the footer.
+    days = max(1, min(days, 14))
+
+    import asyncio
+
+    btc_result, eth_result = await asyncio.gather(
+        deps.crypto_etf.get_etf_flows("BTC", days),
+        deps.crypto_etf.get_etf_flows("ETH", days),
+        return_exceptions=True,
+    )
+    btc = None if isinstance(btc_result, Exception) else btc_result
+    eth = None if isinstance(eth_result, Exception) else eth_result
+
+    def _render_section(label: str, flows) -> str:
+        # Three-state rendering per spec §3.5:
+        #   None → outage ("temporarily unavailable")
+        #   []   → data-gap ("insufficient data" — window too short)
+        #   list → normal
+        if flows is None:
+            return f"=== {label} Spot ETF Flows (US) ===\nTemporarily unavailable."
+        if not flows:
+            return (
+                f"=== {label} Spot ETF Flows (US) ===\n"
+                f"Insufficient data in requested window."
+            )
+        lines = [f"=== {label} Spot ETF Flows (US) ==="]
+        net_total = 0.0
+        for i, entry in enumerate(flows):
+            # First row also shows cumulative net-inflow and end-of-day AUM
+            # (total net assets). Both are fields on ETFFlowEntry sourced from
+            # SoSoValue — AUM lets the agent gauge fund size alongside flow.
+            suffix = (
+                f"  (cum: {_fmt_big_usd(entry.cumulative_usd)}, "
+                f"AUM: {_fmt_big_usd(entry.aum_usd)})"
+            ) if i == 0 else ""
+            lines.append(
+                f"{entry.date}: {_fmt_signed_dollars(entry.net_inflow_usd)}{suffix}"
+            )
+            net_total += entry.net_inflow_usd
+        lines.append(f"{len(flows)}-day net: {_fmt_signed_dollars(net_total)}")
+        return "\n".join(lines)
+
+    sections = [
+        _render_section("BTC", btc),
+        _render_section("ETH", eth),
+    ]
+
+    if btc is None and eth is None:
+        return "ETF flows: temporarily unavailable"
+
+    # Footer: operational facts the Agent needs in-context (spec §3.6).
+    # The trading-day count mirrors the `days` parameter. Only emit when at
+    # least one side actually rendered flow rows — a mix of outage (None) +
+    # data-gap ([]) has no "today's value" for the T+1 caveat to refer to,
+    # so the footer would be misleading noise.
+    if btc or eth:
+        sections.append(
+            f"Note: Past {days} trading days (weekends/holidays excluded).\n"
+            "Note: Issuer-reported; today's value may be revised T+1."
+        )
+
+    return "\n\n".join(sections)
+
+
+async def get_stablecoin_supply(deps: TradingDeps) -> str:
+    """USDT + USDC total supply + 7-day change.
+
+    Output is fact-only (spec §3.4): no 'dry powder' / 'capital entering'.
+    """
+    if deps.onchain is None:
+        return "Onchain service not configured."
+
+    try:
+        result = await deps.onchain.get_stablecoin_snapshot()
+    except Exception:
+        logger.warning("Stablecoin snapshot fetch failed", exc_info=True)
+        return "Stablecoin supply: temporarily unavailable"
+
+    if result is None:
+        return "Stablecoin supply: temporarily unavailable"
+
+    if not result["coins"]:
+        # Guard against upstream schema drift (e.g. DefiLlama renaming USDT →
+        # USDT0): neither tracked symbol matched, so totals would render as
+        # $0.00 — misleading. Signal "data unavailable" instead.
+        return (
+            "Stablecoin supply: data unavailable "
+            "(no tracked symbols found in response)"
+        )
+
+    lines = ["=== Stablecoin Supply ==="]
+    for coin in result["coins"]:
+        lines.append(
+            f"{coin.symbol}: {_fmt_big_usd(coin.circulating_usd)} "
+            f"(7d: {_fmt_signed_dollars(coin.change_7d_usd)}, "
+            f"{coin.change_7d_pct:+.2f}%)"
+        )
+    total = result["total"]
+    lines.append(
+        f"Total Stablecoin Mcap: {_fmt_big_usd(total.total_circulating_usd)} "
+        f"(7d: {_fmt_signed_dollars(total.total_change_7d_usd)}, "
+        f"{total.total_change_7d_pct:+.2f}%)"
+    )
+
+    return "\n".join(lines)
