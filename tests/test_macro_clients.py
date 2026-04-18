@@ -270,6 +270,18 @@ async def test_av_unexpected_shape_raises_value_error():
             await client.fetch_quote("SPY")
 
 
+async def test_av_empty_global_quote_raises_value_error():
+    """AV returns empty 'Global Quote' dict for invalid ticker symbols."""
+    from src.integrations.macro.alpha_vantage import AlphaVantageClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"Global Quote": {}})
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AlphaVantageClient(http, api_key="k")
+        with pytest.raises(ValueError):
+            await client.fetch_quote("BADTICKER")
+
+
 async def test_av_429_also_raises_rate_limit():
     from src.integrations.macro.alpha_vantage import AlphaVantageClient
     transport = httpx.MockTransport(lambda req: httpx.Response(429))
