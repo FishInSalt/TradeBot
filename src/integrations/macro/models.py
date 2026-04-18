@@ -22,7 +22,7 @@ class EquityQuote:
     """Alpha Vantage GLOBAL_QUOTE response — SPY / QQQ."""
     symbol: str
     price: float
-    change_pct: float          # 24h %, e.g. +1.21
+    change_pct: float          # single-session change %, e.g. +1.21
     latest_trading_day: str    # ISO "YYYY-MM-DD"
 
 
