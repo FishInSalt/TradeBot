@@ -67,16 +67,25 @@ def test_n3_close_is_wrapped_in_try_except(close_call: str):
     """Each N3 close must live inside a try/except so a failing close
     does not abort cleanup of siblings (spec §5.7 'per-service try/except').
 
-    Heuristic: within 5 lines before the close call, there should be a
-    `try:` on its own line. This matches the N2 pattern for deps.news.close().
+    Heuristic: within 5 lines before the close call, there must be a `try:`
+    on its own line; within 5 lines after, there must be an `except` line.
+    Checking both halves enforces the full `try/except` discipline — a bare
+    `try/finally` would pass a `try:`-only check but still let exceptions
+    propagate and abort sibling cleanup. Matches the N2 pattern for
+    deps.news.close().
     """
     source = _source()
     lines = source.splitlines()
     line_no = _find_line(source, close_call)
-    window = lines[max(0, line_no - 5):line_no]
-    assert any(L.strip() == "try:" for L in window), (
+    before = lines[max(0, line_no - 5):line_no]
+    assert any(L.strip() == "try:" for L in before), (
         f"{close_call} is not preceded by a `try:` within 5 lines — "
-        f"window was:\n" + "\n".join(window)
+        f"window was:\n" + "\n".join(before)
+    )
+    after = lines[line_no + 1:line_no + 6]
+    assert any(L.lstrip().startswith("except") for L in after), (
+        f"{close_call} is not followed by an `except` within 5 lines — "
+        f"window was:\n" + "\n".join(after)
     )
 
 
