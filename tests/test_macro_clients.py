@@ -109,3 +109,70 @@ async def test_fred_429_raises_rate_limit():
         client = FREDClient(http, api_key="k")
         with pytest.raises(RateLimitHit):
             await client.fetch_latest("VIXCLS")
+
+
+# ===== CoinGecko /global =====
+
+CG_GLOBAL_RESPONSE = {
+    "data": {
+        "active_cryptocurrencies": 18000,
+        "markets": 1100,
+        "total_market_cap": {"usd": 2_692_000_000_000.0},
+        "total_volume": {"usd": 80_000_000_000.0},
+        "market_cap_percentage": {"btc": 57.31, "eth": 10.79, "usdt": 3.5},
+        "market_cap_change_percentage_24h_usd": 2.58,
+        "updated_at": 1776499200,
+    },
+}
+
+
+async def test_cg_global_parse_response():
+    from src.integrations.macro.cg_global import CoinGeckoGlobalClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CG_GLOBAL_RESPONSE)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinGeckoGlobalClient(http, api_key="demo-key")
+        data = await client.fetch_global()
+    assert data["btc_dominance"] == 57.31
+    assert data["eth_dominance"] == 10.79
+    assert data["total_mcap_usd"] == 2_692_000_000_000.0
+    assert data["mcap_change_24h_pct"] == 2.58
+
+
+async def test_cg_global_sends_demo_key_header():
+    from src.integrations.macro.cg_global import CoinGeckoGlobalClient
+    captured_headers: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured_headers.update(dict(req.headers))
+        return httpx.Response(200, json=CG_GLOBAL_RESPONSE)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinGeckoGlobalClient(http, api_key="my-demo-key")
+        await client.fetch_global()
+    assert captured_headers.get("x-cg-demo-api-key") == "my-demo-key"
+
+
+async def test_cg_global_429_raises_rate_limit():
+    from src.integrations.macro.cg_global import CoinGeckoGlobalClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(429))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinGeckoGlobalClient(http, api_key="k")
+        with pytest.raises(RateLimitHit):
+            await client.fetch_global()
+
+
+async def test_cg_global_missing_fields_return_nones():
+    """If CG adjusts its response schema, degrade by returning None per-field."""
+    from src.integrations.macro.cg_global import CoinGeckoGlobalClient
+    body = {"data": {"market_cap_percentage": {}, "total_market_cap": {}}}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=body))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinGeckoGlobalClient(http, api_key="k")
+        data = await client.fetch_global()
+    assert data["btc_dominance"] is None
+    assert data["eth_dominance"] is None
+    assert data["total_mcap_usd"] is None
+    assert data["mcap_change_24h_pct"] is None
