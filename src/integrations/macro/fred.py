@@ -37,6 +37,12 @@ class FREDClient:
             # message includes the full request URL, which here contains the
             # api_key query param. `exc_info=True` in the service layer would
             # then serialize the key into application logs.
+            # NOTE (API key leakage boundary): `str(exc)` is sanitized, so
+            # Python-stdlib traceback formatting is safe. `exc.request.url`
+            # and `exc.response.request.url` still reference the original
+            # URL with the api_key — if this project ever integrates Sentry /
+            # Datadog / other APM that walks exception attributes, configure
+            # their URL/query-string scrubber to redact `api_key=`.
             raise httpx.HTTPStatusError(
                 f"FRED returned HTTP {resp.status_code} for series {series_id}",
                 request=resp.request,
