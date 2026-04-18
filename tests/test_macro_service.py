@@ -41,9 +41,20 @@ async def test_all_sources_succeed():
     ]
     snap = await svc.get_snapshot()
     assert isinstance(snap, MacroSnapshot)
+    # CG
     assert snap.btc_dominance == 57.31
+    assert snap.eth_dominance == 10.79
+    # FRED — verify the field-to-series-id mapping in get_snapshot() for all 5
+    assert snap.usd_index_broad_tw.series_id == "DTWEXBGS"
+    assert snap.vix.series_id == "VIXCLS"
     assert snap.vix.value == 17.94
+    assert snap.treasury_10y.series_id == "DGS10"
+    assert snap.spread_10y_2y.series_id == "T10Y2Y"
+    assert snap.inflation_10y.series_id == "T10YIE"
+    # AV
+    assert snap.spy.symbol == "SPY"
     assert snap.spy.price == 710.14
+    assert snap.qqq.symbol == "QQQ"
 
 
 async def test_cg_failure_does_not_affect_others():
