@@ -604,3 +604,90 @@ async def get_derivatives_data(
         sections.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
 
     return "\n".join(sections)
+
+
+# Unit label for "N periods ago" rendered below range highs/lows.
+_UNIT_LABEL = {"4h": "4h-bars", "1d": "days", "1w": "weeks", "1M": "months"}
+
+
+async def get_higher_timeframe_view(
+    deps: TradingDeps,
+    timeframe: Literal["4h", "1d", "1w", "1M"],
+) -> str:
+    """Show long-period MAs and range position for a higher timeframe.
+
+    Output is fact-only per spec §3.1: MA distances as percentages, range
+    position as 0-100%, no labels like 'uptrend' / 'strong' / 'upper third'.
+    ~250 tokens total.
+    """
+    symbol = deps.symbol
+
+    try:
+        df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=250)
+    except Exception:
+        logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
+        return "Higher timeframe view: temporarily unavailable"
+
+    if df.empty:
+        return "Higher timeframe view: temporarily unavailable"
+
+    last_close = float(df["close"].iloc[-1])
+
+    sections: list[str] = [
+        f"=== Higher Timeframe View ({timeframe}, {symbol}) ===",
+        f"Current Price: {last_close:,.2f}",
+        "",
+        "=== MA Distances ===",
+    ]
+
+    def _ma(period: int) -> float | None:
+        if len(df) < period:
+            return None
+        return float(df["close"].rolling(period).mean().iloc[-1])
+
+    for period in (50, 100, 200):
+        ma = _ma(period)
+        if ma is None:
+            sections.append(f"MA{period}: insufficient data (need {period} candles)")
+            continue
+        dist_pct = (last_close - ma) / ma * 100.0
+        sections.append(
+            f"MA{period}: {ma:,.2f} (price {dist_pct:+.1f}%)"
+        )
+
+    unit = _UNIT_LABEL[timeframe]
+
+    # Range: last 100 periods. Reset index to 0-based integers so .idxmax()
+    # returns a position, not a timestamp — defensive if market_data ever
+    # switches to a timestamp index.
+    if len(df) >= 100:
+        last_100 = df.iloc[-100:].reset_index(drop=True)
+        hi100_idx = int(last_100["high"].idxmax())
+        lo100_idx = int(last_100["low"].idxmin())
+        hi100 = float(last_100["high"].max())
+        lo100 = float(last_100["low"].min())
+        hi_ago = 99 - hi100_idx
+        lo_ago = 99 - lo100_idx
+        rng_pos = 0.0 if hi100 == lo100 else (last_close - lo100) / (hi100 - lo100) * 100.0
+        sections.extend([
+            "",
+            "=== Range Position ===",
+            f"100-period High: {hi100:,.2f} ({hi_ago} {unit} ago)",
+            f"100-period Low:  {lo100:,.2f} ({lo_ago} {unit} ago)",
+            f"Current price within range: {rng_pos:.1f}%",
+        ])
+
+    # 20-period band.
+    if len(df) >= 20:
+        last_20 = df.iloc[-20:]
+        hi20 = float(last_20["high"].max())
+        lo20 = float(last_20["low"].min())
+        width_pct = 0.0 if lo20 == 0 else (hi20 - lo20) / lo20 * 100.0
+        sections.extend([
+            "",
+            f"20-period High: {hi20:,.2f}",
+            f"20-period Low:  {lo20:,.2f}",
+            f"20-period range width: {width_pct:.1f}%",
+        ])
+
+    return "\n".join(sections)
