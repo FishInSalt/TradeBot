@@ -190,3 +190,126 @@ async def test_cg_global_null_nested_fields_return_nones():
     assert data["eth_dominance"] is None
     assert data["total_mcap_usd"] is None
     assert data["mcap_change_24h_pct"] is None
+
+
+# ===== Alpha Vantage =====
+
+AV_RESPONSE_SPY = {
+    "Global Quote": {
+        "01. symbol": "SPY",
+        "05. price": "710.1400",
+        "06. volume": "50000000",
+        "07. latest trading day": "2026-04-17",
+        "09. change": "8.49",
+        "10. change percent": "1.21%",
+    },
+}
+
+AV_RESPONSE_RATE_LIMIT = {
+    "Information": (
+        "Thank you for using Alpha Vantage! "
+        "Our standard API rate limit is 25 requests per day."
+    ),
+}
+
+AV_RESPONSE_NOTE_LIMIT = {
+    "Note": "Thank you for using Alpha Vantage! 5 calls/min exceeded.",
+}
+
+
+async def test_av_parse_quote():
+    from src.integrations.macro.alpha_vantage import AlphaVantageClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=AV_RESPONSE_SPY)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AlphaVantageClient(http, api_key="k")
+        quote = await client.fetch_quote("SPY")
+    assert quote.symbol == "SPY"
+    assert quote.price == 710.14
+    assert quote.change_pct == 1.21
+    assert quote.latest_trading_day == "2026-04-17"
+
+
+async def test_av_information_field_raises_rate_limit():
+    """AV returns HTTP 200 + body containing 'Information' on rate limit.
+    Client must raise RateLimitHit, not return a malformed Quote."""
+    from src.integrations.macro.alpha_vantage import AlphaVantageClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=AV_RESPONSE_RATE_LIMIT)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AlphaVantageClient(http, api_key="k")
+        with pytest.raises(RateLimitHit, match="rate limit"):
+            await client.fetch_quote("SPY")
+
+
+async def test_av_note_field_also_raises_rate_limit():
+    """Older AV error responses use 'Note' key instead of 'Information'."""
+    from src.integrations.macro.alpha_vantage import AlphaVantageClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=AV_RESPONSE_NOTE_LIMIT)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AlphaVantageClient(http, api_key="k")
+        with pytest.raises(RateLimitHit):
+            await client.fetch_quote("SPY")
+
+
+async def test_av_unexpected_shape_raises_value_error():
+    """If the response has neither Global Quote nor Information/Note, flag it
+    as a hard error so it shows up as 'temporarily unavailable' rather than
+    silently degrading."""
+    from src.integrations.macro.alpha_vantage import AlphaVantageClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"unexpected": "shape"})
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AlphaVantageClient(http, api_key="k")
+        with pytest.raises(ValueError):
+            await client.fetch_quote("SPY")
+
+
+async def test_av_429_also_raises_rate_limit():
+    from src.integrations.macro.alpha_vantage import AlphaVantageClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(429))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AlphaVantageClient(http, api_key="k")
+        with pytest.raises(RateLimitHit):
+            await client.fetch_quote("SPY")
+
+
+async def test_av_throttles_consecutive_calls(monkeypatch):
+    """AV enforces 1 req/sec hard limit. Client must call asyncio.sleep for
+    at least _MIN_INTERVAL (~1.1s) on the second consecutive call.
+
+    We patch asyncio.sleep to record call durations without actually waiting,
+    so CI does not burn ~1.1s per invocation."""
+    import src.integrations.macro.alpha_vantage as av_module
+
+    sleep_durations: list[float] = []
+
+    async def fake_sleep(duration: float) -> None:
+        sleep_durations.append(duration)
+
+    monkeypatch.setattr(av_module.asyncio, "sleep", fake_sleep)
+
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=AV_RESPONSE_SPY)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = av_module.AlphaVantageClient(http, api_key="k")
+        await client.fetch_quote("SPY")  # first call: no sleep, _last_fetch_at=0
+        await client.fetch_quote("SPY")  # second call: must sleep ~_MIN_INTERVAL
+
+    # First call should NOT have slept (elapsed since monotonic()=0 is huge).
+    # Second call MUST have slept very close to _MIN_INTERVAL.
+    assert len(sleep_durations) == 1, (
+        f"expected exactly one throttle sleep, got {sleep_durations}"
+    )
+    # Generous band for monotonic-clock jitter between the two time.monotonic()
+    # reads bracketing the http.get() call (which runs in the same test event
+    # loop; mock transport is near-instant).
+    assert 0.9 <= sleep_durations[0] <= 1.2, (
+        f"throttle sleep duration {sleep_durations[0]} outside expected band"
+    )
