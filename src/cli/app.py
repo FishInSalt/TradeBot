@@ -291,6 +291,39 @@ def build_services(
     else:
         sc.print("News: OFF")
 
+    # N3: Macro service — CoinGecko /global + FRED + Alpha Vantage.
+    macro_service = None
+    if settings.macro.enabled:
+        from src.integrations.macro.service import MacroService
+        macro_service = MacroService(
+            fred_key=settings.macro.fred_api_key,
+            av_key=settings.macro.alpha_vantage_api_key,
+            cg_key=settings.macro.coingecko_demo_api_key,
+        )
+        sc.print("Macro: ON (FRED + Alpha Vantage + CoinGecko)")
+    else:
+        sc.print("Macro: OFF")
+
+    # N3: Crypto ETF service — SoSoValue.
+    crypto_etf_service = None
+    if settings.crypto_etf.enabled:
+        from src.integrations.crypto_etf.service import CryptoEtfService
+        crypto_etf_service = CryptoEtfService(
+            api_key=settings.crypto_etf.sosovalue_api_key,
+        )
+        sc.print("Crypto ETF: ON (SoSoValue)")
+    else:
+        sc.print("Crypto ETF: OFF")
+
+    # N3: Onchain service — DefiLlama stablecoins.
+    onchain_service = None
+    if settings.onchain.enabled:
+        from src.integrations.onchain.service import OnchainService
+        onchain_service = OnchainService()
+        sc.print("Onchain: ON (DefiLlama stablecoins)")
+    else:
+        sc.print("Onchain: OFF")
+
     deps = TradingDeps(
         symbol=result.symbol,
         timeframe=result.timeframe,
@@ -305,6 +338,9 @@ def build_services(
         initial_balance=result.initial_balance,
         metrics=metrics_service,
         news=news_service,
+        macro=macro_service,
+        crypto_etf=crypto_etf_service,
+        onchain=onchain_service,
     )
 
     # Alert service
@@ -468,6 +504,21 @@ async def run(
                 await deps.news.close()
             except Exception:
                 logger.warning("Failed to close news service", exc_info=True)
+        if deps.macro is not None:
+            try:
+                await deps.macro.close()
+            except Exception:
+                logger.warning("Failed to close macro service", exc_info=True)
+        if deps.crypto_etf is not None:
+            try:
+                await deps.crypto_etf.close()
+            except Exception:
+                logger.warning("Failed to close crypto_etf service", exc_info=True)
+        if deps.onchain is not None:
+            try:
+                await deps.onchain.close()
+            except Exception:
+                logger.warning("Failed to close onchain service", exc_info=True)
 
     # Update session status to paused on graceful shutdown
     async with get_session(engine) as db_sess:
