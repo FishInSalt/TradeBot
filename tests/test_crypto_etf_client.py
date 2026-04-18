@@ -98,3 +98,15 @@ async def test_sosovalue_empty_data_returns_empty_list():
         client = SoSoValueClient(http, api_key="k")
         rows = await client.fetch_summary_history("BTC")
     assert rows == []
+
+
+async def test_sosovalue_null_data_returns_empty_list():
+    """Exercise the `or []` guard — SoSoValue may return {"data": null}."""
+    from src.integrations.crypto_etf.sosovalue import SoSoValueClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"code": 0, "data": None})
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = SoSoValueClient(http, api_key="k")
+        rows = await client.fetch_summary_history("BTC")
+    assert rows == []
