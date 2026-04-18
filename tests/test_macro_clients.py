@@ -176,3 +176,17 @@ async def test_cg_global_missing_fields_return_nones():
     assert data["eth_dominance"] is None
     assert data["total_mcap_usd"] is None
     assert data["mcap_change_24h_pct"] is None
+
+
+async def test_cg_global_null_nested_fields_return_nones():
+    """Explicitly exercise the `or {}` guard — CG sometimes returns null."""
+    from src.integrations.macro.cg_global import CoinGeckoGlobalClient
+    body = {"data": {"market_cap_percentage": None, "total_market_cap": None}}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=body))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinGeckoGlobalClient(http, api_key="k")
+        data = await client.fetch_global()
+    assert data["btc_dominance"] is None
+    assert data["eth_dominance"] is None
+    assert data["total_mcap_usd"] is None
+    assert data["mcap_change_24h_pct"] is None
