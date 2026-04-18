@@ -373,6 +373,42 @@ async def test_etf_insufficient_data_renders_distinct_from_outage():
     assert "7-day net:" in result
 
 
+async def test_etf_tool_clamps_days_in_footer():
+    """Agent passes days=30 → service clamps to 14 → footer must say
+    "Past 14 trading days", not "Past 30". Otherwise row count and footer
+    contradict each other (14 rows rendered but footer claims 30).
+    """
+    from src.agent.tools_perception import get_etf_flows
+    svc = AsyncMock()
+
+    async def fake_flows(symbol, days):
+        # Service clamps to 14; tool must match.
+        return _flows(min(days, 14))
+
+    svc.get_etf_flows.side_effect = fake_flows
+    deps = _make_deps(crypto_etf=svc)
+    result = await get_etf_flows(deps, days=30)
+
+    assert "Past 14 trading days" in result
+    assert "Past 30 trading days" not in result
+    assert "14-day net:" in result
+
+
+async def test_etf_tool_clamps_days_below_min():
+    """Agent passes days=0 → clamp to 1; footer reflects clamped value."""
+    from src.agent.tools_perception import get_etf_flows
+    svc = AsyncMock()
+
+    async def fake_flows(symbol, days):
+        return _flows(max(days, 1))
+
+    svc.get_etf_flows.side_effect = fake_flows
+    deps = _make_deps(crypto_etf=svc)
+    result = await get_etf_flows(deps, days=0)
+
+    assert "Past 1 trading days" in result
+
+
 async def test_etf_has_no_subjective_labels():
     from src.agent.tools_perception import get_etf_flows
     svc = AsyncMock()

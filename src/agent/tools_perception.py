@@ -807,6 +807,12 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     if deps.crypto_etf is None:
         return "ETF flows service not configured."
 
+    # Clamp mirrors CryptoEtfService.get_etf_flows (spec §3.3). Duplicated here
+    # so the footer's "Past N trading days" line uses the same value the
+    # service actually honors — otherwise a call like days=30 would render 14
+    # rows but claim "Past 30 trading days" in the footer.
+    days = max(1, min(days, 14))
+
     import asyncio
 
     btc_result, eth_result = await asyncio.gather(
