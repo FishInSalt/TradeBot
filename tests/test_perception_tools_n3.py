@@ -224,6 +224,13 @@ async def test_macro_full_snapshot_rendering():
     assert "=== US Equities (Alpha Vantage) ===" in result
     assert "SPY: $710.14" in result
     assert "QQQ: $648.85" in result
+    # Equity section carries its own freshness anchor (matching FRED's pattern)
+    # so the agent can tell weekend/holiday quotes from live trading data.
+    assert "as of 2026-04-17" in result
+    # "24h" label is inaccurate for AV (close-to-previous-close, not rolling
+    # 24h); must NOT appear in equity section output.
+    equity_section = result.split("=== US Equities (Alpha Vantage) ===")[1]
+    assert "24h" not in equity_section
 
 
 async def test_macro_cg_section_unavailable_when_all_cg_fields_none():

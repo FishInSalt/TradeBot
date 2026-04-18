@@ -776,6 +776,10 @@ async def get_macro_context(deps: TradingDeps) -> str:
         sections.append("\n".join(lines))
 
     # US Equities (Alpha Vantage)
+    # AV's change percent is close-to-previous-close for the latest trading
+    # day (NOT a rolling 24h window — weekends/holidays would render Friday
+    # vs Thursday). Drop the misleading "24h:" label and include the actual
+    # trading day via `as of`, matching the FRED section's freshness anchor.
     if snap.spy is None and snap.qqq is None:
         sections.append("=== US Equities (Alpha Vantage) ===\nTemporarily unavailable.")
     else:
@@ -783,11 +787,13 @@ async def get_macro_context(deps: TradingDeps) -> str:
         lines = ["=== US Equities (Alpha Vantage) ==="]
         if snap.spy is not None:
             lines.append(
-                f"SPY: ${snap.spy.price:,.2f} (24h: {snap.spy.change_pct:+.2f}%)"
+                f"SPY: ${snap.spy.price:,.2f} "
+                f"({snap.spy.change_pct:+.2f}%, as of {snap.spy.latest_trading_day})"
             )
         if snap.qqq is not None:
             lines.append(
-                f"QQQ: ${snap.qqq.price:,.2f} (24h: {snap.qqq.change_pct:+.2f}%)"
+                f"QQQ: ${snap.qqq.price:,.2f} "
+                f"({snap.qqq.change_pct:+.2f}%, as of {snap.qqq.latest_trading_day})"
             )
         sections.append("\n".join(lines))
 
