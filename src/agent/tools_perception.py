@@ -855,13 +855,15 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
         return "ETF flows: temporarily unavailable"
 
     # Footer: operational facts the Agent needs in-context (spec §3.6).
-    # The trading-day count mirrors the `days` parameter — spec §3.3 shows
-    # "7" in the example because default days=7; the f-string keeps this
-    # accurate when the agent requests a different window.
-    sections.append(
-        f"Note: Past {days} trading days (weekends/holidays excluded).\n"
-        "Note: Issuer-reported; today's value may be revised T+1."
-    )
+    # The trading-day count mirrors the `days` parameter. Only emit when at
+    # least one side actually rendered flow rows — a mix of outage (None) +
+    # data-gap ([]) has no "today's value" for the T+1 caveat to refer to,
+    # so the footer would be misleading noise.
+    if btc or eth:
+        sections.append(
+            f"Note: Past {days} trading days (weekends/holidays excluded).\n"
+            "Note: Issuer-reported; today's value may be revised T+1."
+        )
 
     return "\n\n".join(sections)
 

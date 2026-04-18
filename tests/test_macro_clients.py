@@ -111,6 +111,23 @@ async def test_fred_429_raises_rate_limit():
             await client.fetch_latest("VIXCLS")
 
 
+async def test_fred_5xx_error_does_not_leak_api_key():
+    """5xx from FRED must raise HTTPStatusError with a sanitized message —
+    httpx's default message contains the full URL including the api_key
+    query param, and service-layer `exc_info=True` would otherwise
+    serialize that URL into application logs.
+    """
+    from src.integrations.macro.fred import FREDClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(500))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = FREDClient(http, api_key="SECRET-FRED-KEY")
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await client.fetch_latest("VIXCLS")
+    assert "SECRET-FRED-KEY" not in str(exc_info.value)
+    assert "500" in str(exc_info.value)
+    assert "VIXCLS" in str(exc_info.value)
+
+
 # ===== CoinGecko /global =====
 
 CG_GLOBAL_RESPONSE = {
@@ -289,6 +306,23 @@ async def test_av_429_also_raises_rate_limit():
         client = AlphaVantageClient(http, api_key="k")
         with pytest.raises(RateLimitHit):
             await client.fetch_quote("SPY")
+
+
+async def test_av_5xx_error_does_not_leak_api_key():
+    """5xx from AV must raise HTTPStatusError with a sanitized message.
+    AV's apikey is a query param, so httpx's default message would include
+    it — the client must override that message to avoid leaking the key
+    through service-level `exc_info=True` traceback logging.
+    """
+    from src.integrations.macro.alpha_vantage import AlphaVantageClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(500))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = AlphaVantageClient(http, api_key="SECRET-AV-KEY")
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await client.fetch_quote("SPY")
+    assert "SECRET-AV-KEY" not in str(exc_info.value)
+    assert "500" in str(exc_info.value)
+    assert "SPY" in str(exc_info.value)
 
 
 async def test_av_throttles_consecutive_calls(monkeypatch):

@@ -373,6 +373,29 @@ async def test_etf_insufficient_data_renders_distinct_from_outage():
     assert "7-day net:" in result
 
 
+async def test_etf_footer_suppressed_on_mixed_outage_and_data_gap():
+    """PR#14 review I3: if one side is None (outage) and the other is []
+    (data-gap), neither rendered actual flow rows, so the T+1 revision
+    caveat refers to nothing. Suppress the footer in that case."""
+    from src.agent.tools_perception import get_etf_flows
+    svc = AsyncMock()
+
+    async def fake_flows(symbol, days):
+        return None if symbol == "BTC" else []
+
+    svc.get_etf_flows.side_effect = fake_flows
+    deps = _make_deps(crypto_etf=svc)
+    result = await get_etf_flows(deps, days=7)
+    lower = result.lower()
+
+    # Both sub-sections render (outage + data-gap messages)
+    assert "temporarily unavailable" in lower
+    assert "insufficient data" in lower
+    # But no T+1 footer — there is no today's value to warn about
+    assert "may be revised t+1" not in lower
+    assert "past 7 trading days" not in lower
+
+
 async def test_etf_tool_clamps_days_in_footer():
     """Agent passes days=30 → service clamps to 14 → footer must say
     "Past 14 trading days", not "Past 30". Otherwise row count and footer

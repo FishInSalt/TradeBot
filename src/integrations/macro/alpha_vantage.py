@@ -80,7 +80,16 @@ class AlphaVantageClient:
 
         if resp.status_code == 429:
             raise RateLimitHit(f"Alpha Vantage hard 429 for {symbol}")
-        resp.raise_for_status()
+        if resp.is_error:
+            # Don't use raise_for_status — httpx's default HTTPStatusError
+            # message includes the full request URL, which here contains the
+            # apikey query param. `exc_info=True` in the service layer would
+            # otherwise serialize the key into application logs.
+            raise httpx.HTTPStatusError(
+                f"Alpha Vantage returned HTTP {resp.status_code} for {symbol}",
+                request=resp.request,
+                response=resp,
+            ) from None
 
         data = resp.json()
         # AV signals soft rate limit via HTTP 200 body. Both 'Information'

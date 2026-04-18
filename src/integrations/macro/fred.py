@@ -32,7 +32,16 @@ class FREDClient:
         resp = await self._http.get(_FRED_URL, params=params)
         if resp.status_code == 429:
             raise RateLimitHit(f"FRED rate limited for {series_id}")
-        resp.raise_for_status()
+        if resp.is_error:
+            # Don't use raise_for_status — httpx's default HTTPStatusError
+            # message includes the full request URL, which here contains the
+            # api_key query param. `exc_info=True` in the service layer would
+            # then serialize the key into application logs.
+            raise httpx.HTTPStatusError(
+                f"FRED returned HTTP {resp.status_code} for series {series_id}",
+                request=resp.request,
+                response=resp,
+            ) from None
 
         observations = resp.json().get("observations", [])
         for obs in observations:
