@@ -429,6 +429,23 @@ async def test_stablecoin_service_failure():
     assert "temporarily unavailable" in result.lower()
 
 
+async def test_stablecoin_empty_coins_signals_data_unavailable():
+    """Guard against upstream schema drift: if DefiLlama renames tracked
+    symbols (USDT → USDT0 etc.), `coins` ends up empty and totals are 0.0.
+    The tool must surface "data unavailable" rather than render $0.00."""
+    from src.agent.tools_perception import get_stablecoin_supply
+    svc = AsyncMock()
+    svc.get_stablecoin_snapshot.return_value = {
+        "coins": [],
+        "total": StablecoinTotal(0.0, 0.0, 0.0),
+    }
+    deps = _make_deps(onchain=svc)
+    result = await get_stablecoin_supply(deps)
+    lower = result.lower()
+    assert "data unavailable" in lower
+    assert "$0.00" not in result
+
+
 async def test_stablecoin_has_no_subjective_labels():
     from src.agent.tools_perception import get_stablecoin_supply
     svc = AsyncMock()

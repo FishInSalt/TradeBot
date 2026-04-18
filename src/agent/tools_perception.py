@@ -877,6 +877,15 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
     if result is None:
         return "Stablecoin supply: temporarily unavailable"
 
+    if not result["coins"]:
+        # Guard against upstream schema drift (e.g. DefiLlama renaming USDT →
+        # USDT0): neither tracked symbol matched, so totals would render as
+        # $0.00 — misleading. Signal "data unavailable" instead.
+        return (
+            "Stablecoin supply: data unavailable "
+            "(no tracked symbols found in response)"
+        )
+
     lines = ["=== Stablecoin Supply ==="]
     for coin in result["coins"]:
         lines.append(
