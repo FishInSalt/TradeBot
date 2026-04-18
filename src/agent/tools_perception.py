@@ -691,3 +691,204 @@ async def get_higher_timeframe_view(
         ])
 
     return "\n".join(sections)
+
+
+def _fmt_signed_dollars(v: float) -> str:
+    """Format a signed dollar amount in $M or $B (spec §3.3 output format)."""
+    abs_v = abs(v)
+    sign = "+" if v >= 0 else "-"
+    if abs_v >= 1e9:
+        return f"{sign}${abs_v / 1e9:,.2f}B"
+    if abs_v >= 1e6:
+        return f"{sign}${abs_v / 1e6:,.2f}M"
+    return f"{sign}${abs_v:,.0f}"
+
+
+def _fmt_big_usd(v: float) -> str:
+    """Positive-only T/B/M formatter for cumulative AUM, totals."""
+    if v >= 1e12:
+        return f"${v / 1e12:.2f}T"
+    if v >= 1e9:
+        return f"${v / 1e9:.2f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.2f}M"
+    return f"${v:,.0f}"
+
+
+async def get_macro_context(deps: TradingDeps) -> str:
+    """Cross-market macro snapshot: crypto totals + FRED + US equities.
+
+    Output is fact-only (spec §3.2): no 'strong dollar' / 'risk-on' labels.
+    FRED values include `as of YYYY-MM-DD` so the Agent sees each reading's
+    real observation date (DTWEXBGS has ~1-week report delay).
+    """
+    if deps.macro is None:
+        return "Macro service not configured."
+
+    try:
+        snap = await deps.macro.get_snapshot()
+    except Exception:
+        logger.warning("Macro snapshot fetch failed", exc_info=True)
+        return "Macro context: temporarily unavailable"
+
+    sections: list[str] = []
+    any_available = False
+
+    # Crypto Market
+    cg_fields = (snap.btc_dominance, snap.eth_dominance,
+                 snap.total_mcap_usd, snap.mcap_change_24h_pct)
+    if all(v is None for v in cg_fields):
+        sections.append("=== Crypto Market ===\nTemporarily unavailable.")
+    else:
+        any_available = True
+        btc = f"{snap.btc_dominance:.2f}%" if snap.btc_dominance is not None else "N/A"
+        eth = f"{snap.eth_dominance:.2f}%" if snap.eth_dominance is not None else "N/A"
+        mcap = _fmt_big_usd(snap.total_mcap_usd) if snap.total_mcap_usd else "N/A"
+        chg = f"{snap.mcap_change_24h_pct:+.2f}%" if snap.mcap_change_24h_pct is not None else "N/A"
+        sections.append(
+            "=== Crypto Market ===\n"
+            f"BTC.D: {btc} | ETH.D: {eth} | Total Mcap: {mcap} (24h: {chg})"
+        )
+
+    # US Macro (FRED)
+    fred_fields = (snap.usd_index_broad_tw, snap.vix, snap.treasury_10y,
+                   snap.spread_10y_2y, snap.inflation_10y)
+    if all(v is None for v in fred_fields):
+        sections.append("=== US Macro (FRED) ===\nTemporarily unavailable.")
+    else:
+        any_available = True
+        lines = ["=== US Macro (FRED) ==="]
+        if snap.usd_index_broad_tw is not None:
+            o = snap.usd_index_broad_tw
+            lines.append(f"USD Index (Broad TW): {o.value:.2f} (as of {o.date})")
+        if snap.vix is not None:
+            o = snap.vix
+            lines.append(f"VIX: {o.value:.2f} (as of {o.date})")
+        if snap.treasury_10y is not None:
+            o = snap.treasury_10y
+            lines.append(f"10Y Treasury: {o.value:.2f}% (as of {o.date})")
+        if snap.spread_10y_2y is not None:
+            o = snap.spread_10y_2y
+            lines.append(f"2s10s Spread: {o.value:+.2f}% (as of {o.date})")
+        if snap.inflation_10y is not None:
+            o = snap.inflation_10y
+            lines.append(f"10Y Inflation Expectation: {o.value:.2f}% (as of {o.date})")
+        sections.append("\n".join(lines))
+
+    # US Equities (Alpha Vantage)
+    if snap.spy is None and snap.qqq is None:
+        sections.append("=== US Equities (Alpha Vantage) ===\nTemporarily unavailable.")
+    else:
+        any_available = True
+        lines = ["=== US Equities (Alpha Vantage) ==="]
+        if snap.spy is not None:
+            lines.append(
+                f"SPY: ${snap.spy.price:,.2f} (24h: {snap.spy.change_pct:+.2f}%)"
+            )
+        if snap.qqq is not None:
+            lines.append(
+                f"QQQ: ${snap.qqq.price:,.2f} (24h: {snap.qqq.change_pct:+.2f}%)"
+            )
+        sections.append("\n".join(lines))
+
+    if not any_available:
+        return "Macro context: all sources temporarily unavailable"
+
+    return "\n\n".join(sections)
+
+
+async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
+    """US BTC + ETH spot ETF daily net flows + cumulative AUM.
+
+    Emits a trailing footer reminding the Agent that today's value may be
+    revised T+1 — this is an operational fact (spec §3.6) needed in-context
+    to avoid misreading same-day values.
+    """
+    if deps.crypto_etf is None:
+        return "ETF flows service not configured."
+
+    import asyncio
+
+    btc_result, eth_result = await asyncio.gather(
+        deps.crypto_etf.get_etf_flows("BTC", days),
+        deps.crypto_etf.get_etf_flows("ETH", days),
+        return_exceptions=True,
+    )
+    btc = None if isinstance(btc_result, Exception) else btc_result
+    eth = None if isinstance(eth_result, Exception) else eth_result
+
+    def _render_section(label: str, flows) -> str:
+        # Three-state rendering per spec §3.5:
+        #   None → outage ("temporarily unavailable")
+        #   []   → data-gap ("insufficient data" — window too short)
+        #   list → normal
+        if flows is None:
+            return f"=== {label} Spot ETF Flows (US) ===\nTemporarily unavailable."
+        if not flows:
+            return (
+                f"=== {label} Spot ETF Flows (US) ===\n"
+                f"Insufficient data in requested window."
+            )
+        lines = [f"=== {label} Spot ETF Flows (US) ==="]
+        net_total = 0.0
+        for i, entry in enumerate(flows):
+            suffix = f"  (cum: {_fmt_big_usd(entry.cumulative_usd)})" if i == 0 else ""
+            lines.append(
+                f"{entry.date}: {_fmt_signed_dollars(entry.net_inflow_usd)}{suffix}"
+            )
+            net_total += entry.net_inflow_usd
+        lines.append(f"{len(flows)}-day net: {_fmt_signed_dollars(net_total)}")
+        return "\n".join(lines)
+
+    sections = [
+        _render_section("BTC", btc),
+        _render_section("ETH", eth),
+    ]
+
+    if btc is None and eth is None:
+        return "ETF flows: temporarily unavailable"
+
+    # Footer: operational facts the Agent needs in-context (spec §3.6).
+    # The trading-day count mirrors the `days` parameter — spec §3.3 shows
+    # "7" in the example because default days=7; the f-string keeps this
+    # accurate when the agent requests a different window.
+    sections.append(
+        f"Note: Past {days} trading days (weekends/holidays excluded).\n"
+        "Note: Issuer-reported; today's value may be revised T+1."
+    )
+
+    return "\n\n".join(sections)
+
+
+async def get_stablecoin_supply(deps: TradingDeps) -> str:
+    """USDT + USDC total supply + 7-day change.
+
+    Output is fact-only (spec §3.4): no 'dry powder' / 'capital entering'.
+    """
+    if deps.onchain is None:
+        return "Onchain service not configured."
+
+    try:
+        result = await deps.onchain.get_stablecoin_snapshot()
+    except Exception:
+        logger.warning("Stablecoin snapshot fetch failed", exc_info=True)
+        return "Stablecoin supply: temporarily unavailable"
+
+    if result is None:
+        return "Stablecoin supply: temporarily unavailable"
+
+    lines = ["=== Stablecoin Supply ==="]
+    for coin in result["coins"]:
+        lines.append(
+            f"{coin.symbol}: {_fmt_big_usd(coin.circulating_usd)} "
+            f"(7d: {_fmt_signed_dollars(coin.change_7d_usd)}, "
+            f"{coin.change_7d_pct:+.2f}%)"
+        )
+    total = result["total"]
+    lines.append(
+        f"Total Stablecoin Mcap: {_fmt_big_usd(total.total_circulating_usd)} "
+        f"(7d: {_fmt_signed_dollars(total.total_change_7d_usd)}, "
+        f"{total.total_change_7d_pct:+.2f}%)"
+    )
+
+    return "\n".join(lines)
