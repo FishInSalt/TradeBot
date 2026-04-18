@@ -127,6 +127,59 @@ async def test_cache_hit_skips_upstream_call():
     assert svc._cg.fetch_global.call_count == cg_calls_first
 
 
+async def test_av_cache_invalidated_on_ttl_state_transition(monkeypatch):
+    """PR#14 review I2: a weekend-cached SPY entry (TTL=12h) must NOT survive
+    past Monday market-open (current-call TTL=30min). Without
+    `invalidate_stale`, a 10h-old entry would still be served because
+    10h < 12h stored TTL — the fix honors the current-call TTL against
+    entry age, so 10h > 30min → refetch."""
+    import src.integrations.macro.service as service_module
+    import src.utils.cache as cache_module
+
+    svc = _make_service()
+    svc._cg.fetch_global.return_value = {
+        "btc_dominance": None, "eth_dominance": None,
+        "total_mcap_usd": None, "mcap_change_24h_pct": None,
+    }
+    svc._fred.fetch_latest.return_value = None
+
+    quotes = [
+        EquityQuote("SPY", 500.00, 0.0, "2026-04-17"),  # Friday close (fetched Sun)
+        EquityQuote("QQQ", 450.00, 0.0, "2026-04-17"),
+        EquityQuote("SPY", 510.00, 1.0, "2026-04-20"),  # Mon 10:00 live price
+        EquityQuote("QQQ", 460.00, 1.0, "2026-04-20"),
+    ]
+    svc._av.fetch_quote.side_effect = quotes
+
+    # Controllable fake clock — set before each get_snapshot invocation.
+    now = {"t": 100.0}
+    monkeypatch.setattr(cache_module.time, "monotonic", lambda: now["t"])
+
+    # TTL returns change between calls.
+    current_ttl = {"v": 12 * 3600.0}
+    monkeypatch.setattr(
+        service_module, "alpha_vantage_ttl_seconds",
+        lambda: current_ttl["v"],
+    )
+
+    # First snapshot: weekend, TTL=12h, stored at t=100.
+    now["t"] = 100.0
+    current_ttl["v"] = 12 * 3600.0
+    await svc.get_snapshot()
+    assert svc._av.fetch_quote.call_count == 2  # SPY + QQQ fresh fetch
+
+    # Second snapshot 10h later: Monday market-hours, TTL=30min. 10h > 30min
+    # → invalidate_stale drops entry → refetch. If invalidate_stale were not
+    # called, the 10h-old entry (< 12h stored TTL) would be a cache HIT.
+    now["t"] = 100.0 + 10 * 3600.0
+    current_ttl["v"] = 30 * 60.0
+    snap = await svc.get_snapshot()
+
+    assert svc._av.fetch_quote.call_count == 4  # 2 refetches
+    assert snap.spy.price == 510.00  # Monday live, not Friday close
+    assert snap.qqq.price == 460.00
+
+
 async def test_close_closes_http_when_owned():
     from src.integrations.macro.service import MacroService
     svc = MacroService(fred_key="k", av_key="k", cg_key="k")  # http=None → owned

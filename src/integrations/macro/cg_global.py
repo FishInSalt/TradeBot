@@ -31,7 +31,11 @@ class CoinGeckoGlobalClient:
             raise RateLimitHit("CoinGecko rate limited")
         resp.raise_for_status()
 
-        data = resp.json().get("data", {})
+        # `or {}` guards against top-level `{"data": null}` — .get() returns
+        # None (not the default) when the key exists with a null value, which
+        # would then AttributeError on the nested .get() calls below. Same
+        # idiom as sosovalue.py and defillama.py.
+        data = resp.json().get("data") or {}
         mcap_pct = data.get("market_cap_percentage", {}) or {}
         total_mcap = data.get("total_market_cap", {}) or {}
 

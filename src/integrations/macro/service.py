@@ -114,13 +114,21 @@ class MacroService:
 
     async def _fetch_av_all(self) -> dict[str, EquityQuote | None]:
         """SPY + QQQ serially (1 req/sec limit). Per-symbol TTL picked at
-        call time — weekend/after-hours caches live longer (spec §5.2)."""
+        call time — weekend/after-hours caches live longer (spec §5.2).
+
+        `invalidate_stale` honors the current-call TTL against entry age
+        rather than the stored TTL. Without it, a Sunday-evening write with
+        TTL=12h would survive through Monday ~11am open, serving Friday's
+        close during active trading.
+        """
         result: dict[str, EquityQuote | None] = {}
         for sym in ("SPY", "QQQ"):
             ttl = alpha_vantage_ttl_seconds()
+            key = f"av:{sym}"
+            self._cache.invalidate_stale(key, ttl)
             try:
                 result[sym] = await self._cache.get_or_fetch(
-                    f"av:{sym}", ttl,
+                    key, ttl,
                     lambda s=sym: self._av.fetch_quote(s),
                 )
             except RateLimitHit:

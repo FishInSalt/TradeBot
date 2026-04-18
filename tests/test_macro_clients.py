@@ -209,6 +209,23 @@ async def test_cg_global_null_nested_fields_return_nones():
     assert data["mcap_change_24h_pct"] is None
 
 
+async def test_cg_global_top_level_null_data_returns_nones():
+    """Guard against `{"data": null}` at the top level. `.get("data", {})`
+    returns None when the key exists with a null value — the `or {}` cascade
+    must prevent the subsequent nested `.get()` calls from AttributeError-ing."""
+    from src.integrations.macro.cg_global import CoinGeckoGlobalClient
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"data": None})
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinGeckoGlobalClient(http, api_key="k")
+        data = await client.fetch_global()
+    assert data["btc_dominance"] is None
+    assert data["eth_dominance"] is None
+    assert data["total_mcap_usd"] is None
+    assert data["mcap_change_24h_pct"] is None
+
+
 # ===== Alpha Vantage =====
 
 AV_RESPONSE_SPY = {
