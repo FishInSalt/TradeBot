@@ -128,6 +128,12 @@ class AlphaVantageClient:
                 # retries respect the 1 req/sec hard limit.
                 self._last_fetch_at = time.monotonic()
 
+            # ORDER MATTERS: the 429 branch MUST precede the `is_error` branch.
+            # httpx's `resp.is_error` returns True for ANY status >= 400 (so it
+            # includes 429). If these two checks were reordered or merged, a 429
+            # would silently fall into the 4xx/5xx path that does NOT set
+            # `consumed_quota = True`, breaking quota tracking for the exact
+            # signal that matters most (AV-enforced hard rate limit).
             if resp.status_code == 429:
                 # Hard 429: AV enforced quota — count as consumed.
                 consumed_quota = True
