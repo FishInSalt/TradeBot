@@ -310,7 +310,7 @@ async def test_get_market_data_four_segments():
         "bb_upper": 75100.0, "bb_middle": 74750.0, "bb_lower": 74400.0,
         "atr_14": 85.2, "volume_ratio": 1.35,
     }
-    deps.technical.format_for_llm.return_value = "RSI(14): 52.88 (neutral)\nMA(20): 74750.00"
+    deps.technical.format_for_llm.return_value = "RSI(14): 52.88\nMA(20): 74750.00 (price vs MA: +0.2%)"
 
     result = await get_market_data(deps)
     # Four segment headers
@@ -345,7 +345,7 @@ async def test_get_market_data_default_params():
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
         "atr_14": 80.0, "volume_ratio": 1.0,
     }
-    deps.technical.format_for_llm.return_value = "RSI(14): 50.00 (neutral)"
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
     result = await get_market_data(deps)
     # Should have called with deps.symbol and deps.timeframe
@@ -372,7 +372,7 @@ async def test_get_market_data_1h_atr_no_qualitative_label():
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
         "atr_14": 850.0, "volume_ratio": 1.0,
     }
-    deps.technical.format_for_llm.return_value = "RSI(14): 50.00 (neutral)"
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
     result = await get_market_data(deps, timeframe="1h")
     # ATR line should exist with value and percentage
@@ -382,6 +382,45 @@ async def test_get_market_data_1h_atr_no_qualitative_label():
     assert "low volatility" not in result
     assert "moderate" not in result
     assert "high volatility" not in result
+
+
+async def test_get_market_data_5m_atr_no_qualitative_label():
+    """5m timeframe must NOT emit ATR qualitative labels — symmetric with 1h.
+
+    Regression guard: previously the 5m branch rendered
+    "low volatility / moderate / high volatility" based on pct thresholds.
+    N5 cleanup removes this; this test prevents label regrowth.
+    """
+    from src.agent.tools_perception import get_market_data
+
+    deps = _make_deps()
+    deps.timeframe = "5m"
+    n = 100
+    deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [1000 + i * 300000 for i in range(n)],
+        "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
+        "low": np.full(n, 74700.0), "close": np.full(n, 74880.0),
+        "volume": np.full(n, 125.0),
+    })
+    deps.technical.compute_indicators.return_value = {
+        "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
+        "atr_14": 85.2, "volume_ratio": 1.0,
+    }
+    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
+
+    result = await get_market_data(deps, timeframe="5m")
+    assert "ATR(14): 85.20" in result
+    assert "5m candles" in result
+    # NO qualitative labels
+    assert "low volatility" not in result
+    assert "moderate" not in result
+    assert "high volatility" not in result
+    # Volume label also gone (Task 6 removes it)
+    assert "above normal" not in result
+    # "normal" alone is too common to grep safely; use "— normal" marker
+    assert "— normal" not in result
 
 
 async def test_get_market_data_truncated_data():

@@ -11,14 +11,14 @@ def test_summarize_get_market_data():
         "Price: 84200.50 | Bid: 84190.00 | Ask: 84210.00\n"
         "24h High: 85000.00 | Low: 83000.00 | Volume: 1234.56\n\n"
         "=== Technical Indicators (15m) ===\n"
-        "RSI(14): 62.30 (neutral)\n"
-        "MA(20): 84000.00 (price above — bullish)\n"
-        "MA(50): 83500.00 (price above — bullish)\n"
-        "MACD: 50.00 | Signal: 45.00 | Histogram: 5.00 (bullish)\n"
-        "BB: 85000 / 84000 / 83000 (price in upper half)\n\n"
+        "RSI(14): 62.30\n"
+        "MA(20): 84000.00 (price vs MA: +0.2%)\n"
+        "MA(50): 83500.00 (price vs MA: +0.8%)\n"
+        "MACD: 50.00 | Signal: 45.00 | Histogram: 5.00\n"
+        "BB: 85000 / 84000 / 83000 (position: 60% of band width)\n\n"
         "=== Market Context ===\n"
         "ATR(14): 101.04 (0.12% of price, 15m candles)\n"
-        "Volume: 500.0 (1.10x avg — normal)\n"
+        "Volume: 500.0 (1.10x avg)\n"
         "50-candle Range: 83000 — 85000\n\n"
         "=== Recent Candles (15m, last 50) ===\n"
         "Time           Open       High        Low      Close        Vol\n"
@@ -373,7 +373,7 @@ def test_is_tool_error_add_price_level_alert_immediate_trigger():
 def test_format_cycle_output_basic():
     from src.cli.display import format_cycle_output
     tool_calls = [
-        {"tool_name": "get_market_data", "content": "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30 (neutral)\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)", "outcome": "success"},
+        {"tool_name": "get_market_data", "content": "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)", "outcome": "success"},
         {"tool_name": "get_position", "content": "No open positions.", "outcome": "success"},
     ]
     result = format_cycle_output(
