@@ -92,15 +92,25 @@ def test_compute_indicators_short_data(short_ohlcv):
     assert indicators["atr_14"] is None
 
 
-def test_format_for_llm_5m_annotations(sample_ohlcv):
+def test_format_for_llm_is_fact_only(sample_ohlcv):
     from src.services.technical import TechnicalAnalysisService
     service = TechnicalAnalysisService()
     indicators = service.compute_indicators(sample_ohlcv)
     text = service.format_for_llm(indicators, current_price=65000.0, timeframe="5m")
     assert "RSI" in text
     assert "MA(20)" in text
-    # Should have annotation words
-    assert any(word in text.lower() for word in ("neutral", "bullish", "bearish", "overbought", "oversold"))
+    # Fact-only: no qualitative / directional labels
+    for label in ("neutral", "bullish", "bearish", "overbought", "oversold",
+                  "upper half", "lower half", "price above", "price below"):
+        assert label not in text.lower()
+    # Positive anchors: guard against "deleted label but forgot to add the
+    # fact-only replacement" regression — negative-only assertions would pass
+    # silently if MA/BB rendered without the new phrasing.
+    assert "price vs MA:" in text
+    assert any(
+        phrase in text
+        for phrase in ("of band width", "above upper band", "below lower band")
+    )
     # format_for_llm should NOT include ATR or Volume (those are in Market Context)
     assert "ATR" not in text
     assert "Volume" not in text
@@ -112,3 +122,66 @@ def test_format_for_llm_none_values(short_ohlcv):
     indicators = service.compute_indicators(short_ohlcv)
     text = service.format_for_llm(indicators, current_price=65000.0, timeframe="5m")
     assert "N/A" in text
+
+
+def test_format_for_llm_bb_position_at_lower_band():
+    """When price == bb_lower, position should be 0% of band width."""
+    from src.services.technical import TechnicalAnalysisService
+    service = TechnicalAnalysisService()
+    indicators = {
+        "rsi_14": 50.0, "ma_20": 100.0, "ma_50": 100.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 110.0, "bb_middle": 100.0, "bb_lower": 90.0,
+        "atr_14": None, "volume_ratio": None,
+    }
+    text = service.format_for_llm(indicators, current_price=90.0, timeframe="5m")
+    # BB line must mention 0% position
+    bb_line = next(line for line in text.split("\n") if line.startswith("BB:"))
+    assert "0%" in bb_line
+    assert "of band width" in bb_line
+    assert "above" not in bb_line and "below" not in bb_line
+
+
+def test_format_for_llm_bb_position_at_upper_band():
+    """When price == bb_upper, position should be 100% of band width."""
+    from src.services.technical import TechnicalAnalysisService
+    service = TechnicalAnalysisService()
+    indicators = {
+        "rsi_14": 50.0, "ma_20": 100.0, "ma_50": 100.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 110.0, "bb_middle": 100.0, "bb_lower": 90.0,
+        "atr_14": None, "volume_ratio": None,
+    }
+    text = service.format_for_llm(indicators, current_price=110.0, timeframe="5m")
+    bb_line = next(line for line in text.split("\n") if line.startswith("BB:"))
+    assert "100%" in bb_line
+    assert "of band width" in bb_line
+
+
+def test_format_for_llm_bb_position_edge_case_equal_bands():
+    """When bb_upper == bb_lower (extremely narrow band), position segment must be N/A.
+
+    Acceptance criteria (spec §6.1):
+      - position segment inside BB line parentheses contains 'N/A'
+      - position segment must NOT contain '%' or numeric digits (prevents future
+        regression writing 'N/A%' or '0%' as a compromise)
+    """
+    from src.services.technical import TechnicalAnalysisService
+    import re
+    service = TechnicalAnalysisService()
+    indicators = {
+        "rsi_14": 50.0, "ma_20": 100.0, "ma_50": 100.0,
+        "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
+        "bb_upper": 100.0, "bb_middle": 100.0, "bb_lower": 100.0,
+        "atr_14": None, "volume_ratio": None,
+    }
+    text = service.format_for_llm(indicators, current_price=100.0, timeframe="5m")
+    bb_line = next(line for line in text.split("\n") if line.startswith("BB:"))
+    # Extract content inside the parentheses (position segment only)
+    m = re.search(r"\(([^)]*)\)", bb_line)
+    assert m, f"BB line missing parentheses: {bb_line}"
+    pos_segment = m.group(1)
+    assert "N/A" in pos_segment
+    # Guard against future 'N/A%' or '0%' compromise
+    assert "%" not in pos_segment
+    assert not any(ch.isdigit() for ch in pos_segment)

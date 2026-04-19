@@ -68,17 +68,7 @@ class TechnicalAnalysisService:
         # RSI
         rsi = indicators.get("rsi_14")
         if rsi is not None:
-            if rsi < 30:
-                label = "oversold"
-            elif rsi < 45:
-                label = "bearish"
-            elif rsi <= 55:
-                label = "neutral"
-            elif rsi <= 70:
-                label = "bullish"
-            else:
-                label = "overbought"
-            lines.append(f"RSI(14): {rsi:.2f} ({label})")
+            lines.append(f"RSI(14): {rsi:.2f}")
         else:
             lines.append("RSI(14): N/A")
 
@@ -86,8 +76,8 @@ class TechnicalAnalysisService:
         for period in (20, 50):
             ma = indicators.get(f"ma_{period}")
             if ma is not None:
-                rel = "price above — bullish" if current_price > ma else "price below — bearish"
-                lines.append(f"MA({period}): {ma:.2f} ({rel})")
+                dist_pct = (current_price - ma) / ma * 100
+                lines.append(f"MA({period}): {ma:.2f} (price vs MA: {dist_pct:+.1f}%)")
             else:
                 lines.append(f"MA({period}): N/A")
 
@@ -96,25 +86,31 @@ class TechnicalAnalysisService:
         signal = indicators.get("macd_signal")
         hist = indicators.get("macd_histogram")
         if all(v is not None for v in (macd, signal, hist)):
-            if hist > 0:
-                label = "bullish"
-            elif hist < 0:
-                label = "bearish"
-            else:
-                label = "neutral"
-            lines.append(f"MACD: {macd:.2f} | Signal: {signal:.2f} | Histogram: {hist:.2f} ({label})")
+            lines.append(
+                f"MACD: {macd:.2f} | Signal: {signal:.2f} | Histogram: {hist:.2f}"
+            )
         else:
             lines.append(f"MACD: {_fmt(macd)} | Signal: {_fmt(signal)} | Histogram: {_fmt(hist)}")
 
-        # Bollinger Bands
+        # Bollinger Bands — fact-only: position as % of band width inside band;
+        # 'X% above/below upper/lower band' when price breaks out. Anchor inside
+        # the band is band width; anchor outside is the band edge (asymmetric on
+        # purpose — band is the reference frame, see spec §2.3 #2).
         bb_u = indicators.get("bb_upper")
         bb_m = indicators.get("bb_middle")
         bb_l = indicators.get("bb_lower")
         if all(v is not None for v in (bb_u, bb_m, bb_l)):
-            if current_price > bb_m:
-                pos = "price in upper half"
+            if bb_u == bb_l:
+                pos = "position: N/A"
+            elif current_price < bb_l:
+                pct_below = (bb_l - current_price) / bb_l * 100
+                pos = f"{pct_below:.1f}% below lower band"
+            elif current_price > bb_u:
+                pct_above = (current_price - bb_u) / bb_u * 100
+                pos = f"{pct_above:.1f}% above upper band"
             else:
-                pos = "price in lower half"
+                pct = (current_price - bb_l) / (bb_u - bb_l) * 100
+                pos = f"position: {pct:.0f}% of band width"
             lines.append(f"BB: {bb_u:.0f} / {bb_m:.0f} / {bb_l:.0f} ({pos})")
         else:
             lines.append(f"BB: {_fmt(bb_u)} / {_fmt(bb_m)} / {_fmt(bb_l)}")
