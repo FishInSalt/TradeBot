@@ -126,6 +126,11 @@ async def test_fred_5xx_error_does_not_leak_api_key():
     assert "SECRET-FRED-KEY" not in str(exc_info.value)
     assert "500" in str(exc_info.value)
     assert "VIXCLS" in str(exc_info.value)
+    # Independent defense-in-depth (M6): guard the URL query-param name, not
+    # just the api_key value. If someone reinstates raise_for_status(), the
+    # default httpx message serializes `api_key=...` — catchable here even if
+    # the key value is too short or dummy to trip the SECRET-* assertion.
+    assert "api_key=" not in str(exc_info.value)
 
 
 # ===== CoinGecko /global =====
@@ -340,6 +345,9 @@ async def test_av_5xx_error_does_not_leak_api_key():
     assert "SECRET-AV-KEY" not in str(exc_info.value)
     assert "500" in str(exc_info.value)
     assert "SPY" in str(exc_info.value)
+    # Independent defense-in-depth (M6): guard the URL query-param name. AV
+    # uses `apikey=` (no underscore). See FRED counterpart for rationale.
+    assert "apikey=" not in str(exc_info.value)
 
 
 async def test_av_throttles_consecutive_calls(monkeypatch):
