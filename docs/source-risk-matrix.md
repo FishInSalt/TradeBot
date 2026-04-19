@@ -382,7 +382,7 @@
 
 **建议动作**：
 
-- 🔴 本批可修（PR C §4.6）：audit 确认**无其他 log 打印包含 request.url** 的路径（非常有信心已覆盖但做一次正式 pass）
+- 🔴 本批可修（PR C §3.6）：audit 确认**无其他 log 打印包含 request.url** 的路径（非常有信心已覆盖但做一次正式 pass）
 - 🟢 观察期记录：FRED 5xx 错误率、DTWEXBGS 停更时段
 
 ---
@@ -405,7 +405,7 @@
 3. **AV 数据延迟**：GLOBAL_QUOTE 最晚可能延迟 15min（AV 免费档特性）
 4. **`change_pct` 语义**：AV 的 `10. change percent` 是 close-to-previous-close，N3 spec 已改为 "as of <trading_day>" 标注
 5. **API key 泄露风险**：同 FRED，key 在 URL query param；已用手工 HTTPStatusError 防护
-6. **Throttle instance-level**：`_last_fetch_at` 是 instance attribute，多实例场景会绕过 throttle（`alpha_vantage.py:60`）
+6. **Throttle instance-level**：`_last_fetch_at` 是 instance attribute，多实例场景会绕过 throttle（`alpha_vantage.py:60`）——保持现状（spec §3.5 决定 AV throttle 不升级为 class-level）
 
 **检测特征**：
 
@@ -426,8 +426,8 @@
 
 **建议动作**：
 
-- 🔴 本批可修（PR C §4.1）：加 daily count warning at 80% 阈值
-- 🔴 本批可修（PR C §4.5 M6）：`_last_fetch_at` 改为 class-level（多实例防御）
+- 🔴 本批可修（PR C §3.1）：加 daily count warning at 80% 阈值
+- 🟢 设计决策（spec §3.5）：AV throttle 保持 instance-level，无需改动
 - 🟢 观察期记录：budget 耗尽频率（特别是周四周五）、`latest_trading_day` 延迟模式
 
 ---
@@ -469,7 +469,7 @@
 
 **建议动作**：
 
-- 🔴 本批可修（PR C §4.5 M3）：`change_7d_pct` 在 `prev_week == 0` 时渲染 "N/A"（类型 `float | None`）—— *注意：此项属 DefiLlama 的 stablecoin snapshot，不是 SoSoValue；此处记录是因为风险类别相同*
+- 🔴 本批可修（PR C §3.5 M3）：`change_7d_pct` 在 `prev_week == 0` 时渲染 "N/A"（类型 `float | None`）—— *注意：此项属 DefiLlama 的 stablecoin snapshot，不是 SoSoValue；此处记录是因为风险类别相同*
 - 🟢 观察期记录：footer "weekends/holidays excluded" 是否与 SoSoValue 实际返回一致（通过 date 值范围 verify）
 
 ---
@@ -485,10 +485,10 @@
 
 **攻击面**：
 
-1. **Schema drift — 多链分条**：若上游某天改为"USDT-Ethereum / USDT-Tron" 分别一行，当前 `{a.get("symbol"): a for a in raw}` 会**静默后者覆盖前者**，丢失数据。**已识别，PR C §4.2 即将修复**
-2. **大小写/whitespace 敏感**：当前 symbol 匹配是精确字符串，`"usdt"` / `" USDT"` 会不匹配。**已识别，PR C §4.2 即将修复**
+1. **Schema drift — 多链分条**：若上游某天改为"USDT-Ethereum / USDT-Tron" 分别一行，当前解析会出现同 symbol 多行情形。已识别，PR C §3.2 修复：归一化（大小写 + whitespace trim）+ first-occurrence 胜出；多行同 symbol 触发 `logger.warning` 作为 schema drift 信号（DefiLlama 当前 top-level `circulating` 已是全链合计（`defillama.py:16-17`），求和会重复计数）。
+2. **大小写/whitespace 敏感**：当前 symbol 匹配是精确字符串，`"usdt"` / `" USDT"` 会不匹配。**已识别，PR C §3.2 即将修复**
 3. **Symbol 重命名**：DefiLlama 若将 USDT 重命名为 "USDT0" 之类，会导致两个 symbol 都不匹配 → 渲染 "no tracked symbols found"（service 层已有 guard，见 `tools_perception.py:900-906`）
-4. **`circulatingPrevWeek` 字段缺失**：当前 `.get(...) or {}` + `.get("peggedUSD", 0.0)` 返回 0.0，**导致 pct 固定 0.0%**（PR C §4.5 M3 将改为 None）
+4. **`circulatingPrevWeek` 字段缺失**：当前 `.get(...) or {}` + `.get("peggedUSD", 0.0)` 返回 0.0，**导致 pct 固定 0.0%**（PR C §3.5 M3 将改为 None）
 5. **链上合约事件**：合约 mint/burn 大额变动会被 reflect，但如果合约本身被黑（theoretically），数据会错误
 6. **DefiLlama 服务中断**：完全公开无 auth，单点故障风险存在
 
@@ -509,8 +509,8 @@
 
 **建议动作**：
 
-- 🔴 本批可修（PR C §4.2）：symbol 归一化（`.strip().upper()`）+ 多行同 symbol 聚合求和
-- 🔴 本批可修（PR C §4.5 M3）：`prev_week == 0` 时 pct 改 `float | None` + 渲染 "N/A"
+- 🔴 本批可修（PR C §3.2）：symbol 归一化（`.strip().upper()`）+ 多行同 symbol 触发 `logger.warning`（schema drift）+ first-occurrence 胜出（DefiLlama top-level `circulating` 已是全链合计（`defillama.py:16-17`），求和会重复计数）
+- 🔴 本批可修（PR C §3.5 M3）：`prev_week == 0` 时 pct 改 `float | None` + 渲染 "N/A"
 - 🟢 观察期记录：DefiLlama 服务稳定性、symbol list 变动
 
 ---
@@ -529,20 +529,20 @@
 
 ### 本批可修项（🔴 直接立即修）
 
-从盘点中识别出的改动，**PR A 后立即并入 PR C**（按已在现有 spec §4 列出，此处确认覆盖）：
+从盘点中识别出的改动，**PR A 后立即并入 PR C**（按已在现有 spec §3 列出，此处确认覆盖）：
 
 | 源 | 改动 | 现有计划位置 |
 |----|------|------------|
-| DefiLlama | symbol 归一化（`.strip().upper()` + 多行求和） | PR C §4.2 |
-| DefiLlama | `change_7d_pct` 在 `prev_week == 0` 时改 `float \| None` | PR C §4.5 M3 |
-| Alpha Vantage | daily count warning at 80% 阈值 | PR C §4.1 |
-| Alpha Vantage | `_last_fetch_at` 改 class-level | PR C §4.5 M6 |
+| DefiLlama | symbol 归一化（`.strip().upper()`）+ 多行同 symbol 触发 drift WARN + first-occurrence 胜出 | PR C §3.2 |
+| DefiLlama | `change_7d_pct` 在 `prev_week == 0` 时改 `float \| None` | PR C §3.5 M3 |
+| Alpha Vantage | daily count warning at 80% 阈值 | PR C §3.1 |
+| Alpha Vantage | `_last_fetch_at` 保持 instance-level（见 spec §3.5 说明） | — |
 | 本地指标 (BB) | 输出改 "% of band width" + zero-width 边界 | PR B §3.2 #4 |
-| FRED | 最终 audit 确认无 URL log 泄露 | PR C §4.6 |
+| FRED | 最终 audit 确认无 URL log 泄露 | PR C §3.6 |
 
 **本 PR A 盘点过程中发现的新项**（不在之前 PR C 清单中）：
 
-- **无**。本次盘点**未发现**此前 spec 未识别的新 schema 漏洞或 key 泄露点。所有 🔴 本批可修项都已在 PR C §4 预定范围内。
+- **无**。本次盘点**未发现**此前 spec 未识别的新 schema 漏洞或 key 泄露点。所有 🔴 本批可修项都已在 PR C §3 预定范围内。
 
 ### 观察期记录项（🟢）
 

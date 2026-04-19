@@ -593,8 +593,22 @@ async def get_derivatives_data(
     return "\n".join(sections)
 
 
-# Unit label for "N periods ago" rendered below range highs/lows.
+# Unit labels for "N periods ago" rendered below range highs/lows.
 _UNIT_LABEL = {"4h": "4h-bars", "1d": "days", "1w": "weeks", "1M": "months"}
+_UNIT_LABEL_SINGULAR = {"4h": "4h-bar", "1d": "day", "1w": "week", "1M": "month"}
+
+
+def _htf_ago_fmt(n: int, timeframe: Literal["4h", "1d", "1w", "1M"]) -> str:
+    """Render the 'N periods ago' suffix with proper latest/singular/plural
+    grammar (spec §3.5 M1). 0 periods ago renders as 'latest' (the max/min
+    landed on the most recent bar); 1 period uses the singular label; N>=2
+    uses the plural label. Placed at module scope alongside _UNIT_LABEL*
+    for consistency with other HTF helpers."""
+    if n == 0:
+        return "latest"
+    if n == 1:
+        return f"1 {_UNIT_LABEL_SINGULAR[timeframe]} ago"
+    return f"{n} {_UNIT_LABEL[timeframe]} ago"
 
 
 async def get_higher_timeframe_view(
@@ -613,10 +627,10 @@ async def get_higher_timeframe_view(
         df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=250)
     except Exception:
         logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
-        return "Higher timeframe view: temporarily unavailable"
+        return f"Higher timeframe view ({timeframe}, {symbol}): temporarily unavailable"
 
     if df.empty:
-        return "Higher timeframe view: temporarily unavailable"
+        return f"Higher timeframe view ({timeframe}, {symbol}): insufficient data"
 
     last_close = float(df["close"].iloc[-1])
 
@@ -639,10 +653,8 @@ async def get_higher_timeframe_view(
             continue
         dist_pct = (last_close - ma) / ma * 100.0
         sections.append(
-            f"MA{period}: {ma:,.2f} (price {dist_pct:+.1f}%)"
+            f"MA{period}: {ma:,.2f} (price vs MA: {dist_pct:+.1f}%)"
         )
-
-    unit = _UNIT_LABEL[timeframe]
 
     # Range: last 100 periods. Reset index to 0-based integers so .idxmax()
     # returns a position, not a timestamp — defensive if market_data ever
@@ -659,8 +671,8 @@ async def get_higher_timeframe_view(
         sections.extend([
             "",
             "=== Range Position ===",
-            f"100-period High: {hi100:,.2f} ({hi_ago} {unit} ago)",
-            f"100-period Low:  {lo100:,.2f} ({lo_ago} {unit} ago)",
+            f"100-period High: {hi100:,.2f} ({_htf_ago_fmt(hi_ago, timeframe)})",
+            f"100-period Low:  {lo100:,.2f} ({_htf_ago_fmt(lo_ago, timeframe)})",
             f"Current price within range: {rng_pos:.1f}%",
         ])
 
@@ -700,6 +712,19 @@ def _fmt_big_usd(v: float) -> str:
     if v >= 1e6:
         return f"${v / 1e6:.2f}M"
     return f"${v:,.0f}"
+
+
+def _fmt_pct(v: float | None) -> str:
+    """Render a 7-day percentage change, tolerating None.
+
+    Returns 'N/A (no prior-week data)' when pct is None (OnchainService sets
+    change_7d_pct / total_change_7d_pct to None when prev_week == 0; §3.5 M3).
+    Sibling to _fmt_big_usd / _fmt_signed_dollars — module-level helper,
+    not inner-defined in get_stablecoin_supply.
+    """
+    if v is None:
+        return "N/A (no prior-week data)"
+    return f"{v:+.2f}%"
 
 
 async def get_macro_context(deps: TradingDeps) -> str:
@@ -800,11 +825,12 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     if deps.crypto_etf is None:
         return "ETF flows service not configured."
 
-    # Clamp mirrors CryptoEtfService.get_etf_flows (spec §3.3). Duplicated here
-    # so the footer's "Past N trading days" line uses the same value the
-    # service actually honors — otherwise a call like days=30 would render 14
-    # rows but claim "Past 30 trading days" in the footer.
-    days = max(1, min(days, 14))
+    # `days` parameter is clamped in CryptoEtfService.get_etf_flows
+    # (src/integrations/crypto_etf/service.py:47) — single source of truth.
+    # The footer below derives the rendered day-count from the service's
+    # actual result lengths, NOT the user-supplied `days`, so over-range
+    # requests (e.g., days=30) render "Past 14 trading days" consistent
+    # with the clamped value rather than the misleading "Past 30".
 
     import asyncio
 
@@ -854,13 +880,21 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
         return "ETF flows: temporarily unavailable"
 
     # Footer: operational facts the Agent needs in-context (spec §3.6).
-    # The trading-day count mirrors the `days` parameter. Only emit when at
-    # least one side actually rendered flow rows — a mix of outage (None) +
-    # data-gap ([]) has no "today's value" for the T+1 caveat to refer to,
-    # so the footer would be misleading noise.
+    # The trading-day count is derived from the service's actual result
+    # length — under the M2 single-clamp regime (§3.5), the clamp expression
+    # lives only in CryptoEtfService.get_etf_flows:47 and the tool layer
+    # reads the clamped outcome back from the result to keep the clamp
+    # logic in one place (DRY). When btc and eth are both non-empty,
+    # invariant len(btc) == len(eth) holds (same clamp + same parallel
+    # fetch path in CryptoEtfService); pick whichever is non-empty to read
+    # the rendered day count. Footer is emitted only when at least one
+    # side rendered flow rows — a mix of outage (None) + data-gap ([]) has
+    # no "today's value" for the T+1 caveat to refer to, so suppressing
+    # the footer avoids misleading noise.
     if btc or eth:
+        days_rendered = len(next((f for f in (btc, eth) if f), []))
         sections.append(
-            f"Note: Past {days} trading days (weekends/holidays excluded).\n"
+            f"Note: Past {days_rendered} trading days (weekends/holidays excluded).\n"
             "Note: Issuer-reported; today's value may be revised T+1."
         )
 
@@ -898,13 +932,13 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
         lines.append(
             f"{coin.symbol}: {_fmt_big_usd(coin.circulating_usd)} "
             f"(7d: {_fmt_signed_dollars(coin.change_7d_usd)}, "
-            f"{coin.change_7d_pct:+.2f}%)"
+            f"{_fmt_pct(coin.change_7d_pct)})"
         )
     total = result["total"]
     lines.append(
         f"Total Stablecoin Mcap: {_fmt_big_usd(total.total_circulating_usd)} "
         f"(7d: {_fmt_signed_dollars(total.total_change_7d_usd)}, "
-        f"{total.total_change_7d_pct:+.2f}%)"
+        f"{_fmt_pct(total.total_change_7d_pct)})"
     )
 
     return "\n".join(lines)
