@@ -150,3 +150,19 @@ async def test_unknown_symbol_does_not_trigger_drift_warning(caplog):
     assert len(drift_warnings) == 0, (
         f"expected zero drift warnings (DAI is untracked), got {len(drift_warnings)}"
     )
+
+
+async def test_prev_week_zero_returns_none_pct():
+    """prev_week == 0 must render pct as None (no misleading 0%)."""
+    svc = _make_service()
+    svc._client.fetch_stablecoins.return_value = [
+        _asset("USDT", 100e9, 0.0),  # prev_week=0
+    ]
+    result = await svc.get_stablecoin_snapshot()
+    by_sym = {s.symbol: s for s in result["coins"]}
+    assert by_sym["USDT"].change_7d_pct is None, (
+        "prev_week=0 should yield pct=None, not 0.0 (spec §3.5 M3)"
+    )
+    # total_prev may still be 0 if USDC is absent; exercise that too
+    total = result["total"]
+    assert total.total_change_7d_pct is None

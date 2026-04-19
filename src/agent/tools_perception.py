@@ -714,6 +714,19 @@ def _fmt_big_usd(v: float) -> str:
     return f"${v:,.0f}"
 
 
+def _fmt_pct(v: float | None) -> str:
+    """Render a 7-day percentage change, tolerating None.
+
+    Returns 'N/A (no prior-week data)' when pct is None (OnchainService sets
+    change_7d_pct / total_change_7d_pct to None when prev_week == 0; §3.5 M3).
+    Sibling to _fmt_big_usd / _fmt_signed_dollars — module-level helper,
+    not inner-defined in get_stablecoin_supply.
+    """
+    if v is None:
+        return "N/A (no prior-week data)"
+    return f"{v:+.2f}%"
+
+
 async def get_macro_context(deps: TradingDeps) -> str:
     """Cross-market macro snapshot: crypto totals + FRED + US equities.
 
@@ -919,13 +932,13 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
         lines.append(
             f"{coin.symbol}: {_fmt_big_usd(coin.circulating_usd)} "
             f"(7d: {_fmt_signed_dollars(coin.change_7d_usd)}, "
-            f"{coin.change_7d_pct:+.2f}%)"
+            f"{_fmt_pct(coin.change_7d_pct)})"
         )
     total = result["total"]
     lines.append(
         f"Total Stablecoin Mcap: {_fmt_big_usd(total.total_circulating_usd)} "
         f"(7d: {_fmt_signed_dollars(total.total_change_7d_usd)}, "
-        f"{total.total_change_7d_pct:+.2f}%)"
+        f"{_fmt_pct(total.total_change_7d_pct)})"
     )
 
     return "\n".join(lines)

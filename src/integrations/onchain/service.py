@@ -93,7 +93,10 @@ class OnchainService:
                 (asset.get("circulatingPrevWeek") or {}).get("peggedUSD", 0.0)
             )
             delta = circulating - prev_week
-            pct = (delta / prev_week * 100.0) if prev_week > 0 else 0.0
+            # M3 (spec §3.5): no prior-week baseline → pct is undefined. Use
+            # None to let the render layer emit 'N/A (no prior-week data)'
+            # instead of the misleading 0.0%.
+            pct = (delta / prev_week * 100.0) if prev_week > 0 else None
             coins.append(StablecoinSnapshot(
                 symbol=sym,
                 circulating_usd=circulating,
@@ -104,7 +107,9 @@ class OnchainService:
             total_prev += prev_week
 
         total_delta = total_circ - total_prev
-        total_pct = (total_delta / total_prev * 100.0) if total_prev > 0 else 0.0
+        total_pct = (
+            (total_delta / total_prev * 100.0) if total_prev > 0 else None
+        )
         total = StablecoinTotal(
             total_circulating_usd=total_circ,
             total_change_7d_usd=total_delta,

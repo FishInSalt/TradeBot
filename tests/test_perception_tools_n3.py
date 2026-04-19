@@ -674,3 +674,31 @@ async def test_stablecoin_has_no_subjective_labels():
     for label in ("dry powder", "capital entering", "sidelined",
                   "bullish", "bearish"):
         assert label not in lower, f"found subjective label '{label}'"
+
+
+async def test_stablecoin_render_handles_none_pct():
+    """When StablecoinSnapshot.change_7d_pct is None, render 'N/A (no prior-week data)' without TypeError."""
+    from src.agent.tools_perception import get_stablecoin_supply
+    from src.integrations.onchain.models import StablecoinSnapshot, StablecoinTotal
+
+    onchain = AsyncMock()
+    onchain.get_stablecoin_snapshot.return_value = {
+        "coins": [
+            StablecoinSnapshot(
+                symbol="USDT",
+                circulating_usd=100e9,
+                change_7d_usd=0.0,
+                change_7d_pct=None,
+            ),
+        ],
+        "total": StablecoinTotal(
+            total_circulating_usd=100e9,
+            total_change_7d_usd=0.0,
+            total_change_7d_pct=None,
+        ),
+    }
+    deps = _make_deps(onchain=onchain)
+    # Must not raise TypeError on `None` in {v:+.2f}%
+    result = await get_stablecoin_supply(deps)
+    assert "N/A" in result
+    assert "no prior-week data" in result
