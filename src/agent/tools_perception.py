@@ -60,29 +60,16 @@ async def get_market_data(
     atr = indicators.get("atr_14")
     if atr is not None and ticker.last > 0:
         pct = atr / ticker.last * 100
-        if timeframe == "5m":
-            if pct < 0.1:
-                atr_label = f"{pct:.2f}% of price — low volatility"
-            elif pct <= 0.3:
-                atr_label = f"{pct:.2f}% of price — moderate"
-            else:
-                atr_label = f"{pct:.2f}% of price — high volatility"
-        else:
-            atr_label = f"{pct:.2f}% of price, {timeframe} candles"
-        ctx_lines.append(f"ATR(14): {atr:.2f} ({atr_label})")
+        ctx_lines.append(
+            f"ATR(14): {atr:.2f} ({pct:.2f}% of price, {timeframe} candles)"
+        )
     else:
         ctx_lines.append("ATR(14): N/A")
 
     vr = indicators.get("volume_ratio")
     if vr is not None:
         raw_vol = df["volume"].iloc[-2] if len(df) >= 2 else df["volume"].iloc[-1]
-        if vr < 0.7:
-            vr_label = "low"
-        elif vr <= 1.3:
-            vr_label = "normal"
-        else:
-            vr_label = "above normal"
-        ctx_lines.append(f"Volume: {raw_vol:.1f} ({vr:.2f}x avg — {vr_label})")
+        ctx_lines.append(f"Volume: {raw_vol:.1f} ({vr:.2f}x avg)")
     else:
         ctx_lines.append("Volume: N/A")
 
