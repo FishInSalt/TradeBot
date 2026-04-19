@@ -52,6 +52,13 @@ def _make_ohlcv_df(n_rows: int, last_close: float = 75_234.50) -> pd.DataFrame:
     presence only, not numeric correctness of range position. If a future
     test asserts on the range-position number, replace this helper with a
     fixture that produces a less degenerate shape.
+
+    NOTE2 (post-_htf_ago_fmt): last-row max high means hi_ago=0 — the hi
+    range line renders "latest" (not "N days ago") after the §3.5 M1 change.
+    The lo range line still renders "99 days ago" (lo_ago=99 → plural), so
+    existing "days ago" / "4h-bars ago" / "weeks ago" / "months ago"
+    substring assertions in test_htf_view_period_label_for_* survive via
+    the lo-line alone.
     """
     base = last_close - (n_rows - 1) * 50
     rows = []
@@ -160,6 +167,8 @@ async def test_htf_view_upstream_failure_degrades():
     result = await get_higher_timeframe_view(deps, timeframe="1d")
 
     assert "temporarily unavailable" in result.lower()
+    # Context prefix added for clarity (spec §3.3)
+    assert "(1d, BTC/USDT:USDT)" in result
 
 
 async def test_htf_view_insufficient_data_for_ma200():
@@ -176,6 +185,122 @@ async def test_htf_view_insufficient_data_for_ma200():
     # MA200 should appear but flagged as insufficient.
     assert "MA200" in result
     assert "insufficient data" in result.lower()
+
+
+async def test_htf_empty_dataframe_returns_insufficient_data():
+    """Empty DataFrame (successful fetch but no rows) is a data-gap, not outage."""
+    from src.agent.tools_perception import get_higher_timeframe_view
+    import pandas as pd
+
+    market_data = AsyncMock()
+    market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
+        "timestamp": [], "open": [], "high": [], "low": [], "close": [], "volume": [],
+    })
+    deps = _make_deps(market_data=market_data)
+    result = await get_higher_timeframe_view(deps, timeframe="1d")
+
+    assert "insufficient data" in result.lower()
+    assert "temporarily unavailable" not in result.lower()
+    assert "(1d, BTC/USDT:USDT)" in result
+
+
+async def test_htf_ma_format_includes_vs_ma_prefix():
+    """HTF MA line aligns with PR B short-period MA: 'price vs MA: +X%'."""
+    from src.agent.tools_perception import get_higher_timeframe_view
+
+    market_data = AsyncMock()
+    market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
+    deps = _make_deps(market_data=market_data)
+    result = await get_higher_timeframe_view(deps, timeframe="1d")
+
+    # Must contain the new prefix; must NOT contain the old bare 'price +X%'
+    assert "(price vs MA:" in result
+    # Guard against regression to the old format
+    assert "(price +" not in result and "(price -" not in result
+
+
+async def test_htf_range_latest_when_zero_ago():
+    """When the max/min occurs on the last bar, render 'latest' instead of '0 X ago'."""
+    from src.agent.tools_perception import get_higher_timeframe_view
+    import pandas as pd
+
+    market_data = AsyncMock()
+    n = 100
+    # Fabricate a series where both the global high AND global low land on the
+    # very last bar (last bar has highest high AND lowest low — spike candle).
+    # hi_ago and lo_ago are both 0, so both range lines should render "latest".
+    rows = []
+    for i in range(n):
+        if i == n - 1:
+            rows.append({
+                "timestamp": i * 86_400_000,
+                "open": 100.0, "high": 200.0, "low": 50.0,
+                "close": 150.0, "volume": 1.0,
+            })
+        else:
+            rows.append({
+                "timestamp": i * 86_400_000,
+                "open": 100.0, "high": 110.0, "low": 90.0,
+                "close": 100.0, "volume": 1.0,
+            })
+    market_data.get_ohlcv_dataframe.return_value = pd.DataFrame(rows)
+    deps = _make_deps(market_data=market_data)
+    result = await get_higher_timeframe_view(deps, timeframe="1d")
+
+    # BOTH hi_ago=0 AND lo_ago=0 hold (spike bar is max high AND min low);
+    # both Range lines must render "latest". count==2 catches the partial-
+    # fix bug where only one line got updated.
+    lower = result.lower()
+    assert lower.count("latest") == 2, (
+        f"expected exactly 2 'latest' occurrences (hi + lo lines), got "
+        f"{lower.count('latest')}:\n{result}"
+    )
+    # Must NOT emit the old "0 days ago" / "0 4h-bars ago" phrasing
+    assert "0 day" not in lower
+    assert "0 4h-bar" not in lower
+    assert "0 week" not in lower
+    assert "0 month" not in lower
+
+
+async def test_htf_range_singular_when_one_ago():
+    """When hi_ago or lo_ago == 1, use singular 'day/week/4h-bar/month'."""
+    from src.agent.tools_perception import get_higher_timeframe_view
+    import pandas as pd
+
+    market_data = AsyncMock()
+    n = 100
+    # Spike on the second-to-last bar (index 98):
+    #   high=300.0  > all other highs (110.0)  → hi_ago = 1
+    #   low=90.0    < all other lows  (95.0)   → lo_ago = 1 (same bar drives both lines)
+    # Both range lines must therefore render "1 day ago".
+    rows = []
+    for i in range(n):
+        if i == n - 2:
+            rows.append({
+                "timestamp": i * 86_400_000,
+                "open": 100.0, "high": 300.0, "low": 90.0,
+                "close": 100.0, "volume": 1.0,
+            })
+        else:
+            rows.append({
+                "timestamp": i * 86_400_000,
+                "open": 100.0, "high": 110.0, "low": 95.0,
+                "close": 100.0, "volume": 1.0,
+            })
+    market_data.get_ohlcv_dataframe.return_value = pd.DataFrame(rows)
+    deps = _make_deps(market_data=market_data)
+    result = await get_higher_timeframe_view(deps, timeframe="1d")
+
+    # BOTH hi_ago=1 (spike high at n-2) AND lo_ago=1 (spike low at n-2) hold;
+    # both Range lines must render "1 day ago" (singular). count==2 catches
+    # the partial-fix bug where only one line uses singular.
+    lower = result.lower()
+    assert lower.count("1 day ago") == 2, (
+        f"expected exactly 2 '1 day ago' occurrences (hi + lo lines), got "
+        f"{lower.count('1 day ago')}:\n{result}"
+    )
+    # Must NOT emit the plural form anywhere (would indicate singular logic missed)
+    assert "1 days ago" not in lower
 
 
 # ===== get_macro_context =====
