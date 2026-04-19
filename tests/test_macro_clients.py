@@ -376,3 +376,113 @@ async def test_av_throttles_consecutive_calls(monkeypatch):
     assert 0.9 <= sleep_durations[0] <= 1.2, (
         f"throttle sleep duration {sleep_durations[0]} outside expected band"
     )
+
+
+async def test_daily_count_increments_on_success(monkeypatch):
+    """Each successful fetch_quote increments the daily counter."""
+    import src.integrations.macro.alpha_vantage as av_module
+
+    async def fake_sleep(duration: float) -> None:
+        return None
+    monkeypatch.setattr(av_module.asyncio, "sleep", fake_sleep)
+
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=AV_RESPONSE_SPY)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = av_module.AlphaVantageClient(http, api_key="k")
+        assert client._daily_count == 0
+        await client.fetch_quote("SPY")
+        assert client._daily_count == 1
+        await client.fetch_quote("QQQ")
+        assert client._daily_count == 2
+
+
+async def test_daily_count_warning_at_threshold_only_once(monkeypatch, caplog):
+    """Warning fires at count>=20 the FIRST time only; repeats same day do not spam."""
+    import logging
+    import src.integrations.macro.alpha_vantage as av_module
+
+    async def fake_sleep(duration: float) -> None:
+        return None
+    monkeypatch.setattr(av_module.asyncio, "sleep", fake_sleep)
+
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=AV_RESPONSE_SPY)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = av_module.AlphaVantageClient(http, api_key="k")
+        # Fast-forward: simulate 19 prior calls having already consumed quota
+        client._daily_count = 19
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=av_module.__name__):
+            await client.fetch_quote("SPY")  # count goes 19 → 20 → warning
+            warnings_after_first = [
+                r for r in caplog.records if r.levelno == logging.WARNING
+                and "daily budget" in r.getMessage()
+            ]
+            await client.fetch_quote("SPY")  # count → 21, no repeat
+            await client.fetch_quote("SPY")  # count → 22, no repeat
+            warnings_after_third = [
+                r for r in caplog.records if r.levelno == logging.WARNING
+                and "daily budget" in r.getMessage()
+            ]
+    assert len(warnings_after_first) == 1, (
+        f"expected 1 budget warning at count=20, got {len(warnings_after_first)}"
+    )
+    assert len(warnings_after_third) == 1, (
+        f"expected still 1 (no repeat); got {len(warnings_after_third)}"
+    )
+    # Spec §7.2 requires "(date %s UTC)" in the message for observation-period
+    # log/alert correlation. Guard against format drift dropping the UTC label.
+    assert "UTC" in warnings_after_first[0].getMessage(), (
+        f"missing UTC marker in warning: {warnings_after_first[0].getMessage()!r}"
+    )
+    # Also verify the actual date string (from self._daily_count_date) is in
+    # the warning, not a stale or unrelated date. Guards against regressions
+    # where someone accidentally interpolates a different datetime source.
+    assert client._daily_count_date in warnings_after_first[0].getMessage(), (
+        f"expected date {client._daily_count_date!r} in warning message, got: "
+        f"{warnings_after_first[0].getMessage()!r}"
+    )
+
+
+async def test_daily_count_resets_on_new_date(monkeypatch):
+    """When UTC date string changes, _daily_count and _warned_today both reset."""
+    import src.integrations.macro.alpha_vantage as av_module
+
+    async def fake_sleep(duration: float) -> None:
+        return None
+    monkeypatch.setattr(av_module.asyncio, "sleep", fake_sleep)
+
+    # Mutable single-element holder lets the test control WHEN the date flips,
+    # independent of HOW MANY TIMES _increment_daily_count reads it. Previous
+    # iter-based approach enumerated exact call counts and would StopIteration
+    # if the implementation added any extra _utc_date_str() lookup (e.g. in
+    # a log format call) — that's implementation coupling, not behavior.
+    current_date = ["2026-04-19"]
+    monkeypatch.setattr(av_module, "_utc_date_str",
+                        lambda: current_date[0])
+
+    transport = httpx.MockTransport(
+        lambda req: httpx.Response(200, json=AV_RESPONSE_SPY)
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = av_module.AlphaVantageClient(http, api_key="k")
+        assert client._daily_count_date == "2026-04-19"
+        client._warned_today = True  # simulate prior same-day warning
+        await client.fetch_quote("SPY")  # same day, count → 1
+        assert client._daily_count == 1
+        assert client._warned_today is True  # not reset
+        await client.fetch_quote("SPY")  # same day, count → 2
+        assert client._daily_count == 2
+
+        # Flip the clock — NEXT fetch must observe a new day and reset.
+        current_date[0] = "2026-04-20"
+        await client.fetch_quote("SPY")
+        # On the new day: counter resets first, THEN this call increments it
+        assert client._daily_count == 1, (
+            f"expected count=1 after date flip (reset + this call), got {client._daily_count}"
+        )
+        assert client._daily_count_date == "2026-04-20"
+        assert client._warned_today is False, "warned flag should reset on date flip"
