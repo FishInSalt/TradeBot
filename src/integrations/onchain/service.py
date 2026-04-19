@@ -46,8 +46,39 @@ class OnchainService:
             logger.warning("DefiLlama fetch failed", exc_info=True)
             return None
 
-        by_sym = {a.get("symbol"): a for a in raw if a.get("symbol")}
+        # === Phase 1: normalize + first-occurrence dedup ===
+        # Original `{a.get("symbol"): a for a in raw if a.get("symbol")}` had
+        # two gaps: case/whitespace sensitivity, and silent overwrite when
+        # multiple rows share a symbol. Fix: strip+upper, keep first-
+        # occurrence, emit schema-drift WARN on duplicates within tracked
+        # symbols. Untracked symbols skip silently to avoid log noise.
+        #
+        # IMPORTANT: DefiLlama top-level `circulating` is already
+        # across-every-chain (see defillama.py:16-17). Multi-row same-symbol
+        # should be treated as schema drift (e.g., if DefiLlama splits into
+        # per-chain rows), NOT summed — summing would double-count under the
+        # current schema.
+        by_sym: dict[str, dict] = {}
+        seen_duplicates: set[str] = set()
+        for asset in raw:
+            sym_raw = asset.get("symbol")
+            if not sym_raw:
+                continue
+            sym = sym_raw.strip().upper()
+            if sym not in _TRACKED_SYMBOLS:
+                continue
+            if sym in by_sym:
+                seen_duplicates.add(sym)
+                continue  # first occurrence wins
+            by_sym[sym] = asset
+        if seen_duplicates:
+            logger.warning(
+                "DefiLlama schema drift: multiple rows for symbol(s) %s; "
+                "using first occurrence. Review if aggregation semantics changed.",
+                ", ".join(sorted(seen_duplicates)),
+            )
 
+        # === Phase 2: extract per-symbol + build totals ===
         coins: list[StablecoinSnapshot] = []
         total_circ = 0.0
         total_prev = 0.0

@@ -1,4 +1,5 @@
 """Tests for OnchainService — stablecoin aggregation."""
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -85,3 +86,67 @@ async def test_close_closes_http_when_owned():
     svc._owns_http = True
     await svc.close()
     svc._http.aclose.assert_awaited_once()
+
+
+async def test_multi_row_same_symbol_first_occurrence_wins_with_warning(caplog):
+    """Multiple rows for the same symbol: first occurrence kept, drift WARN logged."""
+    svc = _make_service()
+    svc._client.fetch_stablecoins.return_value = [
+        _asset("USDT", 100e9, 98e9),
+        _asset("USDT", 50e9, 48e9),  # second-occurrence duplicate
+    ]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING,
+                        logger="src.integrations.onchain.service"):
+        result = await svc.get_stablecoin_snapshot()
+    by_sym = {s.symbol: s for s in result["coins"]}
+    assert by_sym["USDT"].circulating_usd == pytest.approx(100e9), (
+        "first occurrence must win (not overwritten by second)"
+    )
+    drift_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "schema drift" in r.getMessage().lower()
+    ]
+    assert len(drift_warnings) == 1, (
+        f"expected exactly 1 schema-drift warning, got {len(drift_warnings)}"
+    )
+    assert "USDT" in drift_warnings[0].getMessage()
+
+
+async def test_symbol_normalization_whitespace_and_case():
+    """Symbol lookup is tolerant of 'USDT ' / ' usdt' / 'Usdt' variants."""
+    svc = _make_service()
+    svc._client.fetch_stablecoins.return_value = [
+        _asset(" usdt", 100e9, 98e9),  # lowercase + leading whitespace
+        _asset("USDC ", 50e9, 49e9),   # trailing whitespace
+    ]
+    result = await svc.get_stablecoin_snapshot()
+    by_sym = {s.symbol: s for s in result["coins"]}
+    assert "USDT" in by_sym
+    assert "USDC" in by_sym
+    assert by_sym["USDT"].circulating_usd == pytest.approx(100e9)
+    assert by_sym["USDC"].circulating_usd == pytest.approx(50e9)
+
+
+async def test_unknown_symbol_does_not_trigger_drift_warning(caplog):
+    """Untracked symbols (e.g., DAI) silently skip — no drift WARN noise."""
+    svc = _make_service()
+    svc._client.fetch_stablecoins.return_value = [
+        _asset("USDT", 100e9, 98e9),
+        _asset("DAI", 5e9, 5e9),
+        _asset("DAI", 3e9, 3e9),  # duplicate of an untracked symbol
+    ]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING,
+                        logger="src.integrations.onchain.service"):
+        result = await svc.get_stablecoin_snapshot()
+    by_sym = {s.symbol: s for s in result["coins"]}
+    assert "USDT" in by_sym
+    assert "DAI" not in by_sym
+    drift_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "schema drift" in r.getMessage().lower()
+    ]
+    assert len(drift_warnings) == 0, (
+        f"expected zero drift warnings (DAI is untracked), got {len(drift_warnings)}"
+    )
