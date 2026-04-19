@@ -812,11 +812,12 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     if deps.crypto_etf is None:
         return "ETF flows service not configured."
 
-    # Clamp mirrors CryptoEtfService.get_etf_flows (spec §3.3). Duplicated here
-    # so the footer's "Past N trading days" line uses the same value the
-    # service actually honors — otherwise a call like days=30 would render 14
-    # rows but claim "Past 30 trading days" in the footer.
-    days = max(1, min(days, 14))
+    # `days` parameter is clamped in CryptoEtfService.get_etf_flows
+    # (src/integrations/crypto_etf/service.py:47) — single source of truth.
+    # The footer below derives the rendered day-count from the service's
+    # actual result lengths, NOT the user-supplied `days`, so over-range
+    # requests (e.g., days=30) render "Past 14 trading days" consistent
+    # with the clamped value rather than the misleading "Past 30".
 
     import asyncio
 
@@ -866,13 +867,21 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
         return "ETF flows: temporarily unavailable"
 
     # Footer: operational facts the Agent needs in-context (spec §3.6).
-    # The trading-day count mirrors the `days` parameter. Only emit when at
-    # least one side actually rendered flow rows — a mix of outage (None) +
-    # data-gap ([]) has no "today's value" for the T+1 caveat to refer to,
-    # so the footer would be misleading noise.
+    # The trading-day count is derived from the service's actual result
+    # length — under the M2 single-clamp regime (§3.5), the clamp expression
+    # lives only in CryptoEtfService.get_etf_flows:47 and the tool layer
+    # reads the clamped outcome back from the result to keep the clamp
+    # logic in one place (DRY). When btc and eth are both non-empty,
+    # invariant len(btc) == len(eth) holds (same clamp + same parallel
+    # fetch path in CryptoEtfService); pick whichever is non-empty to read
+    # the rendered day count. Footer is emitted only when at least one
+    # side rendered flow rows — a mix of outage (None) + data-gap ([]) has
+    # no "today's value" for the T+1 caveat to refer to, so suppressing
+    # the footer avoids misleading noise.
     if btc or eth:
+        days_rendered = len(next((f for f in (btc, eth) if f), []))
         sections.append(
-            f"Note: Past {days} trading days (weekends/holidays excluded).\n"
+            f"Note: Past {days_rendered} trading days (weekends/holidays excluded).\n"
             "Note: Issuer-reported; today's value may be revised T+1."
         )
 
