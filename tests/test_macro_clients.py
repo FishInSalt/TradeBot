@@ -486,3 +486,30 @@ async def test_daily_count_resets_on_new_date(monkeypatch):
         )
         assert client._daily_count_date == "2026-04-20"
         assert client._warned_today is False, "warned flag should reset on date flip"
+
+
+async def test_daily_count_does_not_increment_on_http_error(monkeypatch):
+    """HTTP 4xx/5xx (non-429) assumed non-billed by AV — counter must not increment.
+
+    Guards spec §3.1's industry assumption that AV does not charge for error
+    responses. PR #19 implemented this via the consumed_quota flag staying
+    False in the `is_error` branch. If observation period finds AV DOES
+    charge for error responses, flip this assertion to == 1, extend the
+    increment path in fetch_quote, and rename this test to
+    `test_daily_count_increments_on_http_error` for regression closure.
+    """
+    import src.integrations.macro.alpha_vantage as av_module
+
+    async def fake_sleep(duration: float) -> None:
+        return None
+    monkeypatch.setattr(av_module.asyncio, "sleep", fake_sleep)
+
+    transport = httpx.MockTransport(lambda req: httpx.Response(500))
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = av_module.AlphaVantageClient(http, api_key="k")
+        assert client._daily_count == 0
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.fetch_quote("SPY")
+        assert client._daily_count == 0, (
+            "HTTP 5xx should NOT consume quota per spec §3.1 assumption"
+        )
