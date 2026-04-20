@@ -195,3 +195,66 @@ async def test_session_new_fields_have_defaults():
         assert s.token_budget == 500000
         assert s.last_active_at is None
     await engine.dispose()
+
+
+async def test_tool_call_model_create():
+    """Verify ToolCall model can be inserted and queried with required fields."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session as SessionModel, ToolCall
+    from datetime import datetime, timezone
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+
+    async with get_session(engine) as db:
+        db.add(SessionModel(id="s1", name="test-session"))
+        await db.commit()
+
+    async with get_session(engine) as db:
+        db.add(ToolCall(
+            session_id="s1",
+            cycle_id="cyc12345",
+            tool_name="get_market_data",
+            status="ok",
+            duration_ms=250,
+            error_type=None,
+        ))
+        await db.commit()
+
+    from sqlalchemy import select
+    async with get_session(engine) as db:
+        result = await db.execute(select(ToolCall))
+        rows = result.scalars().all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.session_id == "s1"
+        assert row.cycle_id == "cyc12345"
+        assert row.tool_name == "get_market_data"
+        assert row.status == "ok"
+        assert row.duration_ms == 250
+        assert row.error_type is None
+        assert isinstance(row.created_at, datetime)
+        assert row.created_at is not None
+
+
+async def test_tool_call_cycle_id_not_null():
+    """cycle_id is NOT NULL — insert without it should fail."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session as SessionModel, ToolCall
+    from sqlalchemy.exc import IntegrityError
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+
+    async with get_session(engine) as db:
+        db.add(SessionModel(id="s1", name="t"))
+        await db.commit()
+
+    async with get_session(engine) as db:
+        db.add(ToolCall(
+            session_id="s1",
+            cycle_id=None,  # type: ignore[arg-type]
+            tool_name="x",
+            status="ok",
+            duration_ms=1,
+        ))
+        with pytest.raises(IntegrityError):
+            await db.commit()
