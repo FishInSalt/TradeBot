@@ -232,8 +232,10 @@ async def test_tool_call_model_create():
         assert row.status == "ok"
         assert row.duration_ms == 250
         assert row.error_type is None
+        # created_at: assert type only; aiosqlite strips tzinfo on read-back
+        # even for DateTime(timezone=True) columns (see Session/TradeAction etc.
+        # for same pattern). Re-check tzinfo preservation if migrating to Postgres.
         assert isinstance(row.created_at, datetime)
-        assert row.created_at is not None
 
 
 async def test_tool_call_cycle_id_not_null():
