@@ -63,3 +63,27 @@ def test_trading_deps_creation():
         approval_enabled=True,
     )
     assert deps.symbol == "BTC/USDT:USDT"
+
+
+def test_registered_tool_names_matches_agent_tools():
+    """Drift防护: REGISTERED_TOOL_NAMES 与 create_trader_agent 实际注册的
+    tool 一一对应。加 tool 忘更新常量会导致 scripts/tool_call_summary.py
+    从'零调用'表静默丢工具 → 本测试立即暴露。"""
+    from src.agent.trader import REGISTERED_TOOL_NAMES, create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    actual = set(agent._function_toolset.tools)
+    declared = set(REGISTERED_TOOL_NAMES)
+
+    assert actual == declared, (
+        f"Drift detected:\n"
+        f"  In agent but not in REGISTERED_TOOL_NAMES: {actual - declared}\n"
+        f"  In REGISTERED_TOOL_NAMES but not in agent: {declared - actual}"
+    )
+    assert len(REGISTERED_TOOL_NAMES) == 26, (
+        f"Expected 26 tools (15+10+1), got {len(REGISTERED_TOOL_NAMES)}"
+    )
+    # 无重复
+    assert len(REGISTERED_TOOL_NAMES) == len(set(REGISTERED_TOOL_NAMES)), \
+        "REGISTERED_TOOL_NAMES contains duplicates"

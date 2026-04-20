@@ -146,3 +146,25 @@ class SimOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     frozen_margin: Mapped[float] = mapped_column(Float, default=0.0)
     leverage: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ToolCall(Base):
+    """每次 agent tool 调用一行（观察期埋点）。Append-only，无 UPDATE/DELETE 接口。"""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (
+        Index("ix_tool_calls_session_tool_time", "session_id", "tool_name", "created_at"),
+        Index("ix_tool_calls_cycle", "cycle_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"))
+    # cycle_id: 应用层软关联 DecisionLog.cycle_id（不声明 DB FK —— 时序不允许）
+    # NOT NULL: 运行时所有 tool 调用都在 run_agent_cycle 内，cycle_id 必有值
+    cycle_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(60))
+    status: Mapped[str] = mapped_column(String(10))  # "ok" / "error"
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    # error_type 存异常类名（非 message / traceback），避免敏感数据泄露
+    error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

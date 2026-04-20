@@ -100,6 +100,7 @@ async def run_agent_cycle(
         return None
 
     cycle_id = str(uuid.uuid4())[:8]
+    deps.cycle_id = cycle_id   # propagate to ToolCallRecorder via ctx.deps (§3.4 of spec)
     prompt = (
         f"You have been woken up by a {trigger_type} trigger.\n"
         f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"

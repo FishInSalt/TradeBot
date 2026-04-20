@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pydantic_ai import Agent, RunContext
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
 from src.agent.persona import generate_system_prompt
@@ -23,7 +24,7 @@ class TradingDeps:
     technical: TechnicalAnalysisService
     memory: MemoryService
     session_id: str  # UUID from sessions table, must be explicitly set
-    db_engine: object | None = None  # AsyncEngine, typed as object to avoid circular import
+    db_engine: AsyncEngine | None = None
     approval_gate: object | None = None  # ApprovalGate instance
     approval_enabled: bool = True
     wake_min_minutes: int = 1
@@ -35,13 +36,24 @@ class TradingDeps:
     macro: object | None = None  # MacroService; typed as object to avoid circular import
     crypto_etf: object | None = None  # CryptoEtfService; typed as object to avoid circular import
     onchain: object | None = None  # OnchainService; typed as object to avoid circular import
+    cycle_id: str | None = None  # Mutated by run_agent_cycle before agent.run(); see §3.3 of spec
 
 
 def create_trader_agent(
     model: str, persona_config: PersonaConfig
 ) -> Agent[TradingDeps, str]:
+    # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
+    # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
+    from src.services.tool_call_recorder import ToolCallRecorder
+
     system_prompt = generate_system_prompt(persona_config)
-    agent = Agent(model, deps_type=TradingDeps, output_type=str, instructions=system_prompt)
+    agent = Agent(
+        model,
+        deps_type=TradingDeps,
+        output_type=str,
+        instructions=system_prompt,
+        capabilities=[ToolCallRecorder()],
+    )
 
     # === Perception Tools ===
 
@@ -298,3 +310,40 @@ def create_trader_agent(
         return await _impl(ctx.deps, category, content, importance)
 
     return agent
+
+
+# REGISTERED_TOOL_NAMES: 与 `@agent.tool` 装饰顺序保持一致（感知 → 执行 → memory）。
+# 供 scheduler 日志、scripts/tool_call_summary.py 脚本、漂移防护测试统一引用。
+# 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
+# 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
+REGISTERED_TOOL_NAMES: list[str] = [
+    # --- 感知 (15) ---
+    "get_market_data",
+    "get_position",
+    "get_account_balance",
+    "get_open_orders",
+    "get_trade_journal",
+    "get_memories",
+    "get_active_alerts",
+    "get_performance",
+    "get_market_news",
+    "get_critical_alerts",
+    "get_derivatives_data",
+    "get_higher_timeframe_view",
+    "get_macro_context",
+    "get_etf_flows",
+    "get_stablecoin_supply",
+    # --- 执行 (10) ---
+    "open_position",
+    "close_position",
+    "set_stop_loss",
+    "set_take_profit",
+    "adjust_leverage",
+    "set_price_alert",
+    "cancel_order",
+    "add_price_level_alert",
+    "set_next_wake",
+    "place_limit_order",
+    # --- memory (1) ---
+    "save_memory",
+]
