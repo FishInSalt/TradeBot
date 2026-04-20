@@ -113,7 +113,7 @@ B 足够覆盖 §0.2 列出的全部观察问题；C 引入敏感数据脱敏规
 | `tests/test_metrics.py` | 追加 6 测试 |
 | `tests/test_trader_agent.py` | 追加 `test_registered_tool_names_matches_agent_tools` 漂移防护 |
 
-**总规模估算**：~200 行源码（recorder 50 + script 30 + ToolCall model 20 + MetricsService 方法 60-80 + trader.py / app.py 散点 10-20）+ ~250 行测试。测试总数 **664 → 677**（新增 13）。
+**总规模估算**：~200 行源码（recorder 50 + script 30 + ToolCall model 20 + MetricsService 方法 60-80 + trader.py / app.py 散点 10-20）+ ~250 行测试。测试总数 **664 → 681**（新增 17）。
 
 ---
 
@@ -569,15 +569,24 @@ set_next_wake                      0   ─       ─       ─     never
 
 ### 5.1 测试矩阵
 
-**Recorder 单元测试（`tests/test_tool_call_recorder.py`，新文件，5 测试）**：
+**Storage 模型测试（`tests/test_storage.py` 扩展，2 测试）**：
+
+| 测试 | 覆盖 |
+|------|------|
+| `test_tool_call_model_create` | 插入并回查，验证所有字段 round-trip（tool_name / status / duration_ms / cycle_id / session_id / error_type / created_at）|
+| `test_tool_call_cycle_id_not_null` | `cycle_id=None` 插入必触发 `IntegrityError`（DB 层 NOT NULL 约束）|
+
+**Recorder 单元测试（`tests/test_tool_call_recorder.py`，新文件，7 测试）**：
 
 | 测试 | 覆盖 |
 |------|------|
 | `test_records_successful_tool_call` | 正常路径：tool 返回 → 写入一行 `status=ok`、`duration_ms>=0`、`error_type=None` |
 | `test_records_failed_tool_call` | tool 抛异常 → 写入一行 `status=error`、`error_type="ValueError"`；**异常仍向外 raise**（验证不吞） |
+| `test_control_flow_exception_not_recorded` | pydantic_ai 控制流异常（`ModelRetry` 等）直通不写 metrics 行；异常仍 raise |
 | `test_recorder_does_not_break_tool_on_db_failure` | mock engine 让 commit 抛 → 外层 except 吞掉 → tool 返回结果正常给 agent；`log.error` 被触发 |
-| `test_recorder_raises_runtime_error_when_cycle_id_missing` | `deps.cycle_id=None` 时 → `RuntimeError` 被外层 except 捕获 → `log.error` 暴露（不炸 agent）。另可并测 `db_engine=None` 同路径 |
-| `test_duration_monotonic` | duration_ms 从 `time.monotonic()` 计算，>=0；用小 sleep 验证量级 |
+| `test_recorder_raises_runtime_error_when_cycle_id_missing` | `deps.cycle_id=None` 时 → `RuntimeError` 被外层 except 捕获 → `log.error` 暴露（不炸 agent）|
+| `test_recorder_raises_runtime_error_when_db_engine_missing` | `deps.db_engine=None` 时同路径 |
+| `test_duration_ms_monotonic` | duration_ms 从 `time.monotonic()` 计算，>=0；用小 sleep 验证量级 |
 
 **MetricsService 单元测试（`tests/test_metrics.py` 扩展，6 测试）**：
 
@@ -604,7 +613,7 @@ set_next_wake                      0   ─       ─       ─     never
 
 **删除的测试**：原计划的 `test_recorder_capability_registered` —— pydantic_ai 1.78 把 capabilities 存在私有 `agent._root_capability`（CombinedCapability 包装），无公有访问器。结构断言会 AttributeError；集成测试的写入验证已足够兜底"capability 被注册"这一契约。
 
-**总新增测试：5 + 6 + 1 + 1 = 13**。664 → **677 passing**。
+**总新增测试：2 + 7 + 6 + 1 + 1 = 17**。664 → **681 passing**。
 
 ### 5.2 不写单测的部分
 
@@ -635,7 +644,7 @@ set_next_wake                      0   ─       ─       ─     never
 
 **部署验证路径**：
 1. 本地 dev 删除 / 新建 sqlite → `init_db()` → 建表含 `tool_calls`。
-2. `uv run pytest` → 677 全绿。
+2. `uv run pytest` → 681 全绿。
 3. 启动 sim session → 触发一次 cycle → `sqlite3 <db> "SELECT * FROM tool_calls LIMIT 5"` 确认写入。
 4. 跑 `uv run python scripts/tool_call_summary.py --help` 确认入口可执行（不依赖 wheel 打包 —— `scripts/` 不在 `[tool.hatch.build.targets.wheel].packages` 内，也不需要在；直接文件系统路径调用）。
 5. 跑 `uv run python scripts/tool_call_summary.py --session <name>` 确认读取 + 格式化。
@@ -653,9 +662,9 @@ set_next_wake                      0   ─       ─       ─     never
    - 普通异常：recorder 写 `status=error` 行 + re-raise
    - 控制流异常（`ModelRetry` / `CallDeferred` / `ApprovalRequired` / `SkipToolExecution` / `ToolRetryError`）：**不写** metrics 行 + re-raise（框架控制流原行为不受影响）
 5. **metrics 失败不影响 agent**：DB 写失败 / precondition check 失败（`RuntimeError`）→ `log.error` + 不影响 tool 返回给 agent。
-6. **读路径**：`MetricsService.get_tool_call_summary(...)` 按 §4.1 签名返回；§5.1 的 6 个 MetricsService 单测全绿（与其他测试合计 13 项）。
+6. **读路径**：`MetricsService.get_tool_call_summary(...)` 按 §4.1 签名返回；§5.1 的 6 个 MetricsService 单测全绿（与其他新增测试合计 17 项）。
 7. **薄脚本**：`scripts/tool_call_summary.py` 能连 DB、查询、打印对齐表格；手动 smoke pass。
-8. **回归**：现有 664 测试全绿；新增 13 测试全绿；总 677。
+8. **回归**：现有 664 测试全绿；新增 17 测试全绿；总 681。
 9. **B 档字段原则**：tool_calls 表无 args / result_preview / traceback 列。
 
 ---
