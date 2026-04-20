@@ -50,8 +50,15 @@ def resolve_db_url(settings_path: Path) -> str:
 
 
 def fmt_ago(dt: datetime) -> str:
-    """Human-readable 'X ago' string."""
+    """Human-readable 'X ago' string.
+
+    SQLite/aiosqlite strips tzinfo on read-back even when column is
+    DateTime(timezone=True). We insert UTC via `_utcnow()`, so treating
+    a naive read-back value as UTC is safe.
+    """
     now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     delta = now - dt
     secs = int(delta.total_seconds())
     if secs < 60:
