@@ -42,8 +42,18 @@ class TradingDeps:
 def create_trader_agent(
     model: str, persona_config: PersonaConfig
 ) -> Agent[TradingDeps, str]:
+    # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
+    # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
+    from src.services.tool_call_recorder import ToolCallRecorder
+
     system_prompt = generate_system_prompt(persona_config)
-    agent = Agent(model, deps_type=TradingDeps, output_type=str, instructions=system_prompt)
+    agent = Agent(
+        model,
+        deps_type=TradingDeps,
+        output_type=str,
+        instructions=system_prompt,
+        capabilities=[ToolCallRecorder()],
+    )
 
     # === Perception Tools ===
 
