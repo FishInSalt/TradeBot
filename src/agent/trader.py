@@ -310,3 +310,40 @@ def create_trader_agent(
         return await _impl(ctx.deps, category, content, importance)
 
     return agent
+
+
+# REGISTERED_TOOL_NAMES: 与 `@agent.tool` 装饰顺序保持一致（感知 → 执行 → memory）。
+# 供 scheduler 日志、scripts/tool_call_summary.py 脚本、漂移防护测试统一引用。
+# 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
+# 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
+REGISTERED_TOOL_NAMES: list[str] = [
+    # --- 感知 (15) ---
+    "get_market_data",
+    "get_position",
+    "get_account_balance",
+    "get_open_orders",
+    "get_trade_journal",
+    "get_memories",
+    "get_active_alerts",
+    "get_performance",
+    "get_market_news",
+    "get_critical_alerts",
+    "get_derivatives_data",
+    "get_higher_timeframe_view",
+    "get_macro_context",
+    "get_etf_flows",
+    "get_stablecoin_supply",
+    # --- 执行 (10) ---
+    "open_position",
+    "close_position",
+    "set_stop_loss",
+    "set_take_profit",
+    "adjust_leverage",
+    "set_price_alert",
+    "cancel_order",
+    "add_price_level_alert",
+    "set_next_wake",
+    "place_limit_order",
+    # --- memory (1) ---
+    "save_memory",
+]
