@@ -603,7 +603,7 @@ set_next_wake                      0   ─       ─       ─     never
 
 | 测试 | 覆盖 |
 |------|------|
-| `test_registered_tool_names_matches_agent_tools` | 断言 `set(REGISTERED_TOOL_NAMES) == set(create_trader_agent(...)._function_toolset.tools)`；复用现有 `tests/test_trader_agent.py:20` 的同款 accessor，保持脆弱路径唯一（若 pydantic_ai 改内部结构，所有同款测试一起挂，预期一致）；防未来加 tool 忘更新常量导致脚本从"零调用"表静默丢工具 |
+| `test_registered_tool_names_matches_agent_tools` | 断言 `set(REGISTERED_TOOL_NAMES) == set(create_trader_agent(...)._function_toolset.tools)`；复用现有 `tests/test_trader_agent.py:20` 的同款 accessor，保持脆弱路径唯一（若 pydantic_ai 改内部结构，所有同款测试一起挂，预期一致）；防未来加 tool 忘更新常量导致脚本从"零调用"表静默丢工具。plan-stage grep (2026-04-20) 确认 pydantic_ai 1.78 `agent/` 无公开 tool accessor（`toolsets` property 返回 `Sequence[AbstractToolset]` 而非 tools 列表），`_function_toolset.tools` 仍是唯一路径，脆弱性 accepted |
 
 **集成测试（`tests/test_tool_call_instrumentation.py`，新文件，1 测试）**：
 
