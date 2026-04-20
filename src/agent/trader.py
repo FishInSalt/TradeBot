@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pydantic_ai import Agent, RunContext
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
 from src.agent.persona import generate_system_prompt
@@ -23,7 +24,7 @@ class TradingDeps:
     technical: TechnicalAnalysisService
     memory: MemoryService
     session_id: str  # UUID from sessions table, must be explicitly set
-    db_engine: object | None = None  # AsyncEngine, typed as object to avoid circular import
+    db_engine: AsyncEngine | None = None
     approval_gate: object | None = None  # ApprovalGate instance
     approval_enabled: bool = True
     wake_min_minutes: int = 1
@@ -35,6 +36,7 @@ class TradingDeps:
     macro: object | None = None  # MacroService; typed as object to avoid circular import
     crypto_etf: object | None = None  # CryptoEtfService; typed as object to avoid circular import
     onchain: object | None = None  # OnchainService; typed as object to avoid circular import
+    cycle_id: str | None = None  # Mutated by run_agent_cycle before agent.run(); see §3.3 of spec
 
 
 def create_trader_agent(
