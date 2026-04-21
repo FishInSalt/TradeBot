@@ -212,6 +212,33 @@ async def test_recent_trades_all_taker_buy():
 
 
 @pytest.mark.asyncio
+async def test_recent_trades_future_timestamp_clock_skew_skipped():
+    """Trades with timestamp in the future (server clock ahead of local) are skipped.
+
+    Regression for IndexError: Python floor division on negative age yields
+    `-5000 // 60_000 == -1`, which would compute bucket_idx = 5 — out of bounds
+    on a 5-element list. NTP-level millisecond drift between OKX server and
+    local clock is common in practice; this test pins the skip-on-negative
+    behavior so a refactor cannot re-introduce the crash silently.
+    """
+    from src.agent.tools_perception import get_recent_trades
+    import time
+    now_ms = int(time.time() * 1000)
+    trades = [
+        # 5 seconds in the future (server clock ahead) — would crash without guard
+        Trade(timestamp=now_ms + 5_000, side="buy", price=64000.0, amount=0.01, trade_id="future"),
+        # Normal in-window trade — should still be counted
+        Trade(timestamp=now_ms - 30_000, side="sell", price=64000.0, amount=0.02, trade_id="ok"),
+    ]
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.return_value = trades
+    # Must NOT raise IndexError
+    result = await get_recent_trades(deps, window_seconds=300)
+    # Future-timestamped trade was filtered; only the in-window trade counted
+    assert "Trade count: 1" in result
+
+
+@pytest.mark.asyncio
 async def test_recent_trades_non_standard_window_label():
     """window_seconds != 300 → fallback label format `bucket {i+1}/N ({start}-{end}s ago)`.
 

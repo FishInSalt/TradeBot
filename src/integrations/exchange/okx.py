@@ -479,8 +479,12 @@ class OKXExchange(BaseExchange):
     async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
         import time
         data = await self._client.fetch_order_book(symbol, limit=depth)
-        bids = [OrderBookLevel(price=float(p), amount=float(a)) for p, a in data.get("bids", [])]
-        asks = [OrderBookLevel(price=float(p), amount=float(a)) for p, a in data.get("asks", [])]
+        # CCXT parse_bid_ask appends `countOrId` (e.g. OKX numOrders) when the
+        # raw exchange response carries it, so each entry can be `[price, amount]`
+        # OR `[price, amount, num_orders, ...]`. `*_` swallows any trailing fields
+        # so the unpack never raises ValueError on real OKX responses.
+        bids = [OrderBookLevel(price=float(p), amount=float(a)) for p, a, *_ in data.get("bids", [])]
+        asks = [OrderBookLevel(price=float(p), amount=float(a)) for p, a, *_ in data.get("asks", [])]
         ts = data.get("timestamp")
         if ts is None:
             ts = int(time.time() * 1000)

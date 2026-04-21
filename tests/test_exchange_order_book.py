@@ -252,3 +252,28 @@ async def test_okx_get_contract_size_unknown_market_fallback(mocker):
     ex._client.markets = {"ETH/USDT:USDT": {"contractSize": 0.01}}
     size = await ex.get_contract_size("BTC/USDT:USDT")
     assert size == 1.0
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_order_book_handles_three_element_bidask_entries(mocker):
+    """CCXT parse_bid_ask appends `countOrId` (e.g. OKX numOrders) to each entry,
+    so real responses are `[price, amount, num_orders]` not `[price, amount]`.
+
+    Regression for production crash: previous `for p, a in ...` unpack raised
+    ValueError on every real OKX call. Fixed via `for p, a, *_ in ...`.
+    """
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    mocker.patch.object(ex._client, "fetch_order_book", return_value={
+        # Real OKX-shaped CCXT entries: 3 elements per row
+        "bids": [[50000.0, 1.0, 5], [49999.5, 0.5, 2]],
+        "asks": [[50001.0, 0.8, 3], [50001.5, 1.2, 7]],
+        "timestamp": 1700000000000,
+    })
+    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=2)
+    assert len(ob.bids) == 2
+    assert ob.bids[0].price == 50000.0
+    assert ob.bids[0].amount == 1.0
+    assert len(ob.asks) == 2
+    assert ob.asks[0].price == 50001.0
+    assert ob.asks[0].amount == 0.8

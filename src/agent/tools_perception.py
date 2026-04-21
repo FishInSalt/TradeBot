@@ -1216,8 +1216,15 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
     in_window: list[Trade] = []
     for t in trades:
         age_ms = now_ms - t.timestamp
-        if age_ms >= window_ms:
-            continue  # strict >= to avoid bucket_idx = -1 boundary bug
+        # Skip out-of-window trades:
+        # - age_ms >= window_ms: too old (strict >= prevents bucket_idx = -1 on boundary)
+        # - age_ms < 0: future-timestamped (server clock ahead of local clock).
+        #   Python floor division gives `-5000 // 60_000 == -1`, which would compute
+        #   bucket_idx = 5 — out of bounds on a 5-element list (IndexError). NTP-level
+        #   clock skew of a few hundred ms is common in practice; skip rather than
+        #   silently clamp so genuine clock-sync failures stay visible.
+        if age_ms >= window_ms or age_ms < 0:
+            continue
         bucket_idx = RECENT_TRADES_BUCKET_COUNT - 1 - (age_ms // bucket_duration_ms)
         buckets[bucket_idx].append(t)
         in_window.append(t)
