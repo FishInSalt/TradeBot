@@ -191,5 +191,22 @@ async def test_get_position_fact_only(mocker):
     deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
     outputs.append(await get_position(deps))
 
+    # Multi-TP scalping scenario (spec §2.4 — multiple TPs sorted rendering path)
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="tp1", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.005, price=66000.0, status="open"),
+        Order(id="tp2", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.005, price=70000.0, status="open"),
+    ])
+    outputs.append(await get_position(deps))
+
+    # ATR(1h) unavailable: OHLCV fetch fails → ATR suffix omission path
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("ohlcv down"))
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="sl", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.01, price=62000.0, status="open"),
+    ])
+    outputs.append(await get_position(deps))
+
     hits = _scan("\n".join(outputs))
     assert not hits, f"Banned words in get_position outputs: {hits}"

@@ -403,3 +403,99 @@ async def test_get_position_atr_unavailable_degrade(mocker):
     result = await get_position(deps)
     assert "Risk exposure:" in result
     assert "ATR(1h)" not in result  # suffix omitted on ATR failure
+
+
+@pytest.mark.asyncio
+async def test_get_position_multi_tp_sorted(mocker):
+    """Multiple TP orders listed all + sorted by price ascending (spec §2.4)."""
+    from src.agent.tools_perception import get_position
+    deps = MockDeps()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.03, entry_price=64000.0,
+        unrealized_pnl=10.0, leverage=3, liquidation_price=55000.0,
+        created_at=datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc),
+    )])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64100.0, bid=64099.5, ask=64100.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10010.0, free_usdt=9796.67, used_usdt=213.33,
+    ))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=_make_ohlcv_df(50, last_close=64100.0))
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 88.0})
+    # Intentionally unsorted (70000 / 66000 / 68000) → expect sorted output (66000 / 68000 / 70000)
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="tp3", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.01, price=70000.0, status="open"),
+        Order(id="tp1", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.01, price=66000.0, status="open"),
+        Order(id="tp2", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.01, price=68000.0, status="open"),
+    ])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+
+    result = await get_position(deps)
+    # All 3 TPs rendered
+    tp_lines = [l for l in result.splitlines() if l.startswith("  Take profit:")]
+    assert len(tp_lines) == 3, f"Expected 3 TP lines, got {len(tp_lines)}: {tp_lines}"
+    # Sorted ascending by price
+    idx_low = result.index("66000.00")
+    idx_mid = result.index("68000.00")
+    idx_high = result.index("70000.00")
+    assert idx_low < idx_mid < idx_high, "TP orders must render sorted by price ascending"
+
+
+@pytest.mark.asyncio
+async def test_get_position_filters_none_price_exit_orders(mocker):
+    """Defensive: orders with price=None are filtered out (never reach _fmt_exit)."""
+    from src.agent.tools_perception import get_position
+    deps = MockDeps()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.01, entry_price=64000.0,
+        unrealized_pnl=10.0, leverage=3, liquidation_price=55000.0,
+        created_at=datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc),
+    )])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64100.0, bid=64099.5, ask=64100.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10010.0, free_usdt=9796.67, used_usdt=213.33,
+    ))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=_make_ohlcv_df(50))
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 88.0})
+    # Mix: 1 valid stop + 1 None-price stop (simulates a hypothetical upstream bug)
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="sl_ok", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.01, price=62000.0, status="open"),
+        Order(id="sl_bad", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.01, price=None, status="open"),
+    ])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+
+    # Should not crash; only the priced order renders
+    result = await get_position(deps)
+    sl_lines = [l for l in result.splitlines() if l.startswith("  Stop loss:")]
+    assert len(sl_lines) == 1, f"Expected 1 valid SL line (None filtered), got {sl_lines}"
+    assert "62000.00" in result
+    # The None-priced order must not produce any garbage render
+    assert "None" not in result
+
+
+@pytest.mark.asyncio
+async def test_order_book_all_zero_amounts_insufficient(mocker):
+    """Spec §2.1 — total_sum == 0 (all 20×2 levels have amount=0) → insufficient data degradation."""
+    from src.agent.tools_perception import get_order_book
+    deps = MockDeps()
+    deps.market_data.get_order_book.return_value = OrderBook(
+        symbol="BTC/USDT:USDT",
+        bids=[OrderBookLevel(100.0 - i * 0.1, 0.0) for i in range(20)],
+        asks=[OrderBookLevel(101.0 + i * 0.1, 0.0) for i in range(20)],
+        timestamp=0,
+    )
+    result = await get_order_book(deps, depth=20)
+    # Should degrade, not raise ZeroDivisionError
+    assert "insufficient data" in result
+    # Should not contain Bid share (didn't reach that branch)
+    assert "Bid share:" not in result

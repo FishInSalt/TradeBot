@@ -249,8 +249,21 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
 
     # === Exit orders ===
-    sl_orders = sorted([o for o in open_orders if o.order_type == "stop" and o.symbol == symbol], key=lambda o: o.price or 0)
-    tp_orders = sorted([o for o in open_orders if o.order_type == "take_profit" and o.symbol == symbol], key=lambda o: o.price or 0)
+    # Filter out None-price orders defensively. Iter 2b OKX algo-order normalization
+    # is expected to always populate `price` from slTriggerPx/tpTriggerPx, but guarding
+    # here keeps _fmt_exit free of None-handling branches and crashes explicitly if the
+    # normalization contract is ever violated upstream (rather than silently rendering
+    # "(None% above entry)" or similar garbage).
+    sl_orders = sorted(
+        [o for o in open_orders
+         if o.order_type == "stop" and o.symbol == symbol and o.price is not None],
+        key=lambda o: o.price,
+    )
+    tp_orders = sorted(
+        [o for o in open_orders
+         if o.order_type == "take_profit" and o.symbol == symbol and o.price is not None],
+        key=lambda o: o.price,
+    )
     lines.append("")
     lines.append("Exit orders:")
 
@@ -1101,6 +1114,10 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     total_bid = sum(l.amount for l in ob.bids[:depth])
     total_ask = sum(l.amount for l in ob.asks[:depth])
     total_sum = total_bid + total_ask
+    # Spec §2.1 — all-zero amounts across both sides: degrade to insufficient data
+    # (real OKX / Sim cannot produce this, but spec mandates explicit guard)
+    if total_sum == 0:
+        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
     bid_deep_pct = (ob.bids[0].price - ob.bids[depth - 1].price) / ob.bids[0].price * 100
     ask_deep_pct = (ob.asks[depth - 1].price - ob.asks[0].price) / ob.asks[0].price * 100
 

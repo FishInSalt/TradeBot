@@ -1139,7 +1139,13 @@ class SimulatedExchange(BaseExchange):
         return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=int(time.time() * 1000))
 
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
-        """Synthesize ~20-50 trades with direction biased by ticker change."""
+        """Synthesize ~20-50 trades with direction biased by ticker change.
+
+        Note: `limit` is accepted for BaseExchange compatibility but unused — synthesis
+        count is fixed at random.randint(20, 50) regardless of requested limit. Safe in
+        practice because tool-layer callers always pass limit=500 and synthesized count
+        is far below, so no truncation scenario occurs.
+        """
         import random
         import time
         if self._latest_ticker is None:
