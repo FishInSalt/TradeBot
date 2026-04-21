@@ -196,6 +196,49 @@ async def test_recent_trades_all_taker_sell():
     assert "net -" in result  # negative net (all sells)
 
 
+@pytest.mark.asyncio
+async def test_recent_trades_all_taker_buy():
+    """All trades are taker-buy → 100% taker buy / positive net (symmetric to all-sell)."""
+    from src.agent.tools_perception import get_recent_trades
+    import time
+    now_ms = int(time.time() * 1000)
+    trades = [Trade(timestamp=now_ms - i * 3000, side="buy", price=64000.0, amount=0.01, trade_id=None)
+              for i in range(50)]
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.return_value = trades
+    result = await get_recent_trades(deps, window_seconds=300)
+    assert "100% taker buy" in result
+    assert "net +" in result  # positive net (all buys)
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_non_standard_window_label():
+    """window_seconds != 300 → fallback label format `bucket {i+1}/N ({start}-{end}s ago)`.
+
+    Spec §5.2 test-coverage clause. Default 300s path uses `t-Xmin` labels; any
+    other window must render positional bucket labels with second ranges.
+    """
+    from src.agent.tools_perception import get_recent_trades
+    import time
+    now_ms = int(time.time() * 1000)
+    # 120s window → 5 buckets × 24s each
+    trades = [Trade(timestamp=now_ms - i * 2000, side="buy", price=64000.0, amount=0.01, trade_id=None)
+              for i in range(50)]  # ages 0..98000ms, all within 120s window
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.return_value = trades
+    result = await get_recent_trades(deps, window_seconds=120)
+    # Non-standard window → fallback label format; no t-Xmin
+    assert "t-1min" not in result
+    assert "t-2min" not in result
+    # Positional label present (exact format: `bucket {i}/5 ({start}-{end}s ago)`)
+    assert "bucket 1/5" in result
+    assert "bucket 5/5" in result
+    # Second-range markers
+    assert "s ago)" in result
+    # Header reflects 24s bucket duration
+    assert "5 × 24s buckets" in result
+
+
 import pandas as pd
 
 
@@ -256,6 +299,39 @@ async def test_multi_tf_snapshot_all_fail(mocker):
     ))
     result = await get_multi_timeframe_snapshot(deps)
     assert "temporarily unavailable" in result
+
+
+@pytest.mark.asyncio
+async def test_multi_tf_snapshot_single_tf_failure_isolated(mocker):
+    """One TF raises an exception; other TFs render normally (per-TF independent
+    degradation via asyncio.gather). Exercises the `isinstance(df_or_err, Exception)`
+    branch specifically — distinct from `df.empty or len < slow` (per_tf_insufficient).
+    """
+    from src.agent.tools_perception import get_multi_timeframe_snapshot
+    deps = MockDeps()
+
+    def ohlcv_side(sym, tf, limit):
+        if tf == "5m":
+            raise Exception("5m endpoint transient failure")
+        return _make_ohlcv_df(limit)
+
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=ohlcv_side)
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    result = await get_multi_timeframe_snapshot(deps)
+    # Failed TF: per-TF degrade line
+    assert "5m: temporarily unavailable" in result
+    # Other TFs: normal data rendering
+    for tf in ("1h:", "4h:", "1d:"):
+        assert tf in result
+    # And they actually rendered data, not failure
+    assert "vs MA50" in result
+    # Header still present — overall degrade was NOT triggered
+    assert "Multi-TF Snapshot" in result
+    assert "Current price:" in result
 
 
 @pytest.mark.asyncio

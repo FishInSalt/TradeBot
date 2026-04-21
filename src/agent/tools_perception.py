@@ -1317,7 +1317,12 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         atr = indicators.get("atr_14")
         close = float(df["close"].iloc[-1])
 
-        # Momentum: price vs primary MA
+        # Momentum: live ticker price vs primary MA.
+        # Intentional: uses `current_price` (live ticker) NOT `df["close"].iloc[-1]`
+        # so the row answers "where is RIGHT NOW relative to this TF's MA?".
+        # Per-TF close lags by up to one candle period (e.g. 1d close = previous
+        # day's close), which would understate fast-moving intraday moves on
+        # higher TFs. Do not "fix" this to df.close.iloc[-1].
         primary_ma_val = float(df["close"].rolling(primary_ma_n).mean().iloc[-1])
         mom_pct = (current_price - primary_ma_val) / primary_ma_val * 100
         mom_str = f"{mom_pct:+.1f}% vs MA{primary_ma_n}"

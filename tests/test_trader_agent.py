@@ -87,3 +87,36 @@ def test_registered_tool_names_matches_agent_tools():
     # 无重复
     assert len(REGISTERED_TOOL_NAMES) == len(set(REGISTERED_TOOL_NAMES)), \
         "REGISTERED_TOOL_NAMES contains duplicates"
+
+
+def test_tool_call_recorder_wraps_iter2_tools():
+    """Spec §6 integration test: ToolCallRecorder capability is attached to the
+    agent AND the 3 Iter 2 perception tools (get_order_book / get_recent_trades /
+    get_multi_timeframe_snapshot) are visible on the agent's function toolset.
+
+    Verifies that any @agent.tool added in Iter 2 will be auto-wrapped at runtime
+    (pydantic-ai dispatches every tool call through the capability's
+    wrap_tool_execute, so visibility in toolset + presence of recorder in the
+    capability chain is sufficient proof — no LLM mock needed).
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    from src.services.tool_call_recorder import ToolCallRecorder
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+
+    # 1. ToolCallRecorder is installed as a capability
+    root_caps = agent._root_capability.capabilities
+    recorder_instances = [c for c in root_caps if isinstance(c, ToolCallRecorder)]
+    assert len(recorder_instances) == 1, (
+        f"Expected exactly 1 ToolCallRecorder in agent capabilities, "
+        f"got {len(recorder_instances)} (all caps: {[type(c).__name__ for c in root_caps]})"
+    )
+
+    # 2. All 3 new Iter 2 tools are registered on the toolset — they will be
+    #    dispatched through the recorder by pydantic-ai at call time
+    registered = set(agent._function_toolset.tools)
+    for name in ("get_order_book", "get_recent_trades", "get_multi_timeframe_snapshot"):
+        assert name in registered, (
+            f"Iter 2 tool '{name}' not registered — ToolCallRecorder cannot wrap it"
+        )
