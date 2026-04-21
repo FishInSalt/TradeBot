@@ -18,8 +18,10 @@ from src.integrations.exchange.base import (
     LongShortRatio,
     OpenInterest,
     Order,
+    OrderBook,
     Position,
     Ticker,
+    Trade,
 )
 from src.utils.cache import RateLimitHit
 
@@ -463,6 +465,15 @@ class OKXExchange(BaseExchange):
             short_ratio=1.0 / (1 + ratio),
             timestamp=int(entry.get("timestamp") or 0),
         )
+
+    async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
+        raise NotImplementedError("Task 3 will implement this")
+
+    async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
+        raise NotImplementedError("Task 4 will implement this")
+
+    async def get_contract_size(self, symbol: str) -> float:
+        raise NotImplementedError("Task 5 will implement this")
 
     async def close(self) -> None:
         logger.info("OKX exchange closing")

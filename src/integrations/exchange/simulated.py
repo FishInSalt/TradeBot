@@ -19,8 +19,10 @@ from src.integrations.exchange.base import (
     LongShortRatio,
     OpenInterest,
     Order,
+    OrderBook,
     Position,
     Ticker,
+    Trade,
 )
 from src.utils.cache import RateLimitHit
 
@@ -70,6 +72,7 @@ class SimulatedExchange(BaseExchange):
         self._pending_orders: list[_PendingOrder] = []
         self._leverage: dict[str, int] = {}
         self._latest_ticker: Ticker | None = None
+        self._prev_ticker: Ticker | None = None
         self._running = False
         self._lock = asyncio.Lock()
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
@@ -580,6 +583,7 @@ class SimulatedExchange(BaseExchange):
 
     async def _process_tick(self, ticker: Ticker) -> None:
         """Process a single tick -- match market orders, check liquidations, conditional orders, alerts."""
+        self._prev_ticker = self._latest_ticker  # save previous before overwrite (for fetch_trades bias)
         self._latest_ticker = ticker
         self._latest_price = ticker.last
 
@@ -1109,3 +1113,12 @@ class SimulatedExchange(BaseExchange):
         if hasattr(self, "_ccxt"):
             await self._ccxt.close()
         logger.info("SimulatedExchange closed")
+
+    async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
+        raise NotImplementedError("Task 2 will implement this")
+
+    async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
+        raise NotImplementedError("Task 2 will implement this")
+
+    async def get_contract_size(self, symbol: str) -> float:
+        raise NotImplementedError("Task 2 will implement this")

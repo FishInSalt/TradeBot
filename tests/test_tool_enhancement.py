@@ -56,6 +56,16 @@ def test_base_exchange_alert_consolidation():
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
 
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
+
     ex = _TestExchange()
 
     # No alert service → get_alert_params returns None
@@ -93,6 +103,16 @@ def test_base_exchange_get_price_level_alerts():
         async def fetch_funding_rate(self, symbol): ...
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
+
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
 
     ex = _TestExchange()
     assert ex.get_price_level_alerts() == []
