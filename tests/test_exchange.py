@@ -32,7 +32,9 @@ def test_base_exchange_requires_new_methods():
         async def set_leverage(self, symbol: str, leverage: int) -> None: ...
         def amount_to_precision(self, symbol: str, amount: float) -> float: ...
         async def close(self) -> None: ...
-        # fetch_order, fetch_open_orders, fetch_closed_orders intentionally omitted
+        # Intentionally omitted: fetch_order, fetch_open_orders, fetch_closed_orders,
+        # fetch_order_book, fetch_trades, get_contract_size — this test verifies
+        # abstract-method enforcement, so IncompleteExchange must remain incomplete.
 
     with pytest.raises(TypeError):
         IncompleteExchange()

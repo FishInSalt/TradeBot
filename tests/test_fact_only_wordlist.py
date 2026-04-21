@@ -128,7 +128,7 @@ async def test_multi_tf_snapshot_fact_only(mocker):
                         "close": 64050, "volume": 100.0} for _ in range(250)])
     deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df)
     deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
-    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=64050.0, bid=64049.5, ask=64050.5,
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))

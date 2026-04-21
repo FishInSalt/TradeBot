@@ -217,7 +217,7 @@ async def test_multi_tf_snapshot_typical(mocker):
     deps = MockDeps()
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=lambda sym, tf, limit: _make_ohlcv_df(limit))
     deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
-    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
@@ -235,7 +235,7 @@ async def test_multi_tf_snapshot_custom_tfs(mocker):
     deps = MockDeps()
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=lambda sym, tf, limit: _make_ohlcv_df(limit))
     deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
-    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
@@ -250,7 +250,7 @@ async def test_multi_tf_snapshot_all_fail(mocker):
     from src.agent.tools_perception import get_multi_timeframe_snapshot
     deps = MockDeps()
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("down"))
-    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
@@ -271,7 +271,7 @@ async def test_multi_tf_snapshot_per_tf_insufficient(mocker):
 
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=ohlcv_side)
     deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
-    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
@@ -295,7 +295,7 @@ async def test_multi_tf_snapshot_ma_entangled(mocker):
     ])
     deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=tight_df)
     deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
-    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=64000.0, bid=63999.5, ask=64000.5,
         high=64001.0, low=63999.0, base_volume=1000.0, timestamp=0,
     ))
@@ -481,6 +481,45 @@ async def test_get_position_filters_none_price_exit_orders(mocker):
     assert "62000.00" in result
     # The None-priced order must not produce any garbage render
     assert "None" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_position_phase2_hard_failure_degradation(mocker):
+    """Phase 2 gather hard failure (e.g., fetch_balance timeout) → degrade to
+    position-only + 'Risk exposure + Exit orders: temporarily unavailable' footer.
+
+    Covers the outer try/except around asyncio.gather in get_position (spec §2.4
+    deviation from §3.3 return_exceptions=True — hard failures collapse to a single
+    degradation path). Previously code-path had zero test coverage.
+    """
+    from src.agent.tools_perception import get_position
+    deps = MockDeps()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.01, entry_price=64000.0,
+        unrealized_pnl=10.0, leverage=3, liquidation_price=55000.0,
+        created_at=datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc),
+    )])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64100.0, bid=64099.5, ask=64100.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    # Hard failure in one of Phase 2 IOs (ticker/balance/orders/contract_size)
+    deps.exchange.fetch_balance = AsyncMock(side_effect=Exception("balance endpoint timeout"))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=_make_ohlcv_df(50))
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+
+    result = await get_position(deps)
+    # Core position lines preserved
+    assert "Current Position:" in result
+    assert "LONG" in result
+    assert "64000.00" in result
+    # Degradation footer present
+    assert "Risk exposure + Exit orders: temporarily unavailable" in result
+    # Enhanced sections absent (hard-failure collapse)
+    assert "Notional value:" not in result
+    assert "Stop loss:" not in result
+    assert "Take profit:" not in result
 
 
 @pytest.mark.asyncio

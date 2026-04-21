@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
+    from src.integrations.exchange.base import Trade
 
 logger = logging.getLogger(__name__)
 
@@ -1095,6 +1096,9 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     "Order book ({symbol}): temporarily unavailable" on service failure.
     """
     symbol = deps.symbol
+    # Extract base currency for unit labels (e.g. "BTC" from "BTC/USDT:USDT");
+    # avoids hardcoded "BTC" when system later supports ETH/USDT:USDT etc.
+    base_currency = symbol.split("/")[0]
     try:
         ob = await deps.market_data.get_order_book(symbol, depth=depth)
     except Exception:
@@ -1139,12 +1143,12 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
 
     lines = [
         f"=== Order Book ({symbol}) ===",
-        f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} BTC  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} BTC",
+        f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} {base_currency}  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} {base_currency}",
         f"Spread: {spread:.2f} ({spread_pct:.3f}%)",
         "",
         f"Depth (top {depth} each side):",
-        f"  Bids cumulative: {total_bid:.4f} BTC over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)",
-        f"  Asks cumulative: {total_ask:.4f} BTC over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)",
+        f"  Bids cumulative: {total_bid:.4f} {base_currency} over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)",
+        f"  Asks cumulative: {total_ask:.4f} {base_currency} over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)",
         f"  {share_line}",
     ]
 
@@ -1175,7 +1179,7 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         lines.append(f"Concentrated levels (size > {ORDER_BOOK_CONCENTRATION_MULTIPLIER:.0f}× median of top {depth}):")
         for side, price, amount, dist_pct, is_bid in bids_conc + asks_conc:
             direction = "below mid" if is_bid else "above mid"
-            lines.append(f"  {side}  {price:.2f}  {amount:.4f} BTC  ({dist_pct:.2f}% {direction})")
+            lines.append(f"  {side}  {price:.2f}  {amount:.4f} {base_currency}  ({dist_pct:.2f}% {direction})")
 
     return "\n".join(lines)
 
@@ -1192,8 +1196,8 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
     Degradation: "no trades in last {window_seconds}s" if cold market; "temporarily unavailable" on service failure.
     """
     import time
-    from src.integrations.exchange.base import Trade
     symbol = deps.symbol
+    base_currency = symbol.split("/")[0]
     try:
         trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
     except Exception:
@@ -1252,7 +1256,7 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
         total_label = f"Total: buy {total_buy:.4f} / sell {total_sell:.4f} (net {net_total:+.4f}*, {buy_pct:.0f}% taker buy) [* partial coverage: {len(trades)} trades at limit, oldest age {oldest_age_ms//1000}s ({oldest_age_ratio:.0%} of window), window not fully covered]"
 
     lines.append(total_label)
-    lines.append(f"Trade count: {len(in_window)} | Avg size: {total_vol / len(in_window):.4f} BTC")
+    lines.append(f"Trade count: {len(in_window)} | Avg size: {total_vol / len(in_window):.4f} {base_currency}")
     return "\n".join(lines)
 
 
@@ -1273,9 +1277,13 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
     if tfs is None:
         tfs = ["5m", "1h", "4h", "1d"]
 
-    # Fetch current price (from ticker, not per-TF close)
+    # Fetch current price (from ticker, not per-TF close).
+    # Uses MarketDataService layer for consistency with other perception tools
+    # (get_market_data / get_position). market_data.get_ticker is a no-cache
+    # passthrough wrapper so the behavior is functionally identical to calling
+    # exchange.fetch_ticker directly.
     try:
-        ticker = await deps.exchange.fetch_ticker(symbol)
+        ticker = await deps.market_data.get_ticker(symbol)
         current_price = ticker.last
     except Exception:
         logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
