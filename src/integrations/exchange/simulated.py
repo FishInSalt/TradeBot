@@ -20,6 +20,7 @@ from src.integrations.exchange.base import (
     OpenInterest,
     Order,
     OrderBook,
+    OrderBookLevel,
     Position,
     Ticker,
     Trade,
@@ -1115,10 +1116,56 @@ class SimulatedExchange(BaseExchange):
         logger.info("SimulatedExchange closed")
 
     async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        raise NotImplementedError("Task 2 will implement this")
+        """Synthesize order book from ticker (best bid/ask + ±0.01% steps)."""
+        import time
+        if self._latest_ticker is None:
+            return OrderBook(symbol=symbol, bids=[], asks=[], timestamp=None)
+        bid_price = self._latest_ticker.bid
+        ask_price = self._latest_ticker.ask
+        bids = [
+            OrderBookLevel(
+                price=round(bid_price * (1 - 0.0001 * i), 2),
+                amount=round(0.01 * (1 + i * 0.1), 4),
+            )
+            for i in range(depth)
+        ]
+        asks = [
+            OrderBookLevel(
+                price=round(ask_price * (1 + 0.0001 * i), 2),
+                amount=round(0.01 * (1 + i * 0.1), 4),
+            )
+            for i in range(depth)
+        ]
+        return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=int(time.time() * 1000))
 
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
-        raise NotImplementedError("Task 2 will implement this")
+        """Synthesize ~20-50 trades with direction biased by ticker change."""
+        import random
+        import time
+        if self._latest_ticker is None:
+            return []
+        # Direction bias based on prev → latest bid change
+        if self._prev_ticker is not None and self._prev_ticker.bid > 0:
+            price_change_pct = (self._latest_ticker.bid - self._prev_ticker.bid) / self._prev_ticker.bid
+        else:
+            price_change_pct = 0.0
+        buy_prob = 0.5 + max(-0.15, min(0.15, price_change_pct * 20))
+        n_trades = random.randint(20, 50)
+        mid = (self._latest_ticker.bid + self._latest_ticker.ask) / 2
+        now_ms = int(time.time() * 1000)
+        window_ms = 300_000  # 5 min, matches RECENT_TRADES_WINDOW_DEFAULT
+        trades: list[Trade] = []
+        for _ in range(n_trades):
+            side = "buy" if random.random() < buy_prob else "sell"
+            price = round(mid * (1 + random.uniform(-0.0002, 0.0002)), 2)
+            amount = round(random.uniform(0.001, 0.01), 4)
+            age_ms = random.randint(0, window_ms - 1)
+            trades.append(Trade(
+                timestamp=now_ms - age_ms,
+                side=side, price=price, amount=amount,
+                trade_id=None,
+            ))
+        return trades
 
     async def get_contract_size(self, symbol: str) -> float:
-        raise NotImplementedError("Task 2 will implement this")
+        return 1.0
