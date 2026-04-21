@@ -18,8 +18,11 @@ from src.integrations.exchange.base import (
     LongShortRatio,
     OpenInterest,
     Order,
+    OrderBook,
+    OrderBookLevel,
     Position,
     Ticker,
+    Trade,
 )
 from src.utils.cache import RateLimitHit
 
@@ -113,7 +116,15 @@ class OKXExchange(BaseExchange):
     # --- WebSocket lifecycle ---
 
     async def start(self) -> None:
-        """启动 WebSocket 监听循环。失败时降级为 REST-only 模式。"""
+        """预加载 markets（fail-fast）+ 启动 WebSocket 监听循环（失败时降级为 REST-only 模式）。
+
+        预加载 markets 用于 get_contract_size 的 contractSize 查询 —— 放在 WebSocket
+        try 之外：markets 加载失败意味着所有依赖合约面值的工具都会坏掉，fail-fast
+        比延迟到每次调用时静默 fallback 更好（spec §8.5）。
+        """
+        # Preload markets for get_contract_size — fail-fast outside WebSocket try
+        await self._client.load_markets()
+
         try:
             import ccxt.pro as ccxtpro
             self._ws_client = ccxtpro.okx({
@@ -463,6 +474,47 @@ class OKXExchange(BaseExchange):
             short_ratio=1.0 / (1 + ratio),
             timestamp=int(entry.get("timestamp") or 0),
         )
+
+    @_retry(max_retries=2, base_delay=0.5)
+    async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
+        import time
+        data = await self._client.fetch_order_book(symbol, limit=depth)
+        # CCXT parse_bid_ask appends `countOrId` (e.g. OKX numOrders) when the
+        # raw exchange response carries it, so each entry can be `[price, amount]`
+        # OR `[price, amount, num_orders, ...]`. `*_` swallows any trailing fields
+        # so the unpack never raises ValueError on real OKX responses.
+        bids = [OrderBookLevel(price=float(p), amount=float(a)) for p, a, *_ in data.get("bids", [])]
+        asks = [OrderBookLevel(price=float(p), amount=float(a)) for p, a, *_ in data.get("asks", [])]
+        ts = data.get("timestamp")
+        if ts is None:
+            ts = int(time.time() * 1000)
+        return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=ts)
+
+    @_retry(max_retries=2, base_delay=0.5)
+    async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
+        data = await self._client.fetch_trades(symbol, limit=limit)
+        trades: list[Trade] = []
+        for raw in data:
+            raw_id = raw.get("id")
+            trades.append(Trade(
+                timestamp=int(raw["timestamp"]),
+                side=str(raw["side"]),
+                price=float(raw["price"]),
+                amount=float(raw["amount"]),
+                trade_id=str(raw_id) if raw_id is not None else None,
+            ))
+        # Explicit sort — don't rely on CCXT default (unified spec is ascending but not guaranteed)
+        trades.sort(key=lambda t: t.timestamp)
+        return trades
+
+    async def get_contract_size(self, symbol: str) -> float:
+        if not self._client.markets:
+            await self._client.load_markets()
+        market = self._client.markets.get(symbol)
+        if market is None:
+            logger.warning("Market %s not loaded, defaulting contract_size=1.0", symbol)
+            return 1.0
+        return float(market.get("contractSize", 1.0))
 
     async def close(self) -> None:
         logger.info("OKX exchange closing")

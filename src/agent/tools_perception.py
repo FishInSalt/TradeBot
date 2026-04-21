@@ -5,8 +5,35 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
+    from src.integrations.exchange.base import Trade
 
 logger = logging.getLogger(__name__)
+
+
+# === Iter 2 toolkit constants ===
+# get_order_book
+ORDER_BOOK_CONCENTRATION_MULTIPLIER = 3.0
+ORDER_BOOK_MAX_CONCENTRATED_LEVELS = 10
+ORDER_BOOK_DEPTH_DEFAULT = 20
+ORDER_BOOK_BALANCED_THRESHOLD_PCT = 5.0
+
+# get_recent_trades
+RECENT_TRADES_WINDOW_DEFAULT = 300
+RECENT_TRADES_BUCKET_COUNT = 5
+RECENT_TRADES_MAX_FETCH = 500  # OKX /market/trades single-call limit
+
+# get_multi_timeframe_snapshot
+MULTI_TF_PRIMARY_MA = {"5m": 20, "1h": 50, "4h": 50, "1d": 50, "1w": 50, "1M": 50}
+MULTI_TF_STRUCTURE_MAS = {
+    "5m": (20, 50),
+    "1h": (50, 200),
+    "4h": (50, 200),
+    "1d": (50, 200),
+    "1w": (20, 50),
+    "1M": (20, 50),
+}
+MULTI_TF_RANGE_PERIODS = 20
+MULTI_TF_OHLCV_LIMIT = {"5m": 80, "1h": 250, "4h": 250, "1d": 250, "1w": 60, "1M": 60}
 
 
 async def get_market_data(
@@ -110,47 +137,160 @@ async def get_market_data(
 
 
 async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
-    """Get current open position with risk context."""
+    """Show current position with risk exposure and SL/TP distances.
+
+    Args:
+        symbol: Optional override of deps.symbol.
+
+    Returns:
+        str: Multi-section position view (position line + PnL + Duration + Risk exposure + Exit orders). See spec §2.4.
+
+    Degradation: 'No open positions.' if empty. ATR(1h) unavailable → ATR-multiple suffixes omitted (other sections intact).
+    """
+    import asyncio
     symbol = symbol or deps.symbol
+
+    # Phase 1: positions only — early return if empty
     positions = await deps.exchange.fetch_positions(symbol)
     if not positions:
         return "No open positions."
 
     p = positions[0]
-    lines = ["Current Position:"]
-    lines.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
 
-    # PnL as % of initial capital
-    if deps.initial_balance > 0:
-        pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
-        lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
-    else:
-        lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
+    # Phase 2: gather remaining IO in parallel. OHLCV has per-call soft-fail (ATR suffix omission
+    # is spec §2.4 three-state). Ticker / balance / orders / contract_size failures are hard —
+    # wrap the whole gather in a try/except that degrades the enhanced sections, keeping the
+    # original position+PnL+Duration lines intact.
+    #
+    # NOTE: spec §3.3 suggests `return_exceptions=True`. We use `False + outer try/except` instead
+    # for these reasons: (1) simpler to reason about — any hard failure collapses to a single
+    # degradation path rather than 5 per-IO isinstance checks; (2) Risk exposure and Exit orders
+    # both need coherent ticker + balance + contract_size; partial success gives misleading
+    # numbers (e.g. "Notional X USDT" without a valid ticker → stale). The spec's preference
+    # is a recommendation, not a hard constraint; the audit flagged this as P3 (non-critical).
+    async def _safe_ohlcv():
+        try:
+            return await deps.market_data.get_ohlcv_dataframe(symbol, "1h", limit=50)
+        except Exception:
+            logger.exception("get_position: 1h OHLCV fetch failed")
+            return None
 
-    # Liquidation distance
-    if p.liquidation_price:
-        ticker = await deps.market_data.get_ticker(symbol)
-        if ticker.last > 0:
-            liq_dist = abs(ticker.last - p.liquidation_price) / ticker.last * 100
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist:.1f}% away)")
+    def _render_position_core() -> list[str]:
+        """Render position header + PnL + Duration — the lines that depend ONLY on
+        Phase-1 fetch_positions data (no Phase-2 IO required). Shared between the
+        happy path and the hard-failure degradation branch so Duration is preserved
+        when ticker/balance/orders/contract_size fail (it would otherwise be lost
+        even though `p.created_at` is fully available).
+        """
+        out = ["Current Position:"]
+        out.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
+        if deps.initial_balance > 0:
+            pnl_pct_inner = (p.unrealized_pnl / deps.initial_balance) * 100
+            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)")
         else:
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f}")
-
-    # Duration
-    if p.created_at is not None:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        delta = now - p.created_at
-        total_minutes = int(delta.total_seconds() / 60)
-        if total_minutes < 60:
-            dur_str = f"{total_minutes} min"
-        elif total_minutes < 1440:
-            dur_str = f"{total_minutes // 60}h {total_minutes % 60}m"
+            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
+        if p.created_at is not None:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            delta = now - p.created_at
+            total_minutes = int(delta.total_seconds() / 60)
+            if total_minutes < 60:
+                dur_str = f"{total_minutes} min"
+            elif total_minutes < 1440:
+                dur_str = f"{total_minutes // 60}h {total_minutes % 60}m"
+            else:
+                dur_str = f"{total_minutes // 1440}d {(total_minutes % 1440) // 60}h"
+            out.append(f"  Duration: {dur_str}")
         else:
-            dur_str = f"{total_minutes // 1440}d {(total_minutes % 1440) // 60}h"
-        lines.append(f"  Duration: {dur_str}")
+            out.append("  Duration: N/A")
+        return out
+
+    try:
+        ticker, balance, ohlcv_df, open_orders, contract_size = await asyncio.gather(
+            deps.market_data.get_ticker(symbol),
+            deps.exchange.fetch_balance(),
+            _safe_ohlcv(),
+            deps.exchange.fetch_open_orders(symbol),
+            deps.exchange.get_contract_size(symbol),
+            return_exceptions=False,
+        )
+    except Exception:
+        logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
+        lines = _render_position_core()
+        lines.append("")
+        lines.append("Risk exposure + Exit orders: temporarily unavailable")
+        return "\n".join(lines)
+
+    # ATR(1h) — may be None if OHLCV failed
+    atr_1h = None
+    if ohlcv_df is not None and not ohlcv_df.empty:
+        indicators = deps.technical.compute_indicators(ohlcv_df)
+        atr_1h = indicators.get("atr_14")
+    current_price = ticker.last
+
+    lines = _render_position_core()
+
+    # === Risk exposure ===
+    notional = p.contracts * p.entry_price * contract_size
+    equity = balance.total_usdt
+    exp_pct = notional / equity * 100 if equity > 0 else 0.0
+    margin_used = balance.used_usdt
+    margin_pct = margin_used / equity * 100 if equity > 0 else 0.0
+    atr_pct_1h = atr_1h / current_price * 100 if atr_1h is not None and current_price > 0 else None
+
+    lines.append("")
+    lines.append("Risk exposure:")
+    lines.append(f"  Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
+    lines.append(f"  Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
+    if p.liquidation_price is not None and current_price > 0:
+        liq_dist_pct = abs(current_price - p.liquidation_price) / current_price * 100
+        if atr_pct_1h is not None and atr_pct_1h > 0:
+            atr_mult = liq_dist_pct / atr_pct_1h
+            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
+        else:
+            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+
+    # === Exit orders ===
+    # Filter out None-price orders defensively. Iter 2b OKX algo-order normalization
+    # is expected to always populate `price` from slTriggerPx/tpTriggerPx, but guarding
+    # here keeps _fmt_exit free of None-handling branches and crashes explicitly if the
+    # normalization contract is ever violated upstream (rather than silently rendering
+    # "(None% above entry)" or similar garbage).
+    sl_orders = sorted(
+        [o for o in open_orders
+         if o.order_type == "stop" and o.symbol == symbol and o.price is not None],
+        key=lambda o: o.price,
+    )
+    tp_orders = sorted(
+        [o for o in open_orders
+         if o.order_type == "take_profit" and o.symbol == symbol and o.price is not None],
+        key=lambda o: o.price,
+    )
+    lines.append("")
+    lines.append("Exit orders:")
+
+    def _fmt_exit(o, kind: str) -> str:
+        dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100
+        dist_curr_pct = (o.price - current_price) / current_price * 100 if current_price > 0 else 0.0
+        direction_entry = "above" if dist_entry_pct > 0 else "below"
+        direction_curr = "above" if dist_curr_pct > 0 else "below"
+        suffix = ""
+        if atr_pct_1h is not None and atr_pct_1h > 0:
+            atr_mult = abs(dist_curr_pct) / atr_pct_1h
+            suffix = f" = {atr_mult:.1f}× ATR(1h)"
+        return f"  {kind}: {o.price:.2f} ({abs(dist_entry_pct):.1f}% {direction_entry} entry, {abs(dist_curr_pct):.1f}% {direction_curr} current{suffix})  [{o.amount} contracts]"
+
+    if sl_orders:
+        for o in sl_orders:
+            lines.append(_fmt_exit(o, "Stop loss"))
     else:
-        lines.append("  Duration: N/A")
+        lines.append("  Stop loss: not set")
+
+    if tp_orders:
+        for o in tp_orders:
+            lines.append(_fmt_exit(o, "Take profit"))
+    else:
+        lines.append("  Take profit: not set")
 
     return "\n".join(lines)
 
@@ -942,3 +1082,290 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
     )
 
     return "\n".join(lines)
+
+
+async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAULT) -> str:
+    """Return top-N order book depth with concentrated-level breakdown.
+
+    Args:
+        depth: Levels per side to fetch. Default 20.
+
+    Returns:
+        str: Multi-line fact-only text (best bid/ask + cumulative depth + bid share + concentrated levels). See spec §2.1.
+
+    Degradation: Returns "Order book ({symbol}): insufficient data (requested depth X, got Y)" if book is empty/short;
+    "Order book ({symbol}): temporarily unavailable" on service failure.
+    """
+    symbol = deps.symbol
+    # Extract base currency for unit labels (e.g. "BTC" from "BTC/USDT:USDT");
+    # avoids hardcoded "BTC" when system later supports ETH/USDT:USDT etc.
+    base_currency = symbol.split("/")[0]
+    try:
+        ob = await deps.market_data.get_order_book(symbol, depth=depth)
+    except Exception:
+        logger.exception("get_order_book failed for %s", symbol)
+        return f"Order book ({symbol}): temporarily unavailable"
+
+    actual = min(len(ob.bids), len(ob.asks))
+    if not ob.bids or not ob.asks or actual < depth:
+        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
+
+    best_bid = ob.bids[0]
+    best_ask = ob.asks[0]
+    mid = (best_bid.price + best_ask.price) / 2
+    spread = best_ask.price - best_bid.price
+    spread_pct = spread / mid * 100
+
+    total_bid = sum(l.amount for l in ob.bids[:depth])
+    total_ask = sum(l.amount for l in ob.asks[:depth])
+    total_sum = total_bid + total_ask
+    # Spec §2.1 — all-zero amounts across both sides: degrade to insufficient data
+    # (real OKX / Sim cannot produce this, but spec mandates explicit guard)
+    if total_sum == 0:
+        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
+    bid_deep_pct = (ob.bids[0].price - ob.bids[depth - 1].price) / ob.bids[0].price * 100
+    ask_deep_pct = (ob.asks[depth - 1].price - ob.asks[0].price) / ob.asks[0].price * 100
+
+    # Bid share three-state
+    if total_bid == 0 and total_ask > 0:
+        share_line = "Bid share: 0% (asks only, no bids in top {})".format(depth)
+    elif total_ask == 0 and total_bid > 0:
+        share_line = "Bid share: 100% (bids only, no asks in top {})".format(depth)
+    else:
+        bid_share = total_bid / total_sum * 100
+        if abs(bid_share - 50) < ORDER_BOOK_BALANCED_THRESHOLD_PCT:
+            # Spec §2.1 — fixed '~50%' label when within balanced threshold, not actual value.
+            # Actual value on a balanced output creates a conflicting signal
+            # ("Bid share: ~47% (balanced)" mixes precise percentage with the approximation marker).
+            share_line = "Bid share: ~50% (balanced)"
+        else:
+            bid_ratio = total_bid / total_ask if total_ask > 0 else float("inf")
+            share_line = f"Bid share: {bid_share:.1f}% (bid : ask = {bid_ratio:.2f} : 1)"
+
+    lines = [
+        f"=== Order Book ({symbol}) ===",
+        f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} {base_currency}  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} {base_currency}",
+        f"Spread: {spread:.2f} ({spread_pct:.3f}%)",
+        "",
+        f"Depth (top {depth} each side):",
+        f"  Bids cumulative: {total_bid:.4f} {base_currency} over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)",
+        f"  Asks cumulative: {total_ask:.4f} {base_currency} over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)",
+        f"  {share_line}",
+    ]
+
+    # Concentrated levels (per-side median)
+    import statistics
+    bid_amounts = [l.amount for l in ob.bids[:depth]]
+    ask_amounts = [l.amount for l in ob.asks[:depth]]
+    bid_median = statistics.median(bid_amounts)
+    ask_median = statistics.median(ask_amounts)
+    threshold_bid = bid_median * ORDER_BOOK_CONCENTRATION_MULTIPLIER
+    threshold_ask = ask_median * ORDER_BOOK_CONCENTRATION_MULTIPLIER
+
+    concentrated = []
+    for l in ob.bids[:depth]:
+        if l.amount > threshold_bid:
+            concentrated.append(("Bid", l.price, l.amount, (mid - l.price) / mid * 100, True))
+    for l in ob.asks[:depth]:
+        if l.amount > threshold_ask:
+            concentrated.append(("Ask", l.price, l.amount, (l.price - mid) / mid * 100, False))
+
+    if concentrated:
+        # Sort top-10 by amount desc, then restore display order (bids-then-asks, nearest-to-mid first)
+        concentrated.sort(key=lambda c: c[2], reverse=True)
+        concentrated = concentrated[:ORDER_BOOK_MAX_CONCENTRATED_LEVELS]
+        bids_conc = sorted([c for c in concentrated if c[0] == "Bid"], key=lambda c: -c[1])  # price desc
+        asks_conc = sorted([c for c in concentrated if c[0] == "Ask"], key=lambda c: c[1])   # price asc
+        lines.append("")
+        lines.append(f"Concentrated levels (size > {ORDER_BOOK_CONCENTRATION_MULTIPLIER:.0f}× median of top {depth}):")
+        for side, price, amount, dist_pct, is_bid in bids_conc + asks_conc:
+            direction = "below mid" if is_bid else "above mid"
+            lines.append(f"  {side}  {price:.2f}  {amount:.4f} {base_currency}  ({dist_pct:.2f}% {direction})")
+
+    return "\n".join(lines)
+
+
+async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRADES_WINDOW_DEFAULT) -> str:
+    """Return taker-flow bias and rhythm over a recent time window via 5 time-buckets.
+
+    Args:
+        window_seconds: Observation window in seconds. Default 300 (5 min).
+
+    Returns:
+        str: 5-bucket breakdown + Total + trade count + avg size. See spec §2.2.
+
+    Degradation: "no trades in last {window_seconds}s" if cold market; "temporarily unavailable" on service failure.
+    """
+    import time
+    symbol = deps.symbol
+    base_currency = symbol.split("/")[0]
+    try:
+        trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
+    except Exception:
+        logger.exception("get_recent_trades failed for %s", symbol)
+        return f"Recent trades ({symbol}): temporarily unavailable"
+
+    if not trades:
+        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+
+    now_ms = int(time.time() * 1000)
+    window_ms = window_seconds * 1000
+    bucket_duration_ms = window_ms // RECENT_TRADES_BUCKET_COUNT
+
+    # Allocate trades to buckets (0 = oldest, 4 = newest); drop over-window
+    buckets: list[list[Trade]] = [[] for _ in range(RECENT_TRADES_BUCKET_COUNT)]
+    in_window: list[Trade] = []
+    for t in trades:
+        age_ms = now_ms - t.timestamp
+        # Skip out-of-window trades:
+        # - age_ms >= window_ms: too old (strict >= prevents bucket_idx = -1 on boundary)
+        # - age_ms < 0: future-timestamped (server clock ahead of local clock).
+        #   Python floor division gives `-5000 // 60_000 == -1`, which would compute
+        #   bucket_idx = 5 — out of bounds on a 5-element list (IndexError). NTP-level
+        #   clock skew of a few hundred ms is common in practice; skip rather than
+        #   silently clamp so genuine clock-sync failures stay visible.
+        if age_ms >= window_ms or age_ms < 0:
+            continue
+        bucket_idx = RECENT_TRADES_BUCKET_COUNT - 1 - (age_ms // bucket_duration_ms)
+        buckets[bucket_idx].append(t)
+        in_window.append(t)
+
+    if not in_window:
+        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+
+    lines = [f"=== Recent Trades ({symbol}, last {window_seconds}s, {RECENT_TRADES_BUCKET_COUNT} × {bucket_duration_ms // 1000}s buckets) ==="]
+    total_buy = 0.0
+    total_sell = 0.0
+    for i, bucket in enumerate(buckets):
+        buy_vol = sum(t.amount for t in bucket if t.side == "buy")
+        sell_vol = sum(t.amount for t in bucket if t.side == "sell")
+        net = buy_vol - sell_vol
+        total_buy += buy_vol
+        total_sell += sell_vol
+        # Label: for standard 300s/5-bucket → t-5min to t-1min; otherwise bucket {i+1}/N ({start_s}-{end_s}s ago)
+        if window_seconds == 300:
+            label = f"t-{RECENT_TRADES_BUCKET_COUNT - i}min"
+        else:
+            start_s = (RECENT_TRADES_BUCKET_COUNT - i - 1) * (bucket_duration_ms // 1000)
+            end_s = (RECENT_TRADES_BUCKET_COUNT - i) * (bucket_duration_ms // 1000)
+            label = f"bucket {i+1}/{RECENT_TRADES_BUCKET_COUNT} ({start_s}-{end_s}s ago)"
+        lines.append(f"  {label}  buy {buy_vol:.4f} / sell {sell_vol:.4f}  (net {net:+.4f})")
+
+    total_vol = total_buy + total_sell
+    buy_pct = total_buy / total_vol * 100 if total_vol > 0 else 0.0
+    net_total = total_buy - total_sell
+    total_label = f"Total: buy {total_buy:.4f} / sell {total_sell:.4f} (net {net_total:+.4f}, {buy_pct:.0f}% taker buy)"
+
+    # Partial coverage double-condition
+    fetch_ratio = len(trades) / RECENT_TRADES_MAX_FETCH
+    oldest_age_ms = max(now_ms - t.timestamp for t in in_window)
+    oldest_age_ratio = oldest_age_ms / window_ms
+    if fetch_ratio >= 0.95 and oldest_age_ratio < 0.95:
+        total_label = f"Total: buy {total_buy:.4f} / sell {total_sell:.4f} (net {net_total:+.4f}*, {buy_pct:.0f}% taker buy) [* partial coverage: {len(trades)} trades at limit, oldest age {oldest_age_ms//1000}s ({oldest_age_ratio:.0%} of window), window not fully covered]"
+
+    lines.append(total_label)
+    lines.append(f"Trade count: {len(in_window)} | Avg size: {total_vol / len(in_window):.4f} {base_currency}")
+    return "\n".join(lines)
+
+
+async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None = None) -> str:
+    """Quick multi-timeframe scan: momentum | structure | volatility | range position.
+
+    Args:
+        tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"].
+
+    Returns:
+        str: 4-column row per TF + Columns header. See spec §2.3.
+
+    Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall unavailable only if ALL TFs fail.
+    """
+    import asyncio
+    import pandas as pd
+    symbol = deps.symbol
+    if tfs is None:
+        tfs = ["5m", "1h", "4h", "1d"]
+
+    # Fetch current price (from ticker, not per-TF close).
+    # Uses MarketDataService layer for consistency with other perception tools
+    # (get_market_data / get_position). market_data.get_ticker is a no-cache
+    # passthrough wrapper so the behavior is functionally identical to calling
+    # exchange.fetch_ticker directly.
+    try:
+        ticker = await deps.market_data.get_ticker(symbol)
+        current_price = ticker.last
+    except Exception:
+        logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
+        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+
+    async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
+        try:
+            df = await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250))
+            return tf, df
+        except Exception as e:
+            return tf, e
+
+    results = await asyncio.gather(*[_fetch_one(tf) for tf in tfs], return_exceptions=False)
+
+    # All failed?
+    if all(isinstance(r[1], Exception) for r in results):
+        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+
+    rows: list[str] = []
+    for tf, df_or_err in results:
+        primary_ma_n = MULTI_TF_PRIMARY_MA.get(tf, 50)
+        fast, slow = MULTI_TF_STRUCTURE_MAS.get(tf, (50, 200))
+        if isinstance(df_or_err, Exception):
+            rows.append(f"{tf}: temporarily unavailable")
+            continue
+        df = df_or_err
+        if df.empty or len(df) < slow:
+            rows.append(f"{tf}: insufficient data (need {slow} candles, got {len(df)})")
+            continue
+        indicators = deps.technical.compute_indicators(df)
+        atr = indicators.get("atr_14")
+        close = float(df["close"].iloc[-1])
+
+        # Momentum: live ticker price vs primary MA.
+        # Intentional: uses `current_price` (live ticker) NOT `df["close"].iloc[-1]`
+        # so the row answers "where is RIGHT NOW relative to this TF's MA?".
+        # Per-TF close lags by up to one candle period (e.g. 1d close = previous
+        # day's close), which would understate fast-moving intraday moves on
+        # higher TFs. Do not "fix" this to df.close.iloc[-1].
+        primary_ma_val = float(df["close"].rolling(primary_ma_n).mean().iloc[-1])
+        mom_pct = (current_price - primary_ma_val) / primary_ma_val * 100
+        mom_str = f"{mom_pct:+.1f}% vs MA{primary_ma_n}"
+
+        # Structure: MA(fast) vs MA(slow)
+        ma_fast = float(df["close"].rolling(fast).mean().iloc[-1])
+        ma_slow = float(df["close"].rolling(slow).mean().iloc[-1])
+        diff_pct = abs(ma_fast - ma_slow) / ma_slow * 100
+        if diff_pct < 0.1:
+            struct_str = f"MA{fast} at MA{slow}"
+        elif ma_fast > ma_slow:
+            struct_str = f"MA{fast} above MA{slow}"
+        else:
+            struct_str = f"MA{fast} below MA{slow}"
+        # (short-structure) marker ONLY for 1w/1M — these are degraded from (50, 200) due to history shortage.
+        # 5m's (MA20, MA50) is its native structure, not a degradation → no marker (spec §2.3 example).
+        if tf in ("1w", "1M"):
+            struct_str += " (short-structure)"
+
+        # Volatility
+        atr_pct = (atr / close * 100) if atr is not None else None
+        atr_str = f"ATR {atr_pct:.2f}%" if atr_pct is not None else "ATR N/A"
+
+        # Range position: last 20-bar high/low
+        last_20 = df.iloc[-MULTI_TF_RANGE_PERIODS:]
+        hi = float(last_20["high"].max())
+        lo = float(last_20["low"].min())
+        range_pct = 0.0 if hi == lo else (close - lo) / (hi - lo) * 100
+
+        rows.append(f"{tf}:  {mom_str:<16} | {struct_str:<40} | {atr_str:<12} | range pos {range_pct:.0f}%")
+
+    header = [
+        f"=== Multi-TF Snapshot ({symbol}) ===",
+        f"Current price: {current_price:.2f}",
+        "Columns: Momentum (price vs primary MA) | Structure (MA alignment) | Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, 0%=low / 100%=high)",
+        "",
+    ]
+    return "\n".join(header + rows)

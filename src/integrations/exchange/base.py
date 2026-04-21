@@ -49,6 +49,29 @@ class Balance:
 
 
 @dataclass
+class OrderBookLevel:
+    price: float
+    amount: float  # base-currency
+
+
+@dataclass
+class OrderBook:
+    symbol: str
+    bids: list[OrderBookLevel]  # sorted by price DESC (best first)
+    asks: list[OrderBookLevel]  # sorted by price ASC (best first)
+    timestamp: int | None  # CCXT may return None in some exchanges/conditions
+
+
+@dataclass
+class Trade:
+    timestamp: int  # ms
+    side: str       # "buy" | "sell" (taker direction per CCXT unified spec)
+    price: float
+    amount: float   # base-currency
+    trade_id: str | None
+
+
+@dataclass
 class Position:
     symbol: str
     side: str
@@ -96,6 +119,14 @@ class BaseExchange(ABC):
     async def fetch_open_interest(self, symbol: str) -> 'OpenInterest': ...
     @abstractmethod
     async def fetch_long_short_ratio(self, symbol: str) -> 'LongShortRatio': ...
+    @abstractmethod
+    async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook: ...
+    @abstractmethod
+    async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]: ...
+    @abstractmethod
+    async def get_contract_size(self, symbol: str) -> float:
+        """Contract multiplier. OKX BTC swap = 0.01 BTC/contract; Sim = 1.0."""
+        ...
 
     async def start(self) -> None:
         """启动 WebSocket 等后台任务。默认空实现。"""

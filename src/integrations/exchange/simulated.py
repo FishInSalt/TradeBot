@@ -19,8 +19,11 @@ from src.integrations.exchange.base import (
     LongShortRatio,
     OpenInterest,
     Order,
+    OrderBook,
+    OrderBookLevel,
     Position,
     Ticker,
+    Trade,
 )
 from src.utils.cache import RateLimitHit
 
@@ -70,6 +73,7 @@ class SimulatedExchange(BaseExchange):
         self._pending_orders: list[_PendingOrder] = []
         self._leverage: dict[str, int] = {}
         self._latest_ticker: Ticker | None = None
+        self._prev_ticker: Ticker | None = None
         self._running = False
         self._lock = asyncio.Lock()
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
@@ -580,6 +584,7 @@ class SimulatedExchange(BaseExchange):
 
     async def _process_tick(self, ticker: Ticker) -> None:
         """Process a single tick -- match market orders, check liquidations, conditional orders, alerts."""
+        self._prev_ticker = self._latest_ticker  # save previous before overwrite (for fetch_trades bias)
         self._latest_ticker = ticker
         self._latest_price = ticker.last
 
@@ -1109,3 +1114,64 @@ class SimulatedExchange(BaseExchange):
         if hasattr(self, "_ccxt"):
             await self._ccxt.close()
         logger.info("SimulatedExchange closed")
+
+    async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
+        """Synthesize order book from ticker (best bid/ask + ±0.01% steps)."""
+        import time
+        if self._latest_ticker is None:
+            return OrderBook(symbol=symbol, bids=[], asks=[], timestamp=None)
+        bid_price = self._latest_ticker.bid
+        ask_price = self._latest_ticker.ask
+        bids = [
+            OrderBookLevel(
+                price=round(bid_price * (1 - 0.0001 * i), 2),
+                amount=round(0.01 * (1 + i * 0.1), 4),
+            )
+            for i in range(depth)
+        ]
+        asks = [
+            OrderBookLevel(
+                price=round(ask_price * (1 + 0.0001 * i), 2),
+                amount=round(0.01 * (1 + i * 0.1), 4),
+            )
+            for i in range(depth)
+        ]
+        return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=int(time.time() * 1000))
+
+    async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
+        """Synthesize ~20-50 trades with direction biased by ticker change.
+
+        Note: `limit` is accepted for BaseExchange compatibility but unused — synthesis
+        count is fixed at random.randint(20, 50) regardless of requested limit. Safe in
+        practice because tool-layer callers always pass limit=500 and synthesized count
+        is far below, so no truncation scenario occurs.
+        """
+        import random
+        import time
+        if self._latest_ticker is None:
+            return []
+        # Direction bias based on prev → latest bid change
+        if self._prev_ticker is not None and self._prev_ticker.bid > 0:
+            price_change_pct = (self._latest_ticker.bid - self._prev_ticker.bid) / self._prev_ticker.bid
+        else:
+            price_change_pct = 0.0
+        buy_prob = 0.5 + max(-0.15, min(0.15, price_change_pct * 20))
+        n_trades = random.randint(20, 50)
+        mid = (self._latest_ticker.bid + self._latest_ticker.ask) / 2
+        now_ms = int(time.time() * 1000)
+        window_ms = 300_000  # 5 min, matches RECENT_TRADES_WINDOW_DEFAULT
+        trades: list[Trade] = []
+        for _ in range(n_trades):
+            side = "buy" if random.random() < buy_prob else "sell"
+            price = round(mid * (1 + random.uniform(-0.0002, 0.0002)), 2)
+            amount = round(random.uniform(0.001, 0.01), 4)
+            age_ms = random.randint(0, window_ms - 1)
+            trades.append(Trade(
+                timestamp=now_ms - age_ms,
+                side=side, price=price, amount=amount,
+                trade_id=None,
+            ))
+        return trades
+
+    async def get_contract_size(self, symbol: str) -> float:
+        return 1.0

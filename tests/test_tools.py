@@ -69,6 +69,7 @@ def deps():
     d.memory.format_for_prompt.return_value = "No memories."
     d.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
     d.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    d.exchange.get_contract_size = AsyncMock(return_value=1.0)
     return d
 
 

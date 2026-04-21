@@ -32,7 +32,9 @@ def test_base_exchange_requires_new_methods():
         async def set_leverage(self, symbol: str, leverage: int) -> None: ...
         def amount_to_precision(self, symbol: str, amount: float) -> float: ...
         async def close(self) -> None: ...
-        # fetch_order, fetch_open_orders, fetch_closed_orders intentionally omitted
+        # Intentionally omitted: fetch_order, fetch_open_orders, fetch_closed_orders,
+        # fetch_order_book, fetch_trades, get_contract_size — this test verifies
+        # abstract-method enforcement, so IncompleteExchange must remain incomplete.
 
     with pytest.raises(TypeError):
         IncompleteExchange()
@@ -242,6 +244,16 @@ async def test_base_exchange_start_default_noop():
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
 
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
+
     ex = DummyExchange()
     await ex.start()  # 不应抛异常
 
@@ -266,6 +278,16 @@ def test_base_exchange_on_fill_default_noop():
         async def fetch_funding_rate(self, symbol): ...
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
+
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
 
     ex = DummyExchange()
     callback = AsyncMock()
@@ -293,6 +315,16 @@ def test_base_exchange_on_alert_default_noop():
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
 
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
+
     ex = DummyExchange()
     callback = AsyncMock()
     ex.on_alert(callback)  # 不应抛异常
@@ -319,6 +351,16 @@ def test_base_exchange_set_alert_service_default_noop():
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
 
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
+
     ex = DummyExchange()
     ex.set_alert_service(object())  # 不应抛异常
 
@@ -344,6 +386,16 @@ def test_base_exchange_update_alert_params_default_noop():
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
 
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
+
     ex = DummyExchange()
     ex.update_alert_params(3.0, 5)  # 不应抛异常
 
@@ -367,6 +419,16 @@ async def test_base_exchange_has_pending_market_order_default():
         async def fetch_funding_rate(self, s): ...
         async def fetch_open_interest(self, s): ...
         async def fetch_long_short_ratio(self, s): ...
+
+        async def fetch_order_book(self, symbol, depth=20):
+            from src.integrations.exchange.base import OrderBook, OrderBookLevel
+            return OrderBook(symbol=symbol, bids=[OrderBookLevel(100.0, 1.0)], asks=[OrderBookLevel(101.0, 1.0)], timestamp=0)
+
+        async def fetch_trades(self, symbol, limit=500):
+            return []
+
+        async def get_contract_size(self, symbol):
+            return 1.0
     stub = _Stub()
     assert stub.has_pending_market_order("BTC/USDT:USDT") is False
     assert stub.has_pending_market_order("BTC/USDT:USDT", side="buy") is False
