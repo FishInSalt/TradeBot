@@ -194,3 +194,110 @@ async def test_recent_trades_all_taker_sell():
     result = await get_recent_trades(deps, window_seconds=300)
     assert "0% taker buy" in result
     assert "net -" in result  # negative net (all sells)
+
+
+import pandas as pd
+
+
+def _make_ohlcv_df(n: int, last_close: float = 64200.0) -> pd.DataFrame:
+    """Helper: synthetic OHLCV with gentle trend."""
+    return pd.DataFrame([
+        {"timestamp": 1700000000000 + i * 60_000,
+         "open": last_close - (n - i), "high": last_close - (n - i) + 5,
+         "low": last_close - (n - i) - 5, "close": last_close - (n - i - 1),
+         "volume": 100.0}
+        for i in range(n)
+    ])
+
+
+@pytest.mark.asyncio
+async def test_multi_tf_snapshot_typical(mocker):
+    """Typical: 4 TFs all with sufficient data → 4 formatted rows + Columns header."""
+    from src.agent.tools_perception import get_multi_timeframe_snapshot
+    deps = MockDeps()
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=lambda sym, tf, limit: _make_ohlcv_df(limit))
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
+    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    result = await get_multi_timeframe_snapshot(deps)
+    assert "Multi-TF Snapshot" in result
+    assert "Current price:" in result
+    assert "Columns: Momentum" in result
+    for tf in ("5m", "1h", "4h", "1d"):
+        assert f"{tf}:" in result
+
+
+@pytest.mark.asyncio
+async def test_multi_tf_snapshot_custom_tfs(mocker):
+    from src.agent.tools_perception import get_multi_timeframe_snapshot
+    deps = MockDeps()
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=lambda sym, tf, limit: _make_ohlcv_df(limit))
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
+    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    result = await get_multi_timeframe_snapshot(deps, tfs=["1h"])
+    assert "1h:" in result
+    assert "5m:" not in result
+
+
+@pytest.mark.asyncio
+async def test_multi_tf_snapshot_all_fail(mocker):
+    """All TFs raise → overall unavailable."""
+    from src.agent.tools_perception import get_multi_timeframe_snapshot
+    deps = MockDeps()
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("down"))
+    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    result = await get_multi_timeframe_snapshot(deps)
+    assert "temporarily unavailable" in result
+
+
+@pytest.mark.asyncio
+async def test_multi_tf_snapshot_per_tf_insufficient(mocker):
+    """5m has only 30 candles (< 50 needed): that TF shows insufficient, others OK."""
+    from src.agent.tools_perception import get_multi_timeframe_snapshot
+    deps = MockDeps()
+
+    def ohlcv_side(sym, tf, limit):
+        if tf == "5m":
+            return _make_ohlcv_df(30)  # insufficient for MA50
+        return _make_ohlcv_df(limit)
+
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=ohlcv_side)
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
+    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64200.0, bid=64199.5, ask=64200.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    result = await get_multi_timeframe_snapshot(deps)
+    assert "5m: insufficient data" in result
+    assert "1h:" in result  # still rendered
+
+
+@pytest.mark.asyncio
+async def test_multi_tf_snapshot_ma_entangled(mocker):
+    """MA fast ≈ MA slow (diff < 0.1%) → 'MA{fast} at MA{slow}' rendering."""
+    from src.agent.tools_perception import get_multi_timeframe_snapshot
+    deps = MockDeps()
+    # Construct a DataFrame where MA50 and MA200 are within 0.1% (constant close → rolling means all equal)
+    tight_df = pd.DataFrame([
+        {"timestamp": 1700000000000 + i * 60_000,
+         "open": 64000.0, "high": 64001.0, "low": 63999.0,
+         "close": 64000.0,
+         "volume": 100.0}
+        for i in range(250)
+    ])
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=tight_df)
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 85.0})
+    deps.exchange.fetch_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64000.0, bid=63999.5, ask=64000.5,
+        high=64001.0, low=63999.0, base_volume=1000.0, timestamp=0,
+    ))
+    result = await get_multi_timeframe_snapshot(deps, tfs=["1h"])
+    assert "MA50 at MA200" in result

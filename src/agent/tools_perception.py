@@ -1138,3 +1138,97 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
     lines.append(total_label)
     lines.append(f"Trade count: {len(in_window)} | Avg size: {total_vol / len(in_window):.4f} BTC")
     return "\n".join(lines)
+
+
+async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None = None) -> str:
+    """Quick multi-timeframe scan: momentum | structure | volatility | range position.
+
+    Args:
+        tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"].
+
+    Returns:
+        str: 4-column row per TF + Columns header. See spec §2.3.
+
+    Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall unavailable only if ALL TFs fail.
+    """
+    import asyncio
+    import pandas as pd
+    symbol = deps.symbol
+    if tfs is None:
+        tfs = ["5m", "1h", "4h", "1d"]
+
+    # Fetch current price (from ticker, not per-TF close)
+    try:
+        ticker = await deps.exchange.fetch_ticker(symbol)
+        current_price = ticker.last
+    except Exception:
+        logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
+        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+
+    async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
+        try:
+            df = await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250))
+            return tf, df
+        except Exception as e:
+            return tf, e
+
+    results = await asyncio.gather(*[_fetch_one(tf) for tf in tfs], return_exceptions=False)
+
+    # All failed?
+    if all(isinstance(r[1], Exception) for r in results):
+        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+
+    rows: list[str] = []
+    for tf, df_or_err in results:
+        primary_ma_n = MULTI_TF_PRIMARY_MA.get(tf, 50)
+        fast, slow = MULTI_TF_STRUCTURE_MAS.get(tf, (50, 200))
+        if isinstance(df_or_err, Exception):
+            rows.append(f"{tf}: temporarily unavailable")
+            continue
+        df = df_or_err
+        if df.empty or len(df) < slow:
+            rows.append(f"{tf}: insufficient data (need {slow} candles, got {len(df)})")
+            continue
+        indicators = deps.technical.compute_indicators(df)
+        atr = indicators.get("atr_14")
+        close = float(df["close"].iloc[-1])
+
+        # Momentum: price vs primary MA
+        primary_ma_val = float(df["close"].rolling(primary_ma_n).mean().iloc[-1])
+        mom_pct = (current_price - primary_ma_val) / primary_ma_val * 100
+        mom_str = f"{mom_pct:+.1f}% vs MA{primary_ma_n}"
+
+        # Structure: MA(fast) vs MA(slow)
+        ma_fast = float(df["close"].rolling(fast).mean().iloc[-1])
+        ma_slow = float(df["close"].rolling(slow).mean().iloc[-1])
+        diff_pct = abs(ma_fast - ma_slow) / ma_slow * 100
+        if diff_pct < 0.1:
+            struct_str = f"MA{fast} at MA{slow}"
+        elif ma_fast > ma_slow:
+            struct_str = f"MA{fast} above MA{slow}"
+        else:
+            struct_str = f"MA{fast} below MA{slow}"
+        # (short-structure) marker ONLY for 1w/1M — these are degraded from (50, 200) due to history shortage.
+        # 5m's (MA20, MA50) is its native structure, not a degradation → no marker (spec §2.3 example).
+        if tf in ("1w", "1M"):
+            struct_str += " (short-structure)"
+
+        # Volatility
+        atr_pct = (atr / close * 100) if atr is not None else None
+        atr_str = f"ATR {atr_pct:.2f}%" if atr_pct is not None else "ATR N/A"
+
+        # Range position: last 20-bar high/low
+        last_20 = df.iloc[-MULTI_TF_RANGE_PERIODS:]
+        hi = float(last_20["high"].max())
+        lo = float(last_20["low"].min())
+        range_pct = 0.0 if hi == lo else (close - lo) / (hi - lo) * 100
+
+        rows.append(f"{tf}:  {mom_str:<16} | {struct_str:<40} | {atr_str:<12} | range pos {range_pct:.0f}%")
+
+    header = [
+        f"=== Multi-TF Snapshot ({symbol}) ===",
+        f"Current price: {current_price:.2f}",
+        "Columns: Momentum (price vs primary MA) | Structure (MA alignment) | Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, 0%=low / 100%=high)",
+        "",
+    ]
+    return "\n".join(header + rows)
