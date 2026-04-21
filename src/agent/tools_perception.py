@@ -9,6 +9,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# === Iter 2 toolkit constants ===
+# get_order_book
+ORDER_BOOK_CONCENTRATION_MULTIPLIER = 3.0
+ORDER_BOOK_MAX_CONCENTRATED_LEVELS = 10
+ORDER_BOOK_DEPTH_DEFAULT = 20
+ORDER_BOOK_BALANCED_THRESHOLD_PCT = 5.0
+
+# get_recent_trades
+RECENT_TRADES_WINDOW_DEFAULT = 300
+RECENT_TRADES_BUCKET_COUNT = 5
+RECENT_TRADES_MAX_FETCH = 500  # OKX /market/trades single-call limit
+
+# get_multi_timeframe_snapshot
+MULTI_TF_PRIMARY_MA = {"5m": 20, "1h": 50, "4h": 50, "1d": 50, "1w": 50, "1M": 50}
+MULTI_TF_STRUCTURE_MAS = {
+    "5m": (20, 50),
+    "1h": (50, 200),
+    "4h": (50, 200),
+    "1d": (50, 200),
+    "1w": (20, 50),
+    "1M": (20, 50),
+}
+MULTI_TF_RANGE_PERIODS = 20
+MULTI_TF_OHLCV_LIMIT = {"5m": 80, "1h": 250, "4h": 250, "1d": 250, "1w": 60, "1M": 60}
+
+
 async def get_market_data(
     deps: TradingDeps,
     symbol: str | None = None,
@@ -940,5 +966,99 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
         f"(7d: {_fmt_signed_dollars(total.total_change_7d_usd)}, "
         f"{_fmt_pct(total.total_change_7d_pct)})"
     )
+
+    return "\n".join(lines)
+
+
+async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAULT) -> str:
+    """Return top-N order book depth with concentrated-level breakdown.
+
+    Args:
+        depth: Levels per side to fetch. Default 20.
+
+    Returns:
+        str: Multi-line fact-only text (best bid/ask + cumulative depth + bid share + concentrated levels). See spec §2.1.
+
+    Degradation: Returns "Order book ({symbol}): insufficient data (requested depth X, got Y)" if book is empty/short;
+    "Order book ({symbol}): temporarily unavailable" on service failure.
+    """
+    symbol = deps.symbol
+    try:
+        ob = await deps.market_data.get_order_book(symbol, depth=depth)
+    except Exception:
+        logger.exception("get_order_book failed for %s", symbol)
+        return f"Order book ({symbol}): temporarily unavailable"
+
+    actual = min(len(ob.bids), len(ob.asks))
+    if not ob.bids or not ob.asks or actual < depth:
+        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
+
+    best_bid = ob.bids[0]
+    best_ask = ob.asks[0]
+    mid = (best_bid.price + best_ask.price) / 2
+    spread = best_ask.price - best_bid.price
+    spread_pct = spread / mid * 100
+
+    total_bid = sum(l.amount for l in ob.bids[:depth])
+    total_ask = sum(l.amount for l in ob.asks[:depth])
+    total_sum = total_bid + total_ask
+    bid_deep_pct = (ob.bids[0].price - ob.bids[depth - 1].price) / ob.bids[0].price * 100
+    ask_deep_pct = (ob.asks[depth - 1].price - ob.asks[0].price) / ob.asks[0].price * 100
+
+    # Bid share three-state
+    if total_bid == 0 and total_ask > 0:
+        share_line = "Bid share: 0% (asks only, no bids in top {})".format(depth)
+    elif total_ask == 0 and total_bid > 0:
+        share_line = "Bid share: 100% (bids only, no asks in top {})".format(depth)
+    else:
+        bid_share = total_bid / total_sum * 100
+        if abs(bid_share - 50) < ORDER_BOOK_BALANCED_THRESHOLD_PCT:
+            # Spec §2.1 — fixed '~50%' label when within balanced threshold, not actual value.
+            # Actual value on a balanced output creates a conflicting signal
+            # ("Bid share: ~47% (balanced)" mixes precise percentage with the approximation marker).
+            share_line = "Bid share: ~50% (balanced)"
+        else:
+            bid_ratio = total_bid / total_ask if total_ask > 0 else float("inf")
+            share_line = f"Bid share: {bid_share:.1f}% (bid : ask = {bid_ratio:.2f} : 1)"
+
+    lines = [
+        f"=== Order Book ({symbol}) ===",
+        f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} BTC  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} BTC",
+        f"Spread: {spread:.2f} ({spread_pct:.3f}%)",
+        "",
+        f"Depth (top {depth} each side):",
+        f"  Bids cumulative: {total_bid:.4f} BTC over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)",
+        f"  Asks cumulative: {total_ask:.4f} BTC over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)",
+        f"  {share_line}",
+    ]
+
+    # Concentrated levels (per-side median)
+    import statistics
+    bid_amounts = [l.amount for l in ob.bids[:depth]]
+    ask_amounts = [l.amount for l in ob.asks[:depth]]
+    bid_median = statistics.median(bid_amounts)
+    ask_median = statistics.median(ask_amounts)
+    threshold_bid = bid_median * ORDER_BOOK_CONCENTRATION_MULTIPLIER
+    threshold_ask = ask_median * ORDER_BOOK_CONCENTRATION_MULTIPLIER
+
+    concentrated = []
+    for l in ob.bids[:depth]:
+        if l.amount > threshold_bid:
+            concentrated.append(("Bid", l.price, l.amount, (mid - l.price) / mid * 100, True))
+    for l in ob.asks[:depth]:
+        if l.amount > threshold_ask:
+            concentrated.append(("Ask", l.price, l.amount, (l.price - mid) / mid * 100, False))
+
+    if concentrated:
+        # Sort top-10 by amount desc, then restore display order (bids-then-asks, nearest-to-mid first)
+        concentrated.sort(key=lambda c: c[2], reverse=True)
+        concentrated = concentrated[:ORDER_BOOK_MAX_CONCENTRATED_LEVELS]
+        bids_conc = sorted([c for c in concentrated if c[0] == "Bid"], key=lambda c: -c[1])  # price desc
+        asks_conc = sorted([c for c in concentrated if c[0] == "Ask"], key=lambda c: c[1])   # price asc
+        lines.append("")
+        lines.append(f"Concentrated levels (size > {ORDER_BOOK_CONCENTRATION_MULTIPLIER:.0f}× median of top {depth}):")
+        for side, price, amount, dist_pct, is_bid in bids_conc + asks_conc:
+            direction = "below mid" if is_bid else "above mid"
+            lines.append(f"  {side}  {price:.2f}  {amount:.4f} BTC  ({dist_pct:.2f}% {direction})")
 
     return "\n".join(lines)
