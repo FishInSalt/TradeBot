@@ -132,3 +132,62 @@ async def test_sim_get_contract_size_always_one():
     ex = _make_sim()
     assert await ex.get_contract_size("BTC/USDT:USDT") == 1.0
     assert await ex.get_contract_size("ETH/USDT:USDT") == 1.0
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_order_book_parses_ccxt_response(mocker):
+    """OKX fetch_order_book parses CCXT raw dict into OrderBook dataclass."""
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    mock_fetch = mocker.patch.object(
+        ex._client, "fetch_order_book",
+        return_value={
+            "bids": [[50000.0, 1.0], [49999.5, 0.5]],
+            "asks": [[50001.0, 0.8], [50001.5, 1.2]],
+            "timestamp": 1700000000000,
+        }
+    )
+    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=2)
+    assert ob.symbol == "BTC/USDT:USDT"
+    assert ob.timestamp == 1700000000000
+    assert len(ob.bids) == 2
+    assert ob.bids[0].price == 50000.0
+    assert ob.bids[0].amount == 1.0
+    assert ob.asks[0].price == 50001.0
+    mock_fetch.assert_called_once_with("BTC/USDT:USDT", limit=2)
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_order_book_timestamp_none_fallback(mocker):
+    """If CCXT returns timestamp=None, OKX layer fills with current time."""
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    mocker.patch.object(ex._client, "fetch_order_book", return_value={
+        "bids": [[50000.0, 1.0]], "asks": [[50001.0, 1.0]], "timestamp": None,
+    })
+    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=1)
+    import time
+    now_ms = int(time.time() * 1000)
+    assert ob.timestamp is not None
+    assert abs(ob.timestamp - now_ms) < 10_000  # within 10s
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_order_book_retry_params(mocker):
+    """@_retry(max_retries=2, base_delay=0.5) — exactly 2 total attempts, then raises."""
+    import ccxt
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    mock_fetch = mocker.patch.object(
+        ex._client, "fetch_order_book",
+        side_effect=ccxt.NetworkError("temporary network failure"),
+    )
+    mocker.patch("asyncio.sleep", return_value=None)
+    with pytest.raises(ccxt.NetworkError):
+        await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
+    assert mock_fetch.call_count == 2, (
+        f"Expected 2 total attempts for max_retries=2 "
+        f"(per okx.py:62 `for attempt in range(max_retries)` → max_retries IS total attempt count, not +1), "
+        f"got {mock_fetch.call_count}. "
+        "If count=3, @_retry is still using default max_retries=3 — verify fetch_order_book decoration."
+    )

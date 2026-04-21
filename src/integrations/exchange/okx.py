@@ -19,6 +19,7 @@ from src.integrations.exchange.base import (
     OpenInterest,
     Order,
     OrderBook,
+    OrderBookLevel,
     Position,
     Ticker,
     Trade,
@@ -466,8 +467,16 @@ class OKXExchange(BaseExchange):
             timestamp=int(entry.get("timestamp") or 0),
         )
 
+    @_retry(max_retries=2, base_delay=0.5)
     async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        raise NotImplementedError("Task 3 will implement this")
+        import time
+        data = await self._client.fetch_order_book(symbol, limit=depth)
+        bids = [OrderBookLevel(price=float(p), amount=float(a)) for p, a in data.get("bids", [])]
+        asks = [OrderBookLevel(price=float(p), amount=float(a)) for p, a in data.get("asks", [])]
+        ts = data.get("timestamp")
+        if ts is None:
+            ts = int(time.time() * 1000)
+        return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=ts)
 
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
         raise NotImplementedError("Task 4 will implement this")
