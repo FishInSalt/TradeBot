@@ -191,3 +191,25 @@ async def test_okx_fetch_order_book_retry_params(mocker):
         f"got {mock_fetch.call_count}. "
         "If count=3, @_retry is still using default max_retries=3 — verify fetch_order_book decoration."
     )
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_trades_parses_and_sorts(mocker):
+    """OKX fetch_trades parses CCXT response and explicitly sorts ascending by timestamp."""
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    # Deliberately unordered to test explicit sort
+    mocker.patch.object(ex._client, "fetch_trades", return_value=[
+        {"timestamp": 1700000030000, "side": "buy", "price": 50001.0, "amount": 0.01, "id": "t3"},
+        {"timestamp": 1700000010000, "side": "sell", "price": 50000.0, "amount": 0.02, "id": "t1"},
+        {"timestamp": 1700000020000, "side": "buy", "price": 50000.5, "amount": 0.015, "id": None},
+    ])
+    trades = await ex.fetch_trades("BTC/USDT:USDT", limit=500)
+    assert len(trades) == 3
+    # Sorted ascending by timestamp
+    assert trades[0].timestamp == 1700000010000
+    assert trades[1].timestamp == 1700000020000
+    assert trades[2].timestamp == 1700000030000
+    # trade_id None handling
+    assert trades[0].trade_id == "t1"
+    assert trades[1].trade_id is None

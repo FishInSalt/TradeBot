@@ -478,8 +478,22 @@ class OKXExchange(BaseExchange):
             ts = int(time.time() * 1000)
         return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=ts)
 
+    @_retry(max_retries=2, base_delay=0.5)
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
-        raise NotImplementedError("Task 4 will implement this")
+        data = await self._client.fetch_trades(symbol, limit=limit)
+        trades: list[Trade] = []
+        for raw in data:
+            raw_id = raw.get("id")
+            trades.append(Trade(
+                timestamp=int(raw["timestamp"]),
+                side=str(raw["side"]),
+                price=float(raw["price"]),
+                amount=float(raw["amount"]),
+                trade_id=str(raw_id) if raw_id is not None else None,
+            ))
+        # Explicit sort — don't rely on CCXT default (unified spec is ascending but not guaranteed)
+        trades.sort(key=lambda t: t.timestamp)
+        return trades
 
     async def get_contract_size(self, symbol: str) -> float:
         raise NotImplementedError("Task 5 will implement this")
