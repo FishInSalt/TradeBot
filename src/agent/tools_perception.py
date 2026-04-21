@@ -1062,3 +1062,79 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
             lines.append(f"  {side}  {price:.2f}  {amount:.4f} BTC  ({dist_pct:.2f}% {direction})")
 
     return "\n".join(lines)
+
+
+async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRADES_WINDOW_DEFAULT) -> str:
+    """Return taker-flow bias and rhythm over a recent time window via 5 time-buckets.
+
+    Args:
+        window_seconds: Observation window in seconds. Default 300 (5 min).
+
+    Returns:
+        str: 5-bucket breakdown + Total + trade count + avg size. See spec §2.2.
+
+    Degradation: "no trades in last {window_seconds}s" if cold market; "temporarily unavailable" on service failure.
+    """
+    import time
+    from src.integrations.exchange.base import Trade
+    symbol = deps.symbol
+    try:
+        trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
+    except Exception:
+        logger.exception("get_recent_trades failed for %s", symbol)
+        return f"Recent trades ({symbol}): temporarily unavailable"
+
+    if not trades:
+        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+
+    now_ms = int(time.time() * 1000)
+    window_ms = window_seconds * 1000
+    bucket_duration_ms = window_ms // RECENT_TRADES_BUCKET_COUNT
+
+    # Allocate trades to buckets (0 = oldest, 4 = newest); drop over-window
+    buckets: list[list[Trade]] = [[] for _ in range(RECENT_TRADES_BUCKET_COUNT)]
+    in_window: list[Trade] = []
+    for t in trades:
+        age_ms = now_ms - t.timestamp
+        if age_ms >= window_ms:
+            continue  # strict >= to avoid bucket_idx = -1 boundary bug
+        bucket_idx = RECENT_TRADES_BUCKET_COUNT - 1 - (age_ms // bucket_duration_ms)
+        buckets[bucket_idx].append(t)
+        in_window.append(t)
+
+    if not in_window:
+        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+
+    lines = [f"=== Recent Trades ({symbol}, last {window_seconds}s, {RECENT_TRADES_BUCKET_COUNT} × {bucket_duration_ms // 1000}s buckets) ==="]
+    total_buy = 0.0
+    total_sell = 0.0
+    for i, bucket in enumerate(buckets):
+        buy_vol = sum(t.amount for t in bucket if t.side == "buy")
+        sell_vol = sum(t.amount for t in bucket if t.side == "sell")
+        net = buy_vol - sell_vol
+        total_buy += buy_vol
+        total_sell += sell_vol
+        # Label: for standard 300s/5-bucket → t-5min to t-1min; otherwise bucket {i+1}/N ({start_s}-{end_s}s ago)
+        if window_seconds == 300:
+            label = f"t-{RECENT_TRADES_BUCKET_COUNT - i}min"
+        else:
+            start_s = (RECENT_TRADES_BUCKET_COUNT - i - 1) * (bucket_duration_ms // 1000)
+            end_s = (RECENT_TRADES_BUCKET_COUNT - i) * (bucket_duration_ms // 1000)
+            label = f"bucket {i+1}/{RECENT_TRADES_BUCKET_COUNT} ({start_s}-{end_s}s ago)"
+        lines.append(f"  {label}  buy {buy_vol:.4f} / sell {sell_vol:.4f}  (net {net:+.4f})")
+
+    total_vol = total_buy + total_sell
+    buy_pct = total_buy / total_vol * 100 if total_vol > 0 else 0.0
+    net_total = total_buy - total_sell
+    total_label = f"Total: buy {total_buy:.4f} / sell {total_sell:.4f} (net {net_total:+.4f}, {buy_pct:.0f}% taker buy)"
+
+    # Partial coverage double-condition
+    fetch_ratio = len(trades) / RECENT_TRADES_MAX_FETCH
+    oldest_age_ms = max(now_ms - t.timestamp for t in in_window)
+    oldest_age_ratio = oldest_age_ms / window_ms
+    if fetch_ratio >= 0.95 and oldest_age_ratio < 0.95:
+        total_label = f"Total: buy {total_buy:.4f} / sell {total_sell:.4f} (net {net_total:+.4f}*, {buy_pct:.0f}% taker buy) [* partial coverage: {len(trades)} trades at limit, oldest age {oldest_age_ms//1000}s ({oldest_age_ratio:.0%} of window), window not fully covered]"
+
+    lines.append(total_label)
+    lines.append(f"Trade count: {len(in_window)} | Avg size: {total_vol / len(in_window):.4f} BTC")
+    return "\n".join(lines)

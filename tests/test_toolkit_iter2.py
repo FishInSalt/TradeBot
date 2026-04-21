@@ -121,3 +121,76 @@ async def test_order_book_concentrated_truncation_to_10():
     # Count rendered concentrated rows (each starts with "  Bid  " or "  Ask  ")
     concentrated_lines = [l for l in result.splitlines() if l.startswith("  Bid  ") or l.startswith("  Ask  ")]
     assert len(concentrated_lines) <= 10, f"Expected ≤ 10 truncated rows, got {len(concentrated_lines)}"
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_typical():
+    """Typical: 5 buckets, total + count + avg size."""
+    from src.agent.tools_perception import get_recent_trades
+    import time
+    now_ms = int(time.time() * 1000)
+    trades = []
+    # Distribute trades into known buckets — 100 trades evenly across 5 minutes
+    for i in range(100):
+        age = i * 3000  # 0 to 297s
+        trades.append(Trade(timestamp=now_ms - age, side="buy" if i % 3 == 0 else "sell",
+                            price=64000.0, amount=0.01, trade_id=None))
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.return_value = trades
+    result = await get_recent_trades(deps, window_seconds=300)
+    assert "Recent Trades" in result
+    assert "last 300s" in result
+    assert "5 × 60s buckets" in result
+    assert "Total:" in result
+    assert "Trade count: 100" in result
+    assert "Avg size:" in result
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_empty_cold_market():
+    """No trades in window → no trades message."""
+    from src.agent.tools_perception import get_recent_trades
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.return_value = []
+    result = await get_recent_trades(deps, window_seconds=300)
+    assert "no trades in last 300s" in result
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_service_failure():
+    from src.agent.tools_perception import get_recent_trades
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.side_effect = Exception("timeout")
+    result = await get_recent_trades(deps)
+    assert "temporarily unavailable" in result
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_partial_coverage_double_condition():
+    """When n>=95% of max AND oldest age < 95% window → partial coverage flagged."""
+    from src.agent.tools_perception import get_recent_trades, RECENT_TRADES_MAX_FETCH
+    import time
+    now_ms = int(time.time() * 1000)
+    # Fill up to limit, oldest 200s ago → 200/300 = 67% of window
+    trades = [Trade(timestamp=now_ms - int((i / RECENT_TRADES_MAX_FETCH) * 200_000),
+                    side="buy", price=64000.0, amount=0.01, trade_id=None)
+              for i in range(RECENT_TRADES_MAX_FETCH)]
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.return_value = trades
+    result = await get_recent_trades(deps, window_seconds=300)
+    assert "partial coverage" in result
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_all_taker_sell():
+    """All trades are taker-sell → 0% taker buy / 100% taker sell / negative net."""
+    from src.agent.tools_perception import get_recent_trades
+    import time
+    now_ms = int(time.time() * 1000)
+    trades = [Trade(timestamp=now_ms - i * 3000, side="sell", price=64000.0, amount=0.01, trade_id=None)
+              for i in range(50)]
+    deps = MockDeps()
+    deps.market_data.get_recent_trades.return_value = trades
+    result = await get_recent_trades(deps, window_seconds=300)
+    assert "0% taker buy" in result
+    assert "net -" in result  # negative net (all sells)
