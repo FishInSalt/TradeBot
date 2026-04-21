@@ -301,3 +301,105 @@ async def test_multi_tf_snapshot_ma_entangled(mocker):
     ))
     result = await get_multi_timeframe_snapshot(deps, tfs=["1h"])
     assert "MA50 at MA200" in result
+
+
+from datetime import datetime, timezone
+
+
+@pytest.mark.asyncio
+async def test_get_position_empty_short_circuit(mocker):
+    """No open position → early return (1 IO only, no parallel gather)."""
+    from src.agent.tools_perception import get_position
+    deps = MockDeps()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    result = await get_position(deps)
+    assert result == "No open positions."
+    # Verify other IOs never called
+    deps.exchange.fetch_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_position_enhanced_output(mocker):
+    """With position: new Risk exposure + Exit orders sections present."""
+    from src.agent.tools_perception import get_position
+    deps = MockDeps()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.01,
+        entry_price=64000.0, unrealized_pnl=10.0, leverage=3,
+        liquidation_price=55000.0, created_at=datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc),
+    )])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64100.0, bid=64099.5, ask=64100.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10010.0, free_usdt=9796.67, used_usdt=213.33,
+    ))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=_make_ohlcv_df(50, last_close=64100.0))
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 88.0})
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="o1", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.01, price=62000.0, status="open"),
+        Order(id="o2", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.01, price=68000.0, status="open"),
+    ])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+
+    result = await get_position(deps)
+    assert "Risk exposure:" in result
+    assert "Notional value:" in result
+    assert "Margin used:" in result
+    assert "ATR(1h)" in result
+    assert "× ATR(1h)" in result
+    assert "Exit orders:" in result
+    assert "Stop loss:" in result
+    assert "Take profit:" in result
+
+
+@pytest.mark.asyncio
+async def test_get_position_no_sl_tp_naked_warning(mocker):
+    """Position without SL/TP: explicit 'not set' warnings."""
+    from src.agent.tools_perception import get_position
+    deps = MockDeps()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.01, entry_price=64000.0,
+        unrealized_pnl=10.0, leverage=3, liquidation_price=55000.0,
+        created_at=datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc),
+    )])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64100.0, bid=64099.5, ask=64100.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(total_usdt=10010.0, free_usdt=9796.67, used_usdt=213.33))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=_make_ohlcv_df(50))
+    deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 88.0})
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+
+    result = await get_position(deps)
+    assert "Stop loss: not set" in result
+    assert "Take profit: not set" in result
+
+
+@pytest.mark.asyncio
+async def test_get_position_atr_unavailable_degrade(mocker):
+    """ATR fetch fails: main sections still shown, ATR-multiple suffix omitted."""
+    from src.agent.tools_perception import get_position
+    deps = MockDeps()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.01, entry_price=64000.0,
+        unrealized_pnl=10.0, leverage=3, liquidation_price=55000.0,
+        created_at=datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc),
+    )])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64100.0, bid=64099.5, ask=64100.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(total_usdt=10010.0, free_usdt=9796.67, used_usdt=213.33))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("no OHLCV"))
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+
+    result = await get_position(deps)
+    assert "Risk exposure:" in result
+    assert "ATR(1h)" not in result  # suffix omitted on ATR failure

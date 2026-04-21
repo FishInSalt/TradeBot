@@ -136,33 +136,75 @@ async def get_market_data(
 
 
 async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
-    """Get current open position with risk context."""
+    """Show current position with risk exposure and SL/TP distances.
+
+    Args:
+        symbol: Optional override of deps.symbol.
+
+    Returns:
+        str: Multi-section position view (position line + PnL + Duration + Risk exposure + Exit orders). See spec §2.4.
+
+    Degradation: 'No open positions.' if empty. ATR(1h) unavailable → ATR-multiple suffixes omitted (other sections intact).
+    """
+    import asyncio
     symbol = symbol or deps.symbol
+
+    # Phase 1: positions only — early return if empty
     positions = await deps.exchange.fetch_positions(symbol)
     if not positions:
         return "No open positions."
 
     p = positions[0]
+
+    # Phase 2: gather remaining IO in parallel. OHLCV has per-call soft-fail
+    # (ATR suffix omission is spec §2.4 three-state). Other IO failures collapse to
+    # position-only degradation footer.
+    async def _safe_ohlcv():
+        try:
+            return await deps.market_data.get_ohlcv_dataframe(symbol, "1h", limit=50)
+        except Exception:
+            logger.exception("get_position: 1h OHLCV fetch failed")
+            return None
+
+    try:
+        ticker, balance, ohlcv_df, open_orders, contract_size = await asyncio.gather(
+            deps.market_data.get_ticker(symbol),
+            deps.exchange.fetch_balance(),
+            _safe_ohlcv(),
+            deps.exchange.fetch_open_orders(symbol),
+            deps.exchange.get_contract_size(symbol),
+            return_exceptions=False,
+        )
+    except Exception:
+        logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
+        lines = ["Current Position:"]
+        lines.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
+        if deps.initial_balance > 0:
+            pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
+            lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
+        else:
+            lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
+        lines.append("")
+        lines.append("Risk exposure + Exit orders: temporarily unavailable")
+        return "\n".join(lines)
+
+    # ATR(1h) — may be None if OHLCV failed
+    atr_1h = None
+    if ohlcv_df is not None and not ohlcv_df.empty:
+        indicators = deps.technical.compute_indicators(ohlcv_df)
+        atr_1h = indicators.get("atr_14")
+    current_price = ticker.last
+
     lines = ["Current Position:"]
     lines.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
 
-    # PnL as % of initial capital
     if deps.initial_balance > 0:
         pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
         lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
     else:
         lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
 
-    # Liquidation distance
-    if p.liquidation_price:
-        ticker = await deps.market_data.get_ticker(symbol)
-        if ticker.last > 0:
-            liq_dist = abs(ticker.last - p.liquidation_price) / ticker.last * 100
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist:.1f}% away)")
-        else:
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f}")
-
-    # Duration
+    # Duration (existing logic, preserved)
     if p.created_at is not None:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
@@ -177,6 +219,55 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         lines.append(f"  Duration: {dur_str}")
     else:
         lines.append("  Duration: N/A")
+
+    # === Risk exposure ===
+    notional = p.contracts * p.entry_price * contract_size
+    equity = balance.total_usdt
+    exp_pct = notional / equity * 100 if equity > 0 else 0.0
+    margin_used = balance.used_usdt
+    margin_pct = margin_used / equity * 100 if equity > 0 else 0.0
+    atr_pct_1h = atr_1h / current_price * 100 if atr_1h is not None and current_price > 0 else None
+
+    lines.append("")
+    lines.append("Risk exposure:")
+    lines.append(f"  Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
+    lines.append(f"  Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
+    if p.liquidation_price is not None and current_price > 0:
+        liq_dist_pct = abs(current_price - p.liquidation_price) / current_price * 100
+        if atr_pct_1h is not None and atr_pct_1h > 0:
+            atr_mult = liq_dist_pct / atr_pct_1h
+            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
+        else:
+            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+
+    # === Exit orders ===
+    sl_orders = sorted([o for o in open_orders if o.order_type == "stop" and o.symbol == symbol], key=lambda o: o.price or 0)
+    tp_orders = sorted([o for o in open_orders if o.order_type == "take_profit" and o.symbol == symbol], key=lambda o: o.price or 0)
+    lines.append("")
+    lines.append("Exit orders:")
+
+    def _fmt_exit(o, kind: str) -> str:
+        dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100 if o.price else 0.0
+        dist_curr_pct = (o.price - current_price) / current_price * 100 if o.price and current_price > 0 else 0.0
+        direction_entry = "above" if dist_entry_pct > 0 else "below"
+        direction_curr = "above" if dist_curr_pct > 0 else "below"
+        suffix = ""
+        if atr_pct_1h is not None and atr_pct_1h > 0:
+            atr_mult = abs(dist_curr_pct) / atr_pct_1h
+            suffix = f" = {atr_mult:.1f}× ATR(1h)"
+        return f"  {kind}: {o.price:.2f} ({abs(dist_entry_pct):.1f}% {direction_entry} entry, {abs(dist_curr_pct):.1f}% {direction_curr} current{suffix})  [{o.amount} contracts]"
+
+    if sl_orders:
+        for o in sl_orders:
+            lines.append(_fmt_exit(o, "Stop loss"))
+    else:
+        lines.append("  Stop loss: not set")
+
+    if tp_orders:
+        for o in tp_orders:
+            lines.append(_fmt_exit(o, "Take profit"))
+    else:
+        lines.append("  Take profit: not set")
 
     return "\n".join(lines)
 

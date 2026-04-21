@@ -307,6 +307,10 @@ def _make_deps():
     d.exchange.create_order = AsyncMock(return_value=Order(
         "o1", "BTC/USDT:USDT", "buy", "market", 0.01, 65000.0, "closed",
     ))
+    d.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    # Default: OHLCV fetch fails → _safe_ohlcv returns None → atr_1h stays None → ATR-multiple suffix omitted.
+    # Tests that want to exercise the ATR path should override this per-test.
+    d.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("default: no OHLCV in _make_deps"))
     return d
 
 
@@ -316,6 +320,7 @@ async def test_get_market_data_four_segments():
     deps = _make_deps()
     # Create a realistic DataFrame
     n = 100
+    deps.market_data.get_ohlcv_dataframe = AsyncMock()
     deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
         "timestamp": [1000 + i * 300000 for i in range(n)],
         "open": np.full(n, 74800.0),
@@ -353,6 +358,7 @@ async def test_get_market_data_default_params():
 
     deps = _make_deps()
     n = 100
+    deps.market_data.get_ohlcv_dataframe = AsyncMock()
     deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
         "timestamp": [1000 + i * 300000 for i in range(n)],
         "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
@@ -380,6 +386,7 @@ async def test_get_market_data_1h_atr_no_qualitative_label():
     deps = _make_deps()
     deps.timeframe = "1h"
     n = 100
+    deps.market_data.get_ohlcv_dataframe = AsyncMock()
     deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
         "timestamp": [1000 + i * 3600000 for i in range(n)],
         "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
@@ -416,6 +423,7 @@ async def test_get_market_data_5m_atr_no_qualitative_label():
     deps = _make_deps()
     deps.timeframe = "5m"
     n = 100
+    deps.market_data.get_ohlcv_dataframe = AsyncMock()
     deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
         "timestamp": [1000 + i * 300000 for i in range(n)],
         "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
@@ -450,6 +458,7 @@ async def test_get_market_data_truncated_data():
     deps = _make_deps()
     # Only 70 rows returned (requested 100 = candle_count 50 + 50 warmup)
     n = 70
+    deps.market_data.get_ohlcv_dataframe = AsyncMock()
     deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
         "timestamp": [1000 + i * 300000 for i in range(n)],
         "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
@@ -475,6 +484,7 @@ async def test_get_market_data_candle_count_clamp():
 
     deps = _make_deps()
     n = 100
+    deps.market_data.get_ohlcv_dataframe = AsyncMock()
     deps.market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
         "timestamp": [1000 + i * 300000 for i in range(n)],
         "open": np.full(n, 74800.0), "high": np.full(n, 74900.0),
@@ -519,6 +529,10 @@ async def test_get_position_enhanced():
     assert "away" in result.lower()
     # Duration
     assert "Duration" in result or "duration" in result.lower() or "min" in result.lower()
+    # New Iter 2 fields (Task 10 enhancement)
+    assert "Risk exposure:" in result
+    assert "Notional" in result or "notional" in result.lower()
+    assert "Exit orders:" in result
 
 
 async def test_get_position_created_at_none():
