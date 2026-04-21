@@ -1,6 +1,6 @@
 from __future__ import annotations
 import pandas as pd
-from src.integrations.exchange.base import BaseExchange, FundingRate, LongShortRatio, OpenInterest, Ticker
+from src.integrations.exchange.base import BaseExchange, FundingRate, LongShortRatio, OpenInterest, OrderBook, Ticker, Trade
 from src.utils.cache import TTLCache
 
 _DERIVATIVES_TTL = 180.0  # 3 minutes
@@ -25,6 +25,12 @@ class MarketDataService:
              "low": c.low, "close": c.close, "volume": c.volume}
             for c in candles
         ])
+
+    async def get_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
+        return await self._exchange.fetch_order_book(symbol, depth=depth)
+
+    async def get_recent_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
+        return await self._exchange.fetch_trades(symbol, limit=limit)
 
     async def get_funding_rate(self, symbol: str) -> FundingRate:
         return await self._derivatives_cache.get_or_fetch(
