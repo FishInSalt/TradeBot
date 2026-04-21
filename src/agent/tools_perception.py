@@ -156,9 +156,17 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
 
     p = positions[0]
 
-    # Phase 2: gather remaining IO in parallel. OHLCV has per-call soft-fail
-    # (ATR suffix omission is spec §2.4 three-state). Other IO failures collapse to
-    # position-only degradation footer.
+    # Phase 2: gather remaining IO in parallel. OHLCV has per-call soft-fail (ATR suffix omission
+    # is spec §2.4 three-state). Ticker / balance / orders / contract_size failures are hard —
+    # wrap the whole gather in a try/except that degrades the enhanced sections, keeping the
+    # original position+PnL+Duration lines intact.
+    #
+    # NOTE: spec §3.3 suggests `return_exceptions=True`. We use `False + outer try/except` instead
+    # for these reasons: (1) simpler to reason about — any hard failure collapses to a single
+    # degradation path rather than 5 per-IO isinstance checks; (2) Risk exposure and Exit orders
+    # both need coherent ticker + balance + contract_size; partial success gives misleading
+    # numbers (e.g. "Notional X USDT" without a valid ticker → stale). The spec's preference
+    # is a recommendation, not a hard constraint; the audit flagged this as P3 (non-critical).
     async def _safe_ohlcv():
         try:
             return await deps.market_data.get_ohlcv_dataframe(symbol, "1h", limit=50)
@@ -247,8 +255,8 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     lines.append("Exit orders:")
 
     def _fmt_exit(o, kind: str) -> str:
-        dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100 if o.price else 0.0
-        dist_curr_pct = (o.price - current_price) / current_price * 100 if o.price and current_price > 0 else 0.0
+        dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100
+        dist_curr_pct = (o.price - current_price) / current_price * 100 if current_price > 0 else 0.0
         direction_entry = "above" if dist_entry_pct > 0 else "below"
         direction_curr = "above" if dist_curr_pct > 0 else "below"
         suffix = ""
