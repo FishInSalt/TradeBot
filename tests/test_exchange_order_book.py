@@ -213,3 +213,42 @@ async def test_okx_fetch_trades_parses_and_sorts(mocker):
     # trade_id None handling
     assert trades[0].trade_id == "t1"
     assert trades[1].trade_id is None
+
+
+@pytest.mark.asyncio
+async def test_okx_get_contract_size_loaded(mocker):
+    """Markets preloaded: returns contractSize directly from memory."""
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    ex._client.markets = {"BTC/USDT:USDT": {"contractSize": 0.01}}
+    load_mock = mocker.patch.object(ex._client, "load_markets")
+    size = await ex.get_contract_size("BTC/USDT:USDT")
+    assert size == 0.01
+    load_mock.assert_not_called()  # no lazy load needed
+
+
+@pytest.mark.asyncio
+async def test_okx_get_contract_size_lazy_load(mocker):
+    """Markets not loaded: triggers lazy load_markets."""
+    from unittest.mock import AsyncMock
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    ex._client.markets = {}  # empty → falsy → lazy load triggered
+    def _side_effect(*_, **__):
+        ex._client.markets = {"BTC/USDT:USDT": {"contractSize": 0.01}}
+    load_mock = mocker.patch.object(
+        ex._client, "load_markets", new_callable=AsyncMock, side_effect=_side_effect,
+    )
+    size = await ex.get_contract_size("BTC/USDT:USDT")
+    assert size == 0.01
+    load_mock.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_okx_get_contract_size_unknown_market_fallback(mocker):
+    """Market not in markets dict → returns 1.0 fallback + warning."""
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    ex._client.markets = {"ETH/USDT:USDT": {"contractSize": 0.01}}
+    size = await ex.get_contract_size("BTC/USDT:USDT")
+    assert size == 1.0

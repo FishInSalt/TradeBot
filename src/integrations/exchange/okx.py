@@ -116,7 +116,15 @@ class OKXExchange(BaseExchange):
     # --- WebSocket lifecycle ---
 
     async def start(self) -> None:
-        """启动 WebSocket 监听循环。失败时降级为 REST-only 模式。"""
+        """预加载 markets（fail-fast）+ 启动 WebSocket 监听循环（失败时降级为 REST-only 模式）。
+
+        预加载 markets 用于 get_contract_size 的 contractSize 查询 —— 放在 WebSocket
+        try 之外：markets 加载失败意味着所有依赖合约面值的工具都会坏掉，fail-fast
+        比延迟到每次调用时静默 fallback 更好（spec §8.5）。
+        """
+        # Preload markets for get_contract_size — fail-fast outside WebSocket try
+        await self._client.load_markets()
+
         try:
             import ccxt.pro as ccxtpro
             self._ws_client = ccxtpro.okx({
@@ -496,7 +504,13 @@ class OKXExchange(BaseExchange):
         return trades
 
     async def get_contract_size(self, symbol: str) -> float:
-        raise NotImplementedError("Task 5 will implement this")
+        if not self._client.markets:
+            await self._client.load_markets()
+        market = self._client.markets.get(symbol)
+        if market is None:
+            logger.warning("Market %s not loaded, defaulting contract_size=1.0", symbol)
+            return 1.0
+        return float(market.get("contractSize", 1.0))
 
     async def close(self) -> None:
         logger.info("OKX exchange closing")
