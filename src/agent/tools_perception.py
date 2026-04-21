@@ -175,6 +175,36 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             logger.exception("get_position: 1h OHLCV fetch failed")
             return None
 
+    def _render_position_core() -> list[str]:
+        """Render position header + PnL + Duration — the lines that depend ONLY on
+        Phase-1 fetch_positions data (no Phase-2 IO required). Shared between the
+        happy path and the hard-failure degradation branch so Duration is preserved
+        when ticker/balance/orders/contract_size fail (it would otherwise be lost
+        even though `p.created_at` is fully available).
+        """
+        out = ["Current Position:"]
+        out.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
+        if deps.initial_balance > 0:
+            pnl_pct_inner = (p.unrealized_pnl / deps.initial_balance) * 100
+            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)")
+        else:
+            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
+        if p.created_at is not None:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            delta = now - p.created_at
+            total_minutes = int(delta.total_seconds() / 60)
+            if total_minutes < 60:
+                dur_str = f"{total_minutes} min"
+            elif total_minutes < 1440:
+                dur_str = f"{total_minutes // 60}h {total_minutes % 60}m"
+            else:
+                dur_str = f"{total_minutes // 1440}d {(total_minutes % 1440) // 60}h"
+            out.append(f"  Duration: {dur_str}")
+        else:
+            out.append("  Duration: N/A")
+        return out
+
     try:
         ticker, balance, ohlcv_df, open_orders, contract_size = await asyncio.gather(
             deps.market_data.get_ticker(symbol),
@@ -186,13 +216,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         )
     except Exception:
         logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
-        lines = ["Current Position:"]
-        lines.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
-        if deps.initial_balance > 0:
-            pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
-            lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
-        else:
-            lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
+        lines = _render_position_core()
         lines.append("")
         lines.append("Risk exposure + Exit orders: temporarily unavailable")
         return "\n".join(lines)
@@ -204,30 +228,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         atr_1h = indicators.get("atr_14")
     current_price = ticker.last
 
-    lines = ["Current Position:"]
-    lines.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
-
-    if deps.initial_balance > 0:
-        pnl_pct = (p.unrealized_pnl / deps.initial_balance) * 100
-        lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct:+.2f}% of initial capital)")
-    else:
-        lines.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
-
-    # Duration (existing logic, preserved)
-    if p.created_at is not None:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        delta = now - p.created_at
-        total_minutes = int(delta.total_seconds() / 60)
-        if total_minutes < 60:
-            dur_str = f"{total_minutes} min"
-        elif total_minutes < 1440:
-            dur_str = f"{total_minutes // 60}h {total_minutes % 60}m"
-        else:
-            dur_str = f"{total_minutes // 1440}d {(total_minutes % 1440) // 60}h"
-        lines.append(f"  Duration: {dur_str}")
-    else:
-        lines.append("  Duration: N/A")
+    lines = _render_position_core()
 
     # === Risk exposure ===
     notional = p.contracts * p.entry_price * contract_size

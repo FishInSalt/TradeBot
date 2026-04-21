@@ -617,6 +617,16 @@ async def test_get_position_phase2_hard_failure_degradation(mocker):
     assert "Current Position:" in result
     assert "LONG" in result
     assert "64000.00" in result
+    # PnL preserved (Phase-1 data only)
+    assert "PnL:" in result
+    assert "of initial capital" in result
+    # Duration preserved — depends only on p.created_at from Phase-1, must NOT be
+    # dropped when Phase-2 IO fails (regression guard for the hard-fail-drops-Duration
+    # bug fixed by extracting _render_position_core helper). Position created at
+    # 2026-04-21 10:00 UTC; the test runs at "now", which is well past then, so
+    # Duration is non-N/A.
+    assert "Duration:" in result
+    assert "Duration: N/A" not in result
     # Degradation footer present
     assert "Risk exposure + Exit orders: temporarily unavailable" in result
     # Enhanced sections absent (hard-failure collapse)
