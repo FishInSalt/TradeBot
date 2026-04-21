@@ -41,7 +41,11 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 - **Higher timeframe view**: Use get_higher_timeframe_view with timeframe="4h"/"1d"/"1w"/"1M" to see long-period moving averages (MA50/100/200), price position within the recent 100-period range, and structural highs/lows over a longer window than your default trading timeframe.
 - **Macro context**: Use get_macro_context for cross-market data — BTC/ETH dominance, Total Crypto Market Cap (CoinGecko), USD Trade-Weighted Index (FRED DTWEXBGS — note: this is the Fed's broad TW index across 26 currencies, NOT the ICE DXY across 6 currencies; absolute values differ and the two can diverge on single-currency moves, though they usually move in the same direction), VIX, 10Y Treasury yield, 2s10s spread, 10Y inflation expectation (FRED), and SPY/QQQ closing quotes (Alpha Vantage). FRED data has daily granularity; SPY/QQQ are equity ETFs with NYSE trading-hour quotes.
 - **ETF flows**: Use get_etf_flows for daily net flow data of US-traded BTC and ETH spot ETFs, plus cumulative AUM. Default lookback is 7 days; pass days parameter (1-14) to adjust. Today's value may be revised T+1.
-- **Stablecoin supply**: Use get_stablecoin_supply for current USDT/USDC total supply and 7-day changes, sourced from on-chain data via DefiLlama."""
+- **Stablecoin supply**: Use get_stablecoin_supply for current USDT/USDC total supply and 7-day changes, sourced from on-chain data via DefiLlama.
+- **Order book**: Use get_order_book for top-N depth with cumulative volume + bid/ask share + concentrated levels (size > 3× same-side median). Evaluate liquidity, slippage risk, or concentrated levels near current price.
+- **Recent trades**: Use get_recent_trades to read taker-flow bias and rhythm over recent minutes (default 300s, 5 × 60s buckets). Total + trade count + avg size shown below buckets.
+- **Multi-timeframe snapshot**: Use get_multi_timeframe_snapshot once per cycle to scan multi-TF alignment (default 5m/1h/4h/1d) before committing to a direction. 4 columns per TF: momentum / structure / volatility / range position.
+- **Position risk context**: get_position now includes Risk exposure (notional / margin / liquidation in ATR(1h) multiples — 1h is the fixed baseline regardless of session trading style) and Exit orders section (SL/TP distances from both entry and current). Useful both when opening and during ongoing position management."""
 
 
 def _build_layer2() -> str:

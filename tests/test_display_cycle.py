@@ -36,8 +36,16 @@ def test_summarize_get_position_with_position():
         "Current Position:\n"
         "  LONG 0.500 contracts @ 83100.00 | 3x leverage\n"
         "  PnL: 5.50 USDT (+1.32% of initial capital)\n"
-        "  Liquidation: 55000.00 (34.7% away)\n"
-        "  Duration: 2h 30m"
+        "  Duration: 2h 30m\n"
+        "\n"
+        "Risk exposure:\n"
+        "  Notional value: 41550.00 USDT (4.2% of equity 100000.00)\n"
+        "  Margin used: 13850.00 USDT (13.9% of equity, from balance.used_usdt)\n"
+        "  Liquidation: 55000.00 (34.7% away = 5.8× ATR(1h))\n"
+        "\n"
+        "Exit orders:\n"
+        "  Stop loss: not set\n"
+        "  Take profit: not set"
     )
     result = summarize_tool("get_position", content)
     assert "Long" in result or "LONG" in result

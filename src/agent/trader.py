@@ -199,6 +199,58 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
+    @agent.tool
+    async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 20) -> str:
+        """Return top-N order book depth with concentrated-level breakdown.
+
+        Args:
+            depth: Levels per side to fetch. Default 20.
+
+        Returns:
+            str: Multi-line fact-only text (best bid/ask + cumulative depth + bid share + concentrated levels).
+
+        Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)" if book is empty/short;
+        "Order book ({symbol}): temporarily unavailable" on service failure.
+        """
+        from src.agent.tools_perception import get_order_book as _impl
+
+        return await _impl(ctx.deps, depth=depth)
+
+    @agent.tool
+    async def get_recent_trades(ctx: RunContext[TradingDeps], window_seconds: int = 300) -> str:
+        """Return taker-flow bias and rhythm over a recent time window via 5 time-buckets.
+
+        Args:
+            window_seconds: Observation window in seconds. Default 300 (5 min).
+
+        Returns:
+            str: 5-bucket breakdown + Total + trade count + avg size.
+
+        Degradation: "Recent trades ({symbol}): no trades in last {window_seconds}s" if cold market;
+        "Recent trades ({symbol}): temporarily unavailable" on service failure. Heavy windows
+        may annotate Total with "partial coverage" footnote.
+        """
+        from src.agent.tools_perception import get_recent_trades as _impl
+
+        return await _impl(ctx.deps, window_seconds=window_seconds)
+
+    @agent.tool
+    async def get_multi_timeframe_snapshot(ctx: RunContext[TradingDeps], tfs: list[str] | None = None) -> str:
+        """Quick multi-timeframe scan: momentum | structure | volatility | range position.
+
+        Args:
+            tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"]. 1w/1M are supported but non-default.
+
+        Returns:
+            str: 4-column row per TF + Columns header.
+
+        Degradation: per-TF "insufficient data (need N candles, got M)" or "temporarily unavailable";
+        overall "Multi-TF snapshot ({symbol}): temporarily unavailable" only if ALL TFs fail or ticker fetch fails.
+        """
+        from src.agent.tools_perception import get_multi_timeframe_snapshot as _impl
+
+        return await _impl(ctx.deps, tfs=tfs)
+
     # === Execution Tools ===
 
     @agent.tool
@@ -317,7 +369,7 @@ def create_trader_agent(
 # 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
 # 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
 REGISTERED_TOOL_NAMES: list[str] = [
-    # --- 感知 (15) ---
+    # --- 感知 (18) ---
     "get_market_data",
     "get_position",
     "get_account_balance",
@@ -333,6 +385,9 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_macro_context",
     "get_etf_flows",
     "get_stablecoin_supply",
+    "get_order_book",
+    "get_recent_trades",
+    "get_multi_timeframe_snapshot",
     # --- 执行 (10) ---
     "open_position",
     "close_position",
