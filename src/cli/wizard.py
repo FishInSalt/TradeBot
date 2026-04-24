@@ -87,13 +87,19 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
             "api_credentials": None,
         }
 
-    # Real exchange — try saved credentials first
+    # Real exchange — namespace credentials by sandbox to prevent demo key leaking to
+    # live endpoint (and vice versa). defaults.exchange.sandbox derives from OKX_SANDBOX
+    # env / YAML before the wizard runs; user switches accounts via that flag.
+    is_sandbox = defaults.exchange.sandbox
+    cred_key = "okx_demo" if is_sandbox else "okx_live"
+    account_label = "demo" if is_sandbox else "live"
+
     api_credentials = None
     saved = _load_credentials(config_dir)
-    if "okx" in saved:
-        console.print("  [dim]Saved OKX credentials found[/]")
-        if Confirm.ask("  Use saved credentials?", default=True, console=console):
-            api_credentials = saved["okx"]
+    if cred_key in saved:
+        console.print(f"  [dim]Saved OKX {account_label} credentials found[/]")
+        if Confirm.ask(f"  Use saved {account_label} credentials?", default=True, console=console):
+            api_credentials = saved[cred_key]
 
     # Spec defines 3-tier priority: .credentials > .env > manual input.
     # For .env tier, spec says "pre-fill as defaults". We intentionally simplify
@@ -104,17 +110,18 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
         env_secret = defaults.exchange.secret
         env_pass = defaults.exchange.password
         if env_key and env_secret and env_pass:
-            console.print("  [dim]Credentials found in environment[/]")
-            if Confirm.ask("  Use environment credentials?", default=True, console=console):
+            console.print(f"  [dim]OKX {account_label} credentials found in environment[/]")
+            if Confirm.ask(f"  Use environment {account_label} credentials?", default=True, console=console):
                 api_credentials = {"api_key": env_key, "secret": env_secret, "password": env_pass}
-                _save_credentials(config_dir, "okx", api_credentials)
+                _save_credentials(config_dir, cred_key, api_credentials)
 
     if api_credentials is None:
+        console.print(f"  [dim]Enter OKX {account_label} credentials[/]")
         api_key = Prompt.ask("  API Key", password=True, console=console)
         secret = Prompt.ask("  Secret", password=True, console=console)
         password = Prompt.ask("  Password", password=True, console=console)
         api_credentials = {"api_key": api_key, "secret": secret, "password": password}
-        _save_credentials(config_dir, "okx", api_credentials)
+        _save_credentials(config_dir, cred_key, api_credentials)
 
     balance = FloatPrompt.ask(
         "  Initial balance (USDT)",

@@ -98,14 +98,16 @@ def test_step_exchange_sim(mock_prompt, mock_float):
 @patch("src.cli.wizard.FloatPrompt.ask", return_value=200.0)
 @patch("src.cli.wizard.Prompt.ask", side_effect=["real", "my_key", "my_secret", "my_pass"])
 def test_step_exchange_real_new_creds(mock_prompt, mock_float, tmp_path):
+    """Settings().exchange.sandbox defaults False → credentials saved under okx_live."""
     from src.cli.wizard import _step_exchange, _load_credentials
     result = _step_exchange(Settings(), tmp_path, Console())
     assert result["exchange_type"] == "okx"
     assert result["api_credentials"]["api_key"] == "my_key"
     assert result["initial_balance"] == 200.0
-    # Verify credentials were saved
     saved = _load_credentials(tmp_path)
-    assert saved["okx"]["api_key"] == "my_key"
+    assert saved["okx_live"]["api_key"] == "my_key"
+    # Legacy "okx" key must not be used — namespace split is the fix point
+    assert "okx" not in saved
 
 
 @patch("src.cli.wizard.FloatPrompt.ask", return_value=100.0)
@@ -113,7 +115,7 @@ def test_step_exchange_real_new_creds(mock_prompt, mock_float, tmp_path):
 @patch("src.cli.wizard.Prompt.ask", return_value="real")
 def test_step_exchange_real_reuse_saved(mock_prompt, mock_confirm, mock_float, tmp_path):
     from src.cli.wizard import _save_credentials, _step_exchange
-    _save_credentials(tmp_path, "okx", {"api_key": "saved_k", "secret": "s", "password": "p"})
+    _save_credentials(tmp_path, "okx_live", {"api_key": "saved_k", "secret": "s", "password": "p"})
     result = _step_exchange(Settings(), tmp_path, Console())
     assert result["api_credentials"]["api_key"] == "saved_k"
 
@@ -122,7 +124,7 @@ def test_step_exchange_real_reuse_saved(mock_prompt, mock_confirm, mock_float, t
 @patch("src.cli.wizard.Confirm.ask", return_value=True)
 @patch("src.cli.wizard.Prompt.ask", return_value="real")
 def test_step_exchange_real_env_fallback(mock_prompt, mock_confirm, mock_float, tmp_path):
-    """Tier 2: no .credentials, Settings has env creds → confirm reuse."""
+    """Tier 2: no .credentials, Settings has env creds → confirm reuse, saved under okx_live."""
     from src.cli.wizard import _step_exchange, _load_credentials
     settings = Settings()
     settings.exchange.api_key = "env_key"
@@ -130,9 +132,42 @@ def test_step_exchange_real_env_fallback(mock_prompt, mock_confirm, mock_float, 
     settings.exchange.password = "env_pass"
     result = _step_exchange(settings, tmp_path, Console())
     assert result["api_credentials"]["api_key"] == "env_key"
-    # Verify env creds were saved to .credentials for next time
     saved = _load_credentials(tmp_path)
-    assert saved["okx"]["api_key"] == "env_key"
+    assert saved["okx_live"]["api_key"] == "env_key"
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", side_effect=["real", "demo_k", "demo_s", "demo_p"])
+@patch("src.cli.wizard.Prompt.ask", side_effect=["real", "demo_k", "demo_s", "demo_p"])
+@patch("src.cli.wizard.FloatPrompt")
+def test_step_exchange_sandbox_saves_under_okx_demo(mock_fp, mock_prompt, mock_fp_ask, tmp_path):
+    """sandbox=True → credentials saved under okx_demo namespace (I1 fix)."""
+    from src.cli.wizard import _step_exchange, _load_credentials
+    from unittest.mock import MagicMock
+    mock_fp.ask = MagicMock(return_value=100.0)
+    settings = Settings()
+    settings.exchange.sandbox = True
+    result = _step_exchange(settings, tmp_path, Console())
+    assert result["api_credentials"]["api_key"] == "demo_k"
+    saved = _load_credentials(tmp_path)
+    assert saved["okx_demo"]["api_key"] == "demo_k"
+    assert "okx_live" not in saved
+    assert "okx" not in saved
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", return_value=100.0)
+@patch("src.cli.wizard.Prompt.ask", side_effect=["real", "fresh_demo_k", "fresh_demo_s", "fresh_demo_p"])
+def test_step_exchange_sandbox_ignores_live_saved_creds(mock_prompt, mock_float, tmp_path):
+    """.credentials has okx_live but sandbox=True → must not reuse, prompts fresh (I1)."""
+    from src.cli.wizard import _save_credentials, _step_exchange, _load_credentials
+    _save_credentials(tmp_path, "okx_live", {"api_key": "live_k", "secret": "s", "password": "p"})
+    settings = Settings()
+    settings.exchange.sandbox = True
+    result = _step_exchange(settings, tmp_path, Console())
+    # Must NOT use the live credentials — fresh prompts
+    assert result["api_credentials"]["api_key"] == "fresh_demo_k"
+    saved = _load_credentials(tmp_path)
+    assert saved["okx_live"]["api_key"] == "live_k"  # untouched
+    assert saved["okx_demo"]["api_key"] == "fresh_demo_k"
 
 
 # --- Step 2: Trading Pair ---

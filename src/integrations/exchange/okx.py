@@ -337,7 +337,7 @@ class OKXExchange(BaseExchange):
         if pnl is None:
             try:
                 fetched = await asyncio.wait_for(
-                    self._client.fetch_order(order_id, symbol),
+                    self._fetch_order_with_algo_fallback(order_id, symbol),
                     timeout=self._pnl_fetch_timeout,
                 )
                 pnl_fetched = fetched.get("info", {}).get("pnl")
@@ -533,21 +533,31 @@ class OKXExchange(BaseExchange):
         parsed = self._parse_order(data)
         return parsed[0]
 
+    async def _fetch_order_with_algo_fallback(
+        self, order_id: str, symbol: str | None,
+    ) -> dict:
+        """Raw CCXT fetch_order with plain-first + 50002 algo fallback.
+
+        Shared by public `fetch_order` (wraps to Order via _parse_order) and
+        `_parse_fill_event` pnl fallback (reads raw info.pnl). Same 50002 fallback
+        semantics. No @_retry: caller decides retry vs timeout semantics.
+        """
+        try:
+            return await self._client.fetch_order(order_id, symbol)
+        except ccxt.BadRequest as e:
+            # OKX 50002 appears when calling plain endpoint on an algo id — fall back to algo
+            if _is_okx_error_code(e, "50002"):
+                return await self._client.fetch_order(
+                    order_id, symbol,
+                    params={"stop": True, "trigger": True, "algoId": order_id},
+                )
+            raise
+
     @_retry()
     async def fetch_order(  # type: ignore[override]
         self, order_id: str, symbol: str | None = None
     ) -> Order:
-        try:
-            data = await self._client.fetch_order(order_id, symbol)
-        except ccxt.BadRequest as e:
-            # OKX 50002 appears when calling plain endpoint on an algo id — fall back to algo
-            if _is_okx_error_code(e, "50002"):
-                data = await self._client.fetch_order(
-                    order_id, symbol,
-                    params={"stop": True, "trigger": True, "algoId": order_id},
-                )
-            else:
-                raise
+        data = await self._fetch_order_with_algo_fallback(order_id, symbol)
         parsed = self._parse_order(data)
         return parsed[0]
 

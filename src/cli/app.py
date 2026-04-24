@@ -263,7 +263,8 @@ def build_services(
             password=creds["password"], symbol=result.symbol,
             sandbox=settings.exchange.sandbox,
         )
-        sc.print("Exchange: okx (REAL account)")
+        account_label = "demo (sandbox)" if settings.exchange.sandbox else "REAL (live)"
+        sc.print(f"Exchange: okx — {account_label}")
 
     market_data = MarketDataService(exchange)
     technical = TechnicalAnalysisService()
