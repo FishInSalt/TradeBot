@@ -569,6 +569,32 @@ async def test_start_with_sandbox_false_ws_client_stays_live():
 
 
 @pytest.mark.asyncio
+async def test_start_retries_account_config_on_network_glitch(monkeypatch):
+    """I2: start() 的 private_get_account_config / load_markets 必须包 @_retry,
+    防止 transient NetworkError 阻止 bot 启动（其他 REST 调用都有 @_retry(3,1.0)）。"""
+    import ccxt.async_support as ccxt_async
+    # Patch sleep so the retry's exponential backoff doesn't slow the test
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    ex = _make_okx()
+    # First call to load_markets raises NetworkError, second succeeds
+    ex._client.load_markets = AsyncMock(
+        side_effect=[ccxt_async.NetworkError("transient glitch"), {}]
+    )
+    # First call to private_get_account_config raises NetworkError, second returns valid config
+    ex._client.private_get_account_config = AsyncMock(
+        side_effect=[
+            ccxt_async.NetworkError("another glitch"),
+            {"data": [{"posMode": "net_mode", "acctLv": "2"}]},
+        ]
+    )
+    # WS construction fails → REST-only fallback (avoids needing ws_client mock)
+    with patch("ccxt.pro.okx", side_effect=ImportError("mocked absence")):
+        await ex.start()  # must not raise
+    assert ex._client.load_markets.call_count == 2
+    assert ex._client.private_get_account_config.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_start_loads_markets_on_ws_client():
     """ws_client 是独立 ccxt.pro instance，watch_orders/watch_ticker 需自己的 markets cache。
 

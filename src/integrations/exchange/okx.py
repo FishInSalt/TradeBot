@@ -146,6 +146,16 @@ class OKXExchange(BaseExchange):
 
     # --- WebSocket lifecycle ---
 
+    @_retry()
+    async def _preload_markets(self) -> None:
+        """load_markets wrapper — @_retry 保护启动时的 transient network glitch."""
+        await self._client.load_markets()
+
+    @_retry()
+    async def _fetch_account_config(self) -> dict:
+        """private_get_account_config wrapper — @_retry 保护启动时的 transient network glitch."""
+        return await self._client.private_get_account_config()
+
     async def start(self) -> None:
         """预加载 markets + 校验账户模式（fail-fast）+ 启动 WebSocket（失败时降级 REST-only）。
 
@@ -158,10 +168,10 @@ class OKXExchange(BaseExchange):
         保证金语义不一致，fail-fast 避免上线后静默坏掉。
         """
         # Preload markets for get_contract_size — fail-fast outside WebSocket try
-        await self._client.load_markets()
+        await self._preload_markets()
 
         # Account config fail-fast — before WebSocket so failures don't waste connections
-        config_resp = await self._client.private_get_account_config()
+        config_resp = await self._fetch_account_config()
         config = (config_resp.get("data") or [{}])[0]
 
         pos_mode = config.get("posMode")
