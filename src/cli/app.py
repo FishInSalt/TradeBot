@@ -261,6 +261,7 @@ def build_services(
         exchange = OKXExchange(
             api_key=creds["api_key"], secret=creds["secret"],
             password=creds["password"], symbol=result.symbol,
+            sandbox=settings.exchange.sandbox,
         )
         sc.print("Exchange: okx (REAL account)")
 

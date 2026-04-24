@@ -83,7 +83,8 @@ def _retry(max_retries: int = 3, base_delay: float = 1.0):
 
 
 class OKXExchange(BaseExchange):
-    def __init__(self, api_key: str, secret: str, password: str, symbol: str):
+    def __init__(self, api_key: str, secret: str, password: str, symbol: str,
+                 sandbox: bool = False):
         super().__init__()
         self._client = ccxt.okx(
             {
@@ -94,6 +95,9 @@ class OKXExchange(BaseExchange):
                 "timeout": 30000,
             }
         )
+        if sandbox:
+            self._client.set_sandbox_mode(True)
+        self._sandbox = sandbox
         self._symbol = symbol
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
@@ -103,7 +107,15 @@ class OKXExchange(BaseExchange):
         self._pnl_fetch_timeout: float = 5.0
         self._seen_order_ids: dict[str, None] = {}
         self._seen_order_ids_max = 10000
-        logger.info("OKX exchange initialized (real account)")
+        logger.info(
+            "OKX exchange initialized (%s account)",
+            "demo" if sandbox else "live",
+        )
+        # spec §2.1.4 Live endpoint 守卫 — 警示 log
+        if not sandbox and api_key:
+            logger.warning(
+                "OKX live account initialized — ALL ORDERS WILL USE REAL FUNDS"
+            )
 
     # --- Fill / Alert callback registration ---
 
