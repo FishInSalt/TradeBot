@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
@@ -39,6 +40,24 @@ _TRIGGER_REASON_MAP = {
     "take_profit_market": "take_profit",
     "market": "market",
 }
+
+def _is_okx_error_code(err: Exception, code: str) -> bool:
+    """Parse OKX sCode from ccxt.BadRequest message envelope.
+
+    Pre-work observed envelope: 'okx {"code":"1","data":[{"sCode":"50002",...}],"msg":""}'
+    Prefer JSON parse; fall back to structured sCode substring match (safer than raw digit match).
+    """
+    msg = str(err)
+    try:
+        payload = json.loads(msg.split(None, 1)[1])
+        data = payload.get("data") or []
+        for item in data:
+            if item.get("sCode") == code:
+                return True
+    except (IndexError, json.JSONDecodeError, AttributeError):
+        pass
+    return f'"sCode":"{code}"' in msg
+
 
 # (side, order_type) → position_side 推断表
 _POSITION_SIDE_INFER = {
@@ -473,7 +492,17 @@ class OKXExchange(BaseExchange):
     async def fetch_order(  # type: ignore[override]
         self, order_id: str, symbol: str | None = None
     ) -> Order:
-        data = await self._client.fetch_order(order_id, symbol)
+        try:
+            data = await self._client.fetch_order(order_id, symbol)
+        except ccxt.BadRequest as e:
+            # OKX 50002 appears when calling plain endpoint on an algo id — fall back to algo
+            if _is_okx_error_code(e, "50002"):
+                data = await self._client.fetch_order(
+                    order_id, symbol,
+                    params={"stop": True, "trigger": True, "algoId": order_id},
+                )
+            else:
+                raise
         parsed = self._parse_order(data)
         return parsed[0]
 
@@ -531,14 +560,24 @@ class OKXExchange(BaseExchange):
 
     @_retry()
     async def set_leverage(self, symbol: str, leverage: int) -> None:  # type: ignore[override]
-        await self._client.set_leverage(leverage, symbol)
+        await self._client.set_leverage(
+            leverage, symbol, params={"mgnMode": "isolated"},
+        )
 
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         return float(self._client.amount_to_precision(symbol, amount))  # type: ignore[arg-type]
 
     @_retry()
-    async def cancel_order(self, order_id: str, symbol: str) -> None:  # type: ignore[override]
-        await self._client.cancel_order(order_id, symbol)
+    async def cancel_order(  # type: ignore[override]
+        self, order_id: str, symbol: str, is_algo: bool = False,
+    ) -> None:
+        if is_algo:
+            await self._client.cancel_order(
+                order_id, symbol,
+                params={"stop": True, "trigger": True, "algoId": order_id},
+            )
+        else:
+            await self._client.cancel_order(order_id, symbol)
 
     # ── Derivatives market-structure fetches ──
     # ccxt.RateLimitExceeded is a subclass of ccxt.NetworkError, and @_retry()

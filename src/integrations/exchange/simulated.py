@@ -745,7 +745,9 @@ class SimulatedExchange(BaseExchange):
                 for row in rows
             ]
 
-    async def cancel_order(self, order_id: str, symbol: str) -> None:
+    async def cancel_order(  # noqa: ARG002
+        self, order_id: str, symbol: str, is_algo: bool = False,
+    ) -> None:
         self._validate_symbol(symbol)
         async with self._lock:
             order = None

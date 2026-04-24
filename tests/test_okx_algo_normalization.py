@@ -361,3 +361,101 @@ async def test_create_order_plain_limit_unchanged_regression():
     assert "takeProfitPrice" not in params
     assert order.is_algo is False
     assert order.order_type == "limit"
+
+
+# ---------------------------------------------------------------------------
+# Task 6: cancel_order + fetch_order + set_leverage algo-aware routing
+# ---------------------------------------------------------------------------
+
+import ccxt.async_support as ccxt_async
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_is_algo_true_passes_stop_params():
+    ex = _make_okx()
+    ex._client.cancel_order = AsyncMock(return_value=None)
+    await ex.cancel_order("algo_123", "BTC/USDT:USDT", is_algo=True)
+    call = ex._client.cancel_order.call_args
+    params = call.kwargs.get("params") or (call.args[2] if len(call.args) > 2 else None)
+    assert params is not None
+    assert params.get("stop") is True
+    assert params.get("trigger") is True
+    assert params.get("algoId") == "algo_123"
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_is_algo_false_plain_call():
+    ex = _make_okx()
+    ex._client.cancel_order = AsyncMock(return_value=None)
+    await ex.cancel_order("plain_123", "BTC/USDT:USDT", is_algo=False)
+    call = ex._client.cancel_order.call_args
+    assert call.args[:2] == ("plain_123", "BTC/USDT:USDT")
+    # no algo params (if there are params kwargs, must not contain algoId)
+    params = call.kwargs.get("params")
+    assert params is None or "algoId" not in params
+
+
+@pytest.mark.asyncio
+async def test_fetch_order_plain_endpoint_first():
+    ex = _make_okx()
+    ex._client.fetch_order = AsyncMock(return_value={
+        "id": "p1", "symbol": "BTC/USDT:USDT", "side": "buy",
+        "type": "limit", "amount": 0.5, "price": 65000.0,
+        "status": "open", "fee": None,
+    })
+    await ex.fetch_order("p1", "BTC/USDT:USDT")
+    call = ex._client.fetch_order.call_args
+    params = call.kwargs.get("params")
+    # first call does not pass algo params
+    assert params is None or not params.get("stop")
+
+
+@pytest.mark.asyncio
+async def test_fetch_order_falls_back_to_algo_on_50002():
+    ex = _make_okx()
+    algo_response = {
+        "id": "algo_x", "symbol": "BTC/USDT:USDT", "side": "sell",
+        "type": "conditional", "amount": 1.0, "price": None,
+        "stopLossPrice": 60000.0, "takeProfitPrice": None,
+        "status": "open", "fee": None,
+        "info": {"ordType": "conditional", "algoId": "algo_x",
+                 "slTriggerPx": "60000", "tpTriggerPx": "", "state": "live"},
+    }
+    err_msg = 'okx {"code":"1","data":[{"sCode":"50002","sMsg":"Incorrect json data format"}],"msg":""}'
+    ex._client.fetch_order = AsyncMock(
+        side_effect=[ccxt_async.BadRequest(err_msg), algo_response]
+    )
+    out = await ex.fetch_order("algo_x", "BTC/USDT:USDT")
+    assert out.order_type == "stop"
+    assert out.is_algo is True
+    assert ex._client.fetch_order.call_count == 2
+    # second call must pass algo params
+    second_call = ex._client.fetch_order.call_args_list[1]
+    params = second_call.kwargs.get("params")
+    assert params is not None
+    assert params.get("stop") is True
+    assert params.get("algoId") == "algo_x"
+
+
+@pytest.mark.asyncio
+async def test_fetch_order_non_50002_error_propagates():
+    ex = _make_okx()
+    err_msg = 'okx {"code":"1","data":[{"sCode":"51001","sMsg":"Order does not exist"}],"msg":""}'
+    ex._client.fetch_order = AsyncMock(side_effect=ccxt_async.BadRequest(err_msg))
+    with pytest.raises(ccxt_async.BadRequest):
+        await ex.fetch_order("missing", "BTC/USDT:USDT")
+    # only called once, no fallback
+    assert ex._client.fetch_order.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_set_leverage_passes_mgnMode_isolated():
+    ex = _make_okx()
+    ex._client.set_leverage = AsyncMock(return_value=None)
+    await ex.set_leverage("BTC/USDT:USDT", 20)
+    call = ex._client.set_leverage.call_args
+    params = call.kwargs.get("params") or (call.args[2] if len(call.args) > 2 else None)
+    assert params is not None
+    assert params.get("mgnMode") == "isolated"
+    # single-direction posMode does not send posSide
+    assert "posSide" not in params
