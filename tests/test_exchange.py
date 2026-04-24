@@ -135,10 +135,20 @@ async def test_okx_fetch_order():
 async def test_okx_fetch_open_orders():
     from src.integrations.exchange.okx import OKXExchange
     mock_ccxt = AsyncMock()
-    mock_ccxt.fetch_open_orders.return_value = [
-        {"id": "o1", "symbol": "BTC/USDT:USDT", "side": "sell", "type": "stop",
-         "amount": 0.01, "price": 93000.0, "status": "open"},
-    ]
+    # Iter 2b T3: fetch_open_orders 现在走 3-way asyncio.gather (plain +
+    # conditional algo + oco algo). Plain path返回一单, algo path 返回空.
+    plain_order = {
+        "id": "o1", "symbol": "BTC/USDT:USDT", "side": "sell", "type": "stop",
+        "amount": 0.01, "price": 93000.0, "status": "open",
+    }
+
+    async def fake_fetch(symbol, params=None):
+        params = params or {}
+        if not params.get("stop"):
+            return [plain_order]
+        return []
+
+    mock_ccxt.fetch_open_orders = AsyncMock(side_effect=fake_fetch)
     exchange = OKXExchange.__new__(OKXExchange)
     exchange._client = mock_ccxt
     orders = await exchange.fetch_open_orders("BTC/USDT:USDT")

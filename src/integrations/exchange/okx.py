@@ -450,8 +450,16 @@ class OKXExchange(BaseExchange):
 
     @_retry()
     async def fetch_open_orders(self, symbol: str) -> list[Order]:  # type: ignore[override]
-        raw = await self._client.fetch_open_orders(symbol)
-        return [o for d in raw for o in self._parse_order(d)]
+        plain_task = self._client.fetch_open_orders(symbol)
+        cond_task = self._client.fetch_open_orders(
+            symbol, params={"stop": True, "ordType": "conditional"}
+        )
+        oco_task = self._client.fetch_open_orders(
+            symbol, params={"stop": True, "ordType": "oco"}
+        )
+        plain, cond, oco = await asyncio.gather(plain_task, cond_task, oco_task)
+        raw_all = list(plain) + list(cond) + list(oco)
+        return [o for d in raw_all for o in self._parse_order(d)]
 
     @_retry()
     async def fetch_closed_orders(  # type: ignore[override]
