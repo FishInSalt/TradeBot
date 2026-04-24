@@ -290,3 +290,74 @@ async def test_fetch_open_orders_concurrent_not_serial():
     )
     release.set()
     await task
+
+
+# ---------------------------------------------------------------------------
+# Task 5: create_order algo routing + manual Order construction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_order_stop_adds_stopLossPrice_param():
+    ex = _make_okx()
+    ex._client.create_order = AsyncMock(return_value={
+        "id": "algo_1", "symbol": "BTC/USDT:USDT", "side": "sell",
+        "type": "stop", "amount": 1.0, "price": None, "status": "open",
+        "info": {"algoId": "algo_1", "clOrdId": "", "tag": ""},
+    })
+    await ex.create_order("BTC/USDT:USDT", "sell", "stop", 1.0, price=50000.0)
+    call = ex._client.create_order.call_args
+    params = call.kwargs.get("params") or (call.args[5] if len(call.args) > 5 else None)
+    assert params is not None
+    assert params.get("tdMode") == "isolated"
+    assert params.get("stopLossPrice") == 50000.0
+
+
+@pytest.mark.asyncio
+async def test_create_order_take_profit_adds_takeProfitPrice_param():
+    ex = _make_okx()
+    ex._client.create_order = AsyncMock(return_value={
+        "id": "algo_2", "symbol": "BTC/USDT:USDT", "side": "sell",
+        "type": "take_profit", "amount": 1.0, "price": None, "status": "open",
+        "info": {"algoId": "algo_2", "clOrdId": "", "tag": ""},
+    })
+    await ex.create_order("BTC/USDT:USDT", "sell", "take_profit", 1.0, price=80000.0)
+    call = ex._client.create_order.call_args
+    params = call.kwargs.get("params") or (call.args[5] if len(call.args) > 5 else None)
+    assert params.get("takeProfitPrice") == 80000.0
+    assert "stopLossPrice" not in params
+
+
+@pytest.mark.asyncio
+async def test_create_order_stop_returns_is_algo_true_with_input_price():
+    """Algo create response is sparse (id/clOrdId/tag only); must manually construct Order with input price."""
+    ex = _make_okx()
+    ex._client.create_order = AsyncMock(return_value={
+        "id": "algo_3", "info": {"algoId": "algo_3", "clOrdId": "", "tag": ""},
+    })
+    order = await ex.create_order("BTC/USDT:USDT", "sell", "stop", 1.0, price=50000.0)
+    assert order.is_algo is True
+    assert order.price == pytest.approx(50000.0)
+    assert order.order_type == "stop"
+    assert order.status == "open"
+    assert order.id == "algo_3"
+    assert order.amount == pytest.approx(1.0)
+    assert order.side == "sell"
+
+
+@pytest.mark.asyncio
+async def test_create_order_plain_limit_unchanged_regression():
+    ex = _make_okx()
+    ex._client.create_order = AsyncMock(return_value={
+        "id": "plain_1", "symbol": "BTC/USDT:USDT", "side": "buy",
+        "type": "limit", "amount": 0.5, "price": 65000.0,
+        "status": "open", "fee": None,
+    })
+    order = await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.5, price=65000.0)
+    call = ex._client.create_order.call_args
+    params = call.kwargs.get("params") or (call.args[5] if len(call.args) > 5 else None)
+    assert params.get("tdMode") == "isolated"
+    assert "stopLossPrice" not in params
+    assert "takeProfitPrice" not in params
+    assert order.is_algo is False
+    assert order.order_type == "limit"

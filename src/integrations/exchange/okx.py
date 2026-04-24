@@ -434,9 +434,38 @@ class OKXExchange(BaseExchange):
         amount: float,
         price: float | None = None,
     ) -> Order:
+        params: dict[str, Any] = {"tdMode": "isolated"}
+        is_algo = order_type in ("stop", "take_profit")
+        # Verified via scripts/iter2b_write_path_probe.py: Attempt B (stop)
+        # + Attempt E (take_profit) both route to OKX algo endpoint with
+        # info.algoId non-empty.
+        if is_algo and price is not None:
+            if order_type == "stop":
+                params["stopLossPrice"] = price
+            else:  # take_profit
+                params["takeProfitPrice"] = price
+
         data = await self._client.create_order(
-            symbol, order_type, side, amount, price  # type: ignore[arg-type]
+            symbol, order_type, side, amount, price, params=params,  # type: ignore[arg-type]
         )
+
+        if is_algo:
+            # Algo create response contains only algoId + clOrdId + tag (verified
+            # via write-path probe Attempt B dump); missing slTriggerPx / ordType /
+            # stopLossPrice. Routing through _parse_order would hit the "both empty
+            # → plain fallback" branch and return is_algo=False wrongly.
+            # → Manually construct Order to bypass _parse_order.
+            return Order(
+                id=data["id"],
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                price=price,
+                status="open",
+                fee=None,
+                is_algo=True,
+            )
         parsed = self._parse_order(data)
         return parsed[0]
 
