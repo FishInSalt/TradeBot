@@ -194,6 +194,9 @@ class OKXExchange(BaseExchange):
             # cross-account pollution (demo orders never emit fill events)
             if self._sandbox:
                 self._ws_client.set_sandbox_mode(True)
+            # ws_client is a separate ccxt.pro instance with its own markets cache;
+            # watch_orders/watch_ticker raise "markets not loaded" without this.
+            await self._ws_client.load_markets()
             self._running = True
             self._ws_connected = True
             self._orders_task = asyncio.create_task(self._watch_orders_loop())

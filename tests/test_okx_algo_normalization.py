@@ -535,6 +535,7 @@ async def test_start_with_sandbox_true_calls_set_sandbox_mode_on_ws_client():
         "data": [{"posMode": "net_mode", "acctLv": "2"}],
     })
     fake_ws = MagicMock()
+    fake_ws.load_markets = AsyncMock(return_value={})
     fake_ws.watch_orders = AsyncMock(side_effect=asyncio.CancelledError)
     fake_ws.watch_ticker = AsyncMock(side_effect=asyncio.CancelledError)
     with patch("ccxt.pro.okx", return_value=fake_ws):
@@ -555,6 +556,7 @@ async def test_start_with_sandbox_false_ws_client_stays_live():
         "data": [{"posMode": "net_mode", "acctLv": "2"}],
     })
     fake_ws = MagicMock()
+    fake_ws.load_markets = AsyncMock(return_value={})
     fake_ws.watch_orders = AsyncMock(side_effect=asyncio.CancelledError)
     fake_ws.watch_ticker = AsyncMock(side_effect=asyncio.CancelledError)
     with patch("ccxt.pro.okx", return_value=fake_ws):
@@ -564,6 +566,31 @@ async def test_start_with_sandbox_false_ws_client_stays_live():
             if t is not None:
                 t.cancel()
     fake_ws.set_sandbox_mode.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_start_loads_markets_on_ws_client():
+    """ws_client 是独立 ccxt.pro instance，watch_orders/watch_ticker 需自己的 markets cache。
+
+    Pre-iter2b 漏调 → smoke test 实盘触发 'okx markets not loaded' ExchangeError。
+    回归用：守护 start() 在 create_task 前 await ws_client.load_markets()。
+    """
+    ex = _make_okx()
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "net_mode", "acctLv": "2"}],
+    })
+    fake_ws = MagicMock()
+    fake_ws.load_markets = AsyncMock(return_value={})
+    fake_ws.watch_orders = AsyncMock(side_effect=asyncio.CancelledError)
+    fake_ws.watch_ticker = AsyncMock(side_effect=asyncio.CancelledError)
+    with patch("ccxt.pro.okx", return_value=fake_ws):
+        await ex.start()
+        for attr in ("_orders_task", "_ticker_task"):
+            t = getattr(ex, attr, None)
+            if t is not None:
+                t.cancel()
+    fake_ws.load_markets.assert_awaited_once()
 
 
 @pytest.mark.asyncio
