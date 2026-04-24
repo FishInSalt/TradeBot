@@ -336,17 +336,94 @@ class OKXExchange(BaseExchange):
             return float(fee_info["cost"])
         return None
 
-    def _parse_order(self, data: dict) -> Order:
+    def _parse_order(self, data: dict) -> list[Order]:
+        """CCXT-unified OKX order dict → one or more logical Orders.
+
+        - ordType="oco" + both triggers present  → 2 Orders sharing id (stop + take_profit)
+        - ordType="conditional" + only sl_px     → [Order(stop)]
+        - ordType="conditional" + only tp_px     → [Order(take_profit)]
+        - other (plain / malformed algo)         → [single Order] (is_algo=False)
+        """
+        ord_type = data.get("type") or ""
+        sl_px, tp_px = self._extract_trigger_prices(data)
+
+        if ord_type == "oco":
+            if sl_px is not None and tp_px is not None:
+                return self._make_oco(data, sl_px, tp_px)
+            logger.warning(
+                "Malformed OCO (missing trigger): sl=%r tp=%r id=%s",
+                sl_px, tp_px, data.get("id"),
+            )
+            return [self._parse_plain(data)]
+
+        if ord_type == "conditional":
+            if sl_px is not None and tp_px is None:
+                return [self._make_algo_order(data, "stop", sl_px)]
+            if tp_px is not None and sl_px is None:
+                return [self._make_algo_order(data, "take_profit", tp_px)]
+            logger.warning(
+                "Unexpected conditional algo shape: sl=%r tp=%r id=%s",
+                sl_px, tp_px, data.get("id"),
+            )
+            return [self._parse_plain(data)]
+
+        return [self._parse_plain(data)]
+
+    def _extract_trigger_prices(self, data: dict) -> tuple[float | None, float | None]:
+        """Two-layer trigger price extraction: unified top-level primary + info fallback for CCXT version drift."""
+        sl_px = data.get("stopLossPrice")
+        tp_px = data.get("takeProfitPrice")
+        info = data.get("info") or {}
+        if sl_px is None:
+            raw_sl = info.get("slTriggerPx")
+            if raw_sl:
+                sl_px = float(raw_sl)
+        if tp_px is None:
+            raw_tp = info.get("tpTriggerPx")
+            if raw_tp:
+                tp_px = float(raw_tp)
+        return sl_px, tp_px
+
+    def _parse_plain(self, data: dict) -> Order:
         return Order(
-            id=data["id"],  # type: ignore[arg-type]
-            symbol=data["symbol"],  # type: ignore[arg-type]
-            side=data["side"],  # type: ignore[arg-type]
-            order_type=data["type"],  # type: ignore[arg-type]
-            amount=float(data["amount"]),  # type: ignore[arg-type]
-            price=float(data["price"]) if data.get("price") else None,  # type: ignore[arg-type]
-            status=data["status"],  # type: ignore[arg-type]
+            id=data["id"],
+            symbol=data["symbol"],
+            side=data["side"],
+            order_type=data["type"],
+            amount=float(data["amount"]),
+            price=float(data["price"]) if data.get("price") else None,
+            status=data["status"],
             fee=self._parse_fee(data),
+            is_algo=False,
         )
+
+    def _make_algo_order(self, data: dict, order_type: str, price: float) -> Order:
+        return Order(
+            id=data["id"],
+            symbol=data["symbol"],
+            side=data["side"],
+            order_type=order_type,
+            amount=float(data["amount"]),
+            price=price,
+            status=data["status"],
+            fee=None,
+            is_algo=True,
+        )
+
+    def _make_oco(self, data: dict, sl_px: float, tp_px: float) -> list[Order]:
+        common = {
+            "id": data["id"],
+            "symbol": data["symbol"],
+            "side": data["side"],
+            "amount": float(data["amount"]),
+            "status": data["status"],
+            "fee": None,
+            "is_algo": True,
+        }
+        return [
+            Order(order_type="stop", price=sl_px, **common),
+            Order(order_type="take_profit", price=tp_px, **common),
+        ]
 
     @_retry()
     async def create_order(  # type: ignore[override]
@@ -360,19 +437,21 @@ class OKXExchange(BaseExchange):
         data = await self._client.create_order(
             symbol, order_type, side, amount, price  # type: ignore[arg-type]
         )
-        return self._parse_order(data)
+        parsed = self._parse_order(data)
+        return parsed[0]
 
     @_retry()
     async def fetch_order(  # type: ignore[override]
         self, order_id: str, symbol: str | None = None
     ) -> Order:
         data = await self._client.fetch_order(order_id, symbol)
-        return self._parse_order(data)
+        parsed = self._parse_order(data)
+        return parsed[0]
 
     @_retry()
     async def fetch_open_orders(self, symbol: str) -> list[Order]:  # type: ignore[override]
         raw = await self._client.fetch_open_orders(symbol)
-        return [self._parse_order(d) for d in raw]
+        return [o for d in raw for o in self._parse_order(d)]
 
     @_retry()
     async def fetch_closed_orders(  # type: ignore[override]
@@ -381,7 +460,7 @@ class OKXExchange(BaseExchange):
         raw = await self._client.fetch_orders(
             symbol, limit=limit, params={"state": "filled"}
         )
-        return [self._parse_order(d) for d in raw]
+        return [o for d in raw for o in self._parse_order(d)]
 
     @_retry()
     async def fetch_balance(self) -> Balance:  # type: ignore[override]

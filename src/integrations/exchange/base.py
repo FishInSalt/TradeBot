@@ -39,6 +39,7 @@ class Order:
     price: float | None
     status: str
     fee: float | None = None
+    is_algo: bool = False
 
 
 @dataclass
