@@ -147,14 +147,40 @@ class OKXExchange(BaseExchange):
     # --- WebSocket lifecycle ---
 
     async def start(self) -> None:
-        """预加载 markets（fail-fast）+ 启动 WebSocket 监听循环（失败时降级为 REST-only 模式）。
+        """预加载 markets + 校验账户模式（fail-fast）+ 启动 WebSocket（失败时降级 REST-only）。
 
         预加载 markets 用于 get_contract_size 的 contractSize 查询 —— 放在 WebSocket
         try 之外：markets 加载失败意味着所有依赖合约面值的工具都会坏掉，fail-fast
         比延迟到每次调用时静默 fallback 更好（spec §8.5）。
+
+        账户模式校验（posMode + acctLv）放在 WebSocket try 之外：系统全栈假设单向仓位
+        （net_mode）+ 单币种保证金（acctLv=2），错配会导致 fill-event 关联断裂或
+        保证金语义不一致，fail-fast 避免上线后静默坏掉。
         """
         # Preload markets for get_contract_size — fail-fast outside WebSocket try
         await self._client.load_markets()
+
+        # Account config fail-fast — before WebSocket so failures don't waste connections
+        config_resp = await self._client.private_get_account_config()
+        config = (config_resp.get("data") or [{}])[0]
+
+        pos_mode = config.get("posMode")
+        if pos_mode != "net_mode":
+            raise RuntimeError(
+                f"OKX account posMode={pos_mode!r}, system expects 'net_mode' (one-way). "
+                f"System 全栈假设单向仓位；改动代价指数级。"
+                f"Change in OKX web → Account → Settings → Position mode → One-way."
+            )
+
+        acct_lv = config.get("acctLv")
+        if acct_lv != "2":
+            raise RuntimeError(
+                f"OKX account acctLv={acct_lv!r}, system expects '2' (Single-currency margin). "
+                f"acctLv=1 (Simple) does not support swap contracts. "
+                f"acctLv=3 (multi-currency) / 4 (portfolio margin) use different margin semantics "
+                f"incompatible with isolated-margin model. "
+                f"Change via OKX web → Trading mode → Single-currency margin."
+            )
 
         try:
             import ccxt.pro as ccxtpro
@@ -164,12 +190,16 @@ class OKXExchange(BaseExchange):
                 "password": self._client.password,
                 "options": {"defaultType": "swap"},
             })
+            # CRITICAL: sync sandbox to WS client — missing this = REST→demo / WS→live
+            # cross-account pollution (demo orders never emit fill events)
+            if self._sandbox:
+                self._ws_client.set_sandbox_mode(True)
             self._running = True
             self._ws_connected = True
             self._orders_task = asyncio.create_task(self._watch_orders_loop())
             self._ticker_task = asyncio.create_task(self._watch_ticker_loop())
             loops = "watch_orders + watch_ticker"
-            logger.info("OKX WebSocket started (%s)", loops)
+            logger.info("OKX WebSocket started (%s, sandbox=%s)", loops, self._sandbox)
         except Exception:
             self._ws_connected = False
             logger.error("WebSocket connection failed, running in REST-only mode", exc_info=True)
@@ -183,6 +213,18 @@ class OKXExchange(BaseExchange):
                 orders = await self._ws_client.watch_orders(self._symbol)
                 error_count = 0
                 for order_data in orders:
+                    info = order_data.get("info") or {}
+                    # Algo-lineage diagnostic log — dual-branch guard covers hypothesis A/B
+                    # (A: info.ordType in {conditional, oco}; B: info.algoId non-empty)
+                    if (info.get("ordType") in ("conditional", "oco")
+                            or info.get("algoId") not in (None, "")):
+                        logger.info(
+                            "algo-lineage raw event: raw_ordType=%s raw_state=%s "
+                            "unified_status=%s id=%s algoId=%s",
+                            info.get("ordType"), info.get("state"),
+                            order_data.get("status"), order_data.get("id"),
+                            info.get("algoId"),
+                        )
                     status = order_data.get("status")
                     filled = order_data.get("filled", 0) or 0
 

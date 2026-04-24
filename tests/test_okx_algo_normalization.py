@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -459,3 +460,149 @@ async def test_set_leverage_passes_mgnMode_isolated():
     assert params.get("mgnMode") == "isolated"
     # single-direction posMode does not send posSide
     assert "posSide" not in params
+
+
+# ---------------------------------------------------------------------------
+# Task 8: start() posMode + acctLv fail-fast + ws_client sandbox sync +
+#         _watch_orders_loop algo-lineage diagnostic log
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_long_short_posMode():
+    ex = _make_okx()
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "long_short_mode", "acctLv": "2"}],
+    })
+    with pytest.raises(RuntimeError, match="posMode"):
+        await ex.start()
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_multi_currency_acctLv():
+    ex = _make_okx()
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "net_mode", "acctLv": "3"}],
+    })
+    with pytest.raises(RuntimeError, match="acctLv"):
+        await ex.start()
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_simple_acctLv():
+    ex = _make_okx()
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "net_mode", "acctLv": "1"}],
+    })
+    with pytest.raises(RuntimeError, match="acctLv"):
+        await ex.start()
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_portfolio_margin_acctLv():
+    """acctLv=4 (Portfolio Margin) — margin semantics incompatible with isolated (spec §0.2)."""
+    ex = _make_okx()
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "net_mode", "acctLv": "4"}],
+    })
+    with pytest.raises(RuntimeError, match="acctLv"):
+        await ex.start()
+
+
+@pytest.mark.asyncio
+async def test_start_accepts_net_mode_single_currency():
+    """Pre-work verified config: posMode=net_mode + acctLv=2."""
+    ex = _make_okx()
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "net_mode", "acctLv": "2"}],
+    })
+    # ccxtpro.okx construction raises → REST-only except branch
+    with patch("ccxt.pro.okx", side_effect=ImportError("mocked absence")):
+        await ex.start()  # must not raise
+    assert ex._ws_connected is False
+
+
+@pytest.mark.asyncio
+async def test_start_with_sandbox_true_calls_set_sandbox_mode_on_ws_client():
+    ex = _make_okx(sandbox=True)
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "net_mode", "acctLv": "2"}],
+    })
+    fake_ws = MagicMock()
+    fake_ws.watch_orders = AsyncMock(side_effect=asyncio.CancelledError)
+    fake_ws.watch_ticker = AsyncMock(side_effect=asyncio.CancelledError)
+    with patch("ccxt.pro.okx", return_value=fake_ws):
+        await ex.start()
+        # cancel watch tasks to avoid hang
+        for attr in ("_orders_task", "_ticker_task"):
+            t = getattr(ex, attr, None)
+            if t is not None:
+                t.cancel()
+    fake_ws.set_sandbox_mode.assert_called_once_with(True)
+
+
+@pytest.mark.asyncio
+async def test_start_with_sandbox_false_ws_client_stays_live():
+    ex = _make_okx(sandbox=False)
+    ex._client.load_markets = AsyncMock(return_value={})
+    ex._client.private_get_account_config = AsyncMock(return_value={
+        "data": [{"posMode": "net_mode", "acctLv": "2"}],
+    })
+    fake_ws = MagicMock()
+    fake_ws.watch_orders = AsyncMock(side_effect=asyncio.CancelledError)
+    fake_ws.watch_ticker = AsyncMock(side_effect=asyncio.CancelledError)
+    with patch("ccxt.pro.okx", return_value=fake_ws):
+        await ex.start()
+        for attr in ("_orders_task", "_ticker_task"):
+            t = getattr(ex, attr, None)
+            if t is not None:
+                t.cancel()
+    fake_ws.set_sandbox_mode.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_watch_orders_loop_emits_algo_lineage_log_for_both_guard_branches(caplog):
+    """Dual-branch guard coverage:
+      Hypothesis A: info.ordType in {conditional, oco}
+      Hypothesis B: info.algoId non-empty (even if ordType is market/limit)
+    Before and after first real OCO trigger, log shape can be reverse-engineered."""
+    ex = _make_okx()
+    ex._running = True
+    ex._ws_client = MagicMock()
+    # Two events, each triggering one guard branch
+    event_a = {
+        "id": "evt_a", "status": "open", "filled": 0,
+        "info": {"ordType": "conditional", "state": "live", "algoId": "algo_a"},
+    }
+    event_b = {
+        "id": "evt_b", "status": "open", "filled": 0,
+        "info": {"ordType": "market", "state": "live", "algoId": "algo_b"},
+    }
+    calls = iter([[event_a, event_b], asyncio.CancelledError()])
+
+    async def fake_watch(symbol):
+        nxt = next(calls)
+        # CancelledError is BaseException (not Exception) in Python 3.11+
+        if isinstance(nxt, BaseException):
+            raise nxt
+        return nxt
+
+    ex._ws_client.watch_orders = fake_watch
+    with caplog.at_level("INFO"):
+        try:
+            await ex._watch_orders_loop()
+        except asyncio.CancelledError:
+            pass
+    log_lines = [r.message for r in caplog.records if "algo-lineage" in r.message]
+    assert len(log_lines) >= 2  # both events logged
+    combined = "\n".join(log_lines)
+    assert "algo_a" in combined and "algo_b" in combined
+    assert "conditional" in combined  # hypothesis A field
+    # 5-field completeness spot-check
+    assert "raw_ordType" in combined and "raw_state" in combined and "unified_status" in combined

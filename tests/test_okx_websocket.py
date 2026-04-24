@@ -17,6 +17,9 @@ async def test_okx_start_fallback_to_rest_on_ws_failure():
         # start() now preloads markets before the WebSocket try-block; make
         # load_markets awaitable so the preload doesn't hide the WS-failure path.
         exchange._client.load_markets = AsyncMock()
+        exchange._client.private_get_account_config = AsyncMock(return_value={
+            "data": [{"posMode": "net_mode", "acctLv": "2"}],
+        })
         with patch.dict("sys.modules", {"ccxt.pro": None}):
             await exchange.start()
         assert exchange._ws_connected is False
