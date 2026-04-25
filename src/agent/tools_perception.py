@@ -314,6 +314,29 @@ async def get_memories(deps: TradingDeps) -> str:
     return await deps.memory.format_for_prompt()
 
 
+def _render_single_order(o, current: float) -> str:
+    """Render a single (non-OCO) order line — preserves pre-Iter-2b rendering exactly.
+
+    Preserves the current > 0 branch: no crash on abnormal ticker. Label/distance/ID
+    suffix format matches original tools_perception.py exactly to satisfy spec §6
+    "zero byte-level regression".
+    """
+    if o.order_type == "market" or o.price is None:
+        label = "[PENDING]" if o.order_type == "market" else f"[{o.order_type.upper()}]"
+        price_str = "market price"
+    else:
+        if o.order_type == "limit":
+            label = "[LIMIT]"
+        else:
+            label = f"[{o.order_type.upper()}]"
+        if current > 0:
+            dist = (o.price - current) / current * 100
+            price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
+        else:
+            price_str = f"@ {o.price:.2f}"
+    return f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}"
+
+
 async def get_open_orders(deps: TradingDeps) -> str:
     """Get all pending orders with distance from current price."""
     orders = await deps.exchange.fetch_open_orders(deps.symbol)
@@ -323,22 +346,37 @@ async def get_open_orders(deps: TradingDeps) -> str:
     ticker = await deps.market_data.get_ticker(deps.symbol)
     current = ticker.last
 
-    lines = ["Pending Orders:"]
+    # Group by id: OCO's two same-id legs share id + is_algo=True
+    by_id: dict[str, list] = {}
     for o in orders:
-        if o.order_type == "market" or o.price is None:
-            label = "[PENDING]" if o.order_type == "market" else f"[{o.order_type.upper()}]"
-            price_str = "market price"
+        by_id.setdefault(o.id, []).append(o)
+
+    lines = ["Pending Orders:"]
+    for order_id, group in by_id.items():
+        is_oco = (
+            len(group) == 2
+            and {o.order_type for o in group} == {"stop", "take_profit"}
+            and all(o.is_algo for o in group)
+        )
+        if is_oco:
+            sl = next(o for o in group if o.order_type == "stop")
+            tp = next(o for o in group if o.order_type == "take_profit")
+            sl_dist = (
+                f" ({(sl.price - current) / current * 100:+.2f}% from current)"
+                if current > 0 else ""
+            )
+            tp_dist = (
+                f" ({(tp.price - current) / current * 100:+.2f}% from current)"
+                if current > 0 else ""
+            )
+            lines.append(
+                f"  [OCO] {sl.side} {sl.amount} "
+                f"stop {sl.price:.2f}{sl_dist} / tp {tp.price:.2f}{tp_dist} "
+                f"| algoId: {order_id} (cancel removes both legs)"
+            )
         else:
-            if o.order_type == "limit":
-                label = "[LIMIT]"
-            else:
-                label = f"[{o.order_type.upper()}]"
-            if current > 0:
-                dist = (o.price - current) / current * 100
-                price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
-            else:
-                price_str = f"@ {o.price:.2f}"
-        lines.append(f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}")
+            for o in group:
+                lines.append(_render_single_order(o, current))
     return "\n".join(lines)
 
 

@@ -39,6 +39,7 @@ class Order:
     price: float | None
     status: str
     fee: float | None = None
+    is_algo: bool = False
 
 
 @dataclass
@@ -112,7 +113,7 @@ class BaseExchange(ABC):
     @abstractmethod
     async def fetch_closed_orders(self, symbol: str, limit: int = 20) -> list[Order]: ...
     @abstractmethod
-    async def cancel_order(self, order_id: str, symbol: str) -> None: ...
+    async def cancel_order(self, order_id: str, symbol: str, is_algo: bool = False) -> None: ...
     @abstractmethod
     async def fetch_funding_rate(self, symbol: str) -> 'FundingRate': ...
     @abstractmethod

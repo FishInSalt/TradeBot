@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
@@ -39,6 +40,24 @@ _TRIGGER_REASON_MAP = {
     "take_profit_market": "take_profit",
     "market": "market",
 }
+
+def _is_okx_error_code(err: Exception, code: str) -> bool:
+    """Parse OKX sCode from ccxt.BadRequest message envelope.
+
+    Pre-work observed envelope: 'okx {"code":"1","data":[{"sCode":"50002",...}],"msg":""}'
+    Prefer JSON parse; fall back to structured sCode substring match (safer than raw digit match).
+    """
+    msg = str(err)
+    try:
+        payload = json.loads(msg.split(None, 1)[1])
+        data = payload.get("data") or []
+        for item in data:
+            if item.get("sCode") == code:
+                return True
+    except (IndexError, json.JSONDecodeError, AttributeError):
+        pass
+    return f'"sCode":"{code}"' in msg
+
 
 # (side, order_type) → position_side 推断表
 _POSITION_SIDE_INFER = {
@@ -83,7 +102,8 @@ def _retry(max_retries: int = 3, base_delay: float = 1.0):
 
 
 class OKXExchange(BaseExchange):
-    def __init__(self, api_key: str, secret: str, password: str, symbol: str):
+    def __init__(self, api_key: str, secret: str, password: str, symbol: str,
+                 sandbox: bool = False):
         super().__init__()
         self._client = ccxt.okx(
             {
@@ -94,6 +114,9 @@ class OKXExchange(BaseExchange):
                 "timeout": 30000,
             }
         )
+        if sandbox:
+            self._client.set_sandbox_mode(True)
+        self._sandbox = sandbox
         self._symbol = symbol
         self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
@@ -103,7 +126,15 @@ class OKXExchange(BaseExchange):
         self._pnl_fetch_timeout: float = 5.0
         self._seen_order_ids: dict[str, None] = {}
         self._seen_order_ids_max = 10000
-        logger.info("OKX exchange initialized (real account)")
+        logger.info(
+            "OKX exchange initialized (%s account)",
+            "demo" if sandbox else "live",
+        )
+        # spec §2.1.4 Live endpoint 守卫 — 警示 log
+        if not sandbox and api_key:
+            logger.warning(
+                "OKX live account initialized — ALL ORDERS WILL USE REAL FUNDS"
+            )
 
     # --- Fill / Alert callback registration ---
 
@@ -115,15 +146,56 @@ class OKXExchange(BaseExchange):
 
     # --- WebSocket lifecycle ---
 
+    @_retry()
+    async def _preload_markets(self) -> None:
+        """load_markets wrapper — @_retry 保护启动时的 transient network glitch."""
+        await self._client.load_markets()
+
+    @_retry()
+    async def _fetch_account_config(self) -> dict:
+        """private_get_account_config wrapper — @_retry 保护启动时的 transient network glitch."""
+        return await self._client.private_get_account_config()
+
     async def start(self) -> None:
-        """预加载 markets（fail-fast）+ 启动 WebSocket 监听循环（失败时降级为 REST-only 模式）。
+        """预加载 markets + 校验账户模式（fail-fast）+ 启动 WebSocket（失败时降级 REST-only）。
 
         预加载 markets 用于 get_contract_size 的 contractSize 查询 —— 放在 WebSocket
         try 之外：markets 加载失败意味着所有依赖合约面值的工具都会坏掉，fail-fast
         比延迟到每次调用时静默 fallback 更好（spec §8.5）。
+
+        账户模式校验（posMode + acctLv）放在 WebSocket try 之外：系统全栈假设单向仓位
+        （net_mode）+ 单币种保证金（acctLv=2），错配会导致 fill-event 关联断裂或
+        保证金语义不一致，fail-fast 避免上线后静默坏掉。
         """
         # Preload markets for get_contract_size — fail-fast outside WebSocket try
-        await self._client.load_markets()
+        await self._preload_markets()
+
+        # Account config fail-fast — before WebSocket so failures don't waste connections
+        config_resp = await self._fetch_account_config()
+        data = config_resp.get("data") or []
+        if not data:
+            raise RuntimeError(
+                "OKX account_config returned empty data — check API credentials/connectivity."
+            )
+        config = data[0]
+
+        pos_mode = config.get("posMode")
+        if pos_mode != "net_mode":
+            raise RuntimeError(
+                f"OKX account posMode={pos_mode!r}, system expects 'net_mode' (one-way). "
+                f"System 全栈假设单向仓位；改动代价指数级。"
+                f"Change in OKX web → Account → Settings → Position mode → One-way."
+            )
+
+        acct_lv = config.get("acctLv")
+        if acct_lv != "2":
+            raise RuntimeError(
+                f"OKX account acctLv={acct_lv!r}, system expects '2' (Single-currency margin). "
+                f"acctLv=1 (Simple) does not support swap contracts. "
+                f"acctLv=3 (multi-currency) / 4 (portfolio margin) use different margin semantics "
+                f"incompatible with isolated-margin model. "
+                f"Change via OKX web → Trading mode → Single-currency margin."
+            )
 
         try:
             import ccxt.pro as ccxtpro
@@ -133,12 +205,19 @@ class OKXExchange(BaseExchange):
                 "password": self._client.password,
                 "options": {"defaultType": "swap"},
             })
+            # CRITICAL: sync sandbox to WS client — missing this = REST→demo / WS→live
+            # cross-account pollution (demo orders never emit fill events)
+            if self._sandbox:
+                self._ws_client.set_sandbox_mode(True)
+            # ws_client is a separate ccxt.pro instance with its own markets cache;
+            # watch_orders/watch_ticker raise "markets not loaded" without this.
+            await self._ws_client.load_markets()
             self._running = True
             self._ws_connected = True
             self._orders_task = asyncio.create_task(self._watch_orders_loop())
             self._ticker_task = asyncio.create_task(self._watch_ticker_loop())
             loops = "watch_orders + watch_ticker"
-            logger.info("OKX WebSocket started (%s)", loops)
+            logger.info("OKX WebSocket started (%s, sandbox=%s)", loops, self._sandbox)
         except Exception:
             self._ws_connected = False
             logger.error("WebSocket connection failed, running in REST-only mode", exc_info=True)
@@ -152,6 +231,18 @@ class OKXExchange(BaseExchange):
                 orders = await self._ws_client.watch_orders(self._symbol)
                 error_count = 0
                 for order_data in orders:
+                    info = order_data.get("info") or {}
+                    # Algo-lineage diagnostic log — dual-branch guard covers hypothesis A/B
+                    # (A: info.ordType in {conditional, oco}; B: info.algoId non-empty)
+                    if (info.get("ordType") in ("conditional", "oco")
+                            or info.get("algoId") not in (None, "")):
+                        logger.info(
+                            "algo-lineage raw event: raw_ordType=%s raw_state=%s "
+                            "unified_status=%s id=%s algoId=%s",
+                            info.get("ordType"), info.get("state"),
+                            order_data.get("status"), order_data.get("id"),
+                            info.get("algoId"),
+                        )
                     status = order_data.get("status")
                     filled = order_data.get("filled", 0) or 0
 
@@ -229,11 +320,20 @@ class OKXExchange(BaseExchange):
     # --- FillEvent 解析 ---
 
     async def _parse_fill_event(self, order_data: dict) -> FillEvent:
-        order_id = order_data["id"]
         symbol = order_data["symbol"]
         side = order_data["side"]
         order_type = order_data.get("type", "")
         info = order_data.get("info", {})
+        # algoId-aware order_id: agent stores algoId (= Order.id from create_order T5
+        # manual construction) in decision_logs / TradeAction.order_id. OKX algo fill
+        # events shape unverified pre-observation, two hypotheses (spec §3.1.3):
+        #   A: info.ordType ∈ {conditional, oco}, order_data["id"] IS algoId
+        #   B: info.ordType ∈ {market, limit}, order_data["id"] is underlying ordId,
+        #      info.algoId is the algoId
+        # Under A: info.algoId may be empty/None → fallback to order_data["id"] = algoId ✓
+        # Under B: info.algoId non-empty → use algoId, matches decision_logs ✓
+        # Plain (non-algo) fills: info.algoId absent → fallback to order_data["id"] ✓
+        order_id = info.get("algoId") or order_data["id"]
 
         pos_side_raw = info.get("posSide")
         if pos_side_raw and pos_side_raw not in ("", "net"):
@@ -261,7 +361,7 @@ class OKXExchange(BaseExchange):
         if pnl is None:
             try:
                 fetched = await asyncio.wait_for(
-                    self._client.fetch_order(order_id, symbol),
+                    self._fetch_order_with_algo_fallback(order_id, symbol),
                     timeout=self._pnl_fetch_timeout,
                 )
                 pnl_fetched = fetched.get("info", {}).get("pnl")
@@ -324,17 +424,94 @@ class OKXExchange(BaseExchange):
             return float(fee_info["cost"])
         return None
 
-    def _parse_order(self, data: dict) -> Order:
+    def _parse_order(self, data: dict) -> list[Order]:
+        """CCXT-unified OKX order dict → one or more logical Orders.
+
+        - ordType="oco" + both triggers present  → 2 Orders sharing id (stop + take_profit)
+        - ordType="conditional" + only sl_px     → [Order(stop)]
+        - ordType="conditional" + only tp_px     → [Order(take_profit)]
+        - other (plain / malformed algo)         → [single Order] (is_algo=False)
+        """
+        ord_type = data.get("type") or ""
+        sl_px, tp_px = self._extract_trigger_prices(data)
+
+        if ord_type == "oco":
+            if sl_px is not None and tp_px is not None:
+                return self._make_oco(data, sl_px, tp_px)
+            logger.warning(
+                "Malformed OCO (missing trigger): sl=%r tp=%r id=%s",
+                sl_px, tp_px, data.get("id"),
+            )
+            return [self._parse_plain(data)]
+
+        if ord_type == "conditional":
+            if sl_px is not None and tp_px is None:
+                return [self._make_algo_order(data, "stop", sl_px)]
+            if tp_px is not None and sl_px is None:
+                return [self._make_algo_order(data, "take_profit", tp_px)]
+            logger.warning(
+                "Unexpected conditional algo shape: sl=%r tp=%r id=%s",
+                sl_px, tp_px, data.get("id"),
+            )
+            return [self._parse_plain(data)]
+
+        return [self._parse_plain(data)]
+
+    def _extract_trigger_prices(self, data: dict) -> tuple[float | None, float | None]:
+        """Two-layer trigger price extraction: unified top-level primary + info fallback for CCXT version drift."""
+        sl_px = data.get("stopLossPrice")
+        tp_px = data.get("takeProfitPrice")
+        info = data.get("info") or {}
+        if sl_px is None:
+            raw_sl = info.get("slTriggerPx")
+            if raw_sl:
+                sl_px = float(raw_sl)
+        if tp_px is None:
+            raw_tp = info.get("tpTriggerPx")
+            if raw_tp:
+                tp_px = float(raw_tp)
+        return sl_px, tp_px
+
+    def _parse_plain(self, data: dict) -> Order:
         return Order(
-            id=data["id"],  # type: ignore[arg-type]
-            symbol=data["symbol"],  # type: ignore[arg-type]
-            side=data["side"],  # type: ignore[arg-type]
-            order_type=data["type"],  # type: ignore[arg-type]
-            amount=float(data["amount"]),  # type: ignore[arg-type]
-            price=float(data["price"]) if data.get("price") else None,  # type: ignore[arg-type]
-            status=data["status"],  # type: ignore[arg-type]
+            id=data["id"],
+            symbol=data["symbol"],
+            side=data["side"],
+            order_type=data["type"],
+            amount=float(data["amount"]),
+            price=float(data["price"]) if data.get("price") else None,
+            status=data["status"],
             fee=self._parse_fee(data),
+            is_algo=False,
         )
+
+    def _make_algo_order(self, data: dict, order_type: str, price: float) -> Order:
+        return Order(
+            id=data["id"],
+            symbol=data["symbol"],
+            side=data["side"],
+            order_type=order_type,
+            amount=float(data["amount"]),
+            price=price,
+            status=data["status"],
+            fee=None,
+            is_algo=True,
+        )
+
+    def _make_oco(self, data: dict, sl_px: float, tp_px: float) -> list[Order]:
+        common = {
+            "id": data["id"],
+            "symbol": data["symbol"],
+            "side": data["side"],
+            "amount": float(data["amount"]),
+            "status": data["status"],
+            "fee": None,
+            "is_algo": True,
+        }
+        return [
+            Order(order_type="stop", price=sl_px, **common),
+            Order(order_type="take_profit", price=tp_px, **common),
+        ]
 
     @_retry()
     async def create_order(  # type: ignore[override]
@@ -345,31 +522,94 @@ class OKXExchange(BaseExchange):
         amount: float,
         price: float | None = None,
     ) -> Order:
+        params: dict[str, Any] = {"tdMode": "isolated"}
+        is_algo = order_type in ("stop", "take_profit")
+        # Verified via scripts/iter2b_write_path_probe.py: Attempt B (stop)
+        # + Attempt E (take_profit) both route to OKX algo endpoint with
+        # info.algoId non-empty.
+        if is_algo and price is not None:
+            if order_type == "stop":
+                params["stopLossPrice"] = price
+            else:  # take_profit
+                params["takeProfitPrice"] = price
+
         data = await self._client.create_order(
-            symbol, order_type, side, amount, price  # type: ignore[arg-type]
+            symbol, order_type, side, amount, price, params=params,  # type: ignore[arg-type]
         )
-        return self._parse_order(data)
+
+        if is_algo:
+            # Algo create response contains only algoId + clOrdId + tag (verified
+            # via write-path probe Attempt B dump); missing slTriggerPx / ordType /
+            # stopLossPrice. Routing through _parse_order would hit the "both empty
+            # → plain fallback" branch and return is_algo=False wrongly.
+            # → Manually construct Order to bypass _parse_order.
+            return Order(
+                id=data["id"],
+                symbol=symbol,
+                side=side,
+                order_type=order_type,
+                amount=amount,
+                price=price,
+                status="open",
+                fee=None,
+                is_algo=True,
+            )
+        parsed = self._parse_order(data)
+        return parsed[0]
+
+    async def _fetch_order_with_algo_fallback(
+        self, order_id: str, symbol: str | None,
+    ) -> dict:
+        """Raw CCXT fetch_order with plain-first + 50002 algo fallback.
+
+        Shared by public `fetch_order` (wraps to Order via _parse_order) and
+        `_parse_fill_event` pnl fallback (reads raw info.pnl). Same 50002 fallback
+        semantics. No @_retry: caller decides retry vs timeout semantics.
+        """
+        try:
+            return await self._client.fetch_order(order_id, symbol)
+        except ccxt.BadRequest as e:
+            # OKX 50002 appears when calling plain endpoint on an algo id — fall back to algo
+            if _is_okx_error_code(e, "50002"):
+                return await self._client.fetch_order(
+                    order_id, symbol,
+                    params={"stop": True, "trigger": True, "algoId": order_id},
+                )
+            raise
 
     @_retry()
     async def fetch_order(  # type: ignore[override]
         self, order_id: str, symbol: str | None = None
     ) -> Order:
-        data = await self._client.fetch_order(order_id, symbol)
-        return self._parse_order(data)
+        data = await self._fetch_order_with_algo_fallback(order_id, symbol)
+        parsed = self._parse_order(data)
+        return parsed[0]
 
     @_retry()
     async def fetch_open_orders(self, symbol: str) -> list[Order]:  # type: ignore[override]
-        raw = await self._client.fetch_open_orders(symbol)
-        return [self._parse_order(d) for d in raw]
+        plain_task = self._client.fetch_open_orders(symbol)
+        cond_task = self._client.fetch_open_orders(
+            symbol, params={"stop": True, "ordType": "conditional"}
+        )
+        oco_task = self._client.fetch_open_orders(
+            symbol, params={"stop": True, "ordType": "oco"}
+        )
+        plain, cond, oco = await asyncio.gather(plain_task, cond_task, oco_task)
+        raw_all = list(plain) + list(cond) + list(oco)
+        return [o for d in raw_all for o in self._parse_order(d)]
 
     @_retry()
     async def fetch_closed_orders(  # type: ignore[override]
         self, symbol: str, limit: int = 20
     ) -> list[Order]:
+        # Spec §7.2: 当前仅查 plain history endpoint, 不查 algo-history. 设计选择,
+        # 非疏漏 — journal 走单条 fetch_order + 50002 fallback (§2.5.4) 已 cover
+        # OCO/conditional 触发后的详情查询。若未来出现"列所有 closed orders"用例,
+        # 扩为 plain-history + algo-history 两路 gather (类似 fetch_open_orders 三路)。
         raw = await self._client.fetch_orders(
             symbol, limit=limit, params={"state": "filled"}
         )
-        return [self._parse_order(d) for d in raw]
+        return [o for d in raw for o in self._parse_order(d)]
 
     @_retry()
     async def fetch_balance(self) -> Balance:  # type: ignore[override]
@@ -403,14 +643,24 @@ class OKXExchange(BaseExchange):
 
     @_retry()
     async def set_leverage(self, symbol: str, leverage: int) -> None:  # type: ignore[override]
-        await self._client.set_leverage(leverage, symbol)
+        await self._client.set_leverage(
+            leverage, symbol, params={"mgnMode": "isolated"},
+        )
 
     def amount_to_precision(self, symbol: str, amount: float) -> float:
         return float(self._client.amount_to_precision(symbol, amount))  # type: ignore[arg-type]
 
     @_retry()
-    async def cancel_order(self, order_id: str, symbol: str) -> None:  # type: ignore[override]
-        await self._client.cancel_order(order_id, symbol)
+    async def cancel_order(  # type: ignore[override]
+        self, order_id: str, symbol: str, is_algo: bool = False,
+    ) -> None:
+        if is_algo:
+            await self._client.cancel_order(
+                order_id, symbol,
+                params={"stop": True, "trigger": True, "algoId": order_id},
+            )
+        else:
+            await self._client.cancel_order(order_id, symbol)
 
     # ── Derivatives market-structure fetches ──
     # ccxt.RateLimitExceeded is a subclass of ccxt.NetworkError, and @_retry()

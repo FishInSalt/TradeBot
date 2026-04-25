@@ -51,7 +51,7 @@ def test_base_exchange_alert_consolidation():
         async def fetch_order(self, order_id, symbol=None): ...
         async def fetch_open_orders(self, symbol): ...
         async def fetch_closed_orders(self, symbol, limit=20): ...
-        async def cancel_order(self, order_id, symbol): ...
+        async def cancel_order(self, order_id, symbol, is_algo: bool = False): ...  # noqa: ARG002
         async def fetch_funding_rate(self, symbol): ...
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
@@ -99,7 +99,7 @@ def test_base_exchange_get_price_level_alerts():
         async def fetch_order(self, order_id, symbol=None): ...
         async def fetch_open_orders(self, symbol): ...
         async def fetch_closed_orders(self, symbol, limit=20): ...
-        async def cancel_order(self, order_id, symbol): ...
+        async def cancel_order(self, order_id, symbol, is_algo: bool = False): ...  # noqa: ARG002
         async def fetch_funding_rate(self, symbol): ...
         async def fetch_open_interest(self, symbol): ...
         async def fetch_long_short_ratio(self, symbol): ...
@@ -727,7 +727,7 @@ async def test_cancel_order_success():
 
     result = await cancel_order(deps, "o1", reasoning="no longer needed")
     assert "cancelled" in result.lower() or "Cancelled" in result or "cancel" in result.lower()
-    deps.exchange.cancel_order.assert_called_once_with("o1", "BTC/USDT:USDT")
+    deps.exchange.cancel_order.assert_called_once_with("o1", "BTC/USDT:USDT", is_algo=False)
 
 
 async def test_cancel_order_not_found():
@@ -856,3 +856,248 @@ async def test_get_performance_empty(tmp_path):
     result = await get_performance(deps)
     assert "No completed trades yet" in result
     await engine.dispose()
+
+
+# --- Iter 2b T4: get_open_orders OCO merge rendering ---
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from src.integrations.exchange.base import Order, Ticker
+
+
+def _make_oco_deps(orders: list[Order], ticker_last: float = 70000.0):
+    """OCO merge rendering deps factory (distinct from existing file helpers)."""
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=orders)
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=ticker_last, bid=ticker_last - 1,
+        ask=ticker_last + 1, high=ticker_last, low=ticker_last,
+        base_volume=0.0, timestamp=0,
+    ))
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_merges_oco_into_single_line():
+    from src.agent.tools_perception import get_open_orders
+    oco_id = "algo_123"
+    orders = [
+        Order(id=oco_id, symbol="BTC/USDT:USDT", side="sell",
+              order_type="stop", amount=1.0, price=60000.0,
+              status="open", fee=None, is_algo=True),
+        Order(id=oco_id, symbol="BTC/USDT:USDT", side="sell",
+              order_type="take_profit", amount=1.0, price=80000.0,
+              status="open", fee=None, is_algo=True),
+    ]
+    out = await get_open_orders(_make_oco_deps(orders))
+    lines = out.splitlines()
+    # Only one rendered row besides the header
+    assert lines[0] == "Pending Orders:"
+    data_lines = [l for l in lines[1:] if l.strip()]
+    assert len(data_lines) == 1, f"expected 1 merged OCO line, got {data_lines}"
+    row = data_lines[0]
+    assert "[OCO]" in row
+    assert "stop" in row.lower()
+    assert "tp" in row.lower()
+    assert "algoId:" in row
+    assert "cancel removes both legs" in row
+    assert "60000.00" in row
+    assert "80000.00" in row
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_non_oco_single_orders_separate_lines():
+    from src.agent.tools_perception import get_open_orders
+    orders = [
+        Order(id="p1", symbol="BTC/USDT:USDT", side="buy",
+              order_type="limit", amount=0.5, price=65000.0,
+              status="open", is_algo=False),
+        Order(id="s1", symbol="BTC/USDT:USDT", side="sell",
+              order_type="stop", amount=0.5, price=60000.0,
+              status="open", is_algo=True),  # single-leg conditional SL
+    ]
+    out = await get_open_orders(_make_oco_deps(orders))
+    data_lines = [l for l in out.splitlines()[1:] if l.strip()]
+    assert len(data_lines) == 2
+    assert "[LIMIT]" in data_lines[0]
+    assert "[STOP]" in data_lines[1]
+    # no OCO merge tag
+    assert "[OCO]" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_fact_only_no_banned_words():
+    """N5 fact-only compliance regression — OCO merge line must not contain evaluative words."""
+    from src.agent.tools_perception import get_open_orders
+    orders = [
+        Order(id="oco_1", symbol="BTC/USDT:USDT", side="sell",
+              order_type="stop", amount=1.0, price=60000.0, status="open",
+              is_algo=True),
+        Order(id="oco_1", symbol="BTC/USDT:USDT", side="sell",
+              order_type="take_profit", amount=1.0, price=80000.0, status="open",
+              is_algo=True),
+    ]
+    out = await get_open_orders(_make_oco_deps(orders))
+    banned = ("protective", "tight", "wide", "safe", "aggressive")
+    for word in banned:
+        assert word not in out.lower(), f"banned word '{word}' in output:\n{out}"
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_oco_handles_zero_ticker_without_dist_suffix():
+    """ticker.last == 0 (abnormal fallback) must not ZeroDivisionError;
+    dist suffix should be omitted but other fields kept. spec §2.4.1 regression."""
+    from src.agent.tools_perception import get_open_orders
+    orders = [
+        Order(id="oco_z", symbol="BTC/USDT:USDT", side="sell",
+              order_type="stop", amount=1.0, price=60000.0, status="open",
+              is_algo=True),
+        Order(id="oco_z", symbol="BTC/USDT:USDT", side="sell",
+              order_type="take_profit", amount=1.0, price=80000.0, status="open",
+              is_algo=True),
+    ]
+    out = await get_open_orders(_make_oco_deps(orders, ticker_last=0.0))
+    # no crash + OCO structure preserved
+    data_lines = [l for l in out.splitlines()[1:] if l.strip()]
+    assert len(data_lines) == 1
+    row = data_lines[0]
+    assert "[OCO]" in row
+    assert "60000.00" in row and "80000.00" in row
+    # dist suffix must not appear
+    assert "% from current" not in row
+
+
+# --- Task 7 (Iter 2b): tools_execution forwards is_algo to cancel_order ---
+
+from src.integrations.exchange.base import Position
+
+
+def _make_exec_deps(positions=None, open_orders=None, ticker_last=70000.0):
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.session_id = "s1"
+    deps.db_engine = None
+    deps.approval_enabled = False
+    deps.approval_gate = None
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=positions or [])
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=open_orders or [])
+    deps.exchange.cancel_order = AsyncMock(return_value=None)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="new_order", symbol="BTC/USDT:USDT", side="sell",
+        order_type="stop", amount=1.0, price=60000.0, status="open", is_algo=True,
+    ))
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=ticker_last, bid=ticker_last - 1,
+        ask=ticker_last + 1, high=ticker_last, low=ticker_last,
+        base_volume=0.0, timestamp=0,
+    ))
+    return deps
+
+
+def _pos(side="long", contracts=1.0):
+    return Position(symbol="BTC/USDT:USDT", side=side, contracts=contracts,
+                    entry_price=70000.0, unrealized_pnl=0.0, leverage=10,
+                    liquidation_price=None)
+
+
+@pytest.mark.asyncio
+async def test_set_stop_loss_forwards_is_algo_true_for_algo_sl():
+    from src.agent.tools_execution import set_stop_loss
+    old_sl = Order(id="algo_old", symbol="BTC/USDT:USDT", side="sell",
+                   order_type="stop", amount=1.0, price=59000.0,
+                   status="open", is_algo=True)
+    deps = _make_exec_deps(positions=[_pos()], open_orders=[old_sl])
+    await set_stop_loss(deps, price=60000.0, reasoning="tighten")
+    call = deps.exchange.cancel_order.call_args
+    is_algo_actual = (
+        call.kwargs.get("is_algo") if "is_algo" in call.kwargs
+        else (call.args[2] if len(call.args) > 2 else False)
+    )
+    assert is_algo_actual is True
+
+
+@pytest.mark.asyncio
+async def test_set_stop_loss_forwards_is_algo_false_for_sim_sl():
+    from src.agent.tools_execution import set_stop_loss
+    old_sl = Order(id="sim_old", symbol="BTC/USDT:USDT", side="sell",
+                   order_type="stop", amount=1.0, price=59000.0,
+                   status="open", is_algo=False)
+    deps = _make_exec_deps(positions=[_pos()], open_orders=[old_sl])
+    await set_stop_loss(deps, price=60000.0, reasoning="tighten")
+    call = deps.exchange.cancel_order.call_args
+    is_algo_actual = (
+        call.kwargs.get("is_algo") if "is_algo" in call.kwargs
+        else (call.args[2] if len(call.args) > 2 else False)
+    )
+    assert is_algo_actual is False
+
+
+@pytest.mark.asyncio
+async def test_set_take_profit_forwards_is_algo_true_for_algo_tp():
+    from src.agent.tools_execution import set_take_profit
+    old_tp = Order(id="algo_tp", symbol="BTC/USDT:USDT", side="sell",
+                   order_type="take_profit", amount=1.0, price=80000.0,
+                   status="open", is_algo=True)
+    deps = _make_exec_deps(positions=[_pos()], open_orders=[old_tp])
+    await set_take_profit(deps, price=81000.0, reasoning="bump")
+    call = deps.exchange.cancel_order.call_args
+    is_algo_actual = (
+        call.kwargs.get("is_algo") if "is_algo" in call.kwargs
+        else (call.args[2] if len(call.args) > 2 else False)
+    )
+    assert is_algo_actual is True
+
+
+@pytest.mark.asyncio
+async def test_set_take_profit_forwards_is_algo_false_for_sim_tp():
+    from src.agent.tools_execution import set_take_profit
+    old_tp = Order(id="sim_tp", symbol="BTC/USDT:USDT", side="sell",
+                   order_type="take_profit", amount=1.0, price=80000.0,
+                   status="open", is_algo=False)
+    deps = _make_exec_deps(positions=[_pos()], open_orders=[old_tp])
+    await set_take_profit(deps, price=81000.0, reasoning="bump")
+    call = deps.exchange.cancel_order.call_args
+    is_algo_actual = (
+        call.kwargs.get("is_algo") if "is_algo" in call.kwargs
+        else (call.args[2] if len(call.args) > 2 else False)
+    )
+    assert is_algo_actual is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_tool_routes_is_algo_true_for_algo_order():
+    from src.agent.tools_execution import cancel_order
+    target = Order(id="algo_xyz", symbol="BTC/USDT:USDT", side="sell",
+                   order_type="stop", amount=1.0, price=60000.0,
+                   status="open", is_algo=True)
+    deps = _make_exec_deps(open_orders=[target])
+    await cancel_order(deps, order_id="algo_xyz", reasoning="stale")
+    call = deps.exchange.cancel_order.call_args
+    is_algo_actual = (
+        call.kwargs.get("is_algo") if "is_algo" in call.kwargs
+        else (call.args[2] if len(call.args) > 2 else False)
+    )
+    assert is_algo_actual is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_tool_routes_is_algo_false_for_plain_order():
+    from src.agent.tools_execution import cancel_order
+    target = Order(id="plain_abc", symbol="BTC/USDT:USDT", side="buy",
+                   order_type="limit", amount=0.5, price=65000.0,
+                   status="open", is_algo=False)
+    deps = _make_exec_deps(open_orders=[target])
+    await cancel_order(deps, order_id="plain_abc", reasoning="stale")
+    call = deps.exchange.cancel_order.call_args
+    is_algo_actual = (
+        call.kwargs.get("is_algo") if "is_algo" in call.kwargs
+        else (call.args[2] if len(call.args) > 2 else False)
+    )
+    assert is_algo_actual is False

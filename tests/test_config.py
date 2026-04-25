@@ -278,3 +278,95 @@ def test_load_settings_yaml_overrides_n3_keys_wins(tmp_path):
     env = {"FRED_API_KEY": "env-fred"}
     settings = load_settings(path=yaml_path, env_overrides=env)
     assert settings.macro.fred_api_key == "yaml-fred"
+
+
+# --- Iter 2b T1: sandbox + OKX_DEMO_* credentials split ---
+
+import tempfile
+from pathlib import Path
+from src.config import load_settings
+
+
+def _write_yaml_settings(content: str = "") -> Path:
+    """Helper: write a minimal settings.yaml to a temp file and return path."""
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, encoding="utf-8",
+    )
+    tmp.write(content)
+    tmp.close()
+    return Path(tmp.name)
+
+
+def test_load_settings_sandbox_true_reads_demo_credentials():
+    path = _write_yaml_settings("")
+    env = {
+        "OKX_SANDBOX": "true",
+        "OKX_DEMO_API_KEY": "demo_key",
+        "OKX_DEMO_SECRET": "demo_secret",
+        "OKX_DEMO_PASSWORD": "demo_pwd",
+        "OKX_API_KEY": "live_key",
+        "OKX_SECRET": "live_secret",
+        "OKX_PASSWORD": "live_pwd",
+    }
+    settings = load_settings(path, env_overrides=env)
+    assert settings.exchange.api_key == "demo_key"
+    assert settings.exchange.secret == "demo_secret"
+    assert settings.exchange.password == "demo_pwd"
+    assert settings.exchange.sandbox is True
+
+
+def test_load_settings_sandbox_false_reads_live_credentials():
+    path = _write_yaml_settings("")
+    env = {
+        "OKX_SANDBOX": "false",
+        "OKX_DEMO_API_KEY": "demo_key",
+        "OKX_API_KEY": "live_key",
+        "OKX_SECRET": "live_secret",
+        "OKX_PASSWORD": "live_pwd",
+    }
+    settings = load_settings(path, env_overrides=env)
+    assert settings.exchange.api_key == "live_key"
+    assert settings.exchange.sandbox is False
+
+
+def test_load_settings_missing_sandbox_defaults_live():
+    path = _write_yaml_settings("")
+    env = {"OKX_API_KEY": "live_key", "OKX_SECRET": "live_s", "OKX_PASSWORD": "live_p"}
+    settings = load_settings(path, env_overrides=env)
+    assert settings.exchange.sandbox is False
+    assert settings.exchange.api_key == "live_key"
+
+
+def test_load_settings_yaml_sandbox_true_wins_over_env_missing():
+    path = _write_yaml_settings("exchange:\n  sandbox: true\n")
+    env = {"OKX_DEMO_API_KEY": "demo_k", "OKX_DEMO_SECRET": "d_s", "OKX_DEMO_PASSWORD": "d_p"}
+    settings = load_settings(path, env_overrides=env)
+    assert settings.exchange.sandbox is True
+    assert settings.exchange.api_key == "demo_k"
+
+
+def test_load_settings_yaml_sandbox_false_overrides_env_true():
+    """YAML 显式 sandbox=false 必须覆盖 OKX_SANDBOX=true env — final_sandbox 单一 SoT 关键分支.
+
+    若 final_sandbox 错用 env-derived sandbox_env (非 exchange["sandbox"]),
+    此场景会错走 demo credentials 路径 → demo endpoint + 空 live credentials
+    或 demo credentials 的 live 标签, auth 失败时 error message 误导.
+    """
+    path = _write_yaml_settings("exchange:\n  sandbox: false\n")
+    env = {
+        "OKX_SANDBOX": "true",
+        "OKX_API_KEY": "live_key", "OKX_SECRET": "live_s", "OKX_PASSWORD": "live_p",
+        "OKX_DEMO_API_KEY": "demo_k",
+    }
+    settings = load_settings(path, env_overrides=env)
+    assert settings.exchange.sandbox is False
+    assert settings.exchange.api_key == "live_key"
+
+
+def test_load_settings_empty_env_dict_defaults_to_live_empty_credentials():
+    path = _write_yaml_settings("")
+    settings = load_settings(path, env_overrides={})
+    assert settings.exchange.sandbox is False
+    assert settings.exchange.api_key == ""
+    assert settings.exchange.secret == ""
+    assert settings.exchange.password == ""

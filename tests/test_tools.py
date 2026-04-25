@@ -139,7 +139,7 @@ async def test_set_stop_loss_cancels_existing(deps):
     deps.exchange.cancel_order = AsyncMock()
     result = await set_stop_loss(deps, 63000.0, reasoning="trailing stop")
     assert "63000" in result
-    deps.exchange.cancel_order.assert_called_once_with("old-sl", "BTC/USDT:USDT")
+    deps.exchange.cancel_order.assert_called_once_with("old-sl", "BTC/USDT:USDT", is_algo=False)
 
 
 async def test_set_take_profit(deps):

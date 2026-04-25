@@ -135,7 +135,7 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
     open_orders = await deps.exchange.fetch_open_orders(deps.symbol)
     for o in open_orders:
         if o.order_type == "stop":
-            await deps.exchange.cancel_order(o.id, deps.symbol)
+            await deps.exchange.cancel_order(o.id, deps.symbol, is_algo=o.is_algo)
 
     side = "sell" if p.side == "long" else "buy"
     order = await deps.exchange.create_order(
@@ -165,7 +165,7 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
     open_orders = await deps.exchange.fetch_open_orders(deps.symbol)
     for o in open_orders:
         if o.order_type == "take_profit":
-            await deps.exchange.cancel_order(o.id, deps.symbol)
+            await deps.exchange.cancel_order(o.id, deps.symbol, is_algo=o.is_algo)
 
     side = "sell" if p.side == "long" else "buy"
     order = await deps.exchange.create_order(
@@ -343,7 +343,7 @@ async def cancel_order(
     if target.order_type == "market":
         return "Cannot cancel market orders"
 
-    await deps.exchange.cancel_order(order_id, deps.symbol)
+    await deps.exchange.cancel_order(order_id, deps.symbol, is_algo=target.is_algo)
 
     await _record_action(
         deps, action="cancel_order", order_id=order_id,

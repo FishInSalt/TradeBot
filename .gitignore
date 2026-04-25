@@ -14,3 +14,6 @@ config/.credentials
 logs/
 .working/
 .DS_Store
+
+# Iter 2b smoke test runtime artifact — fixture dumped per run, not source of truth
+tests/fixtures/okx_fetch_balance_idle.json

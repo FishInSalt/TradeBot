@@ -16,6 +16,7 @@ class ExchangeConfig(BaseModel):
     password: str = ""
     fee_rate: float | None = None
     precision: dict[str, int] | None = None
+    sandbox: bool = False
 
 
 class TradingConfig(BaseModel):
@@ -122,9 +123,20 @@ def load_settings(
         data = yaml.safe_load(f) or {}
 
     exchange = data.get("exchange", {})
-    exchange.setdefault("api_key", env_overrides.get("OKX_API_KEY", ""))
-    exchange.setdefault("secret", env_overrides.get("OKX_SECRET", ""))
-    exchange.setdefault("password", env_overrides.get("OKX_PASSWORD", ""))
+    # Env-derived sandbox flag — seed for setdefault
+    sandbox_env = env_overrides.get("OKX_SANDBOX", "").lower() == "true"
+    exchange.setdefault("sandbox", sandbox_env)
+    # Final sandbox = YAML-set value (if any) else env-derived; single source of truth.
+    final_sandbox = bool(exchange["sandbox"])
+
+    if final_sandbox:
+        exchange.setdefault("api_key", env_overrides.get("OKX_DEMO_API_KEY", ""))
+        exchange.setdefault("secret", env_overrides.get("OKX_DEMO_SECRET", ""))
+        exchange.setdefault("password", env_overrides.get("OKX_DEMO_PASSWORD", ""))
+    else:
+        exchange.setdefault("api_key", env_overrides.get("OKX_API_KEY", ""))
+        exchange.setdefault("secret", env_overrides.get("OKX_SECRET", ""))
+        exchange.setdefault("password", env_overrides.get("OKX_PASSWORD", ""))
     data["exchange"] = exchange
 
     # N3: macro + crypto_etf env overrides (YAML values take precedence)

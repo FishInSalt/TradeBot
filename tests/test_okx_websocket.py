@@ -17,6 +17,9 @@ async def test_okx_start_fallback_to_rest_on_ws_failure():
         # start() now preloads markets before the WebSocket try-block; make
         # load_markets awaitable so the preload doesn't hide the WS-failure path.
         exchange._client.load_markets = AsyncMock()
+        exchange._client.private_get_account_config = AsyncMock(return_value={
+            "data": [{"posMode": "net_mode", "acctLv": "2"}],
+        })
         with patch.dict("sys.modules", {"ccxt.pro": None}):
             await exchange.start()
         assert exchange._ws_connected is False
@@ -198,6 +201,111 @@ async def test_parse_fill_event_pnl_rest_fallback():
         fill = await exchange._parse_fill_event(order_data)
         assert fill.pnl == -3.5
         exchange._client.fetch_order.assert_called_once_with("order-rest-pnl", "BTC/USDT:USDT")
+
+
+async def test_parse_fill_event_uses_algoid_for_order_id_when_present():
+    """II-1 (round-3 review): hypothesis B — OKX 推底层 ord 事件含 info.algoId 时,
+    FillEvent.order_id 必须用 algoId, 否则与 decision_logs.order_id (= algoId from
+    create_order T5 manual construction) 对不齐, agent journal 关联断。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        order_data = {
+            "id": "underlying-ord-789",  # 底层 ordId
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "type": "market",  # hypothesis B 下推 market/limit shape
+            "status": "closed",
+            "average": 58000.0,
+            "price": 58000.0,
+            "filled": 0.01,
+            "fee": {"cost": 0.29, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long", "algoId": "algo-id-12345", "pnl": "10.5"},
+        }
+        fill = await exchange._parse_fill_event(order_data)
+        assert fill.order_id == "algo-id-12345"  # 用 algoId, 不是 underlying ordId
+
+
+async def test_parse_fill_event_falls_back_to_order_id_when_algoid_absent():
+    """II-1 fallback: hypothesis A 或 plain 路径, info.algoId 不存在/空 → 用 order_data['id']."""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        # 场景 1: info 完全没 algoId 字段（plain 限价单 fill）
+        order_data_plain = {
+            "id": "plain-ord-111",
+            "symbol": "BTC/USDT:USDT", "side": "buy", "type": "limit",
+            "status": "closed", "average": 58000.0, "price": 58000.0,
+            "filled": 0.01, "fee": {"cost": 0.1, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long", "pnl": "0"},
+        }
+        fill1 = await exchange._parse_fill_event(order_data_plain)
+        assert fill1.order_id == "plain-ord-111"
+
+        # 场景 2: info.algoId 存在但是空字符串（hypothesis A：order_data["id"] 已是 algoId）
+        order_data_algo_a = {
+            "id": "algo-id-already",
+            "symbol": "BTC/USDT:USDT", "side": "sell", "type": "stop",
+            "status": "closed", "average": 58000.0, "price": 58000.0,
+            "filled": 0.01, "fee": {"cost": 0.1, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long", "algoId": "", "pnl": "5"},
+        }
+        fill2 = await exchange._parse_fill_event(order_data_algo_a)
+        assert fill2.order_id == "algo-id-already"
+
+
+async def test_parse_fill_event_pnl_fallback_on_algo_50002():
+    """PnL fallback 对 algo id 要走 50002→algo endpoint fallback（I4 修复）.
+
+    原代码 _parse_fill_event pnl 块直接调 self._client.fetch_order，不经 50002 fallback。
+    algo SL/TP fill 事件 info.pnl 若缺，这里 plain-endpoint 必报 50002 → pnl 恒 None。
+    修复后走 self._fetch_order_with_algo_fallback，plain-first 50002 → algo retry 拿回 pnl。
+    """
+    import ccxt.async_support as ccxt_async
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        order_data = {
+            "id": "algo-fill-42",
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "type": "stop",
+            "status": "closed",
+            "average": 58000.0,
+            "price": 58000.0,
+            "filled": 0.01,
+            "fee": {"cost": 0.29, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long"},  # no pnl here → triggers fallback
+        }
+        err_50002 = 'okx {"code":"1","data":[{"sCode":"50002","sMsg":"Incorrect json data format"}],"msg":""}'
+        algo_response = {"info": {"pnl": "-7.25", "algoId": "algo-fill-42"}}
+        exchange._client.fetch_order = AsyncMock(
+            side_effect=[ccxt_async.BadRequest(err_50002), algo_response]
+        )
+        fill = await exchange._parse_fill_event(order_data)
+        assert fill.pnl == -7.25
+        assert exchange._client.fetch_order.call_count == 2
+        second_call = exchange._client.fetch_order.call_args_list[1]
+        params = second_call.kwargs.get("params")
+        assert params is not None
+        assert params.get("stop") is True
+        assert params.get("algoId") == "algo-fill-42"
 
 
 async def test_parse_fill_event_pnl_rest_fallback_timeout():

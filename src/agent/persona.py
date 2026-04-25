@@ -45,7 +45,8 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 - **Order book**: Use get_order_book for top-N depth with cumulative volume + bid/ask share + concentrated levels (size > 3× same-side median). Evaluate liquidity, slippage risk, or concentrated levels near current price.
 - **Recent trades**: Use get_recent_trades to read taker-flow bias and rhythm over recent minutes (default 300s, 5 × 60s buckets). Total + trade count + avg size shown below buckets.
 - **Multi-timeframe snapshot**: Use get_multi_timeframe_snapshot once per cycle to scan multi-TF alignment (default 5m/1h/4h/1d) before committing to a direction. 4 columns per TF: momentum / structure / volatility / range position.
-- **Position risk context**: get_position now includes Risk exposure (notional / margin / liquidation in ATR(1h) multiples — 1h is the fixed baseline regardless of session trading style) and Exit orders section (SL/TP distances from both entry and current). Useful both when opening and during ongoing position management."""
+- **Position risk context**: get_position now includes Risk exposure (notional / margin / liquidation in ATR(1h) multiples — 1h is the fixed baseline regardless of session trading style) and Exit orders section (SL/TP distances from both entry and current). Useful both when opening and during ongoing position management.
+- **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after."""
 
 
 def _build_layer2() -> str:

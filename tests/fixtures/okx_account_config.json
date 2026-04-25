@@ -1,0 +1,40 @@
+{
+  "code": "0",
+  "data": [
+    {
+      "acctLv": "2",
+      "acctStpMode": "cancel_maker",
+      "autoLoan": false,
+      "ctIsoMode": "automatic",
+      "enableSpotBorrow": false,
+      "feeType": "1",
+      "greeksType": "PA",
+      "ip": "",
+      "kycLv": "2",
+      "label": "模拟交易api",
+      "level": "Lv1",
+      "levelTmp": "",
+      "liquidationGear": "-1",
+      "mainUid": "785178828971991265",
+      "mgnIsoMode": "auto_transfers_ccy",
+      "opAuth": "0",
+      "perm": "read_only,trade",
+      "posMode": "net_mode",
+      "roleType": "0",
+      "settleCcy": "USDC",
+      "settleCcyList": [
+        "USDC",
+        "USDG"
+      ],
+      "spotBorrowAutoRepay": false,
+      "spotOffsetType": "",
+      "spotRoleType": "0",
+      "spotTraderInsts": [],
+      "stgyType": "0",
+      "traderInsts": [],
+      "type": "0",
+      "uid": "785178828971991265"
+    }
+  ],
+  "msg": ""
+}
