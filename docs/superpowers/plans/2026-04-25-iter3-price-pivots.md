@@ -246,7 +246,7 @@ def _compute_swing_pivots(
     return highs, lows
 ```
 
-(`pandas as pd` is already imported at the top of `tools_perception.py` — confirm with grep before writing if uncertain.)
+(`pandas as pd` is **not** imported at module level in `tools_perception.py` — it's only locally imported inside `get_multi_timeframe_snapshot` at line 1321. The new helper does not need a runtime `pd` reference: the type annotation `pd.DataFrame` works as a string under `from __future__ import annotations` (line 1), and the function body uses only `df["high"].to_numpy()` / `df["low"].to_numpy()`. So **do not add a top-level `import pandas as pd`**.)
 
 - [ ] **Step 1.4: Run tests, verify all 10 pass**
 
@@ -522,7 +522,18 @@ class _PivotsDeps:
 
 
 def _ticker(price: float = 66523.40) -> Ticker:
-    return Ticker(symbol="BTC/USDT:USDT", last=price, bid=price - 0.5, ask=price + 0.5, timestamp=0)
+    # Ticker is a strict dataclass with 8 required fields (src/integrations/exchange/base.py:11-19).
+    # get_price_pivots only reads ticker.last, so high/low/base_volume are inert defaults.
+    return Ticker(
+        symbol="BTC/USDT:USDT",
+        last=price,
+        bid=price - 0.5,
+        ask=price + 0.5,
+        high=price + 100.0,
+        low=price - 100.0,
+        base_volume=0.0,
+        timestamp=0,
+    )
 
 
 def _df_n_bars(n: int, *, base: float = 66000.0, with_pivots: bool = False) -> pd.DataFrame:
@@ -1026,7 +1037,17 @@ def _pivots_df(highs, lows):
 
 
 def _pivots_ticker():
-    return Ticker(symbol="BTC/USDT:USDT", last=66523.40, bid=66523.0, ask=66524.0, timestamp=0)
+    # Ticker is a strict 8-field dataclass; only ticker.last is consumed by get_price_pivots.
+    return Ticker(
+        symbol="BTC/USDT:USDT",
+        last=66523.40,
+        bid=66523.0,
+        ask=66524.0,
+        high=66623.40,
+        low=66423.40,
+        base_volume=0.0,
+        timestamp=0,
+    )
 
 
 def _pivots_ohlcv_side_effect(by_tf):
