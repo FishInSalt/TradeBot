@@ -259,3 +259,33 @@ def test_prompt_minimum_length():
     prompt = generate_system_prompt(PersonaConfig())
     # Three-layer prompt should be substantial
     assert len(prompt) > 500
+
+
+def test_layer1_bullet_count_25():
+    """Layer 1 bullet count drift guard (Iter 3: 24 → 25). Bullets are markdown
+    rows starting with '\n- **' — matches `_build_layer1`'s tools-section format.
+    """
+    from src.agent.persona import generate_system_prompt
+    config = PersonaConfig()
+    prompt = generate_system_prompt(config)
+    # Guard: Layer 2 header — protects against silent false-pass if persona.py renames it
+    assert "## How to Think" in prompt, \
+        "Layer 2 header changed; update split key in this test"
+    layer1 = prompt.split("## How to Think")[0]
+    bullet_count = layer1.count("\n- **")
+    assert bullet_count == 25, f"Expected 25 Layer 1 bullets, got {bullet_count}"
+
+
+def test_layer1_includes_get_price_pivots():
+    """Iter 3 Layer 1 bullet describes get_price_pivots with key terminology
+    (fractal / structural / above / below)."""
+    from src.agent.persona import generate_system_prompt
+    config = PersonaConfig()
+    prompt = generate_system_prompt(config)
+    assert "get_price_pivots" in prompt
+    assert "## How to Think" in prompt, \
+        "Layer 2 header changed; update split key in this test"
+    layer1 = prompt.split("## How to Think")[0]
+    for keyword in ("fractal", "structural", "above", "below"):
+        assert keyword in layer1.lower(), \
+            f"Layer 1 bullet missing keyword '{keyword}'"

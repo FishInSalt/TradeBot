@@ -251,6 +251,19 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, tfs=tfs)
 
+    @agent.tool
+    async def get_price_pivots(ctx: RunContext[TradingDeps]) -> str:
+        """Show structural support/resistance: last 100 main-TF swing pivots
+        (Williams fractal N=5) + prior daily/weekly/monthly H/L. Fact-only.
+        Returns levels grouped by above/below current price, sorted by
+        absolute distance. Swing rows annotate 'N bars ago'; prior rows
+        label the period (Daily / Weekly / Monthly). See tool implementation
+        for full degradation semantics.
+        """
+        from src.agent.tools_perception import get_price_pivots as _impl
+
+        return await _impl(ctx.deps)
+
     # === Execution Tools ===
 
     @agent.tool
@@ -369,7 +382,7 @@ def create_trader_agent(
 # 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
 # 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
 REGISTERED_TOOL_NAMES: list[str] = [
-    # --- 感知 (18) ---
+    # --- 感知 (19) ---
     "get_market_data",
     "get_position",
     "get_account_balance",
@@ -388,6 +401,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_order_book",
     "get_recent_trades",
     "get_multi_timeframe_snapshot",
+    "get_price_pivots",
     # --- 执行 (10) ---
     "open_position",
     "close_position",

@@ -1407,3 +1407,195 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         "",
     ]
     return "\n".join(header + rows)
+
+
+# === Iter 3 — get_price_pivots helpers ===
+
+def _compute_swing_pivots(
+    df: pd.DataFrame, n: int = 5
+) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    """Return (highs, lows) where each entry is (bars_ago, price).
+
+    Williams fractal with strict inequality: center bar's high must be strictly
+    greater than all 2n surrounding bars' highs (and similarly low strictly less).
+    Equality at any neighbor disqualifies the pivot — prevents flat-plateau false
+    signals. Confirmed pivots only — last n bars excluded due to incomplete
+    right window, so min returned bars_ago = n.
+    """
+    if len(df) < 2 * n + 1:
+        return [], []
+
+    h = df["high"].to_numpy()
+    l = df["low"].to_numpy()
+    last_idx = len(df) - 1
+    confirm_end = last_idx - n
+
+    highs: list[tuple[int, float]] = []
+    lows: list[tuple[int, float]] = []
+    for i in range(n, confirm_end + 1):
+        center_h = h[i]
+        center_l = l[i]
+        is_high = all(center_h > h[i + d] for d in range(-n, n + 1) if d != 0)
+        is_low = all(center_l < l[i + d] for d in range(-n, n + 1) if d != 0)
+        if is_high:
+            highs.append((last_idx - i, float(center_h)))
+        if is_low:
+            lows.append((last_idx - i, float(center_l)))
+    return highs, lows
+
+
+def _get_prior_period_hl(
+    df_or_err: pd.DataFrame | Exception | None,
+) -> tuple[str, float | None, float | None]:
+    """Return (status, high, low). status one of 'ok' / 'insufficient' / 'unavailable'.
+
+    Period label ('Daily' / 'Weekly' / 'Monthly') is bound by the caller in
+    `_render_pivot_rows` when iterating the three period results — not needed here.
+    """
+    if isinstance(df_or_err, Exception):
+        return "unavailable", None, None
+    df = df_or_err
+    if df is None or df.empty or len(df) < 2:
+        return "insufficient", None, None
+    prior = df.iloc[-2]
+    return "ok", float(prior["high"]), float(prior["low"])
+
+
+def _bars_ago_fmt(n: int) -> str:
+    """0 → 'now' (defensive — confirmed pivots have min ago=N=5);
+    1 → '1 bar ago'; N≥2 → 'N bars ago'."""
+    if n == 0:
+        return "now"
+    if n == 1:
+        return "1 bar ago"
+    return f"{n} bars ago"
+
+
+def _render_pivot_rows(
+    swing_highs: list[tuple[int, float]],
+    swing_lows: list[tuple[int, float]],
+    prior_d: tuple[str, float | None, float | None],
+    prior_w: tuple[str, float | None, float | None],
+    prior_m: tuple[str, float | None, float | None],
+    current_price: float,
+) -> tuple[list[str], list[str], list[str]]:
+    """Return (above_rows, below_rows, footer_lines).
+
+    above/below already sorted by abs(distance%) ascending; footer collects
+    insufficient/unavailable notices for priors that don't fit either group.
+    Caller (`get_price_pivots`) handles swing_status separately.
+    """
+    above: list[tuple[float, str]] = []
+    below: list[tuple[float, str]] = []
+    footer: list[str] = []
+
+    for kind, items in (("Swing High", swing_highs), ("Swing Low", swing_lows)):
+        for ago, price in items:
+            dist_pct = (price - current_price) / current_price * 100
+            line = f"{kind}: {price:,.2f} ({dist_pct:+.2f}%, {_bars_ago_fmt(ago)})"
+            target = above if price > current_price else below
+            target.append((abs(dist_pct), line))
+
+    for label, (status, h, l_) in [
+        ("Daily", prior_d), ("Weekly", prior_w), ("Monthly", prior_m),
+    ]:
+        if status == "ok":
+            for kind, value in [("H", h), ("L", l_)]:
+                dist_pct = (value - current_price) / current_price * 100
+                line = f"Prior {label} {kind}: {value:,.2f} ({dist_pct:+.2f}%)"
+                target = above if value > current_price else below
+                target.append((abs(dist_pct), line))
+        else:
+            note = "insufficient data" if status == "insufficient" else "temporarily unavailable"
+            footer.append(f"Prior {label} H/L: {note}")
+
+    above.sort(key=lambda x: x[0])
+    below.sort(key=lambda x: x[0])
+    return [line for _, line in above], [line for _, line in below], footer
+
+
+async def get_price_pivots(deps: TradingDeps) -> str:
+    """Show structural support/resistance: last 100 main-TF swing pivots
+    (Williams fractal N=5) + prior daily/weekly/monthly H/L. Fact-only.
+
+    Returns:
+        Levels grouped by 'above current price' / 'below current price';
+        within each group, sorted by absolute distance ascending. Swing
+        rows include 'N bars ago'; prior rows label the period.
+
+    Degradation: per-source three-state (fact / insufficient data /
+        temporarily unavailable). Ticker failure → whole tool unavailable
+        (no baseline price); main-TF failure → swing section degrades only;
+        per-prior failure → only that row degrades.
+    """
+    import asyncio  # local import — matches existing convention (e.g. tools_perception.py:1320)
+
+    symbol = deps.symbol
+    main_tf = deps.timeframe
+
+    try:
+        ticker = await deps.market_data.get_ticker(symbol)
+        current_price = ticker.last
+    except Exception:
+        logger.exception("get_price_pivots ticker fetch failed for %s", symbol)
+        return f"Price pivots ({symbol}, main TF: {main_tf}): temporarily unavailable"
+
+    async def _fetch(tf: str, limit: int):
+        try:
+            return await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=limit)
+        except Exception as e:
+            return e
+
+    main_df_or_err, daily_or_err, weekly_or_err, monthly_or_err = await asyncio.gather(
+        _fetch(main_tf, 100),
+        _fetch("1d", 2),
+        _fetch("1w", 2),
+        _fetch("1M", 2),
+    )
+
+    swing_status: str | None = None
+    swing_highs: list[tuple[int, float]] = []
+    swing_lows: list[tuple[int, float]] = []
+    if isinstance(main_df_or_err, Exception):
+        swing_status = "Swing pivots: temporarily unavailable"
+    elif main_df_or_err is None or main_df_or_err.empty or len(main_df_or_err) < 11:
+        got_bars = 0 if (main_df_or_err is None or main_df_or_err.empty) else len(main_df_or_err)
+        swing_status = f"Swing pivots: insufficient data (need 11+ bars, got {got_bars})"
+    else:
+        bar_count = len(main_df_or_err)
+        swing_highs, swing_lows = _compute_swing_pivots(main_df_or_err, n=5)
+        no_pivot = not swing_highs and not swing_lows
+        if no_pivot and bar_count >= 100:
+            swing_status = "(No swing pivots in 100-bar window)"
+        elif no_pivot and bar_count < 100:
+            swing_status = f"(Window: {bar_count} bars, less than 100 — no swing pivots found)"
+        elif bar_count < 100:
+            swing_status = f"(Window: {bar_count} bars, less than 100)"
+        # else: 100 bars + ≥1 pivot → swing_status stays None
+
+    prior_d = _get_prior_period_hl(daily_or_err)
+    prior_w = _get_prior_period_hl(weekly_or_err)
+    prior_m = _get_prior_period_hl(monthly_or_err)
+
+    above_rows, below_rows, prior_footer = _render_pivot_rows(
+        swing_highs, swing_lows, prior_d, prior_w, prior_m, current_price,
+    )
+
+    sections: list[str] = [
+        f"=== Price Pivots ({symbol}, main TF: {main_tf}) ===",
+        f"Current Price: {current_price:,.2f}",
+        "",
+        "=== Levels Above Current Price ===",
+        *(above_rows or ["(none)"]),
+        "",
+        "=== Levels Below Current Price ===",
+        *(below_rows or ["(none)"]),
+    ]
+    if swing_status:
+        sections.append("")
+        sections.append(swing_status)
+    if prior_footer:
+        if not swing_status:
+            sections.append("")
+        sections.extend(prior_footer)
+    return "\n".join(sections)
