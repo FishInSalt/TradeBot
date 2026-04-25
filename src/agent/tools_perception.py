@@ -1512,3 +1512,90 @@ def _render_pivot_rows(
     above.sort(key=lambda x: x[0])
     below.sort(key=lambda x: x[0])
     return [line for _, line in above], [line for _, line in below], footer
+
+
+async def get_price_pivots(deps: TradingDeps) -> str:
+    """Show structural support/resistance: last 100 main-TF swing pivots
+    (Williams fractal N=5) + prior daily/weekly/monthly H/L. Fact-only.
+
+    Returns:
+        Levels grouped by 'above current price' / 'below current price';
+        within each group, sorted by absolute distance ascending. Swing
+        rows include 'N bars ago'; prior rows label the period.
+
+    Degradation: per-source three-state (fact / insufficient data /
+        temporarily unavailable). Ticker failure → whole tool unavailable
+        (no baseline price); main-TF failure → swing section degrades only;
+        per-prior failure → only that row degrades.
+    """
+    import asyncio  # local import — matches existing convention (e.g. tools_perception.py:1320)
+
+    symbol = deps.symbol
+    main_tf = deps.timeframe
+
+    try:
+        ticker = await deps.market_data.get_ticker(symbol)
+        current_price = ticker.last
+    except Exception:
+        logger.exception("get_price_pivots ticker fetch failed for %s", symbol)
+        return f"Price pivots ({symbol}, main TF: {main_tf}): temporarily unavailable"
+
+    async def _fetch(tf: str, limit: int):
+        try:
+            return await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=limit)
+        except Exception as e:
+            return e
+
+    main_df_or_err, daily_or_err, weekly_or_err, monthly_or_err = await asyncio.gather(
+        _fetch(main_tf, 100),
+        _fetch("1d", 2),
+        _fetch("1w", 2),
+        _fetch("1M", 2),
+    )
+
+    swing_status: str | None = None
+    swing_highs: list[tuple[int, float]] = []
+    swing_lows: list[tuple[int, float]] = []
+    if isinstance(main_df_or_err, Exception):
+        swing_status = "Swing pivots: temporarily unavailable"
+    elif main_df_or_err is None or main_df_or_err.empty or len(main_df_or_err) < 11:
+        got_bars = 0 if (main_df_or_err is None or main_df_or_err.empty) else len(main_df_or_err)
+        swing_status = f"Swing pivots: insufficient data (need 11+ bars, got {got_bars})"
+    else:
+        bar_count = len(main_df_or_err)
+        swing_highs, swing_lows = _compute_swing_pivots(main_df_or_err, n=5)
+        no_pivot = not swing_highs and not swing_lows
+        if no_pivot and bar_count >= 100:
+            swing_status = "(No swing pivots in 100-bar window)"
+        elif no_pivot and bar_count < 100:
+            swing_status = f"(Window: {bar_count} bars, less than 100 — no swing pivots found)"
+        elif bar_count < 100:
+            swing_status = f"(Window: {bar_count} bars, less than 100)"
+        # else: 100 bars + ≥1 pivot → swing_status stays None
+
+    prior_d = _get_prior_period_hl(daily_or_err)
+    prior_w = _get_prior_period_hl(weekly_or_err)
+    prior_m = _get_prior_period_hl(monthly_or_err)
+
+    above_rows, below_rows, prior_footer = _render_pivot_rows(
+        swing_highs, swing_lows, prior_d, prior_w, prior_m, current_price,
+    )
+
+    sections: list[str] = [
+        f"=== Price Pivots ({symbol}, main TF: {main_tf}) ===",
+        f"Current Price: {current_price:,.2f}",
+        "",
+        "=== Levels Above Current Price ===",
+        *(above_rows or ["(none)"]),
+        "",
+        "=== Levels Below Current Price ===",
+        *(below_rows or ["(none)"]),
+    ]
+    if swing_status:
+        sections.append("")
+        sections.append(swing_status)
+    if prior_footer:
+        if not swing_status:
+            sections.append("")
+        sections.extend(prior_footer)
+    return "\n".join(sections)

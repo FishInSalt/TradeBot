@@ -261,3 +261,179 @@ def test_render_prior_unavailable_in_footer():
     prior_m = ("unavailable", None, None)
     above, below, footer = _render_pivot_rows([], [], prior_d, prior_w, prior_m, current_price=66523.40)
     assert footer == ["Prior Monthly H/L: temporarily unavailable"]
+
+
+from dataclasses import dataclass, field
+from unittest.mock import AsyncMock, MagicMock
+
+from src.agent.tools_perception import get_price_pivots
+from src.integrations.exchange.base import Ticker
+
+
+@dataclass
+class _PivotsDeps:
+    symbol: str = "BTC/USDT:USDT"
+    timeframe: str = "5m"
+    market_data: AsyncMock = field(default_factory=AsyncMock)
+
+
+def _ticker(price: float = 66523.40) -> Ticker:
+    return Ticker(
+        symbol="BTC/USDT:USDT",
+        last=price,
+        bid=price - 0.5,
+        ask=price + 0.5,
+        high=price + 100.0,
+        low=price - 100.0,
+        base_volume=0.0,
+        timestamp=0,
+    )
+
+
+def _df_n_bars(n: int, *, base: float = 66000.0, with_pivots: bool = False) -> pd.DataFrame:
+    """Build n-bar OHLCV df. with_pivots=True inserts one swing high + low for testing."""
+    highs = [base + i * 0.1 for i in range(n)]
+    lows = [base - 100.0 + i * 0.1 for i in range(n)]
+    if with_pivots and n >= 30:
+        highs[15] = base + 1000.0  # swing high
+        lows[20] = base - 1000.0   # swing low
+    return _df(highs, lows)
+
+
+def _ohlcv_side_effect(by_tf: dict):
+    """Build a side_effect function for get_ohlcv_dataframe(symbol, timeframe, limit=...)."""
+    async def _impl(symbol, timeframe, limit=None):
+        result = by_tf.get(timeframe)
+        if isinstance(result, Exception):
+            raise result
+        return result
+    return _impl
+
+
+@pytest.mark.asyncio
+async def test_pivots_ticker_failure_short_circuits():
+    """ticker fetch raises → whole tool returns single-line unavailable; OHLCV not called."""
+    deps = _PivotsDeps()
+    deps.market_data.get_ticker = AsyncMock(side_effect=Exception("ticker down"))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock()
+
+    out = await get_price_pivots(deps)
+
+    assert out == "Price pivots (BTC/USDT:USDT, main TF: 5m): temporarily unavailable"
+    deps.market_data.get_ohlcv_dataframe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pivots_main_tf_error_three_priors_ok():
+    """main TF raises; 3 priors ok → swing_status footer 'temporarily unavailable'; above/below contain prior rows."""
+    deps = _PivotsDeps()
+    deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
+    daily = _df([67234.0, 67100.0], [65500.0, 65400.0])
+    weekly = _df([68500.0, 68400.0], [64200.0, 64100.0])
+    monthly = _df([71200.0, 71100.0], [60800.0, 60700.0])
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({
+        "5m": Exception("main tf down"),
+        "1d": daily, "1w": weekly, "1M": monthly,
+    }))
+
+    out = await get_price_pivots(deps)
+
+    assert "Swing pivots: temporarily unavailable" in out
+    assert "Prior Daily H: 67,234.00" in out
+    assert "Prior Weekly L: 64,200.00" in out
+    assert "(none)" not in out  # priors fill above/below
+
+
+@pytest.mark.asyncio
+async def test_pivots_short_window_with_insufficient_priors():
+    """50 bar main TF (with pivots) + all priors len<2 → window-note + 3 insufficient footers."""
+    deps = _PivotsDeps()
+    deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
+    main_df = _df_n_bars(50, with_pivots=True)
+    short_df = _df([100.0], [99.0])  # len 1 → insufficient
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({
+        "5m": main_df, "1d": short_df, "1w": short_df, "1M": short_df,
+    }))
+
+    out = await get_price_pivots(deps)
+
+    assert "(Window: 50 bars, less than 100)" in out
+    # Has at least one swing row (with_pivots=True)
+    assert "Swing High" in out or "Swing Low" in out
+    # Three priors → all insufficient footer lines
+    assert out.count("insufficient data") == 3
+    assert "Prior Daily H/L: insufficient data" in out
+    assert "Prior Weekly H/L: insufficient data" in out
+    assert "Prior Monthly H/L: insufficient data" in out
+
+
+@pytest.mark.asyncio
+async def test_pivots_short_window_with_prior_exceptions():
+    """50 bar main TF + 3 priors raise → window-note + 3 unavailable footers (separate from #3 path)."""
+    deps = _PivotsDeps()
+    deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
+    main_df = _df_n_bars(50, with_pivots=True)
+    err = RuntimeError("api glitch")
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({
+        "5m": main_df, "1d": err, "1w": err, "1M": err,
+    }))
+
+    out = await get_price_pivots(deps)
+
+    assert "(Window: 50 bars, less than 100)" in out
+    assert out.count("temporarily unavailable") == 3
+    assert "Prior Daily H/L: temporarily unavailable" in out
+
+
+@pytest.mark.asyncio
+async def test_pivots_main_tf_empty_with_prior_exceptions():
+    """main TF df.empty + 3 priors raise → swing insufficient + above/below '(none)' + 3 unavailable footers."""
+    deps = _PivotsDeps()
+    deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
+    empty_df = _df([], [])
+    err = RuntimeError("down")
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({
+        "5m": empty_df, "1d": err, "1w": err, "1M": err,
+    }))
+
+    out = await get_price_pivots(deps)
+
+    assert "Swing pivots: insufficient data (need 11+ bars, got 0)" in out
+    # above/below sections still rendered, but content is (none)
+    assert out.count("(none)") == 2
+    assert out.count("Prior Daily H/L: temporarily unavailable") == 1
+    assert out.count("Prior Weekly H/L: temporarily unavailable") == 1
+    assert out.count("Prior Monthly H/L: temporarily unavailable") == 1
+
+
+@pytest.mark.asyncio
+async def test_pivots_full_main_tf_one_prior_failure_spacing():
+    """100 bar main TF + 2 priors ok + 1 prior fails → swing_status None,
+    spacing branch in §4.4 ('if prior_footer and not swing_status:' inserts blank line) verified."""
+    deps = _PivotsDeps()
+    deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
+    main_df = _df_n_bars(100, with_pivots=True)
+    daily = _df([67234.0, 67100.0], [65500.0, 65400.0])
+    monthly = _df([71200.0, 71100.0], [60800.0, 60700.0])
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({
+        "5m": main_df,
+        "1d": daily,
+        "1w": Exception("weekly down"),
+        "1M": monthly,
+    }))
+
+    out = await get_price_pivots(deps)
+
+    # Swing rows present (no insufficient/unavailable swing_status line)
+    assert "Swing pivots:" not in out
+    # Daily + Monthly priors in above/below
+    assert "Prior Daily H" in out
+    assert "Prior Monthly H" in out
+    # Only weekly in footer
+    assert "Prior Weekly H/L: temporarily unavailable" in out
+    assert "Prior Daily H/L: temporarily unavailable" not in out
+    # Spacing: blank line precedes the weekly footer (footer not glued to below rows)
+    lines = out.split("\n")
+    weekly_idx = next(i for i, l in enumerate(lines) if "Prior Weekly H/L: temporarily unavailable" in l)
+    assert lines[weekly_idx - 1] == "", \
+        f"Expected blank line before weekly footer, got {lines[weekly_idx - 1]!r}"
