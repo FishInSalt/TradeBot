@@ -1442,3 +1442,73 @@ def _compute_swing_pivots(
         if is_low:
             lows.append((last_idx - i, float(center_l)))
     return highs, lows
+
+
+def _get_prior_period_hl(
+    df_or_err: pd.DataFrame | Exception | None,
+) -> tuple[str, float | None, float | None]:
+    """Return (status, high, low). status one of 'ok' / 'insufficient' / 'unavailable'.
+
+    Period label ('Daily' / 'Weekly' / 'Monthly') is bound by the caller in
+    `_render_pivot_rows` when iterating the three period results — not needed here.
+    """
+    if isinstance(df_or_err, Exception):
+        return "unavailable", None, None
+    df = df_or_err
+    if df is None or df.empty or len(df) < 2:
+        return "insufficient", None, None
+    prior = df.iloc[-2]
+    return "ok", float(prior["high"]), float(prior["low"])
+
+
+def _bars_ago_fmt(n: int) -> str:
+    """0 → 'now' (defensive — confirmed pivots have min ago=N=5);
+    1 → '1 bar ago'; N≥2 → 'N bars ago'."""
+    if n == 0:
+        return "now"
+    if n == 1:
+        return "1 bar ago"
+    return f"{n} bars ago"
+
+
+def _render_pivot_rows(
+    swing_highs: list[tuple[int, float]],
+    swing_lows: list[tuple[int, float]],
+    prior_d: tuple[str, float | None, float | None],
+    prior_w: tuple[str, float | None, float | None],
+    prior_m: tuple[str, float | None, float | None],
+    current_price: float,
+) -> tuple[list[str], list[str], list[str]]:
+    """Return (above_rows, below_rows, footer_lines).
+
+    above/below already sorted by abs(distance%) ascending; footer collects
+    insufficient/unavailable notices for priors that don't fit either group.
+    Caller (`get_price_pivots`) handles swing_status separately.
+    """
+    above: list[tuple[float, str]] = []
+    below: list[tuple[float, str]] = []
+    footer: list[str] = []
+
+    for kind, items in (("Swing High", swing_highs), ("Swing Low", swing_lows)):
+        for ago, price in items:
+            dist_pct = (price - current_price) / current_price * 100
+            line = f"{kind}: {price:,.2f} ({dist_pct:+.2f}%, {_bars_ago_fmt(ago)})"
+            target = above if price > current_price else below
+            target.append((abs(dist_pct), line))
+
+    for label, (status, h, l_) in [
+        ("Daily", prior_d), ("Weekly", prior_w), ("Monthly", prior_m),
+    ]:
+        if status == "ok":
+            for kind, value in [("H", h), ("L", l_)]:
+                dist_pct = (value - current_price) / current_price * 100
+                line = f"Prior {label} {kind}: {value:,.2f} ({dist_pct:+.2f}%)"
+                target = above if value > current_price else below
+                target.append((abs(dist_pct), line))
+        else:
+            note = "insufficient data" if status == "insufficient" else "temporarily unavailable"
+            footer.append(f"Prior {label} H/L: {note}")
+
+    above.sort(key=lambda x: x[0])
+    below.sort(key=lambda x: x[0])
+    return [line for _, line in above], [line for _, line in below], footer

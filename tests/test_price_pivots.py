@@ -138,3 +138,126 @@ def test_dual_pivot_high_and_low_same_bar():
     last_idx = 29
     assert h == [(last_idx - 15, 110.0)]
     assert l == [(last_idx - 15, 90.0)]
+
+
+from src.agent.tools_perception import _render_pivot_rows, _bars_ago_fmt
+
+
+def test_bars_ago_fmt_zero():
+    assert _bars_ago_fmt(0) == "now"
+
+
+def test_bars_ago_fmt_one():
+    assert _bars_ago_fmt(1) == "1 bar ago"
+
+
+def test_bars_ago_fmt_many():
+    assert _bars_ago_fmt(23) == "23 bars ago"
+
+
+# --- _render_pivot_rows ---
+
+
+def test_render_full_load():
+    """2 swing high + 2 swing low + 3 prior all ok → 5 above rows + 5 below rows + footer empty."""
+    swing_highs = [(23, 66890.0), (47, 67120.5)]
+    swing_lows = [(8, 66102.0), (19, 65800.0)]
+    prior_d = ("ok", 67234.0, 65500.0)
+    prior_w = ("ok", 68500.0, 64200.0)
+    prior_m = ("ok", 71200.0, 60800.0)
+    above, below, footer = _render_pivot_rows(swing_highs, swing_lows, prior_d, prior_w, prior_m, current_price=66523.40)
+    assert len(above) == 5
+    assert len(below) == 5
+    assert footer == []
+
+
+def test_render_swing_high_below_current_price():
+    """A swing high entry whose price < current_price routes to below group (business fact, not contradictory)."""
+    swing_highs = [(10, 65000.0)]  # below 66523
+    swing_lows = []
+    null_prior = ("insufficient", None, None)
+    above, below, footer = _render_pivot_rows(swing_highs, [], null_prior, null_prior, null_prior, current_price=66523.40)
+    assert above == []
+    assert any("Swing High" in line and "65,000.00" in line for line in below)
+
+
+def test_render_above_sorted_ascending_distance():
+    """above rows ordered by abs(distance%) ascending."""
+    swing_highs = [(84, 68750.0), (23, 66890.0), (47, 67120.5)]  # +3.35%, +0.55%, +0.90%
+    swing_lows = []
+    prior_d = ("ok", 67234.0, 65500.0)  # +1.07% above, -1.54% below
+    prior_w = ("ok", 68500.0, 64200.0)  # +2.97% above, -3.49% below
+    prior_m = ("ok", 71200.0, 60800.0)  # +7.03% above, -8.60% below
+    above, below, footer = _render_pivot_rows(swing_highs, swing_lows, prior_d, prior_w, prior_m, current_price=66523.40)
+    # Expected order: +0.55, +0.90, +1.07, +2.97, +3.35, +7.03
+    assert "66,890.00" in above[0]
+    assert "67,120.50" in above[1]
+    assert "67,234.00" in above[2]
+    assert "68,500.00" in above[3]
+    assert "68,750.00" in above[4]
+    assert "71,200.00" in above[5]
+
+
+def test_render_signs_correct():
+    """above rows show + sign, below rows show - sign."""
+    swing_highs = [(10, 67000.0)]
+    swing_lows = [(8, 66000.0)]
+    null_prior = ("insufficient", None, None)
+    above, below, _ = _render_pivot_rows(swing_highs, swing_lows, null_prior, null_prior, null_prior, current_price=66500.0)
+    assert "(+" in above[0]
+    assert "(-" in below[0]
+
+
+def test_render_swing_row_has_bars_ago():
+    swing_highs = [(23, 66890.0)]
+    null_prior = ("insufficient", None, None)
+    above, _, _ = _render_pivot_rows(swing_highs, [], null_prior, null_prior, null_prior, current_price=66523.40)
+    assert above == ["Swing High: 66,890.00 (+0.55%, 23 bars ago)"]
+
+
+def test_render_prior_row_no_bars_ago():
+    prior_d = ("ok", 67234.0, 65500.0)
+    null_prior = ("insufficient", None, None)
+    above, _, _ = _render_pivot_rows([], [], prior_d, null_prior, null_prior, current_price=66523.40)
+    assert any(line == "Prior Daily H: 67,234.00 (+1.07%)" for line in above)
+    for line in above:
+        assert "bars ago" not in line
+
+
+def test_render_above_empty_returns_empty_list():
+    """When nothing routes to above, _render_pivot_rows returns empty list (caller substitutes '(none)')."""
+    swing_lows = [(8, 65000.0)]
+    null_prior = ("insufficient", None, None)
+    above, below, _ = _render_pivot_rows([], swing_lows, null_prior, null_prior, null_prior, current_price=66500.0)
+    assert above == []
+    assert len(below) == 1
+
+
+def test_render_below_empty_returns_empty_list():
+    swing_highs = [(8, 67000.0)]
+    null_prior = ("insufficient", None, None)
+    above, below, _ = _render_pivot_rows(swing_highs, [], null_prior, null_prior, null_prior, current_price=66500.0)
+    assert below == []
+    assert len(above) == 1
+
+
+def test_render_prior_insufficient_in_footer():
+    """Single prior insufficient → footer line, not in above/below.
+    (Indirectly verifies _get_prior_period_hl's 'insufficient' status via fixture injection — see spec §5.2.)"""
+    prior_d = ("ok", 67234.0, 65500.0)
+    prior_w = ("insufficient", None, None)
+    prior_m = ("ok", 71200.0, 60800.0)
+    above, below, footer = _render_pivot_rows([], [], prior_d, prior_w, prior_m, current_price=66523.40)
+    assert footer == ["Prior Weekly H/L: insufficient data"]
+    # Ensure weekly H/L not in above/below
+    for line in above + below:
+        assert "Weekly" not in line
+
+
+def test_render_prior_unavailable_in_footer():
+    """(Indirectly verifies _get_prior_period_hl's 'unavailable' status via fixture injection — see spec §5.2.)"""
+    prior_d = ("ok", 67234.0, 65500.0)
+    prior_w = ("ok", 68500.0, 64200.0)
+    prior_m = ("unavailable", None, None)
+    above, below, footer = _render_pivot_rows([], [], prior_d, prior_w, prior_m, current_price=66523.40)
+    assert footer == ["Prior Monthly H/L: temporarily unavailable"]
