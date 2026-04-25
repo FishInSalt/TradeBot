@@ -172,7 +172,12 @@ class OKXExchange(BaseExchange):
 
         # Account config fail-fast — before WebSocket so failures don't waste connections
         config_resp = await self._fetch_account_config()
-        config = (config_resp.get("data") or [{}])[0]
+        data = config_resp.get("data") or []
+        if not data:
+            raise RuntimeError(
+                "OKX account_config returned empty data — check API credentials/connectivity."
+            )
+        config = data[0]
 
         pos_mode = config.get("posMode")
         if pos_mode != "net_mode":
@@ -597,6 +602,10 @@ class OKXExchange(BaseExchange):
     async def fetch_closed_orders(  # type: ignore[override]
         self, symbol: str, limit: int = 20
     ) -> list[Order]:
+        # Spec §7.2: 当前仅查 plain history endpoint, 不查 algo-history. 设计选择,
+        # 非疏漏 — journal 走单条 fetch_order + 50002 fallback (§2.5.4) 已 cover
+        # OCO/conditional 触发后的详情查询。若未来出现"列所有 closed orders"用例,
+        # 扩为 plain-history + algo-history 两路 gather (类似 fetch_open_orders 三路)。
         raw = await self._client.fetch_orders(
             symbol, limit=limit, params={"state": "filled"}
         )

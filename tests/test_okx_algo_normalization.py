@@ -569,6 +569,33 @@ async def test_start_with_sandbox_false_ws_client_stays_live():
 
 
 @pytest.mark.asyncio
+async def test_start_raises_clear_error_on_empty_account_config_data():
+    """F2 (round-4 review): config_resp.data=[] / None / 缺字段时, 不能让用户看到误导性
+    'posMode=None' error (会以为账户配置问题, 实际是 API call 异常)。
+    系统边界 (external API) 应明确 raise check API credentials/connectivity。"""
+    ex = _make_okx()
+    ex._client.load_markets = AsyncMock(return_value={})
+    # 场景 1: data 为空 list
+    ex._client.private_get_account_config = AsyncMock(return_value={"data": []})
+    with pytest.raises(RuntimeError, match="empty data"):
+        await ex.start()
+    # 场景 2: data 字段缺失 (schema drift)
+    ex._client.private_get_account_config = AsyncMock(return_value={"code": "1"})
+    with pytest.raises(RuntimeError, match="empty data"):
+        await ex.start()
+    # 场景 3: data 为 None
+    ex._client.private_get_account_config = AsyncMock(return_value={"data": None})
+    with pytest.raises(RuntimeError, match="empty data"):
+        await ex.start()
+    # 三种场景的错误消息都不应该出现 "posMode" / "acctLv" 字样 (避免误导)
+    ex._client.private_get_account_config = AsyncMock(return_value={"data": []})
+    with pytest.raises(RuntimeError) as exc_info:
+        await ex.start()
+    assert "posMode" not in str(exc_info.value)
+    assert "acctLv" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_start_retries_account_config_on_network_glitch(monkeypatch):
     """I2: start() 的 private_get_account_config / load_markets 必须包 @_retry,
     防止 transient NetworkError 阻止 bot 启动（其他 REST 调用都有 @_retry(3,1.0)）。"""
