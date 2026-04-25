@@ -203,6 +203,68 @@ async def test_parse_fill_event_pnl_rest_fallback():
         exchange._client.fetch_order.assert_called_once_with("order-rest-pnl", "BTC/USDT:USDT")
 
 
+async def test_parse_fill_event_uses_algoid_for_order_id_when_present():
+    """II-1 (round-3 review): hypothesis B — OKX 推底层 ord 事件含 info.algoId 时,
+    FillEvent.order_id 必须用 algoId, 否则与 decision_logs.order_id (= algoId from
+    create_order T5 manual construction) 对不齐, agent journal 关联断。"""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        order_data = {
+            "id": "underlying-ord-789",  # 底层 ordId
+            "symbol": "BTC/USDT:USDT",
+            "side": "sell",
+            "type": "market",  # hypothesis B 下推 market/limit shape
+            "status": "closed",
+            "average": 58000.0,
+            "price": 58000.0,
+            "filled": 0.01,
+            "fee": {"cost": 0.29, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long", "algoId": "algo-id-12345", "pnl": "10.5"},
+        }
+        fill = await exchange._parse_fill_event(order_data)
+        assert fill.order_id == "algo-id-12345"  # 用 algoId, 不是 underlying ordId
+
+
+async def test_parse_fill_event_falls_back_to_order_id_when_algoid_absent():
+    """II-1 fallback: hypothesis A 或 plain 路径, info.algoId 不存在/空 → 用 order_data['id']."""
+    with patch("ccxt.async_support.okx") as mock_okx:
+        mock_okx.return_value = MagicMock()
+        from src.integrations.exchange.okx import OKXExchange
+        exchange = OKXExchange(
+            api_key="test", secret="test", password="test",
+            symbol="BTC/USDT:USDT",
+        )
+        # 场景 1: info 完全没 algoId 字段（plain 限价单 fill）
+        order_data_plain = {
+            "id": "plain-ord-111",
+            "symbol": "BTC/USDT:USDT", "side": "buy", "type": "limit",
+            "status": "closed", "average": 58000.0, "price": 58000.0,
+            "filled": 0.01, "fee": {"cost": 0.1, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long", "pnl": "0"},
+        }
+        fill1 = await exchange._parse_fill_event(order_data_plain)
+        assert fill1.order_id == "plain-ord-111"
+
+        # 场景 2: info.algoId 存在但是空字符串（hypothesis A：order_data["id"] 已是 algoId）
+        order_data_algo_a = {
+            "id": "algo-id-already",
+            "symbol": "BTC/USDT:USDT", "side": "sell", "type": "stop",
+            "status": "closed", "average": 58000.0, "price": 58000.0,
+            "filled": 0.01, "fee": {"cost": 0.1, "currency": "USDT"},
+            "timestamp": 1712534600000,
+            "info": {"posSide": "long", "algoId": "", "pnl": "5"},
+        }
+        fill2 = await exchange._parse_fill_event(order_data_algo_a)
+        assert fill2.order_id == "algo-id-already"
+
+
 async def test_parse_fill_event_pnl_fallback_on_algo_50002():
     """PnL fallback 对 algo id 要走 50002→algo endpoint fallback（I4 修复）.
 
