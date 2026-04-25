@@ -46,7 +46,8 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 - **Recent trades**: Use get_recent_trades to read taker-flow bias and rhythm over recent minutes (default 300s, 5 × 60s buckets). Total + trade count + avg size shown below buckets.
 - **Multi-timeframe snapshot**: Use get_multi_timeframe_snapshot once per cycle to scan multi-TF alignment (default 5m/1h/4h/1d) before committing to a direction. 4 columns per TF: momentum / structure / volatility / range position.
 - **Position risk context**: get_position now includes Risk exposure (notional / margin / liquidation in ATR(1h) multiples — 1h is the fixed baseline regardless of session trading style) and Exit orders section (SL/TP distances from both entry and current). Useful both when opening and during ongoing position management.
-- **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after."""
+- **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after.
+- **Price pivots**: Use get_price_pivots to scan structural levels — swing highs/lows from the last 100 main-TF bars (Williams fractal N=5) plus prior daily/weekly/monthly H/L. Levels are grouped above/below current price with distance % and bars-ago. Useful for placing SL/TP at structural levels rather than arbitrary percentages."""
 
 
 def _build_layer2() -> str:
