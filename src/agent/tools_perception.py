@@ -1407,3 +1407,38 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         "",
     ]
     return "\n".join(header + rows)
+
+
+# === Iter 3 — get_price_pivots helpers ===
+
+def _compute_swing_pivots(
+    df: pd.DataFrame, n: int = 5
+) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    """Return (highs, lows) where each entry is (bars_ago, price).
+
+    Williams fractal with strict inequality: center bar's high must be strictly
+    greater than all 2n surrounding bars' highs (and similarly low strictly less).
+    Equality at any neighbor disqualifies the pivot — prevents flat-plateau false
+    signals. Confirmed pivots only — last n bars excluded due to incomplete
+    right window, so min returned bars_ago = n.
+    """
+    if len(df) < 2 * n + 1:
+        return [], []
+
+    h = df["high"].to_numpy()
+    l = df["low"].to_numpy()
+    last_idx = len(df) - 1
+    confirm_end = last_idx - n
+
+    highs: list[tuple[int, float]] = []
+    lows: list[tuple[int, float]] = []
+    for i in range(n, confirm_end + 1):
+        center_h = h[i]
+        center_l = l[i]
+        is_high = all(center_h > h[i + d] for d in range(-n, n + 1) if d != 0)
+        is_low = all(center_l < l[i + d] for d in range(-n, n + 1) if d != 0)
+        if is_high:
+            highs.append((last_idx - i, float(center_h)))
+        if is_low:
+            lows.append((last_idx - i, float(center_l)))
+    return highs, lows
