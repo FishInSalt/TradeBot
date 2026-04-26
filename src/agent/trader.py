@@ -462,14 +462,33 @@ def create_trader_agent(
         window_minutes: int,
         reasoning: str,
     ) -> str:
-        """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-240. Always provide reasoning."""
+        """Adjust volatility alert sensitivity.
+
+        Tighten in quiet markets to catch early moves; widen in volatile
+        conditions to reduce noise. Pair with get_active_alerts to review
+        current configuration.
+
+        Args:
+            threshold_pct: alert threshold percent (0.5-50%).
+            window_minutes: time window in minutes (1-240).
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_price_alert as _impl
 
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
 
     @agent.tool
     async def cancel_order(ctx: RunContext[TradingDeps], order_id: str, reasoning: str) -> str:
-        """Cancel a pending order (limit, stop loss, take profit). Always provide reasoning."""
+        """Cancel a pending order (limit, stop loss, or take profit).
+
+        Use to remove stale limit orders when the market has moved away from
+        your intended entry. Leaving outdated orders risks an unintended fill
+        at a price that no longer makes sense.
+
+        Args:
+            order_id: id of the order to cancel.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import cancel_order as _impl
 
         return await _impl(ctx.deps, order_id, reasoning=reasoning)
@@ -481,7 +500,17 @@ def create_trader_agent(
         direction: str,
         reasoning: str,
     ) -> str:
-        """Set a one-shot price level alert. direction: 'above' (breakout) or 'below' (breakdown). Triggers once then auto-removes. Always provide reasoning."""
+        """Set a one-shot alert at a specific price level.
+
+        Useful for support/resistance levels you want to be notified about.
+        Triggers once when reached, then auto-removes. You will be woken up
+        when the level is hit.
+
+        Args:
+            price: alert price level.
+            direction: 'above' (breakout) or 'below' (breakdown).
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import add_price_level_alert as _impl
 
         return await _impl(ctx.deps, price, direction, reasoning=reasoning)
@@ -492,7 +521,16 @@ def create_trader_agent(
         minutes: int,
         reasoning: str,
     ) -> str:
-        """Set how soon you want to check the market again (minutes). One-shot: only affects the next wake, then reverts to default. Always provide reasoning."""
+        """Set how soon you want to check the market again.
+
+        One-shot: only affects the next wake, then reverts to the default
+        interval. Shorten when you have an open position or expect volatility;
+        lengthen when the market is quiet and you have no exposure.
+
+        Args:
+            minutes: minutes until next wake.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_next_wake as _impl
 
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
@@ -506,7 +544,18 @@ def create_trader_agent(
         leverage: int,
         reasoning: str,
     ) -> str:
-        """Place a limit order at a specific price (e.g., buy at support level). side='long' or 'short'. position_pct=% of free balance. Always provide reasoning."""
+        """Place a limit order at a specific price (e.g., buy at support level).
+
+        Not every entry needs to be a market order — limit orders let you
+        target specific levels without paying the spread.
+
+        Args:
+            side: 'long' or 'short'.
+            price: limit price.
+            position_pct: percent of free balance to allocate (0-100).
+            leverage: leverage multiplier.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import place_limit_order as _impl
 
         return await _impl(ctx.deps, side, price, position_pct, leverage, reasoning=reasoning)
@@ -517,7 +566,18 @@ def create_trader_agent(
     async def save_memory(
         ctx: RunContext[TradingDeps], category: str, content: str, importance: float = 0.5
     ) -> str:
-        """Save a learning or observation to long-term memory. category: trade_review/market_pattern/lesson. importance: 0-1."""
+        """Save a learning or observation to long-term memory.
+
+        Save memories that your future self would find actionable — trade
+        outcomes, pattern recognitions that proved correct or incorrect, and
+        mistakes to avoid. Routine observations like "market is quiet" are
+        not worth saving.
+
+        Args:
+            category: 'trade_review', 'market_pattern', or 'lesson'.
+            content: the memory content to save.
+            importance: weight 0-1 (default 0.5).
+        """
         from src.agent.tools_memory import save_memory as _impl
 
         return await _impl(ctx.deps, category, content, importance)
