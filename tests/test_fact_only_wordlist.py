@@ -611,3 +611,109 @@ async def test_get_price_pivots_global_wordlist_fact_only():
     output = await get_price_pivots(deps)
     hits = _scan(output)
     assert hits == [], f"get_price_pivots emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invoker", [
+    "_invoke_open_position",
+    "_invoke_close_position",
+    "_invoke_set_stop_loss",
+    "_invoke_set_take_profit",
+    "_invoke_adjust_leverage",
+    "_invoke_set_price_alert",
+    "_invoke_cancel_order",
+    "_invoke_add_price_level_alert",
+    "_invoke_set_next_wake",
+    "_invoke_place_limit_order",
+])
+async def test_execution_tool_fact_only(invoker, mocker):
+    """Execution tools — outputs are fixed templates; verify global wordlist clean.
+    Each helper exercises a representative path (early-return where minimal,
+    happy-path where the early-return is trivially clean).
+    MockDeps default `approval_enabled=False` skips the approval gate."""
+    deps = MockDeps()
+    output = await globals()[invoker](deps, mocker)
+    hits = _scan(output)
+    assert hits == [], f"{invoker} emitted banned words: {hits}"
+
+
+# === Execution tool invokers — each sets up minimal mocks for one representative path ===
+
+async def _invoke_open_position(deps, mocker):
+    """Happy path: full mock chain through create_order."""
+    from src.agent.tools_execution import open_position
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10000.0, free_usdt=8000.0, used_usdt=2000.0,
+    ))
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64000.0, bid=63999.5, ask=64000.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.amount_to_precision = mocker.Mock(return_value=0.01)
+    deps.exchange.has_pending_market_order = mocker.Mock(return_value=False)
+    deps.exchange.set_leverage = AsyncMock(return_value=None)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="ord1", symbol="BTC/USDT:USDT", side="buy", order_type="market",
+        amount=0.01, price=None, status="open",
+    ))
+    return await open_position(deps, "long", 10.0, 5, reasoning="test")
+
+
+async def _invoke_close_position(deps, mocker):
+    """Early return: no positions."""
+    from src.agent.tools_execution import close_position
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    return await close_position(deps, reasoning="test")
+
+
+async def _invoke_set_stop_loss(deps, mocker):
+    """Early return: no position."""
+    from src.agent.tools_execution import set_stop_loss
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    return await set_stop_loss(deps, 62000.0, reasoning="test")
+
+
+async def _invoke_set_take_profit(deps, mocker):
+    """Early return: no position."""
+    from src.agent.tools_execution import set_take_profit
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    return await set_take_profit(deps, 66000.0, reasoning="test")
+
+
+async def _invoke_adjust_leverage(deps, mocker):
+    """Happy path: set_leverage no-op + record_action skipped (db_engine=None)."""
+    from src.agent.tools_execution import adjust_leverage
+    deps.exchange.set_leverage = AsyncMock(return_value=None)
+    return await adjust_leverage(deps, 5, reasoning="test")
+
+
+async def _invoke_set_price_alert(deps, mocker):
+    """Early return: alerts disabled."""
+    from src.agent.tools_execution import set_price_alert
+    deps.exchange.get_alert_params = mocker.Mock(return_value=None)
+    return await set_price_alert(deps, 1.5, 30, reasoning="test")
+
+
+async def _invoke_cancel_order(deps, mocker):
+    """Early return: order not found."""
+    from src.agent.tools_execution import cancel_order
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    return await cancel_order(deps, "nonexistent-id", reasoning="test")
+
+
+async def _invoke_add_price_level_alert(deps, mocker):
+    """Early return: invalid direction (must be 'above' or 'below')."""
+    from src.agent.tools_execution import add_price_level_alert
+    return await add_price_level_alert(deps, 64000.0, "sideways", reasoning="test")
+
+
+async def _invoke_set_next_wake(deps, mocker):
+    """Early return: set_next_wake_fn=None."""
+    from src.agent.tools_execution import set_next_wake
+    return await set_next_wake(deps, 30, reasoning="test")
+
+
+async def _invoke_place_limit_order(deps, mocker):
+    """Early return: invalid side (must be 'long' or 'short')."""
+    from src.agent.tools_execution import place_limit_order
+    return await place_limit_order(deps, "neutral", 64000.0, 10.0, 5, reasoning="test")
