@@ -1,4 +1,4 @@
-"""Tests for get_market_news, get_critical_alerts, get_derivatives_data tools."""
+"""Tests for get_market_news, get_exchange_announcements, get_macro_calendar, get_derivatives_data tools."""
 import pytest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -169,124 +169,139 @@ async def test_market_news_all_non_currency_tags_shows_dash():
     assert "Currencies: —" in result
 
 
-# ===== get_critical_alerts =====
+# ===== get_exchange_announcements (Iter 4 split from get_critical_alerts) =====
 
-async def test_critical_alerts_no_service():
-    from src.agent.tools_perception import get_critical_alerts
+async def test_exchange_announcements_no_service():
+    from src.agent.tools_perception import get_exchange_announcements
     deps = _make_deps(news=None)
-    result = await get_critical_alerts(deps)
+    result = await get_exchange_announcements(deps)
     assert "not configured" in result.lower()
 
 
-async def test_critical_alerts_format():
-    from src.agent.tools_perception import get_critical_alerts
+async def test_exchange_announcements_format():
+    from src.agent.tools_perception import get_exchange_announcements
 
     news_svc = AsyncMock()
     news_svc.get_announcements.return_value = [
         _event("Delisting XYZ", source="okx_announcement", category="announcement"),
     ]
+
+    deps = _make_deps(news=news_svc)
+    result = await get_exchange_announcements(deps)
+
+    assert "Exchange Announcements" in result
+    assert "Delisting XYZ" in result
+    # Footer is macro-calendar specific — must NOT appear in announcements tool
+    assert "macro calendar covers current week only" not in result
+    # macro section should NOT appear (this tool is announcements-only)
+    assert "Upcoming Macro Events" not in result
+
+
+async def test_exchange_announcements_empty():
+    from src.agent.tools_perception import get_exchange_announcements
+
+    news_svc = AsyncMock()
+    news_svc.get_announcements.return_value = []
+
+    deps = _make_deps(news=news_svc)
+    result = await get_exchange_announcements(deps)
+
+    assert "No exchange announcements" in result
+
+
+async def test_exchange_announcements_passes_lookback_hours():
+    from src.agent.tools_perception import get_exchange_announcements
+
+    news_svc = AsyncMock()
+    news_svc.get_announcements.return_value = []
+
+    deps = _make_deps(news=news_svc)
+    await get_exchange_announcements(deps, lookback_hours=48)
+    news_svc.get_announcements.assert_called_once_with(48)
+
+
+async def test_exchange_announcements_unavailable():
+    """NewsService returns None → 'temporarily unavailable' rendering."""
+    from src.agent.tools_perception import get_exchange_announcements
+
+    news_svc = AsyncMock()
+    news_svc.get_announcements.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_exchange_announcements(deps)
+
+    assert "Exchange announcements service temporarily unavailable" in result
+
+
+# ===== get_macro_calendar (Iter 4 split from get_critical_alerts) =====
+
+async def test_macro_calendar_no_service():
+    from src.agent.tools_perception import get_macro_calendar
+    deps = _make_deps(news=None)
+    result = await get_macro_calendar(deps)
+    assert "not configured" in result.lower()
+
+
+async def test_macro_calendar_format():
+    from src.agent.tools_perception import get_macro_calendar
+
+    news_svc = AsyncMock()
     news_svc.get_macro_events.return_value = [
         _event("FOMC Meeting", source="forexfactory", category="macro_event",
                importance="high", content="Previous: N/A | Forecast: N/A"),
     ]
 
     deps = _make_deps(news=news_svc)
-    result = await get_critical_alerts(deps)
+    result = await get_macro_calendar(deps)
 
-    assert "Exchange Announcements" in result
-    assert "Delisting XYZ" in result
     assert "Upcoming Macro Events" in result
     assert "FOMC Meeting" in result
     assert "Impact: High" in result
-    # Previous/Forecast line should appear below the event per spec §3.2
     assert "Previous: N/A | Forecast: N/A" in result
-    # Calendar scope reminder is rendered whenever macro_events returns a list
-    # (spec §3.2); only suppressed when macro source itself is unavailable.
+    # Footer shows when macro_events is a list (success, even if empty)
     assert "macro calendar covers current week only" in result
+    # announcements section should NOT appear
+    assert "Exchange Announcements" not in result
 
 
-async def test_critical_alerts_empty():
-    from src.agent.tools_perception import get_critical_alerts
+async def test_macro_calendar_empty():
+    """macro_events=[] → 'no upcoming events' + footer SHOWS (list success)."""
+    from src.agent.tools_perception import get_macro_calendar
 
     news_svc = AsyncMock()
-    news_svc.get_announcements.return_value = []
     news_svc.get_macro_events.return_value = []
 
     deps = _make_deps(news=news_svc)
-    result = await get_critical_alerts(deps)
+    result = await get_macro_calendar(deps)
 
-    assert "No exchange announcements" in result
     assert "No upcoming macro events" in result
-    # Footer still there even when both sections are empty
+    # Footer must appear: list (incl. []) is a valid result the scope qualifies
     assert "macro calendar covers current week only" in result
 
 
-async def test_critical_alerts_passes_params():
-    from src.agent.tools_perception import get_critical_alerts
+async def test_macro_calendar_passes_lookahead_hours():
+    from src.agent.tools_perception import get_macro_calendar
 
     news_svc = AsyncMock()
-    news_svc.get_announcements.return_value = []
     news_svc.get_macro_events.return_value = []
 
     deps = _make_deps(news=news_svc)
-    await get_critical_alerts(deps, lookback_hours=48, lookahead_hours=24)
-    news_svc.get_announcements.assert_called_once_with(48)
+    await get_macro_calendar(deps, lookahead_hours=24)
     news_svc.get_macro_events.assert_called_once_with(24)
 
 
-async def test_critical_alerts_services_unavailable():
-    """NewsService returns None → render 'temporarily unavailable' per section
-    so the Agent distinguishes a quiet window from an outage (spec §3.5)."""
-    from src.agent.tools_perception import get_critical_alerts
+async def test_macro_calendar_unavailable():
+    """macro_events=None → 'temporarily unavailable' + footer HIDDEN (no result to qualify)."""
+    from src.agent.tools_perception import get_macro_calendar
 
     news_svc = AsyncMock()
-    news_svc.get_announcements.return_value = None
     news_svc.get_macro_events.return_value = None
 
     deps = _make_deps(news=news_svc)
-    result = await get_critical_alerts(deps)
+    result = await get_macro_calendar(deps)
 
-    assert "Exchange announcements service temporarily unavailable" in result
     assert "Macro events service temporarily unavailable" in result
-    # Footer skipped when macro source is unavailable — the calendar-scope
-    # caveat is meaningless without a result to qualify (spec §3.2 rationale).
-    assert "macro calendar covers current week only" not in result
-
-
-async def test_critical_alerts_mixed_unavailable_and_empty():
-    """One section unavailable, the other simply empty — distinct rendering."""
-    from src.agent.tools_perception import get_critical_alerts
-
-    news_svc = AsyncMock()
-    news_svc.get_announcements.return_value = None
-    news_svc.get_macro_events.return_value = []
-
-    deps = _make_deps(news=news_svc)
-    result = await get_critical_alerts(deps)
-
-    assert "Exchange announcements service temporarily unavailable" in result
-    assert "No upcoming macro events" in result
-    # macro_events is [] (reachable, just empty) → footer still qualifies
-    # the scope of the empty calendar result.
-    assert "macro calendar covers current week only" in result
-
-
-async def test_critical_alerts_announcements_only_macro_unavailable():
-    """Announcements present + macro unavailable → footer suppressed because
-    the scope caveat has no macro result to qualify."""
-    from src.agent.tools_perception import get_critical_alerts
-
-    news_svc = AsyncMock()
-    news_svc.get_announcements.return_value = [
-        _event("Delisting XYZ", source="okx_announcement", category="announcement"),
-    ]
-    news_svc.get_macro_events.return_value = None
-
-    deps = _make_deps(news=news_svc)
-    result = await get_critical_alerts(deps)
-
-    assert "Delisting XYZ" in result
-    assert "Macro events service temporarily unavailable" in result
+    # Footer must be suppressed when macro source is unavailable
     assert "macro calendar covers current week only" not in result
 
 

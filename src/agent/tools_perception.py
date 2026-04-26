@@ -611,54 +611,56 @@ async def get_market_news(
     return "\n\n".join(sections)
 
 
-async def get_critical_alerts(
+async def get_exchange_announcements(
     deps: TradingDeps,
     lookback_hours: int = 24,
-    lookahead_hours: int = 12,
 ) -> str:
-    """Get critical alerts: exchange announcements + upcoming macro events."""
-    import asyncio
-
+    """Get recent exchange announcements (maintenance, delistings, parameter changes)."""
     if deps.news is None:
         return "News service not configured."
 
-    # Parallelize announcements + macro events to minimize wall-clock latency.
-    # Each call has independent upstream sources and caches, so gather is safe.
-    announcements, macro_events = await asyncio.gather(
-        deps.news.get_announcements(lookback_hours),
-        deps.news.get_macro_events(lookahead_hours),
-        return_exceptions=True,
-    )
-    # NewsService contract: list for success (may be empty); None when every
-    # upstream source errored, so the Agent can distinguish "quiet window" from
-    # "services unavailable" (spec §3.5). gather(return_exceptions=True) is a
-    # belt-and-suspenders guard in case the service contract ever changes.
-    if isinstance(announcements, Exception):
+    try:
+        announcements = await deps.news.get_announcements(lookback_hours)
+    except Exception:
         announcements = None
-    if isinstance(macro_events, Exception):
+
+    if announcements is None:
+        return (
+            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
+            "Exchange announcements service temporarily unavailable."
+        )
+    if announcements:
+        lines = [e.timestamp.strftime("[%Y-%m-%d %H:%M] ") + e.title for e in announcements]
+        return (
+            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
+            + "\n".join(lines)
+        )
+    return (
+        f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
+        "No exchange announcements."
+    )
+
+
+async def get_macro_calendar(
+    deps: TradingDeps,
+    lookahead_hours: int = 12,
+) -> str:
+    """Get upcoming macro events (FOMC, CPI, NFP) with impact level.
+
+    Footer rule: shown when macro_events is a list (incl. []) so the scope
+    caveat qualifies a real result; suppressed when macro_events is None
+    (no result to qualify, per spec §3.4).
+    """
+    if deps.news is None:
+        return "News service not configured."
+
+    try:
+        macro_events = await deps.news.get_macro_events(lookahead_hours)
+    except Exception:
         macro_events = None
 
     sections: list[str] = []
 
-    # Announcements
-    if announcements is None:
-        sections.append(
-            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
-            "Exchange announcements service temporarily unavailable."
-        )
-    elif announcements:
-        lines = [e.timestamp.strftime("[%Y-%m-%d %H:%M] ") + e.title for e in announcements]
-        sections.append(
-            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
-            + "\n".join(lines)
-        )
-    else:
-        sections.append(
-            f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
-            "No exchange announcements."
-        )
-
-    # Macro events
     if macro_events is None:
         sections.append(
             f"=== Upcoming Macro Events (next {lookahead_hours}h) ===\n"
@@ -683,8 +685,7 @@ async def get_critical_alerts(
             "No upcoming macro events."
         )
 
-    # Footer: calendar scope reminder (spec §3.2). Skip when macro source is
-    # fully unavailable — the caveat is meaningless without a result to qualify.
+    # Footer: shown when macro_events is a list; suppressed when None.
     if macro_events is not None:
         sections.append(
             "Note: macro calendar covers current week only; "
