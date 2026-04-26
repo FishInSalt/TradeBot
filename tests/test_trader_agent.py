@@ -37,7 +37,8 @@ def test_trader_agent_has_all_tools():
     assert "set_next_wake" in tool_names
     # N2 market intelligence tools
     assert "get_market_news" in tool_names
-    assert "get_critical_alerts" in tool_names
+    assert "get_exchange_announcements" in tool_names
+    assert "get_macro_calendar" in tool_names
     assert "get_derivatives_data" in tool_names
     # N3 perception tools
     assert "get_higher_timeframe_view" in tool_names
@@ -81,8 +82,8 @@ def test_registered_tool_names_matches_agent_tools():
         f"  In agent but not in REGISTERED_TOOL_NAMES: {actual - declared}\n"
         f"  In REGISTERED_TOOL_NAMES but not in agent: {declared - actual}"
     )
-    assert len(REGISTERED_TOOL_NAMES) == 30, (
-        f"Expected 30 tools (19+10+1), got {len(REGISTERED_TOOL_NAMES)}"
+    assert len(REGISTERED_TOOL_NAMES) == 31, (
+        f"Expected 31 tools (20+10+1), got {len(REGISTERED_TOOL_NAMES)}"
     )
     # 无重复
     assert len(REGISTERED_TOOL_NAMES) == len(set(REGISTERED_TOOL_NAMES)), \

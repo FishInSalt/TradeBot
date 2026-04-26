@@ -136,18 +136,40 @@ def create_trader_agent(
         return await _impl(ctx.deps, news_filter)
 
     @agent.tool
-    async def get_critical_alerts(
+    async def get_exchange_announcements(
         ctx: RunContext[TradingDeps],
         lookback_hours: int = 24,
+    ) -> str:
+        """Get recent exchange announcements (maintenance, delistings, parameter changes).
+
+        Call before trading or when investigating unexpected price moves. Output
+        ~50-200 tokens (often empty when no recent announcements).
+
+        Args:
+            lookback_hours: how far back to scan for announcements (default 24h).
+        """
+        from src.agent.tools_perception import get_exchange_announcements as _impl
+
+        return await _impl(ctx.deps, lookback_hours)
+
+    @agent.tool
+    async def get_macro_calendar(
+        ctx: RunContext[TradingDeps],
         lookahead_hours: int = 12,
     ) -> str:
-        """Get critical alerts: exchange announcements and upcoming macro events.
-        lookback_hours: how far back to check announcements (default 24h).
-        lookahead_hours: how far ahead to check macro events (default 12h).
-        Output ~100-400 tokens (often empty when no relevant events are scheduled)."""
-        from src.agent.tools_perception import get_critical_alerts as _impl
+        """Get upcoming macro events (FOMC, CPI, NFP) with impact level.
 
-        return await _impl(ctx.deps, lookback_hours, lookahead_hours)
+        Call before trading or when assessing forward-looking risk. Macro calendar
+        covers the current week only — Friday evening / weekend calls may miss
+        next week's early events. Output ~50-250 tokens (often empty when no
+        scheduled events in window).
+
+        Args:
+            lookahead_hours: how far ahead to scan for events (default 12h).
+        """
+        from src.agent.tools_perception import get_macro_calendar as _impl
+
+        return await _impl(ctx.deps, lookahead_hours)
 
     @agent.tool
     async def get_derivatives_data(
@@ -382,7 +404,7 @@ def create_trader_agent(
 # 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
 # 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
 REGISTERED_TOOL_NAMES: list[str] = [
-    # --- 感知 (19) ---
+    # --- 感知 (20) ---
     "get_market_data",
     "get_position",
     "get_account_balance",
@@ -392,7 +414,8 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_active_alerts",
     "get_performance",
     "get_market_news",
-    "get_critical_alerts",
+    "get_exchange_announcements",
+    "get_macro_calendar",
     "get_derivatives_data",
     "get_higher_timeframe_view",
     "get_macro_context",
