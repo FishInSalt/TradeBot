@@ -50,7 +50,6 @@ def create_trader_agent(
 ) -> Agent[TradingDeps, str]:
     # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
     # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
-    from functools import partial
     from src.services.tool_call_recorder import ToolCallRecorder
 
     system_prompt = generate_system_prompt(persona_config)
@@ -64,7 +63,13 @@ def create_trader_agent(
 
     # Iter 5 D: 启用 google docstring 显式声明 + 强制 Args 完整性。
     # require_parameter_descriptions=True 在 tool 加载时校验，缺 Args 立即 startup fail。
-    tool = partial(agent.tool, docstring_format="google", require_parameter_descriptions=True)
+    # 用 def 而非 functools.partial — partial 丢失 Agent.tool 的 overload 信息，
+    # IDE static type checker 会把 @tool 标红；def 让 pyright 看到清晰的装饰器签名。
+    def tool(func):
+        return agent.tool(
+            docstring_format="google",
+            require_parameter_descriptions=True,
+        )(func)
 
     # === Perception Tools ===
 
