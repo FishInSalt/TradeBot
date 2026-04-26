@@ -184,6 +184,13 @@ async def run_agent_cycle(
                 return None
 
     tokens = result.usage().total_tokens if result.usage() else 0
+    # reasoning_tokens 由 DeepSeek/OpenAI o-series 等 thinking 模型返回；
+    # > 0 即可验证 thinking mode 在本 cycle 真实生效。
+    reasoning_tokens = (
+        (result.usage().details or {}).get("reasoning_tokens", 0)
+        if result.usage() else 0
+    )
+    logger.info(f"cycle {cycle_id} tokens: total={tokens} reasoning={reasoning_tokens}")
     budget.record(tokens)
 
     # === A2: Extract tool calls from message history ===
