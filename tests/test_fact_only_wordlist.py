@@ -488,3 +488,126 @@ async def test_get_performance_fact_only():
     output = await get_performance(deps)
     hits = _scan(output)
     assert hits == [], f"get_performance emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_market_news_fact_only():
+    """News service unavailable early-return path."""
+    from src.agent.tools_perception import get_market_news
+    deps = MockDeps()  # news=None by default
+    output = await get_market_news(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_market_news emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_exchange_announcements_fact_only():
+    """Empty announcements list (typical) + None (degraded) outputs."""
+    from src.agent.tools_perception import get_exchange_announcements
+    deps = MockDeps()
+    deps.news = AsyncMock()
+    outputs = []
+    deps.news.get_announcements = AsyncMock(return_value=[])
+    outputs.append(await get_exchange_announcements(deps))
+    deps.news.get_announcements = AsyncMock(return_value=None)
+    outputs.append(await get_exchange_announcements(deps))
+    hits = _scan("\n".join(outputs))
+    assert hits == [], f"get_exchange_announcements emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_macro_calendar_fact_only():
+    """Empty (footer shows) + None (footer hidden) per spec §3.4."""
+    from src.agent.tools_perception import get_macro_calendar
+    deps = MockDeps()
+    deps.news = AsyncMock()
+    outputs = []
+    deps.news.get_macro_events = AsyncMock(return_value=[])
+    outputs.append(await get_macro_calendar(deps))
+    deps.news.get_macro_events = AsyncMock(return_value=None)
+    outputs.append(await get_macro_calendar(deps))
+    hits = _scan("\n".join(outputs))
+    assert hits == [], f"get_macro_calendar emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_derivatives_data_fact_only():
+    """All 3 sub-fetches fail → 'temporarily unavailable' rendering path."""
+    from src.agent.tools_perception import get_derivatives_data
+    deps = MockDeps()
+    deps.market_data.get_funding_rate = AsyncMock(side_effect=Exception("down"))
+    deps.market_data.get_open_interest = AsyncMock(side_effect=Exception("down"))
+    deps.market_data.get_long_short_ratio = AsyncMock(side_effect=Exception("down"))
+    output = await get_derivatives_data(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_derivatives_data emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_higher_timeframe_view_fact_only():
+    """Typical 250-bar OHLCV → MA + range rendering."""
+    from src.agent.tools_perception import get_higher_timeframe_view
+    deps = MockDeps()
+    df = pd.DataFrame([{"timestamp": i, "open": 64000 + i, "high": 64100 + i,
+                        "low": 63900 + i, "close": 64050 + i, "volume": 100.0}
+                       for i in range(250)])
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df)
+    output = await get_higher_timeframe_view(deps, "4h")
+    hits = _scan(output)
+    assert hits == [], f"get_higher_timeframe_view emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_macro_context_fact_only():
+    """macro=None early-return path."""
+    from src.agent.tools_perception import get_macro_context
+    deps = MockDeps()  # macro=None by default
+    output = await get_macro_context(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_macro_context emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_etf_flows_fact_only():
+    """crypto_etf=None early-return path."""
+    from src.agent.tools_perception import get_etf_flows
+    deps = MockDeps()  # crypto_etf=None by default
+    output = await get_etf_flows(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_etf_flows emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_stablecoin_supply_fact_only():
+    """onchain=None early-return path."""
+    from src.agent.tools_perception import get_stablecoin_supply
+    deps = MockDeps()  # onchain=None by default
+    output = await get_stablecoin_supply(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_stablecoin_supply emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_price_pivots_global_wordlist_fact_only():
+    """Global wordlist coverage — separate from existing PIVOTS_BANNED_WORDS per-tool
+    test (test_fact_only_wordlist.py:336+) which guards strong/weak/important/key/major/minor.
+    This test ensures price_pivots also passes the global sentiment wordlist.
+    """
+    from src.agent.tools_perception import get_price_pivots
+    from src.integrations.exchange.base import Ticker
+    deps = MockDeps()
+    # Inline 100-row DataFrame with timestamp column (price_pivots reads timestamp).
+    # Shape independent from `_pivots_df` helper — that helper's no-timestamp shape
+    # is incompatible with this tool, so we build a per-test fixture instead.
+    df = pd.DataFrame([{"timestamp": i, "open": 64000, "high": 64100 + (i % 7) * 10,
+                        "low": 63900 - (i % 5) * 10, "close": 64050,
+                        "volume": 100.0} for i in range(100)])
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df)
+    # get_price_pivots also requires get_ticker for current_price baseline.
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64050.0, bid=64049.5, ask=64050.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    output = await get_price_pivots(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_price_pivots emitted banned words: {hits}"
