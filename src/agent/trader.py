@@ -65,59 +65,108 @@ def create_trader_agent(
         candle_count: int = 50,
     ) -> str:
         """Get market data: ticker, technical indicators, market context, and recent candles.
-        candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis.
-        Default 50. Values above 50 may be capped by exchange API limits.
+
+        Use multiple timeframes to build conviction before acting (e.g., "1h" for
+        the bigger picture, "5m" for entry timing). Pass candle_count=20 for
+        secondary timeframes to save tokens.
+
         Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
-        symbol and timeframe default to session config."""
+
+        Args:
+            symbol: trading symbol; None defaults to session symbol.
+            timeframe: candle timeframe (e.g., '5m', '1h', '4h', '1d'); None defaults to session timeframe.
+            candle_count: number of candles to fetch (default 50). Use 20 for quick checks
+                or secondary timeframes; 50 for detailed analysis. Values above 50 may be
+                capped by exchange API limits.
+        """
         from src.agent.tools_perception import get_market_data as _impl
 
         return await _impl(ctx.deps, symbol, timeframe, candle_count)
 
     @agent.tool
     async def get_position(ctx: RunContext[TradingDeps], symbol: str | None = None) -> str:
-        """Get current open position with risk context (PnL %, liquidation distance, duration)."""
+        """Get current position details with risk exposure context.
+
+        Includes Risk exposure (notional / margin / liquidation distance in
+        ATR(1h) multiples — 1h is the fixed baseline regardless of session
+        trading style) and Exit orders section (SL/TP distances from both
+        entry and current). Useful both when opening and during ongoing
+        position management.
+
+        Args:
+            symbol: trading symbol (defaults to session symbol).
+        """
         from src.agent.tools_perception import get_position as _impl
 
         return await _impl(ctx.deps, symbol)
 
     @agent.tool
     async def get_account_balance(ctx: RunContext[TradingDeps]) -> str:
-        """Get account balance with return on initial capital."""
+        """Get account balance with return on initial capital.
+
+        Output reports total equity, free margin, used margin, and percentage
+        return on initial capital — useful for sizing decisions and risk checks.
+        """
         from src.agent.tools_perception import get_account_balance as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
-        """Get all pending orders with distance from current price."""
+        """Get all pending orders with distance from current price.
+
+        Lists limit orders, stop loss, and take profit orders, each with their
+        price level and distance from current. OCO-paired orders (sharing an
+        algoId on OKX) render with `[OCO]` tag. Useful before placing new
+        orders or when reviewing exposure.
+        """
         from src.agent.tools_perception import get_open_orders as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_trade_journal(ctx: RunContext[TradingDeps]) -> str:
-        """Get trade journal — decision timeline with quick stats summary. Use for reviewing recent decisions and their outcomes."""
+        """Get the trade journal — decision timeline with quick stats summary.
+
+        Use for reviewing recent decisions and their outcomes — pair with
+        get_performance for the quantitative view of the same period.
+        """
         from src.agent.tools_perception import get_trade_journal as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_memories(ctx: RunContext[TradingDeps]) -> str:
-        """Get long-term memories (lessons, patterns, trade reviews)."""
+        """Get long-term memories (lessons, patterns, trade reviews).
+
+        Check past memories before making decisions to avoid repeating mistakes
+        and apply pattern recognitions that proved correct previously.
+        """
         from src.agent.tools_perception import get_memories as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_active_alerts(ctx: RunContext[TradingDeps]) -> str:
-        """Get current alert configuration: volatility alert params and active price level alerts."""
+        """Get current alert configuration.
+
+        Reports volatility alert parameters (threshold % + time window) and
+        active price level alerts. Useful when reviewing or adjusting your
+        alert setup.
+        """
         from src.agent.tools_perception import get_active_alerts as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
-        """Get detailed trading performance statistics. Use for reviewing overall results and evaluating strategy effectiveness."""
+        """Get quantitative trading performance statistics.
+
+        Reports return, win rate, drawdown, profit factor, and other
+        quantitative metrics. Use for evaluating strategy effectiveness
+        across the session — pair with get_trade_journal for decision
+        pattern review.
+        """
         from src.agent.tools_perception import get_performance as _impl
 
         return await _impl(ctx.deps)
@@ -127,27 +176,55 @@ def create_trader_agent(
         ctx: RunContext[TradingDeps],
         news_filter: Literal["positive", "negative", "neutral"] | None = None,
     ) -> str:
-        """Get recent crypto news headlines and market sentiment.
-        news_filter: 'positive', 'negative', 'neutral'. Default: no filter (latest mix).
-        Returns up to 10 headlines total (up to 5 symbol-specific, remainder general crypto); total may be fewer if upstream has limited recent posts. Plus Fear & Greed Index.
-        Output ~500-700 tokens."""
+        """Get recent crypto news headlines + Fear & Greed Index (0 = max fear, 100 = max greed).
+
+        Returns up to 10 headlines total (up to 5 symbol-specific, remainder
+        general crypto); total may be fewer if upstream has limited recent posts.
+        Usually call without news_filter; use 'positive' / 'negative' / 'neutral'
+        when you want a specific sentiment lens. Output ~500-700 tokens.
+
+        Args:
+            news_filter: 'positive', 'negative', 'neutral', or None for latest mix.
+        """
         from src.agent.tools_perception import get_market_news as _impl
 
         return await _impl(ctx.deps, news_filter)
 
     @agent.tool
-    async def get_critical_alerts(
+    async def get_exchange_announcements(
         ctx: RunContext[TradingDeps],
         lookback_hours: int = 24,
+    ) -> str:
+        """Get recent exchange announcements (maintenance, delistings, parameter changes).
+
+        Call before trading or when investigating unexpected price moves. Output
+        ~50-200 tokens (often empty when no recent announcements).
+
+        Args:
+            lookback_hours: how far back to scan for announcements (default 24h).
+        """
+        from src.agent.tools_perception import get_exchange_announcements as _impl
+
+        return await _impl(ctx.deps, lookback_hours)
+
+    @agent.tool
+    async def get_macro_calendar(
+        ctx: RunContext[TradingDeps],
         lookahead_hours: int = 12,
     ) -> str:
-        """Get critical alerts: exchange announcements and upcoming macro events.
-        lookback_hours: how far back to check announcements (default 24h).
-        lookahead_hours: how far ahead to check macro events (default 12h).
-        Output ~100-400 tokens (often empty when no relevant events are scheduled)."""
-        from src.agent.tools_perception import get_critical_alerts as _impl
+        """Get upcoming macro events (FOMC, CPI, NFP) with impact level.
 
-        return await _impl(ctx.deps, lookback_hours, lookahead_hours)
+        Call before trading or when assessing forward-looking risk. Macro calendar
+        covers the current week only — Friday evening / weekend calls may miss
+        next week's early events. Output ~50-250 tokens (often empty when no
+        scheduled events in window).
+
+        Args:
+            lookahead_hours: how far ahead to scan for events (default 12h).
+        """
+        from src.agent.tools_perception import get_macro_calendar as _impl
+
+        return await _impl(ctx.deps, lookahead_hours)
 
     @agent.tool
     async def get_derivatives_data(
@@ -155,8 +232,15 @@ def create_trader_agent(
         symbol: str | None = None,
     ) -> str:
         """Get derivatives market data: funding rate, open interest, long/short ratio.
-        When symbol is None, uses the currently traded pair.
-        Output ~150-250 tokens."""
+
+        Positive funding rate means longs pay shorts; negative means shorts pay
+        longs (settlement interval varies by contract — see next settlement time
+        in output). Open interest is total outstanding contracts. Long/short
+        ratio is the ratio of long vs short account positions. Output ~150-250 tokens.
+
+        Args:
+            symbol: trading symbol; None uses the currently traded pair.
+        """
         from src.agent.tools_perception import get_derivatives_data as _impl
 
         return await _impl(ctx.deps, symbol)
@@ -167,34 +251,55 @@ def create_trader_agent(
         timeframe: Literal["4h", "1d", "1w", "1M"],
     ) -> str:
         """Get long-period structure: MA50/100/200 distances and range position.
-        timeframe: '4h' bridges LTF and 1d; '1d'/'1w'/'1M' for swing/position context.
-        Output ~250 tokens. No default — explicitly pick the timeframe you need."""
+
+        Reports moving averages (MA50/100/200), price position within the recent
+        100-period range, and structural highs/lows over a longer window than
+        your default trading timeframe. No default — explicitly pick the
+        timeframe. Output ~250 tokens.
+
+        Args:
+            timeframe: '4h' bridges LTF and 1d; '1d'/'1w'/'1M' for swing/position context.
+        """
         from src.agent.tools_perception import get_higher_timeframe_view as _impl
 
         return await _impl(ctx.deps, timeframe)
 
     @agent.tool
     async def get_macro_context(ctx: RunContext[TradingDeps]) -> str:
-        """Get cross-market macro snapshot: BTC/ETH dominance, Total Crypto Mcap, USD
-        Trade-Weighted Index (FRED DTWEXBGS; NOT ICE DXY), VIX, 10Y Treasury, 2s10s spread,
-        10Y inflation expectation, and SPY/QQQ. Output ~200 tokens."""
+        """Get cross-market macro snapshot.
+
+        Includes BTC/ETH dominance, Total Crypto Mcap (CoinGecko), USD
+        Trade-Weighted Index (FRED DTWEXBGS — note: the Fed's broad TW index
+        across 26 currencies, NOT the ICE DXY across 6 currencies; absolute
+        values differ and the two can diverge on single-currency moves, though
+        they usually move in the same direction), VIX, 10Y Treasury yield,
+        2s10s spread, 10Y inflation expectation (FRED), and SPY/QQQ closing
+        quotes (Alpha Vantage). FRED data has daily granularity; SPY/QQQ are
+        equity ETFs with NYSE trading-hour quotes. Output ~200 tokens.
+        """
         from src.agent.tools_perception import get_macro_context as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_etf_flows(ctx: RunContext[TradingDeps], days: int = 7) -> str:
-        """Get US BTC + ETH spot ETF daily net flows + cumulative AUM for the past `days`
-        trading days (1-14, default 7). Today's value may be revised T+1.
-        Output ~300 tokens."""
+        """Get US BTC + ETH spot ETF daily net flows + cumulative AUM.
+
+        Today's value may be revised T+1. Output ~300 tokens.
+
+        Args:
+            days: lookback days (1-14, default 7).
+        """
         from src.agent.tools_perception import get_etf_flows as _impl
 
         return await _impl(ctx.deps, days)
 
     @agent.tool
     async def get_stablecoin_supply(ctx: RunContext[TradingDeps]) -> str:
-        """Get USDT + USDC current total supply and 7-day change.
-        Data sourced from DefiLlama (on-chain circulating supply). Output ~80 tokens."""
+        """Get USDT + USDC current total supply and 7-day changes.
+
+        Data sourced from DefiLlama (on-chain circulating supply). Output ~80 tokens.
+        """
         from src.agent.tools_perception import get_stablecoin_supply as _impl
 
         return await _impl(ctx.deps)
@@ -203,14 +308,16 @@ def create_trader_agent(
     async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 20) -> str:
         """Return top-N order book depth with concentrated-level breakdown.
 
+        Reports best bid/ask, cumulative depth, bid/ask share, and concentrated
+        levels (size > 3× same-side median). Use to evaluate liquidity, slippage
+        risk, or concentrated levels near current price.
+
         Args:
-            depth: Levels per side to fetch. Default 20.
+            depth: levels per side to fetch (default 20).
 
-        Returns:
-            str: Multi-line fact-only text (best bid/ask + cumulative depth + bid share + concentrated levels).
-
-        Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)" if book is empty/short;
-        "Order book ({symbol}): temporarily unavailable" on service failure.
+        Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)"
+        if book is empty/short; "Order book ({symbol}): temporarily unavailable" on
+        service failure.
         """
         from src.agent.tools_perception import get_order_book as _impl
 
@@ -218,17 +325,13 @@ def create_trader_agent(
 
     @agent.tool
     async def get_recent_trades(ctx: RunContext[TradingDeps], window_seconds: int = 300) -> str:
-        """Return taker-flow bias and rhythm over a recent time window via 5 time-buckets.
+        """Read taker-flow bias and rhythm over recent minutes.
+
+        Default 300s window across 5 × 60s buckets. Total + trade count + avg
+        size shown below buckets.
 
         Args:
-            window_seconds: Observation window in seconds. Default 300 (5 min).
-
-        Returns:
-            str: 5-bucket breakdown + Total + trade count + avg size.
-
-        Degradation: "Recent trades ({symbol}): no trades in last {window_seconds}s" if cold market;
-        "Recent trades ({symbol}): temporarily unavailable" on service failure. Heavy windows
-        may annotate Total with "partial coverage" footnote.
+            window_seconds: total scan window (default 300s).
         """
         from src.agent.tools_perception import get_recent_trades as _impl
 
@@ -236,16 +339,14 @@ def create_trader_agent(
 
     @agent.tool
     async def get_multi_timeframe_snapshot(ctx: RunContext[TradingDeps], tfs: list[str] | None = None) -> str:
-        """Quick multi-timeframe scan: momentum | structure | volatility | range position.
+        """Scan multi-TF alignment in a single call (default 5m/1h/4h/1d).
+
+        Useful for a once-per-cycle structural overview before committing to
+        a direction. Reports 4 columns per TF: momentum / structure / volatility
+        / range position.
 
         Args:
-            tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"]. 1w/1M are supported but non-default.
-
-        Returns:
-            str: 4-column row per TF + Columns header.
-
-        Degradation: per-TF "insufficient data (need N candles, got M)" or "temporarily unavailable";
-        overall "Multi-TF snapshot ({symbol}): temporarily unavailable" only if ALL TFs fail or ticker fetch fails.
+            tfs: list of timeframes; None uses default (5m/1h/4h/1d).
         """
         from src.agent.tools_perception import get_multi_timeframe_snapshot as _impl
 
@@ -253,12 +354,11 @@ def create_trader_agent(
 
     @agent.tool
     async def get_price_pivots(ctx: RunContext[TradingDeps]) -> str:
-        """Show structural support/resistance: last 100 main-TF swing pivots
-        (Williams fractal N=5) + prior daily/weekly/monthly H/L. Fact-only.
-        Returns levels grouped by above/below current price, sorted by
-        absolute distance. Swing rows annotate 'N bars ago'; prior rows
-        label the period (Daily / Weekly / Monthly). See tool implementation
-        for full degradation semantics.
+        """Scan structural price levels.
+
+        Reports swing highs/lows from the last 100 main-TF bars (Williams fractal
+        N=5) plus prior daily/weekly/monthly H/L. Levels are grouped above/below
+        current price with distance % and bars-ago.
         """
         from src.agent.tools_perception import get_price_pivots as _impl
 
@@ -274,35 +374,83 @@ def create_trader_agent(
         leverage: int,
         reasoning: str,
     ) -> str:
-        """Open a new position. side='long' or 'short'. position_pct=% of free balance. Always provide reasoning."""
+        """Open a new market-order position.
+
+        Position fills via market order; you will receive a fill notification
+        when execution completes. Set stop loss and take profit only after the
+        fill notification arrives (separate trigger, not in the same cycle).
+
+        Args:
+            side: 'long' or 'short'.
+            position_pct: percent of free balance to allocate (0-100).
+            leverage: leverage multiplier (cannot be changed while holding position).
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import open_position as _impl
 
         return await _impl(ctx.deps, side, position_pct, leverage, reasoning=reasoning)
 
     @agent.tool
     async def close_position(ctx: RunContext[TradingDeps], reasoning: str) -> str:
-        """Close all open positions. Always provide reasoning."""
+        """Close all open positions via market order.
+
+        Position closure fills via market order; you will receive a fill
+        notification when execution completes (separate trigger).
+
+        Args:
+            reasoning: brief description of your decision logic (e.g., 'TP target hit', 'thesis invalidated').
+        """
         from src.agent.tools_execution import close_position as _impl
 
         return await _impl(ctx.deps, reasoning=reasoning)
 
     @agent.tool
     async def set_stop_loss(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
-        """Set stop loss on current position. Auto-cancels existing stop orders. Always provide reasoning."""
+        """Set stop loss on the current position.
+
+        Auto-cancels any existing stop orders before placing the new one.
+        On OKX, stop and take_profit orders sharing an algoId render as `[OCO]`
+        in get_open_orders and are atomic — cancelling or triggering one leg
+        removes both. To replace only one leg, re-create the other leg
+        immediately after.
+
+        Args:
+            price: trigger price for the stop loss.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_stop_loss as _impl
 
         return await _impl(ctx.deps, price, reasoning=reasoning)
 
     @agent.tool
     async def set_take_profit(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
-        """Set take profit on current position. Auto-cancels existing TP orders. Always provide reasoning."""
+        """Set take profit on the current position.
+
+        Auto-cancels any existing take_profit orders before placing the new one.
+        On OKX, stop and take_profit orders sharing an algoId render as `[OCO]`
+        in get_open_orders and are atomic — cancelling or triggering one leg
+        removes both. To replace only one leg, re-create the other leg
+        immediately after.
+
+        Args:
+            price: trigger price for the take profit.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_take_profit as _impl
 
         return await _impl(ctx.deps, price, reasoning=reasoning)
 
     @agent.tool
     async def adjust_leverage(ctx: RunContext[TradingDeps], leverage: int, reasoning: str) -> str:
-        """Adjust leverage. Always provide reasoning."""
+        """Adjust leverage multiplier.
+
+        Cannot be changed while holding a position — close first, then adjust.
+        Higher leverage amplifies both gains and losses, including liquidation risk.
+
+        Args:
+            leverage: new leverage multiplier.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import adjust_leverage as _impl
 
         return await _impl(ctx.deps, leverage, reasoning=reasoning)
@@ -314,14 +462,33 @@ def create_trader_agent(
         window_minutes: int,
         reasoning: str,
     ) -> str:
-        """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-240. Always provide reasoning."""
+        """Adjust volatility alert sensitivity.
+
+        Tighten in quiet markets to catch early moves; widen in volatile
+        conditions to reduce noise. Pair with get_active_alerts to review
+        current configuration.
+
+        Args:
+            threshold_pct: alert threshold percent (0.5-50%).
+            window_minutes: time window in minutes (1-240).
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_price_alert as _impl
 
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
 
     @agent.tool
     async def cancel_order(ctx: RunContext[TradingDeps], order_id: str, reasoning: str) -> str:
-        """Cancel a pending order (limit, stop loss, take profit). Always provide reasoning."""
+        """Cancel a pending order (limit, stop loss, or take profit).
+
+        Use to remove stale limit orders when the market has moved away from
+        your intended entry. Leaving outdated orders risks an unintended fill
+        at a price that no longer makes sense.
+
+        Args:
+            order_id: id of the order to cancel.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import cancel_order as _impl
 
         return await _impl(ctx.deps, order_id, reasoning=reasoning)
@@ -333,7 +500,17 @@ def create_trader_agent(
         direction: str,
         reasoning: str,
     ) -> str:
-        """Set a one-shot price level alert. direction: 'above' (breakout) or 'below' (breakdown). Triggers once then auto-removes. Always provide reasoning."""
+        """Set a one-shot alert at a specific price level.
+
+        Useful for support/resistance levels you want to be notified about.
+        Triggers once when reached, then auto-removes. You will be woken up
+        when the level is hit.
+
+        Args:
+            price: alert price level.
+            direction: 'above' (breakout) or 'below' (breakdown).
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import add_price_level_alert as _impl
 
         return await _impl(ctx.deps, price, direction, reasoning=reasoning)
@@ -344,7 +521,16 @@ def create_trader_agent(
         minutes: int,
         reasoning: str,
     ) -> str:
-        """Set how soon you want to check the market again (minutes). One-shot: only affects the next wake, then reverts to default. Always provide reasoning."""
+        """Set how soon you want to check the market again.
+
+        One-shot: only affects the next wake, then reverts to the default
+        interval. Shorten when you have an open position or expect volatility;
+        lengthen when the market is quiet and you have no exposure.
+
+        Args:
+            minutes: minutes until next wake.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_next_wake as _impl
 
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
@@ -358,7 +544,18 @@ def create_trader_agent(
         leverage: int,
         reasoning: str,
     ) -> str:
-        """Place a limit order at a specific price (e.g., buy at support level). side='long' or 'short'. position_pct=% of free balance. Always provide reasoning."""
+        """Place a limit order at a specific price (e.g., buy at support level).
+
+        Not every entry needs to be a market order — limit orders let you
+        target specific levels without paying the spread.
+
+        Args:
+            side: 'long' or 'short'.
+            price: limit price.
+            position_pct: percent of free balance to allocate (0-100).
+            leverage: leverage multiplier.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import place_limit_order as _impl
 
         return await _impl(ctx.deps, side, price, position_pct, leverage, reasoning=reasoning)
@@ -369,7 +566,18 @@ def create_trader_agent(
     async def save_memory(
         ctx: RunContext[TradingDeps], category: str, content: str, importance: float = 0.5
     ) -> str:
-        """Save a learning or observation to long-term memory. category: trade_review/market_pattern/lesson. importance: 0-1."""
+        """Save a learning or observation to long-term memory.
+
+        Save memories that your future self would find actionable — trade
+        outcomes, pattern recognitions that proved correct or incorrect, and
+        mistakes to avoid. Routine observations like "market is quiet" are
+        not worth saving.
+
+        Args:
+            category: 'trade_review', 'market_pattern', or 'lesson'.
+            content: the memory content to save.
+            importance: weight 0-1 (default 0.5).
+        """
         from src.agent.tools_memory import save_memory as _impl
 
         return await _impl(ctx.deps, category, content, importance)
@@ -382,7 +590,7 @@ def create_trader_agent(
 # 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
 # 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
 REGISTERED_TOOL_NAMES: list[str] = [
-    # --- 感知 (19) ---
+    # --- 感知 (20) ---
     "get_market_data",
     "get_position",
     "get_account_balance",
@@ -392,7 +600,8 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_active_alerts",
     "get_performance",
     "get_market_news",
-    "get_critical_alerts",
+    "get_exchange_announcements",
+    "get_macro_calendar",
     "get_derivatives_data",
     "get_higher_timeframe_view",
     "get_macro_context",

@@ -21,33 +21,13 @@ def _build_layer1() -> str:
 
 You trade USDT-margined perpetual futures (no expiry date). The exchange uses one-way position mode — you cannot hold long and short positions on the same symbol simultaneously. To reverse direction, close your current position first. Leverage cannot be changed while holding a position. Every trade incurs fees on both entry and exit — frequent small trades can erode capital through friction costs alone.
 
-## Tool Usage Notes
+## Cross-Tool Behavior
 
 - **Fill timing**: After submitting a market order, you will be notified when it fills via a separate trigger. Set stop loss and take profit only after receiving fill confirmation — do not attempt in the same cycle as order submission.
-- **Open fill response**: When woken by an order fill notification (conditional trigger) that opened a position, check the chart to identify structural support/resistance levels, then set stop loss and take profit at those levels. Do not skip market data — you need it to place stops at meaningful prices, not arbitrary ones.
+- **Open fill response**: When woken by an order fill notification (conditional trigger) that opened a position, identify your stop loss and take profit levels and set them. Use market data to inform these levels.
 - **Close fill response**: When woken by a fill that closed a position (stop loss, take profit, or manual close), review the trade outcome: what worked, what didn't, and what you would do differently. Save actionable lessons to memory.
-- **Multi-timeframe analysis**: You can call get_market_data with different timeframe parameters (e.g., "1h" for the bigger picture, "5m" for entry timing). Use candle_count=20 for secondary timeframes to save tokens. Use multiple timeframes to build conviction before acting.
-- **Memory**: Use save_memory to record trade reviews, market patterns, and lessons learned. Save memories that your future self would find actionable — trade outcomes, pattern recognitions that proved correct or incorrect, and mistakes to avoid. Routine observations like "market is quiet" are not worth saving. Check your memories via get_memories to avoid repeating past mistakes.
-- **Dynamic wake interval**: Use set_next_wake to control how soon you check the market again. This is one-shot — it only affects the next wake, then reverts to the default interval. Shorten the interval when you have an open position or expect volatility; lengthen it when the market is quiet and you have no exposure.
-- **Limit orders**: Use place_limit_order to enter at specific price levels (e.g., buy at support). Not every entry needs to be a market order.
-- **Price level alerts**: Use add_price_level_alert to set one-shot alerts at key support/resistance levels you identify. You will be woken up when these levels are reached.
 - **Alert response**: When woken by a price alert, assess whether the price move changes your thesis. For a price level alert, evaluate whether the level held or broke and what that implies. For a volatility alert, determine if the move is the start of a trend or just noise before acting.
-- **Volatility alerts**: Use set_price_alert to adjust volatility alert sensitivity (threshold % and time window). Tighten in quiet markets to catch early moves; widen in volatile conditions to reduce noise. Use get_active_alerts to review your current alert configuration.
-- **Order management**: Use cancel_order to remove stale limit orders when the market has moved away from your intended entry. Leaving outdated orders risks an unintended fill at a price that no longer makes sense.
-- **Self-assessment**: Use get_performance for quantitative strategy evaluation (return, win rate, drawdown) and get_trade_journal to review recent decision patterns and outcomes.
-- **Market news**: Use get_market_news to check crypto news headlines + Fear & Greed Index (0 = max fear, 100 = max greed). Returns up to 10 headlines total (up to 5 symbol-specific, remainder general); total may be fewer if upstream has limited recent posts. Usually call without news_filter; use 'positive' / 'negative' / 'neutral' when you want a specific sentiment lens.
-- **Critical alerts**: Use get_critical_alerts before trading to scan exchange announcements (maintenance, delistings, parameter changes) over the past lookback_hours and upcoming macro events (FOMC, CPI, NFP with impact level) within the next lookahead_hours. Often empty when nothing is scheduled. Macro calendar covers the current week only — Friday evening / weekend calls may miss next week's early events.
-- **Derivatives structure**: Use get_derivatives_data for funding rate, open interest, and long/short ratio. Positive funding rate means longs pay shorts, negative means shorts pay longs (settlement interval varies by contract — see next settlement time in output). Open interest is total outstanding contracts. Long/short ratio is the ratio of long vs short account positions.
-- **Higher timeframe view**: Use get_higher_timeframe_view with timeframe="4h"/"1d"/"1w"/"1M" to see long-period moving averages (MA50/100/200), price position within the recent 100-period range, and structural highs/lows over a longer window than your default trading timeframe.
-- **Macro context**: Use get_macro_context for cross-market data — BTC/ETH dominance, Total Crypto Market Cap (CoinGecko), USD Trade-Weighted Index (FRED DTWEXBGS — note: this is the Fed's broad TW index across 26 currencies, NOT the ICE DXY across 6 currencies; absolute values differ and the two can diverge on single-currency moves, though they usually move in the same direction), VIX, 10Y Treasury yield, 2s10s spread, 10Y inflation expectation (FRED), and SPY/QQQ closing quotes (Alpha Vantage). FRED data has daily granularity; SPY/QQQ are equity ETFs with NYSE trading-hour quotes.
-- **ETF flows**: Use get_etf_flows for daily net flow data of US-traded BTC and ETH spot ETFs, plus cumulative AUM. Default lookback is 7 days; pass days parameter (1-14) to adjust. Today's value may be revised T+1.
-- **Stablecoin supply**: Use get_stablecoin_supply for current USDT/USDC total supply and 7-day changes, sourced from on-chain data via DefiLlama.
-- **Order book**: Use get_order_book for top-N depth with cumulative volume + bid/ask share + concentrated levels (size > 3× same-side median). Evaluate liquidity, slippage risk, or concentrated levels near current price.
-- **Recent trades**: Use get_recent_trades to read taker-flow bias and rhythm over recent minutes (default 300s, 5 × 60s buckets). Total + trade count + avg size shown below buckets.
-- **Multi-timeframe snapshot**: Use get_multi_timeframe_snapshot once per cycle to scan multi-TF alignment (default 5m/1h/4h/1d) before committing to a direction. 4 columns per TF: momentum / structure / volatility / range position.
-- **Position risk context**: get_position now includes Risk exposure (notional / margin / liquidation in ATR(1h) multiples — 1h is the fixed baseline regardless of session trading style) and Exit orders section (SL/TP distances from both entry and current). Useful both when opening and during ongoing position management.
-- **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after.
-- **Price pivots**: Use get_price_pivots to scan structural levels — swing highs/lows from the last 100 main-TF bars (Williams fractal N=5) plus prior daily/weekly/monthly H/L. Levels are grouped above/below current price with distance % and bars-ago. Useful for placing SL/TP at structural levels rather than arbitrary percentages."""
+- **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after."""
 
 
 def _build_layer2() -> str:
@@ -62,7 +42,7 @@ What is the dominant trend across timeframes? Is the market trending or ranging?
 Are technical indicators showing confluence? Does price action confirm the signal? Is volume supporting the move, or diverging? Are there any warning signs (divergences, exhaustion candles)?
 
 **Risk-Reward**
-What is the risk-to-reward ratio of this potential trade? Where is the logical stop loss — at a structural level, not an arbitrary percentage? Is the potential reward worth the risk? Would a better entry improve the ratio?
+What is the risk-to-reward ratio of this potential trade? Where is the logical stop loss? Is the potential reward worth the risk? Would a better entry improve the ratio?
 
 **Position Management**
 How much capital is currently at risk? Is there a reason to scale in or scale out? Should stops be trailed as the trade develops? Is the position sized appropriately for the conviction level?
