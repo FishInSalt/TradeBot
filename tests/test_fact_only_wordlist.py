@@ -41,6 +41,22 @@ class MockDeps:
     market_data: AsyncMock = field(default_factory=AsyncMock)
     technical: AsyncMock = field(default_factory=AsyncMock)
     timeframe: str = "5m"  # Iter 3: get_price_pivots reads deps.timeframe
+    # Iter 4 fact-only coverage extension (real TradingDeps field names):
+    memory: AsyncMock = field(default_factory=AsyncMock)
+    db_engine: object | None = None
+    metrics: object | None = None
+    news: object | None = None
+    macro: object | None = None
+    crypto_etf: object | None = None
+    onchain: object | None = None
+    set_next_wake_fn: object | None = None
+    wake_min_minutes: int = 1
+    wake_max_minutes: int = 60
+    session_id: str = "test-session"
+    cycle_id: str | None = "test-cycle"  # defense-in-depth: ToolCallRecorder reads this in real flow
+    # Execution-tool defaults (Task 12) — skip approval gate by default
+    approval_enabled: bool = False
+    approval_gate: object | None = None
 
 
 @pytest.mark.asyncio
@@ -349,3 +365,126 @@ async def test_get_price_pivots_fact_only_5_scenarios():
         output = await get_price_pivots(deps)
         matches = PIVOTS_BANNED_RE.findall(output)
         assert not matches, f"Banned words in scenario '{name}': {matches}\n--- output ---\n{output}"
+
+
+@pytest.mark.asyncio
+async def test_get_market_data_fact_only(mocker):
+    """get_market_data typical-path output must not emit banned subjective words."""
+    from src.agent.tools_perception import get_market_data
+    deps = MockDeps()
+    df = pd.DataFrame([{"timestamp": 0, "open": 64000, "high": 64100, "low": 63900,
+                        "close": 64050, "volume": 100.0} for _ in range(250)])
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df)
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64050.0, bid=64049.5, ask=64050.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.technical.compute_indicators = mocker.Mock(return_value={
+        "rsi_14": 55.0, "macd": 0.5, "macd_signal": 0.3, "macd_hist": 0.2,
+        "bb_upper": 65000.0, "bb_middle": 64000.0, "bb_lower": 63000.0, "atr_14": 85.0,
+    })
+    deps.technical.format_for_llm = mocker.Mock(return_value="RSI(14): 55.0 | MACD: 0.50")
+    output = await get_market_data(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_market_data emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_account_balance_fact_only():
+    """Happy path: rendered balance lines."""
+    from src.agent.tools_perception import get_account_balance
+    deps = MockDeps()
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10500.0, free_usdt=8500.0, used_usdt=2000.0,
+    ))
+    output = await get_account_balance(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_account_balance emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_fact_only():
+    """Empty + non-empty rendering paths."""
+    from src.agent.tools_perception import get_open_orders
+    deps = MockDeps()
+    outputs = []
+
+    # Scenario 1: no pending orders → "No pending orders." (early return)
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    outputs.append(await get_open_orders(deps))
+
+    # Scenario 2: limit + OCO pair (covers _render_single_order + OCO branch)
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="lim1", symbol="BTC/USDT:USDT", side="buy", order_type="limit",
+              amount=0.01, price=63000.0, status="open"),
+        Order(id="oco1", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.01, price=62000.0, status="open", is_algo=True),
+        Order(id="oco1", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.01, price=66000.0, status="open", is_algo=True),
+    ])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64000.0, bid=63999.5, ask=64000.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    outputs.append(await get_open_orders(deps))
+
+    hits = _scan("\n".join(outputs))
+    assert hits == [], f"get_open_orders emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_trade_journal_fact_only():
+    """Early return path when no db_engine — covers degraded-state output."""
+    from src.agent.tools_perception import get_trade_journal
+    deps = MockDeps()  # db_engine=None by default
+    output = await get_trade_journal(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_trade_journal emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_memories_fact_only():
+    """deps.memory.format_for_prompt() returns rendered string."""
+    from src.agent.tools_perception import get_memories
+    deps = MockDeps()
+    deps.memory.format_for_prompt = AsyncMock(return_value="No memories yet.")
+    output = await get_memories(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_memories emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_active_alerts_fact_only(mocker):
+    """Volatility config + price level alerts rendering."""
+    from src.agent.tools_perception import get_active_alerts
+    deps = MockDeps()
+    outputs = []
+
+    # Scenario 1: alerts OFF + no price levels
+    deps.exchange.get_alert_params = mocker.Mock(return_value=None)
+    deps.exchange.get_price_level_alerts = mocker.Mock(return_value=[])
+    outputs.append(await get_active_alerts(deps))
+
+    # Scenario 2: alerts ON + 2 price levels
+    deps.exchange.get_alert_params = mocker.Mock(return_value=(1.5, 30))
+    deps.exchange.get_price_level_alerts = mocker.Mock(return_value=[
+        {"direction": "above", "price": 65000.0, "reasoning": "test"},
+        {"direction": "below", "price": 62000.0, "reasoning": "test"},
+    ])
+    outputs.append(await get_active_alerts(deps))
+
+    hits = _scan("\n".join(outputs))
+    assert hits == [], f"get_active_alerts emitted banned words: {hits}"
+
+
+@pytest.mark.asyncio
+async def test_get_performance_fact_only():
+    """metrics=None early-return path covers minimal rendering."""
+    from src.agent.tools_perception import get_performance
+    deps = MockDeps()  # metrics=None by default
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10100.0, free_usdt=9000.0, used_usdt=1100.0,
+    ))
+    output = await get_performance(deps)
+    hits = _scan(output)
+    assert hits == [], f"get_performance emitted banned words: {hits}"
