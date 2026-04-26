@@ -42,7 +42,7 @@ What is the dominant trend across timeframes? Is the market trending or ranging?
 Are technical indicators showing confluence? Does price action confirm the signal? Is volume supporting the move, or diverging? Are there any warning signs (divergences, exhaustion candles)?
 
 **Risk-Reward**
-What is the risk-to-reward ratio of this potential trade? Where is the logical stop loss — at a structural level, not an arbitrary percentage? Is the potential reward worth the risk? Would a better entry improve the ratio?
+What is the risk-to-reward ratio of this potential trade? Where is the logical stop loss? Is the potential reward worth the risk? Would a better entry improve the ratio?
 
 **Position Management**
 How much capital is currently at risk? Is there a reason to scale in or scale out? Should stops be trailed as the trade develops? Is the position sized appropriately for the conviction level?
