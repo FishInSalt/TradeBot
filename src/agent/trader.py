@@ -51,14 +51,21 @@ def create_trader_agent(
     # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
     # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
     from src.services.tool_call_recorder import ToolCallRecorder
+    from src.services.model_manager import get_optimal_settings
 
     system_prompt = generate_system_prompt(persona_config)
+    # model-specific 配置由 model_manager.get_optimal_settings() 统一管理，
+    # trader 不感知具体 provider/model 细节，仅按 name 查表。
+    # model 入参可能是 KnownModelName 字符串 (tests) 或 pydantic-ai Model 对象 (prod);
+    # .model_name 是 Model 基类公共属性，缺失即 AttributeError（fail-loud，避免 silent skip）。
+    model_name = model if isinstance(model, str) else model.model_name
     agent = Agent(
         model,
         deps_type=TradingDeps,
         output_type=str,
         instructions=system_prompt,
         capabilities=[ToolCallRecorder()],
+        model_settings=get_optimal_settings(model_name),
     )
 
     # Iter 5 D: 启用 google docstring 显式声明 + 强制 Args 完整性。

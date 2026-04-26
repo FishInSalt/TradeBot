@@ -18,15 +18,36 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.groq import GroqProvider
+from pydantic_ai.providers.deepseek import DeepSeekProvider
+from pydantic_ai.settings import ModelSettings
 
 logger = logging.getLogger(__name__)
 
+# DeepSeek 用 OpenAI 兼容协议，但 DeepSeekProvider 携带 v3.2+ 必要的 model profile
+# (send_back_thinking_parts='field' / reasoning_content 字段 / tool_choice 兜底)。
 _PROVIDER_MAP: dict[str, tuple[type, type]] = {
     "anthropic": (AnthropicModel, AnthropicProvider),
     "openai": (OpenAIChatModel, OpenAIProvider),
     "google-gla": (GoogleModel, GoogleProvider),
     "groq": (GroqModel, GroqProvider),
+    "deepseek": (OpenAIChatModel, DeepSeekProvider),
 }
+
+# 按具体 model name 枚举最佳 model_settings。同公司不同模型行为差异大
+# (e.g. DeepSeek r1 自动启用 thinking / v4 系需 extra_body 协议透传；
+#  OpenAI o-series 支持 reasoning_effort / GPT-4o 不支持)，故按 model name 而非 provider 索引。
+# 仅列实际启用的模型；新模型按需添加，未知 model 返回空 dict（不强加 thinking）。
+_OPTIMAL_SETTINGS: dict[str, ModelSettings] = {
+    "deepseek-v4-pro": ModelSettings(
+        thinking="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    ),
+}
+
+
+def get_optimal_settings(model_name: str) -> ModelSettings:
+    """返回 model 对应的最佳 model_settings；未列入表的返回空 ModelSettings。"""
+    return _OPTIMAL_SETTINGS.get(model_name, ModelSettings())
 
 
 @dataclass
