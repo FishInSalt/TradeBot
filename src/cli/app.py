@@ -16,6 +16,8 @@ from pydantic_ai.messages import (
     ModelRequest, ModelResponse,
     ToolCallPart, ToolReturnPart,
 )
+from pydantic_ai.usage import UsageLimits
+from pydantic_ai.exceptions import UsageLimitExceeded
 from src.cli.display import (
     display_metrics, format_cycle_output,
     is_tool_error, resolve_tool_display,
@@ -32,6 +34,15 @@ from src.integrations.exchange.base import FillEvent, PriceLevelAlertInfo
 from src.cli.wizard import WizardResult
 
 logger = logging.getLogger(__name__)
+
+# Iter 5 §3.1: 单 cycle 防爆裂兜底；非业务 throttle。
+# 正常 cycle ~10 tool calls / ~5 LLM requests，阈值留 5x buffer。
+# 观察期 W1 末校准（实测中位数 + safety buffer）。
+USAGE_LIMITS_PER_CYCLE = UsageLimits(
+    request_limit=50,            # = pydantic-ai default，显式传防 1.79+ 默认变化
+    tool_calls_limit=50,
+    total_tokens_limit=300_000,  # 单 cycle 上限；外层 daily TokenBudget 是日累积
+)
 
 
 class TokenBudget:
@@ -140,7 +151,11 @@ async def run_agent_cycle(
     result = None
     for attempt in range(3):
         try:
-            result = await agent.run(prompt, **run_kwargs)
+            result = await agent.run(
+                prompt,
+                usage_limits=USAGE_LIMITS_PER_CYCLE,
+                **run_kwargs,
+            )
             break
         except Exception as e:
             if attempt < 2:
