@@ -61,7 +61,6 @@ def test_prompt_contains_anti_overtrading():
     assert "does not need intervention" in prompt_lower
 
 
-
 def test_prompt_contains_layer2_thinking_framework():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
