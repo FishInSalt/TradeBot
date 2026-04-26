@@ -3,20 +3,24 @@ from src.config import PersonaConfig
 
 
 def test_prompt_contains_layer1_identity():
+    """Layer 1 keyword presence — scope limited to Layer 1 only (intent clarity).
+    After Iter 4 slim-down Layer 1 only contains: market context (perpetual / one-way)
+    + 5 cross-tool bullets (fill / woken trigger responses). timeframe / memory
+    coverage moves to Layer 2 tests; tool keywords (set_next_wake, save_memory etc.)
+    live in docstrings (separate from system prompt).
+    """
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
-    prompt_lower = prompt.lower()
-    # Market context
-    assert "perpetual" in prompt_lower
-    assert "one-way" in prompt_lower or "single direction" in prompt_lower or "close position first" in prompt_lower
-    # Fill timing
-    assert "fill" in prompt_lower
-    # Multi-timeframe (P0)
-    assert "timeframe" in prompt_lower
-    # Memory
-    assert "save_memory" in prompt_lower or "memory" in prompt_lower
-    # Dynamic wake
-    assert "set_next_wake" in prompt_lower or "wake" in prompt_lower
+    assert "## How to Think" in prompt, \
+        "Layer 2 header changed; update split key in this test"
+    layer1 = prompt.split("## How to Think")[0].lower()
+    # Market context (preserved from old L22)
+    assert "perpetual" in layer1
+    assert "one-way" in layer1 or "single direction" in layer1 or "close position first" in layer1
+    # Fill bullets (L26 / L27 / L28) preserved
+    assert "fill" in layer1
+    # Trigger response keyword: "woken" appears in L27/L28/L34 (trigger response bullets)
+    assert "woken" in layer1
 
 
 def test_prompt_contains_fill_response_guidance():
@@ -42,11 +46,11 @@ def test_prompt_contains_alert_response_guidance():
 
 
 def test_prompt_contains_memory_quality_guidance():
+    """L28 retained-bullet guard: 'Save actionable lessons to memory.' (spec §2.1)."""
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
     prompt_lower = prompt.lower()
     assert "actionable" in prompt_lower
-    assert "not worth saving" in prompt_lower or "not worth" in prompt_lower
 
 
 def test_prompt_contains_anti_overtrading():
@@ -56,27 +60,6 @@ def test_prompt_contains_anti_overtrading():
     assert "according to plan" in prompt_lower
     assert "does not need intervention" in prompt_lower
 
-
-def test_prompt_contains_missing_tool_guidance():
-    from src.agent.persona import generate_system_prompt
-    prompt = generate_system_prompt(PersonaConfig())
-    prompt_lower = prompt.lower()
-    # get_performance / get_trade_journal
-    assert "get_performance" in prompt_lower or "performance" in prompt_lower
-    assert "get_trade_journal" in prompt_lower or "trade_journal" in prompt_lower
-    # cancel_order
-    assert "cancel_order" in prompt_lower or "cancel" in prompt_lower
-    # set_price_alert / get_active_alerts
-    assert "set_price_alert" in prompt_lower or "volatility alert" in prompt_lower
-    assert "get_active_alerts" in prompt_lower
-
-
-def test_prompt_set_next_wake_one_shot():
-    from src.agent.persona import generate_system_prompt
-    prompt = generate_system_prompt(PersonaConfig())
-    prompt_lower = prompt.lower()
-    assert "one-shot" in prompt_lower or "one shot" in prompt_lower
-    assert "revert" in prompt_lower or "default" in prompt_lower
 
 
 def test_prompt_contains_layer2_thinking_framework():
@@ -261,9 +244,9 @@ def test_prompt_minimum_length():
     assert len(prompt) > 500
 
 
-def test_layer1_bullet_count_25():
-    """Layer 1 bullet count drift guard (Iter 3: 24 → 25). Bullets are markdown
-    rows starting with '\n- **' — matches `_build_layer1`'s tools-section format.
+def test_layer1_bullet_count_5():
+    """Layer 1 bullet count drift guard (Iter 4: 25 → 5 — cross-tool behavior only).
+    Bullets are markdown rows starting with '\n- **' — matches `_build_layer1`'s format.
     """
     from src.agent.persona import generate_system_prompt
     config = PersonaConfig()
@@ -273,19 +256,52 @@ def test_layer1_bullet_count_25():
         "Layer 2 header changed; update split key in this test"
     layer1 = prompt.split("## How to Think")[0]
     bullet_count = layer1.count("\n- **")
-    assert bullet_count == 25, f"Expected 25 Layer 1 bullets, got {bullet_count}"
+    assert bullet_count == 5, f"Expected 5 Layer 1 bullets, got {bullet_count}"
 
 
-def test_layer1_includes_get_price_pivots():
-    """Iter 3 Layer 1 bullet describes get_price_pivots with key terminology
-    (fractal / structural / above / below)."""
+def test_layer1_no_tool_invocation_descriptions():
+    """After Iter 4, Layer 1 should not contain tool-name invocation patterns —
+    tool descriptions belong in docstrings (DRY). The 5 retained bullets describe
+    cross-tool behavior, not single-tool invocation.
+    """
+    import re
     from src.agent.persona import generate_system_prompt
-    config = PersonaConfig()
-    prompt = generate_system_prompt(config)
-    assert "get_price_pivots" in prompt
+    prompt = generate_system_prompt(PersonaConfig())
     assert "## How to Think" in prompt, \
         "Layer 2 header changed; update split key in this test"
     layer1 = prompt.split("## How to Think")[0]
-    for keyword in ("fractal", "structural", "above", "below"):
-        assert keyword in layer1.lower(), \
-            f"Layer 1 bullet missing keyword '{keyword}'"
+    # Pattern: "Use get_<tool_name>" or "Use set_<tool_name>" etc. — typical bullet style
+    # for tool-invocation descriptions (matches L29-L50 deleted bullets).
+    forbidden = re.findall(r"\bUse (get|set|add|cancel|place|save)_\w+", layer1)
+    assert forbidden == [], \
+        f"Layer 1 should not invoke tools by name (found: {forbidden}); move to docstrings."
+
+
+def test_prompt_l27_softened():
+    """L27 Open fill response softening (spec §3.2): hard-rule wording removed.
+    Old phrases ('check the chart', 'do not skip', 'arbitrary ones') deleted;
+    softened wording ('use market data') retained.
+    """
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig()).lower()
+    # Hard-rule wording must NOT be present
+    assert "do not skip market data" not in prompt
+    assert "structural support/resistance" not in prompt
+    assert "arbitrary ones" not in prompt
+    # Softened wording must be present
+    assert "use market data" in prompt
+
+
+def test_prompt_l65_softened():
+    """L65 Layer 2 Risk-Reward single-direction sub-clause removed (spec §3.3).
+    The clause '— at a structural level, not an arbitrary percentage' was
+    deleted because it imposes a one-way decision rule on stop-loss placement.
+    The open question 'Where is the logical stop loss?' is preserved.
+    """
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig()).lower()
+    # Single-direction wording must NOT be present
+    assert "arbitrary percentage" not in prompt
+    assert "at a structural level" not in prompt
+    # Open question preserved
+    assert "where is the logical stop loss" in prompt
