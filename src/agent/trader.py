@@ -82,14 +82,24 @@ def create_trader_agent(
 
     @agent.tool
     async def get_account_balance(ctx: RunContext[TradingDeps]) -> str:
-        """Get account balance with return on initial capital."""
+        """Get account balance with return on initial capital.
+
+        Output reports total equity, free margin, used margin, and percentage
+        return on initial capital — useful for sizing decisions and risk checks.
+        """
         from src.agent.tools_perception import get_account_balance as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
-        """Get all pending orders with distance from current price."""
+        """Get all pending orders with distance from current price.
+
+        Lists limit orders, stop loss, and take profit orders, each with their
+        price level and distance from current. OCO-paired orders (sharing an
+        algoId on OKX) render with `[OCO]` tag. Useful before placing new
+        orders or when reviewing exposure.
+        """
         from src.agent.tools_perception import get_open_orders as _impl
 
         return await _impl(ctx.deps)
@@ -296,35 +306,83 @@ def create_trader_agent(
         leverage: int,
         reasoning: str,
     ) -> str:
-        """Open a new position. side='long' or 'short'. position_pct=% of free balance. Always provide reasoning."""
+        """Open a new market-order position.
+
+        Position fills via market order; you will receive a fill notification
+        when execution completes. Set stop loss and take profit only after the
+        fill notification arrives (separate trigger, not in the same cycle).
+
+        Args:
+            side: 'long' or 'short'.
+            position_pct: percent of free balance to allocate (0-100).
+            leverage: leverage multiplier (cannot be changed while holding position).
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import open_position as _impl
 
         return await _impl(ctx.deps, side, position_pct, leverage, reasoning=reasoning)
 
     @agent.tool
     async def close_position(ctx: RunContext[TradingDeps], reasoning: str) -> str:
-        """Close all open positions. Always provide reasoning."""
+        """Close all open positions via market order.
+
+        Position closure fills via market order; you will receive a fill
+        notification when execution completes (separate trigger).
+
+        Args:
+            reasoning: brief description of your decision logic (e.g., 'TP target hit', 'thesis invalidated').
+        """
         from src.agent.tools_execution import close_position as _impl
 
         return await _impl(ctx.deps, reasoning=reasoning)
 
     @agent.tool
     async def set_stop_loss(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
-        """Set stop loss on current position. Auto-cancels existing stop orders. Always provide reasoning."""
+        """Set stop loss on the current position.
+
+        Auto-cancels any existing stop orders before placing the new one.
+        On OKX, stop and take_profit orders sharing an algoId render as `[OCO]`
+        in get_open_orders and are atomic — cancelling or triggering one leg
+        removes both. To replace only one leg, re-create the other leg
+        immediately after.
+
+        Args:
+            price: trigger price for the stop loss.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_stop_loss as _impl
 
         return await _impl(ctx.deps, price, reasoning=reasoning)
 
     @agent.tool
     async def set_take_profit(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
-        """Set take profit on current position. Auto-cancels existing TP orders. Always provide reasoning."""
+        """Set take profit on the current position.
+
+        Auto-cancels any existing take_profit orders before placing the new one.
+        On OKX, stop and take_profit orders sharing an algoId render as `[OCO]`
+        in get_open_orders and are atomic — cancelling or triggering one leg
+        removes both. To replace only one leg, re-create the other leg
+        immediately after.
+
+        Args:
+            price: trigger price for the take profit.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import set_take_profit as _impl
 
         return await _impl(ctx.deps, price, reasoning=reasoning)
 
     @agent.tool
     async def adjust_leverage(ctx: RunContext[TradingDeps], leverage: int, reasoning: str) -> str:
-        """Adjust leverage. Always provide reasoning."""
+        """Adjust leverage multiplier.
+
+        Cannot be changed while holding a position — close first, then adjust.
+        Higher leverage amplifies both gains and losses, including liquidation risk.
+
+        Args:
+            leverage: new leverage multiplier.
+            reasoning: brief description of your decision logic.
+        """
         from src.agent.tools_execution import adjust_leverage as _impl
 
         return await _impl(ctx.deps, leverage, reasoning=reasoning)
