@@ -157,6 +157,23 @@ async def run_agent_cycle(
                 **run_kwargs,
             )
             break
+        except UsageLimitExceeded as e:
+            # 病理状态（LLM 死循环 / runaway tools），不重试，写 forensic trace。
+            # 注：ToolCallRecorder capability 已在 agent.run 内部独立 session 写完
+            # 任何已成功 tool 调用的 tool_calls 行（不需要本路径协调 rollback）。
+            logger.error(f"Cycle {cycle_id} hit usage limit: {e}")
+            async with get_session(engine) as session:
+                session.add(DecisionLog(
+                    session_id=deps.session_id,
+                    cycle_id=cycle_id,
+                    trigger_type=trigger_type,
+                    decision="usage_limit_exceeded",
+                    reasoning=str(e)[:500],
+                    model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
+                    tokens_used=0,  # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
+                ))
+                await session.commit()
+            return None
         except Exception as e:
             if attempt < 2:
                 delay = 2 ** attempt
