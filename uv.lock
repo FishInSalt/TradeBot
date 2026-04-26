@@ -3142,7 +3142,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.0" },
     { name = "pandas-ta", specifier = ">=0.3" },
     { name = "pydantic", specifier = ">=2.0" },
-    { name = "pydantic-ai", specifier = ">=1.0" },
+    { name = "pydantic-ai", specifier = ">=1.78,<2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.14" },

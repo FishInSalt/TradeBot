@@ -9,9 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
 from src.agent.persona import generate_system_prompt
+from src.cli.approval import ApprovalGate
 from src.config import PersonaConfig
+from src.integrations.crypto_etf.service import CryptoEtfService
 from src.integrations.exchange.base import BaseExchange
+from src.integrations.macro.service import MacroService
 from src.integrations.market_data import MarketDataService
+from src.integrations.news.service import NewsService
+from src.integrations.onchain.service import OnchainService
+from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 
 
@@ -25,17 +31,17 @@ class TradingDeps:
     memory: MemoryService
     session_id: str  # UUID from sessions table, must be explicitly set
     db_engine: AsyncEngine | None = None
-    approval_gate: object | None = None  # ApprovalGate instance
+    approval_gate: ApprovalGate | None = None
     approval_enabled: bool = True
     wake_min_minutes: int = 1
     wake_max_minutes: int = 60
     set_next_wake_fn: Callable[[int], None] | None = None
     initial_balance: float = 10000.0
-    metrics: object | None = None  # MetricsService, typed as object to avoid circular import
-    news: object | None = None  # NewsService, typed as object to avoid circular import
-    macro: object | None = None  # MacroService; typed as object to avoid circular import
-    crypto_etf: object | None = None  # CryptoEtfService; typed as object to avoid circular import
-    onchain: object | None = None  # OnchainService; typed as object to avoid circular import
+    metrics: MetricsService | None = None
+    news: NewsService | None = None
+    macro: MacroService | None = None
+    crypto_etf: CryptoEtfService | None = None
+    onchain: OnchainService | None = None
     cycle_id: str | None = None  # Mutated by run_agent_cycle before agent.run(); see §3.3 of spec
 
 
@@ -44,6 +50,7 @@ def create_trader_agent(
 ) -> Agent[TradingDeps, str]:
     # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
     # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
+    from functools import partial
     from src.services.tool_call_recorder import ToolCallRecorder
 
     system_prompt = generate_system_prompt(persona_config)
@@ -55,9 +62,13 @@ def create_trader_agent(
         capabilities=[ToolCallRecorder()],
     )
 
+    # Iter 5 D: 启用 google docstring 显式声明 + 强制 Args 完整性。
+    # require_parameter_descriptions=True 在 tool 加载时校验，缺 Args 立即 startup fail。
+    tool = partial(agent.tool, docstring_format="google", require_parameter_descriptions=True)
+
     # === Perception Tools ===
 
-    @agent.tool
+    @tool
     async def get_market_data(
         ctx: RunContext[TradingDeps],
         symbol: str | None = None,
@@ -83,7 +94,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, symbol, timeframe, candle_count)
 
-    @agent.tool
+    @tool
     async def get_position(ctx: RunContext[TradingDeps], symbol: str | None = None) -> str:
         """Get current position details with risk exposure context.
 
@@ -100,7 +111,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, symbol)
 
-    @agent.tool
+    @tool
     async def get_account_balance(ctx: RunContext[TradingDeps]) -> str:
         """Get account balance with return on initial capital.
 
@@ -111,7 +122,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
         """Get all pending orders with distance from current price.
 
@@ -124,7 +135,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_trade_journal(ctx: RunContext[TradingDeps]) -> str:
         """Get the trade journal — decision timeline with quick stats summary.
 
@@ -135,7 +146,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_memories(ctx: RunContext[TradingDeps]) -> str:
         """Get long-term memories (lessons, patterns, trade reviews).
 
@@ -146,7 +157,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_active_alerts(ctx: RunContext[TradingDeps]) -> str:
         """Get current alert configuration.
 
@@ -158,7 +169,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
         """Get quantitative trading performance statistics.
 
@@ -171,7 +182,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_market_news(
         ctx: RunContext[TradingDeps],
         news_filter: Literal["positive", "negative", "neutral"] | None = None,
@@ -190,7 +201,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, news_filter)
 
-    @agent.tool
+    @tool
     async def get_exchange_announcements(
         ctx: RunContext[TradingDeps],
         lookback_hours: int = 24,
@@ -207,7 +218,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, lookback_hours)
 
-    @agent.tool
+    @tool
     async def get_macro_calendar(
         ctx: RunContext[TradingDeps],
         lookahead_hours: int = 12,
@@ -226,7 +237,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, lookahead_hours)
 
-    @agent.tool
+    @tool
     async def get_derivatives_data(
         ctx: RunContext[TradingDeps],
         symbol: str | None = None,
@@ -245,7 +256,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, symbol)
 
-    @agent.tool
+    @tool
     async def get_higher_timeframe_view(
         ctx: RunContext[TradingDeps],
         timeframe: Literal["4h", "1d", "1w", "1M"],
@@ -264,7 +275,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, timeframe)
 
-    @agent.tool
+    @tool
     async def get_macro_context(ctx: RunContext[TradingDeps]) -> str:
         """Get cross-market macro snapshot.
 
@@ -281,7 +292,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_etf_flows(ctx: RunContext[TradingDeps], days: int = 7) -> str:
         """Get US BTC + ETH spot ETF daily net flows + cumulative AUM.
 
@@ -294,7 +305,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, days)
 
-    @agent.tool
+    @tool
     async def get_stablecoin_supply(ctx: RunContext[TradingDeps]) -> str:
         """Get USDT + USDC current total supply and 7-day changes.
 
@@ -304,7 +315,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps)
 
-    @agent.tool
+    @tool
     async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 20) -> str:
         """Return top-N order book depth with concentrated-level breakdown.
 
@@ -323,7 +334,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, depth=depth)
 
-    @agent.tool
+    @tool
     async def get_recent_trades(ctx: RunContext[TradingDeps], window_seconds: int = 300) -> str:
         """Read taker-flow bias and rhythm over recent minutes.
 
@@ -337,7 +348,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, window_seconds=window_seconds)
 
-    @agent.tool
+    @tool
     async def get_multi_timeframe_snapshot(ctx: RunContext[TradingDeps], tfs: list[str] | None = None) -> str:
         """Scan multi-TF alignment in a single call (default 5m/1h/4h/1d).
 
@@ -352,7 +363,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, tfs=tfs)
 
-    @agent.tool
+    @tool
     async def get_price_pivots(ctx: RunContext[TradingDeps]) -> str:
         """Scan structural price levels.
 
@@ -366,7 +377,7 @@ def create_trader_agent(
 
     # === Execution Tools ===
 
-    @agent.tool
+    @tool
     async def open_position(
         ctx: RunContext[TradingDeps],
         side: str,
@@ -390,7 +401,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, side, position_pct, leverage, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def close_position(ctx: RunContext[TradingDeps], reasoning: str) -> str:
         """Close all open positions via market order.
 
@@ -404,7 +415,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def set_stop_loss(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
         """Set stop loss on the current position.
 
@@ -422,7 +433,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, price, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def set_take_profit(ctx: RunContext[TradingDeps], price: float, reasoning: str) -> str:
         """Set take profit on the current position.
 
@@ -440,7 +451,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, price, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def adjust_leverage(ctx: RunContext[TradingDeps], leverage: int, reasoning: str) -> str:
         """Adjust leverage multiplier.
 
@@ -455,7 +466,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, leverage, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def set_price_alert(
         ctx: RunContext[TradingDeps],
         threshold_pct: float,
@@ -477,7 +488,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def cancel_order(ctx: RunContext[TradingDeps], order_id: str, reasoning: str) -> str:
         """Cancel a pending order (limit, stop loss, or take profit).
 
@@ -493,7 +504,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, order_id, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def add_price_level_alert(
         ctx: RunContext[TradingDeps],
         price: float,
@@ -515,7 +526,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, price, direction, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def set_next_wake(
         ctx: RunContext[TradingDeps],
         minutes: int,
@@ -535,7 +546,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
-    @agent.tool
+    @tool
     async def place_limit_order(
         ctx: RunContext[TradingDeps],
         side: str,
@@ -562,7 +573,7 @@ def create_trader_agent(
 
     # === Memory Tools ===
 
-    @agent.tool
+    @tool
     async def save_memory(
         ctx: RunContext[TradingDeps], category: str, content: str, importance: float = 0.5
     ) -> str:

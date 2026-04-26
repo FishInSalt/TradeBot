@@ -121,3 +121,76 @@ def test_tool_call_recorder_wraps_iter2_tools():
         assert name in registered, (
             f"Iter 2 tool '{name}' not registered — ToolCallRecorder cannot wrap it"
         )
+
+
+def test_trading_deps_no_object_typed_service_fields():
+    """T8 drift guard: TradingDeps 6 个 service 字段不能用 object | None。
+
+    限定保护这 6 个特定字段（硬编码列表）；未来加新 deps 字段不会被本测试
+    覆盖——是有意的窄化，避免误伤合法 Callable / object 用法。
+    """
+    from typing import get_args, get_type_hints
+    from src.agent.trader import TradingDeps
+
+    expected_typed_fields = {
+        "approval_gate", "metrics", "news",
+        "macro", "crypto_etf", "onchain",
+    }
+    hints = get_type_hints(TradingDeps)
+    for field_name in expected_typed_fields:
+        hint = hints[field_name]
+        args = get_args(hint)
+        assert object not in args, (
+            f"{field_name} still typed with `object` in {args}; "
+            f"should be tightened to real service class | None"
+        )
+
+
+def test_all_tools_use_google_docstring_format():
+    """T5: 31 个工具全部 docstring_format='google'。
+
+    实测 1.78 toolset 私有 API 可读 Tool.docstring_format 字段。
+    若 1.79+ 改名见 spec §6.3 fallback。
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    for name, tool in agent._function_toolset.tools.items():
+        assert tool.docstring_format == "google", (
+            f"Tool {name} docstring_format = {tool.docstring_format!r}, expected 'google'"
+        )
+
+
+def test_all_tools_require_parameter_descriptions():
+    """T6: 31 个工具全部 require_parameter_descriptions=True。"""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    for name, tool in agent._function_toolset.tools.items():
+        assert tool.require_parameter_descriptions is True, (
+            f"Tool {name} require_parameter_descriptions = "
+            f"{tool.require_parameter_descriptions!r}, expected True"
+        )
+
+
+def test_missing_args_with_require_descriptions_triggers_fail():
+    """T7: pydantic-ai 1.78 行为契约 — partial(Agent.tool,
+    require_parameter_descriptions=True) 装饰缺 Args 段工具时抛异常。
+
+    本测试**不验证 trader.py 实施**（T5/T6 才是 trader.py drift guard）；
+    本测试锁定 pydantic-ai 版本行为：若 1.79+ 静默放弃 require 校验，本测试 FAIL 提醒。
+    """
+    from functools import partial
+    import pytest as _pytest
+    from pydantic_ai import Agent, RunContext
+
+    agent = Agent("test", deps_type=type(None), output_type=str)
+    tool = partial(agent.tool, docstring_format="google", require_parameter_descriptions=True)
+
+    with _pytest.raises(Exception):
+        @tool
+        async def bad_tool(ctx: RunContext, x: int) -> str:
+            """Missing Args section docstring."""
+            return str(x)
