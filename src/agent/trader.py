@@ -9,9 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
 from src.agent.persona import generate_system_prompt
+from src.cli.approval import ApprovalGate
 from src.config import PersonaConfig
+from src.integrations.crypto_etf.service import CryptoEtfService
 from src.integrations.exchange.base import BaseExchange
+from src.integrations.macro.service import MacroService
 from src.integrations.market_data import MarketDataService
+from src.integrations.news.service import NewsService
+from src.integrations.onchain.service import OnchainService
+from src.services.metrics import MetricsService
 from src.services.technical import TechnicalAnalysisService
 
 
@@ -25,17 +31,17 @@ class TradingDeps:
     memory: MemoryService
     session_id: str  # UUID from sessions table, must be explicitly set
     db_engine: AsyncEngine | None = None
-    approval_gate: object | None = None  # ApprovalGate instance
+    approval_gate: ApprovalGate | None = None
     approval_enabled: bool = True
     wake_min_minutes: int = 1
     wake_max_minutes: int = 60
     set_next_wake_fn: Callable[[int], None] | None = None
     initial_balance: float = 10000.0
-    metrics: object | None = None  # MetricsService, typed as object to avoid circular import
-    news: object | None = None  # NewsService, typed as object to avoid circular import
-    macro: object | None = None  # MacroService; typed as object to avoid circular import
-    crypto_etf: object | None = None  # CryptoEtfService; typed as object to avoid circular import
-    onchain: object | None = None  # OnchainService; typed as object to avoid circular import
+    metrics: MetricsService | None = None
+    news: NewsService | None = None
+    macro: MacroService | None = None
+    crypto_etf: CryptoEtfService | None = None
+    onchain: OnchainService | None = None
     cycle_id: str | None = None  # Mutated by run_agent_cycle before agent.run(); see §3.3 of spec
 
 

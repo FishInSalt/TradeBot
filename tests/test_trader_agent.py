@@ -121,3 +121,26 @@ def test_tool_call_recorder_wraps_iter2_tools():
         assert name in registered, (
             f"Iter 2 tool '{name}' not registered — ToolCallRecorder cannot wrap it"
         )
+
+
+def test_trading_deps_no_object_typed_service_fields():
+    """T8 drift guard: TradingDeps 6 个 service 字段不能用 object | None。
+
+    限定保护这 6 个特定字段（硬编码列表）；未来加新 deps 字段不会被本测试
+    覆盖——是有意的窄化，避免误伤合法 Callable / object 用法。
+    """
+    from typing import get_args, get_type_hints
+    from src.agent.trader import TradingDeps
+
+    expected_typed_fields = {
+        "approval_gate", "metrics", "news",
+        "macro", "crypto_etf", "onchain",
+    }
+    hints = get_type_hints(TradingDeps)
+    for field_name in expected_typed_fields:
+        hint = hints[field_name]
+        args = get_args(hint)
+        assert object not in args, (
+            f"{field_name} still typed with `object` in {args}; "
+            f"should be tightened to real service class | None"
+        )
