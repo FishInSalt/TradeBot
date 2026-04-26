@@ -144,3 +144,32 @@ def test_trading_deps_no_object_typed_service_fields():
             f"{field_name} still typed with `object` in {args}; "
             f"should be tightened to real service class | None"
         )
+
+
+def test_all_tools_use_google_docstring_format():
+    """T5: 31 个工具全部 docstring_format='google'。
+
+    实测 1.78 toolset 私有 API 可读 Tool.docstring_format 字段。
+    若 1.79+ 改名见 spec §6.3 fallback。
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    for name, tool in agent._function_toolset.tools.items():
+        assert tool.docstring_format == "google", (
+            f"Tool {name} docstring_format = {tool.docstring_format!r}, expected 'google'"
+        )
+
+
+def test_all_tools_require_parameter_descriptions():
+    """T6: 31 个工具全部 require_parameter_descriptions=True。"""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    for name, tool in agent._function_toolset.tools.items():
+        assert tool.require_parameter_descriptions is True, (
+            f"Tool {name} require_parameter_descriptions = "
+            f"{tool.require_parameter_descriptions!r}, expected True"
+        )
