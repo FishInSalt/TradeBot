@@ -173,3 +173,24 @@ def test_all_tools_require_parameter_descriptions():
             f"Tool {name} require_parameter_descriptions = "
             f"{tool.require_parameter_descriptions!r}, expected True"
         )
+
+
+def test_missing_args_with_require_descriptions_triggers_fail():
+    """T7: pydantic-ai 1.78 行为契约 — partial(Agent.tool,
+    require_parameter_descriptions=True) 装饰缺 Args 段工具时抛异常。
+
+    本测试**不验证 trader.py 实施**（T5/T6 才是 trader.py drift guard）；
+    本测试锁定 pydantic-ai 版本行为：若 1.79+ 静默放弃 require 校验，本测试 FAIL 提醒。
+    """
+    from functools import partial
+    import pytest as _pytest
+    from pydantic_ai import Agent, RunContext
+
+    agent = Agent("test", deps_type=type(None), output_type=str)
+    tool = partial(agent.tool, docstring_format="google", require_parameter_descriptions=True)
+
+    with _pytest.raises(Exception):
+        @tool
+        async def bad_tool(ctx: RunContext, x: int) -> str:
+            """Missing Args section docstring."""
+            return str(x)
