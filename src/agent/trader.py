@@ -126,28 +126,47 @@ def create_trader_agent(
 
     @agent.tool
     async def get_trade_journal(ctx: RunContext[TradingDeps]) -> str:
-        """Get trade journal — decision timeline with quick stats summary. Use for reviewing recent decisions and their outcomes."""
+        """Get the trade journal — decision timeline with quick stats summary.
+
+        Use for reviewing recent decisions and their outcomes — pair with
+        get_performance for the quantitative view of the same period.
+        """
         from src.agent.tools_perception import get_trade_journal as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_memories(ctx: RunContext[TradingDeps]) -> str:
-        """Get long-term memories (lessons, patterns, trade reviews)."""
+        """Get long-term memories (lessons, patterns, trade reviews).
+
+        Check past memories before making decisions to avoid repeating mistakes
+        and apply pattern recognitions that proved correct previously.
+        """
         from src.agent.tools_perception import get_memories as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_active_alerts(ctx: RunContext[TradingDeps]) -> str:
-        """Get current alert configuration: volatility alert params and active price level alerts."""
+        """Get current alert configuration.
+
+        Reports volatility alert parameters (threshold % + time window) and
+        active price level alerts. Useful when reviewing or adjusting your
+        alert setup.
+        """
         from src.agent.tools_perception import get_active_alerts as _impl
 
         return await _impl(ctx.deps)
 
     @agent.tool
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
-        """Get detailed trading performance statistics. Use for reviewing overall results and evaluating strategy effectiveness."""
+        """Get quantitative trading performance statistics.
+
+        Reports return, win rate, drawdown, profit factor, and other
+        quantitative metrics. Use for evaluating strategy effectiveness
+        across the session — pair with get_trade_journal for decision
+        pattern review.
+        """
         from src.agent.tools_perception import get_performance as _impl
 
         return await _impl(ctx.deps)
@@ -289,14 +308,16 @@ def create_trader_agent(
     async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 20) -> str:
         """Return top-N order book depth with concentrated-level breakdown.
 
+        Reports best bid/ask, cumulative depth, bid/ask share, and concentrated
+        levels (size > 3× same-side median). Use to evaluate liquidity, slippage
+        risk, or concentrated levels near current price.
+
         Args:
-            depth: Levels per side to fetch. Default 20.
+            depth: levels per side to fetch (default 20).
 
-        Returns:
-            str: Multi-line fact-only text (best bid/ask + cumulative depth + bid share + concentrated levels).
-
-        Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)" if book is empty/short;
-        "Order book ({symbol}): temporarily unavailable" on service failure.
+        Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)"
+        if book is empty/short; "Order book ({symbol}): temporarily unavailable" on
+        service failure.
         """
         from src.agent.tools_perception import get_order_book as _impl
 
@@ -304,17 +325,13 @@ def create_trader_agent(
 
     @agent.tool
     async def get_recent_trades(ctx: RunContext[TradingDeps], window_seconds: int = 300) -> str:
-        """Return taker-flow bias and rhythm over a recent time window via 5 time-buckets.
+        """Read taker-flow bias and rhythm over recent minutes.
+
+        Default 300s window across 5 × 60s buckets. Total + trade count + avg
+        size shown below buckets.
 
         Args:
-            window_seconds: Observation window in seconds. Default 300 (5 min).
-
-        Returns:
-            str: 5-bucket breakdown + Total + trade count + avg size.
-
-        Degradation: "Recent trades ({symbol}): no trades in last {window_seconds}s" if cold market;
-        "Recent trades ({symbol}): temporarily unavailable" on service failure. Heavy windows
-        may annotate Total with "partial coverage" footnote.
+            window_seconds: total scan window (default 300s).
         """
         from src.agent.tools_perception import get_recent_trades as _impl
 
@@ -322,16 +339,14 @@ def create_trader_agent(
 
     @agent.tool
     async def get_multi_timeframe_snapshot(ctx: RunContext[TradingDeps], tfs: list[str] | None = None) -> str:
-        """Quick multi-timeframe scan: momentum | structure | volatility | range position.
+        """Scan multi-TF alignment in a single call (default 5m/1h/4h/1d).
+
+        Useful for a once-per-cycle structural overview before committing to
+        a direction. Reports 4 columns per TF: momentum / structure / volatility
+        / range position.
 
         Args:
-            tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"]. 1w/1M are supported but non-default.
-
-        Returns:
-            str: 4-column row per TF + Columns header.
-
-        Degradation: per-TF "insufficient data (need N candles, got M)" or "temporarily unavailable";
-        overall "Multi-TF snapshot ({symbol}): temporarily unavailable" only if ALL TFs fail or ticker fetch fails.
+            tfs: list of timeframes; None uses default (5m/1h/4h/1d).
         """
         from src.agent.tools_perception import get_multi_timeframe_snapshot as _impl
 
@@ -339,12 +354,11 @@ def create_trader_agent(
 
     @agent.tool
     async def get_price_pivots(ctx: RunContext[TradingDeps]) -> str:
-        """Show structural support/resistance: last 100 main-TF swing pivots
-        (Williams fractal N=5) + prior daily/weekly/monthly H/L. Fact-only.
-        Returns levels grouped by above/below current price, sorted by
-        absolute distance. Swing rows annotate 'N bars ago'; prior rows
-        label the period (Daily / Weekly / Monthly). See tool implementation
-        for full degradation semantics.
+        """Scan structural price levels.
+
+        Reports swing highs/lows from the last 100 main-TF bars (Williams fractal
+        N=5) plus prior daily/weekly/monthly H/L. Levels are grouped above/below
+        current price with distance % and bars-ago.
         """
         from src.agent.tools_perception import get_price_pivots as _impl
 
