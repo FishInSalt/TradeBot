@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "AI Agent-driven crypto trading bot"
 requires-python = ">=3.12"
 dependencies = [
-    "pydantic-ai>=1.0",
+    "pydantic-ai>=1.78,<2",
     "pydantic>=2.0",
     "ccxt>=4.0",
     "sqlalchemy[asyncio]>=2.0",
