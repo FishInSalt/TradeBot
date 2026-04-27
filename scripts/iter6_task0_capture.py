@@ -73,6 +73,11 @@ SCENARIO_CONFIG = {
         "fixture": "okx_watch_orders_tp_fill.json",
         "description": "open long → set TP @ +0.1% → wait for trigger",
     },
+    "1D": {
+        "name": "market_close_with_reduce_only",
+        "fixture": "okx_watch_orders_market_close_reduce_only.json",
+        "description": "open long → market close with params={'reduceOnly': True} (Remediation A validation)",
+    },
 }
 
 
@@ -103,6 +108,29 @@ def install_capture_hook() -> None:
         return await original_parse(self, order_data)
 
     OKXExchange._parse_fill_event = capturing_parse
+
+
+def install_parse_plain_workaround() -> None:
+    """Workaround for OKX market order create response missing 'amount' field.
+
+    OKX swap market order create response unified data sometimes returns
+    amount=None (size info lives in info.sz instead). _parse_plain (okx.py:481)
+    does float(data["amount"]) → TypeError. Fall back to info.sz or filled.
+
+    UPSTREAM TODO: this should be fixed in src/integrations/exchange/okx.py:481
+    as a defensive fallback (separate PR, not Iter 6 scope).
+    """
+    original = OKXExchange._parse_plain
+
+    def safe_parse_plain(self, data):
+        if data.get("amount") is None:
+            info = data.get("info") or {}
+            sz = info.get("sz") or data.get("filled") or 0
+            data = {**data, "amount": float(sz) if sz else 0.0}
+            print(f"[PATCH] _parse_plain amount=None → fallback to info.sz={sz}")
+        return original(self, data)
+
+    OKXExchange._parse_plain = safe_parse_plain
 
 
 # ============ scenario runners ============
@@ -170,19 +198,50 @@ async def scenario_1A_market_close(ex: OKXExchange) -> bool:
     return len(captured_events) > 0
 
 
-async def scenario_1B_sl_trigger(ex: OKXExchange) -> bool:
-    """1B: open long + only SL @ -0.1% + wait for trigger.
+async def _fetch_mark_price(ex: OKXExchange) -> float:
+    """Fetch OKX mark price via raw public endpoint.
 
-    Expected wall-time: minutes to 4h (depends on price drift).
+    Demo ticker.last drifts up to 1.67% from mark price (verified via
+    iter6_diag_ticker.py); OKX algo trigger validation uses mark price
+    despite the 51280 error message saying "last price". Always compute
+    triggers from mark price.
     """
+    raw = await ex._client.public_get_public_mark_price(
+        {"instType": "SWAP", "instId": "BTC-USDT-SWAP"}
+    )
+    if not raw.get("data"):
+        raise RuntimeError(f"mark price fetch returned empty: {raw}")
+    return float(raw["data"][0]["markPx"])
+
+
+async def _place_algo(ex: OKXExchange, side: str, order_type: str, pct: float):
+    """Place algo order with single attempt at given buffer percentage.
+
+    Trigger computed from mark price (NOT ticker.last) because OKX algo
+    validation uses mark price internally. Buffer 0.6% chosen empirically.
+    """
+    mark = await _fetch_mark_price(ex)
+    ticker = await ex.fetch_ticker(SYMBOL)
+    if order_type == "stop":
+        trigger = mark * (1 - pct)
+    else:  # take_profit
+        trigger = mark * (1 + pct)
+    label = "SL" if order_type == "stop" else "TP"
+    sign = "-" if order_type == "stop" else "+"
+    print(
+        f"[{label}] placing at {trigger:.2f} "
+        f"(mark={mark:.2f}, ticker.last={ticker.last:.2f}, drift={(ticker.last-mark)/mark*100:+.2f}%, "
+        f"{sign}{pct*100:.2f}% from mark)..."
+    )
+    return await ex.create_order(SYMBOL, side, order_type, NOTIONAL_BTC, price=trigger)
+
+
+async def scenario_1B_sl_trigger(ex: OKXExchange) -> bool:
+    """1B: open long + only SL @ -0.1% from mark + wait for trigger."""
     await _ensure_no_position(ex)
     await _open_long(ex)
 
-    # Get current price for SL placement
-    ticker = await ex.fetch_ticker(SYMBOL)
-    sl_trigger = ticker.last * 0.999
-    print(f"[SL] placing stop loss at {sl_trigger:.2f} (current={ticker.last:.2f}, -0.1%)...")
-    sl_order = await ex.create_order(SYMBOL, "sell", "stop", NOTIONAL_BTC, price=sl_trigger)
+    sl_order = await _place_algo(ex, "sell", "stop", 0.001)
     print(f"[SL] algo order submitted: id={sl_order.id} is_algo={sl_order.is_algo}")
 
     captured_events.clear()  # reset before wait so we only capture the SL fill
@@ -208,18 +267,43 @@ async def scenario_1B_sl_trigger(ex: OKXExchange) -> bool:
     return len(captured_events) > 0
 
 
-async def scenario_1C_tp_trigger(ex: OKXExchange) -> bool:
-    """1C: open long + only TP @ +0.1% + wait for trigger.
+async def scenario_1D_market_close_with_reduce_only(ex: OKXExchange) -> bool:
+    """1D: open long + market close with params={'reduceOnly': True}.
 
-    Expected wall-time: minutes to 4h (depends on price drift).
+    Validates Remediation A hypothesis: does OKX echo info.reduceOnly=true
+    in the fill event when the close order was submitted with reduceOnly param?
+
+    If yes → Remediation A works (signal 1 fires for market close path).
+    If no  → Remediation A insufficient → must use Remediation B (cache).
+
+    Bypasses OKXExchange.create_order (which hardcodes params={"tdMode":"isolated"})
+    by calling ex._client.create_order directly with merged params.
     """
     await _ensure_no_position(ex)
     await _open_long(ex)
 
-    ticker = await ex.fetch_ticker(SYMBOL)
-    tp_trigger = ticker.last * 1.001
-    print(f"[TP] placing take profit at {tp_trigger:.2f} (current={ticker.last:.2f}, +0.1%)...")
-    tp_order = await ex.create_order(SYMBOL, "sell", "take_profit", NOTIONAL_BTC, price=tp_trigger)
+    captured_events.clear()  # only capture the close fill
+    print("[CLOSE] placing market sell with params={'reduceOnly': True}...")
+    data = await ex._client.create_order(
+        SYMBOL, "market", "sell", NOTIONAL_BTC,
+        params={"tdMode": "isolated", "reduceOnly": True},
+    )
+    print(f"[CLOSE] order submitted: id={data.get('id')}")
+
+    closed = await _wait_position_gone(ex, timeout_sec=60)
+    if not closed:
+        print("[ERROR] position not closed within 60s")
+        return False
+    await asyncio.sleep(3)
+    return len(captured_events) > 0
+
+
+async def scenario_1C_tp_trigger(ex: OKXExchange) -> bool:
+    """1C: open long + only TP @ +0.1% from mark + wait for trigger."""
+    await _ensure_no_position(ex)
+    await _open_long(ex)
+
+    tp_order = await _place_algo(ex, "sell", "take_profit", 0.001)
     print(f"[TP] algo order submitted: id={tp_order.id} is_algo={tp_order.is_algo}")
 
     captured_events.clear()
@@ -251,6 +335,7 @@ SCENARIO_RUNNERS = {
     "1A": scenario_1A_market_close,
     "1B": scenario_1B_sl_trigger,
     "1C": scenario_1C_tp_trigger,
+    "1D": scenario_1D_market_close_with_reduce_only,
 }
 
 
@@ -300,7 +385,7 @@ async def run_scenario(scenario: str, ex: OKXExchange) -> int:
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Iter 6 Task 0 OKX capture")
     parser.add_argument(
-        "--scenario", choices=["1A", "1B", "1C", "all"], required=True,
+        "--scenario", choices=["1A", "1B", "1C", "1D", "all"], required=True,
         help="Which scenario to run",
     )
     args = parser.parse_args()
@@ -312,6 +397,8 @@ async def main() -> int:
 
     install_capture_hook()
     print(f"[INIT] capture hook installed on OKXExchange._parse_fill_event")
+    install_parse_plain_workaround()
+    print(f"[INIT] _parse_plain amount=None workaround installed (upstream TODO)")
 
     ex = OKXExchange(
         api_key=os.environ["OKX_DEMO_API_KEY"],

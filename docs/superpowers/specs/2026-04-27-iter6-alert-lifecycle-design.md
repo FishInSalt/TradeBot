@@ -270,7 +270,7 @@ async def _parse_fill_event(self, order_data: dict) -> FillEvent:
     )
 
 def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bool:
-    """OKX 平仓判定：三源融合，任一命中即认 close。
+    """OKX 平仓判定：四源融合，任一命中即认 close。
 
     NOTE: 当前项目 convention 下 ALL CLOSE FILLS ARE FULL CLOSE
     (close_position / set_stop_loss / set_take_profit 都传 amount=pos.contracts)。
@@ -281,15 +281,20 @@ def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bo
     导致 alert 被全清而仓位仍存在)。届时需改为基于 fetch_positions /
     in-memory position cache 的精确判定（见 §6.3）。
     """
-    # 信号 1: reduceOnly 显式（OKX 强信号，最可靠）
+    # 信号 1: reduceOnly 显式（OKX 强信号，最可靠）。
+    # Task 0 实测：market close 路径下，仅当 caller 显式传
+    # params={"reduceOnly": True} 时 OKX 才回填 'true'（Outcome B → Remediation A
+    # → Task 5b 实施 BaseExchange.create_order +params kwarg + close_position 传值）。
     if info.get("reduceOnly") in (True, "true"):
         return True
     # 信号 2: trigger_reason 派生 close 类型。
     # 注意 "liquidation" 当前不可达 — _TRIGGER_REASON_MAP (okx.py:36-42)
     # 只映射 stop / stop_market / take_profit / take_profit_market / market，
-    # 没有 liquidation key。OKX liquidation fill 实际靠信号 1 (reduceOnly) +
-    # 信号 3 (posSide+side) 兜底。"liquidation" 留在 list 是防御性占位 —
-    # 未来若 _TRIGGER_REASON_MAP 加入该映射，本判定无需改动。
+    # 没有 liquidation key。
+    #
+    # Task 0 实测发现：algo (SL/TP) 触发后 OKX 推送 fill event 的 ordType="limit"
+    # （不是 stop/take_profit）→ trigger_reason 派生为 "unknown" → 信号 2 漏。
+    # algo 路径靠新增的信号 4 (algoId) 兜底。"liquidation" 留在 list 是防御性占位。
     if trigger_reason in ("stop", "take_profit", "liquidation"):
         return True
     # 信号 3: posSide + side 反向（hedge mode + liquidation 的强信号）
@@ -298,30 +303,41 @@ def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bo
         return True
     if pos_side == "short" and side == "buy":
         return True
+    # 信号 4 (Task 0 实测后新增): info.algoId 非空 → algo-triggered fill。
+    # algo 单 (SL/TP/conditional/OCO) 本质都是 reduce-only 语义，触发后的 fill
+    # event 一定带 algoId。Task 0 1B/1C 实测确认：SL 与 TP 触发的 fill event 中
+    # info.algoId / info.algoClOrdId 均非空；普通用户下单 (1A/1D) algoId 为空。
+    # 这是 OKX 显式标识，比信号 1/2/3 都强。algo 路径专属兜底。
+    algo_id = info.get("algoId")
+    if algo_id and algo_id != "":
+        return True
     return False
 ```
 
 **为什么不用 `pnl is not None`**:
 - OKX `_parse_fill_event` line 369-371 兜底 `pnl=None`（fetch 失败 logger.warning 但不抛）
 - 用 pnl 推断会让"fetch 失败的真实 close"被误认 open，alert 漏清
-- 三源融合（reduceOnly | trigger_reason | posSide）覆盖所有 OKX 平仓路径，pnl fetch 失败不影响判定
+- 四源融合（reduceOnly | trigger_reason | posSide | algoId）覆盖所有 OKX 平仓路径，pnl fetch 失败不影响判定
 
-**net mode + 三源覆盖准确性校准**:
+**net mode + 四源覆盖准确性校准（Task 0 实测后更新）**:
 
 项目强制 `posMode == "net_mode"`（okx.py:183 startup 校验，错配 fail-fast）→ `info.posSide` 永远是 `"net"`（line 339 已处理）→ **信号 3 (posSide+side 反向) 在本项目永远不命中**。
 
-实际命中矩阵：
+实际命中矩阵（Task 0 实测后定稿，详见 §4.3.1）：
 
-| close 路径 | order_type | trigger_reason | 信号 1 (reduceOnly) | 信号 2 (trigger_reason) | 信号 3 (posSide) |
-|---|---|---|---|---|---|
-| `set_stop_loss` algo | "stop" | "stop" | ❓ 待实测 | ✅ 命中 | ❌ net mode |
-| `set_take_profit` algo | "take_profit" | "take_profit" | ❓ 待实测 | ✅ 命中 | ❌ net mode |
-| `close_position` market | "market" | "market" | ❓ 待实测 | ❌ 不命中 | ❌ net mode |
-| Liquidation | (OKX 内部) | (映射不到) | ❓ 待实测 | ❌ "liquidation" 当前不可达 | ❌ net mode |
+| close 路径 | OKX 推送 ordType | trigger_reason | 信号 1 (reduceOnly) | 信号 2 (trigger_reason) | 信号 3 (posSide) | 信号 4 (algoId) |
+|---|---|---|---|---|---|---|
+| `set_stop_loss` algo | "limit" (实测) | "unknown" | ❌ false (实测) | ❌ unknown | ❌ net mode | ✅ **非空 (实测)** |
+| `set_take_profit` algo | "limit" (实测) | "unknown" | ❌ false (实测) | ❌ unknown | ❌ net mode | ✅ **非空 (实测)** |
+| `close_position` market（无 params）| "market" | "market" | ❌ false (实测) | ❌ 不命中 | ❌ net mode | ❌ 空 (实测) |
+| `close_position` market（**Task 5b 后**带 `params={"reduceOnly":True}`）| "market" | "market" | ✅ **'true' (实测)** | ❌ 不命中 | ❌ net mode | ❌ 空 |
+| Liquidation | (推测同 algo) | (映射不到) | 推测 false | ❌ "liquidation" 不可达 | ❌ net mode | 推测非空 |
 
-**关键盲点**: `close_position` 市价路径 + liquidation 路径**完全依赖 OKX 是否在 fill event 里自动回填 `info.reduceOnly`**。Algo 路径（SL/TP 触发）有信号 2 兜底相对安全。
+**双闭环**：
+- Algo 路径（SL/TP/conditional/OCO）→ 信号 4 (algoId) 兜底 ✓
+- Market close 路径 → Task 5b 实施 Remediation A 显式传 `reduceOnly=True` → 信号 1 兜底 ✓
 
-附带证据：tests/fixtures/ 内 OKX raw response 全是 fetch_open_orders 路径（algo），**没有 watch_orders fill event 数据**。当前对 `info.reduceOnly` 在 fill event 里的存在性是未验证假设。
+实测产物：4 个真实 fixture 已归档到 `tests/fixtures/okx_watch_orders_*.json`（market_close / sl_fill / tp_fill / market_close_reduce_only）。Liquidation fixture 仍为手工构造（demo 不可控），W3+ 实盘真实化（§6.4）。
 
 ### 4.3.1 OKX market close 信号 1 验证（plan 阶段必跑）
 
@@ -366,7 +382,73 @@ def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bo
 
 **不验证不落地原则**: §4.3 OKX 设计的接受度 100% 取决于本节实测结果。若实测显示需补救，plan 阶段把补救方案纳入 task 拆分（影响 §8 Task 5 + 后续 task 工作量）。
 
-**实测产物归档**: 三场景 raw event JSON 存 `tests/fixtures/okx_watch_orders_market_close.json` / `okx_watch_orders_sl_fill.json` / `okx_watch_orders_tp_fill.json`，作为 §5.3 OKX 集成测试的真实 fixture（避免 Iter 2 R4 暴露的 mock fidelity 盲区，见 memory `project_iter2_mock_fidelity_lesson`）。
+### 4.3.1.1 Task 0 实测结果（2026-04-28 完成）
+
+四个 scenario 全部跑完 + 4 个真实 fixture 归档（含 1D 新增 Remediation A 验证）。
+
+**Scenario 实测**（`tests/fixtures/okx_watch_orders_*.json`）:
+
+| Scenario | 操作 | fill event 关键字段 | 信号命中 |
+|---|---|---|---|
+| **1A** market close (no params) | 开仓 → 立即 market close | `reduceOnly=false / ordType=market / posSide=net / algoId=空` | 全漏 |
+| **1B** SL trigger | 开仓 → 挂 SL → 价格穿触发 | `reduceOnly=false / ordType=limit / posSide=net / **algoId=非空**` | 信号 4 |
+| **1C** TP trigger | 开仓 → 挂 TP → 价格穿触发 | `reduceOnly=false / ordType=limit / posSide=net / **algoId=非空**` | 信号 4 |
+| **1D** market close (with `params={"reduceOnly": True}`) | 开仓 → close 显式带 reduceOnly | `**reduceOnly=true** / ordType=market / posSide=net / algoId=空` | 信号 1 |
+
+**关键发现**:
+
+1. **OKX algo 单触发后 fill event 的 `info.ordType="limit"`**（非 stop/take_profit），导致 `_TRIGGER_REASON_MAP` 派生 `trigger_reason="unknown"` → 信号 2 漏。但 `info.algoId` 非空可作专属信号 → **新增信号 4**。
+2. **Market close 路径下 `info.reduceOnly=false`**（即使 OKX algo 单本身是 reduce-only 语义，OKX 不在 fill event 推回标记）→ 信号 1 漏。但显式传 `params={"reduceOnly": True}` 时 OKX 会回填 `reduceOnly=true` → **Remediation A 有效**。
+3. OKX simulated trading 的 `ticker.last` 与 `mark_price` 实测漂移 -1.67%（详见 memory `project_okx_demo_mark_vs_last_drift`），但不影响 fill event 字段判定（trade engine 用 mark price，但 fill 事件字段独立）。
+
+**Outcome 决策**: **Outcome B + 信号 4** — Remediation A 实施（Task 5b 新增）+ `_infer_is_full_close` 加信号 4（Task 5 Step 1 修改）。
+
+**双闭环验证**:
+- Algo 路径（SL/TP/conditional/OCO）→ 信号 4 (algoId) 兜底 ✓
+- Market close 路径 → Remediation A（显式传 reduceOnly）+ 信号 1 兜底 ✓
+
+**Mark vs last 实测细节（措辞校准 — 文档 verify 后）**: OKX 文档 + CCXT okx.py:866/3427 明示 algo trigger 校验默认用 **last price**（不是 mark）。但 demo sandbox 上 ticker.last 与 mark price 漂移 1.67%，连续 ±0.1% / ±0.3% buffer 都被 51280 拒。调查 root cause：
+
+- OKX 文档 + CCXT 注释一致：`51280` = "SL trigger price can not be higher than the last price"
+- demo ticker.last (77986) > demo mark (76680) 异常 1.67%（可能 demo cache lag / 流动性枯竭基差）
+- 改用 mark 算 trigger work，**不是因为 OKX 校验源是 mark**，而是 mark < ticker.last 提供了**意外 buffer**（mark*0.999 = 76603 远低于服务端实际 last reference）
+
+**实操结论**: demo 环境用 mark price 算 trigger 是安全策略（绕开异常基差 race）。**实盘 mark vs last 通常 < 0.05%，用 mark 等同于 last + 微小 buffer**，无需特殊处理。脚本 `iter6_task0_capture.py` 用 `_fetch_mark_price()` 是 demo-specific workaround。
+
+详见 memory `project_okx_demo_mark_vs_last_drift` + 诊断脚本 `iter6_diag_ticker.py`。
+
+**fixture 文件清单**:
+- `okx_watch_orders_market_close.json` — 1A 真实
+- `okx_watch_orders_sl_fill.json` — 1B 真实
+- `okx_watch_orders_tp_fill.json` — 1C 真实
+- `okx_watch_orders_market_close_reduce_only.json` — 1D 真实（验证 Remediation A）
+- `okx_watch_orders_liquidation.json` — 4 场景外手工构造（demo 不可控，§6.4 W3+ 真实化）
+
+**实测产物归档**: 4 真实 fixture（1A/1B/1C/1D）+ 1 手工 (liquidation) 存 `tests/fixtures/okx_watch_orders_*.json`，作为 §5.3 OKX 集成测试的真实 fixture（避免 Iter 2 R4 暴露的 mock fidelity 盲区，见 memory `project_iter2_mock_fidelity_lesson`）。
+
+### 4.3.1.2 Verify status — 哪些是 docs verified / 实测推断 / 手工推测
+
+Task 0 闭环后做了 cross-check（OKX V5 docs + CCXT 4.5.47 源码 + 4 真实 fixture），分类记录证据强度，避免未来误把"实测推断"当"文档铁律":
+
+| 维度 | Status | 证据 |
+|---|---|---|
+| ccxt `info.*` raw passthrough（不加工 OKX 字段） | ✅ ccxt 设计承诺 | ccxt unified design contract |
+| 51280 = SL trigger > last price 校验拒 | ✅ docs verified | OKX V5 docs + CCXT okx.py:866 inline 注释 |
+| trigger price type 默认 'last' (可选 last/index/mark) | ✅ docs verified | CCXT okx.py:3427 docstring |
+| ccxt `id = info.algoId or ordId` 用 algoId 优先（验证项目 okx.py:336 一致性） | ✅ ccxt verify | CCXT okx.py:3934 `safe_string_2(order, 'algoId', 'ordId')` |
+| net_mode → posSide='net'（fill event field） | ✅ 项目代码 + 实测 | okx.py:339 + 4 fixture 全部 posSide=net |
+| **OKX echo `reduceOnly=true` 当 caller 显式传 `params={"reduceOnly": True}`** | ⚠️ **实测推断** (1A vs 1D 控制实验) | 1A fixture reduceOnly=false（无传）; 1D fixture reduceOnly=true（有传）。OKX docs 未明文背书 |
+| **`info.algoId` 非空 ⟺ algo-triggered fill** | ⚠️ **实测推断** (4 fixture 完美分群) | 1B/1C algoId 非空; 1A/1D algoId 空。CCXT okx.py 行为暗示但未明文 |
+| algo (SL/TP) 触发后 fill event ordType="limit" | ⚠️ **实测发现** (反预期) | 1B/1C ordType="limit"，与 OKX 创建时 ordType=stop/take_profit 不同 |
+| OKX 校验 trigger 用 last price (与"用 mark price 算 trigger 能避开 51280" 的关系) | ✅ docs verified + 实测 buffer 解释 | 文档明示用 last; demo 用 mark 算 trigger work 是因为 mark < last 提供 buffer，**不是**校验源换了 |
+| Liquidation fill `category=full_liquidation` / `source=13` / `execType=L` | ❌ **手工推测** (无 demo 实测，无 OKX docs verify) | spec §6.4 W3+ 真实化候选 |
+
+**信号 4 (algoId) 与 Remediation A (reduceOnly echo) 的可信度根基是 4 真实 fixture，不是 OKX docs 明文**。fixture 是 ccxt + OKX 联合行为的 ground truth — ccxt 不加工 info 字段（设计承诺 + 项目实际 grep verify），fixture 的 info.* 部分等于 OKX 服务端原始推送。
+
+**风险 mitigations**:
+- ccxt 版本 pin: 当前 `pyproject.toml: "ccxt>=4.0"` 无上限，建议**实盘准备期前**收紧到 `>=4.5,<5`（独立 follow-up，非 Iter 6 scope）
+- 实盘准备期 跑一次 Iter 2b smoke test 验证 fill event info 字段在升级后未漂移
+- 1B/1C/1D fixture 是 ground truth，未来 OKX API 改 schema 时这些 fixture + 测试会立即暴露
 
 ### 4.4 base 层新增 / 上提
 
@@ -662,11 +744,12 @@ assert len(REGISTERED_TOOL_NAMES) == 32, (
 
 - 现有 baseline: 857 passed + 1 skipped
 - baseline: **857 passed + 1 skipped**
-- 新增: **26 tests**（单元 11 + 集成 15）
+- 新增: **32 tests**（单元 11 + 集成 16 + Remediation A 5）
   - 单元 11（全 pass）：cancel tool ×2 / clear helper ×2 / dispatch ×4 / sim partial close 契约保护 ×1 / is_tool_error display.py ×2
-  - 集成 15：sim 端到端 ×4 / OKX `_parse_fill_event` 三源融合 ×7 (含 reduceOnly bool ×1 + reduceOnly string 变体 ×1 + trigger_reason ×3 + posSide hedge ×2 skip) + net mode 边界 ×1 / OKX `_watch_orders_loop` mock ×1 / drift guard ×1
+  - 集成 16：sim 端到端 ×4 / OKX `_parse_fill_event` 四源融合 ×8 (含 reduceOnly bool/string ×2 + trigger_reason ×3 + posSide hedge ×2 skip + **algoId 信号 4 ×1**) + net mode 边界 ×1 / OKX `_watch_orders_loop` mock ×1 / drift guard ×1 / Task 5b sim end-to-end with reduceOnly param 透传 ×1
+  - Remediation A (Task 5b) 单元 5：`BaseExchange.create_order` signature 兼容 ×1 / sim override params 透传 ×1 / okx override params merge ×1 / `close_position` 传 reduceOnly 验证 ×1 / fill event reduceOnly=true 集成验证 ×1
   - **2 hedge mode 测试 skipped**（net mode 项目下不可达，保留代码 + skip 标记防御未来）
-- 预期 final: **881 passed + 3 skipped**（857+24 passed / 1+2 skipped）
+- 预期 final: **887 passed + 3 skipped**（857+30 passed / 1+2 skipped）
 
 ---
 
@@ -734,9 +817,9 @@ assert len(REGISTERED_TOOL_NAMES) == 32, (
 5. ✅ Sim 直接构造 partial close（`_close_position_core` amount < pos.contracts）→ alert **不** 清空（契约保护，未来 partial close 工具落地的安全网）
 6. ✅ Callback 失败 → logger.exception 但 dispatch 不传播，下一 fill 仍正常处理
 7. ✅ `REGISTERED_TOOL_NAMES` drift guard 31 → 32 + 计数注释同步
-8. ✅ 全套 857 baseline + 新增 26 tests (24 pass + 2 hedge skip) = **881 passed + 3 skipped**，零 regression
+8. ✅ 全套 857 baseline + 新增 32 tests (30 pass + 2 hedge skip) = **887 passed + 3 skipped**，零 regression
 9. ✅ Iter 5 framework 合规保持：`cancel_price_level_alert` Args 描述齐全，startup 不 fail
-10. ✅ §4.3.1 OKX market close 信号 1 实测通过 — 场景 1-3（market close / SL / TP）fill event raw JSON 已归档到 `tests/fixtures/`；`info.reduceOnly` 全部命中，或补救方案 A/B 已 implemented + 测试覆盖。场景 4 (liquidation) 用手工 fixture（demo 不可控，已知盲区，§6.4 长远候选真实化）
+10. ✅ §4.3.1 OKX 实测完成（Task 0 closed 2026-04-28）— 4 场景 fixture 归档：1A market close (no params, all signals miss) / 1B SL trigger (algoId 非空) / 1C TP trigger (algoId 非空) / 1D market close with reduceOnly param (reduceOnly=true)。outcome B + 信号 4 → Remediation A 实施 (Task 5b) + `_infer_is_full_close` 加信号 4 (algoId)。Liquidation 用手工 fixture (§6.4 W3+ 真实化)
 11. ✅ display.py prefix 注册 + `is_tool_error` 双测试覆盖（详见 §4.6 Step 3）
 
 **不验证项（明牌跳过）**:

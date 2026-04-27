@@ -145,36 +145,45 @@ Estimated +0.5 day on top of existing plan.
 
 Estimated +1-1.5 day on top of existing plan.
 
-- [ ] **Step 9: Document Task 0 outcome**
+- [x] **Step 9: ✅ COMPLETED — Task 0 outcome captured (2026-04-28)**
 
-Append to spec §4.3.1 a new "Task 0 实测结果" subsection with:
-- Date of capture
-- Outcome (A/B/C)
-- If B or C: link to remediation tasks added to this plan
+Outcome: **B + 信号 4** (see spec §4.3.1.1).
 
-Commit the fixture files + spec amendment together:
+Commit:
 ```bash
-git add tests/fixtures/okx_watch_orders_*.json docs/superpowers/specs/2026-04-27-iter6-alert-lifecycle-design.md
+git add tests/fixtures/okx_watch_orders_*.json scripts/iter6_task0_capture.py scripts/iter6_diag_ticker.py docs/superpowers/specs/2026-04-27-iter6-alert-lifecycle-design.md
 git commit -m "$(cat <<'EOF'
-docs(iter6): Task 0 OKX reality check — outcome [A/B/C]
+docs(iter6): Task 0 OKX reality check — Outcome B + 信号 4
 
-Captured real watch_orders fill events from demo for market close /
-SL trigger / TP trigger scenarios. Liquidation fixture is synthetic
-(demo unreachable, §6.4 candidate).
+Captured 4 real watch_orders fill events from OKX demo:
+- 1A market close (no params): all signals miss → needs Remediation A
+- 1B SL trigger: ordType=limit, reduceOnly=false, but algoId non-empty
+- 1C TP trigger: same as 1B
+- 1D market close with params={"reduceOnly": True}: reduceOnly=true echoed
 
-Outcome: [describe per Step 8]
-Decision: [proceed unchanged | add Remediation A tasks | add Remediation B tasks]
+Decisions landed in spec §4.3.1.1:
+- Add signal 4 (info.algoId non-empty) to _infer_is_full_close
+- Implement Remediation A in new Task 5b: extend BaseExchange.create_order
+  with params kwarg, sim/okx override, close_position passes
+  params={"reduceOnly": True}
+
+Liquidation fixture remains synthetic (demo unreachable, §6.4 W3+
+candidate). Helper scripts (iter6_task0_capture.py, iter6_diag_ticker.py)
+committed for reproducibility (e.g. partial close tool 落地后 revisit).
+
+Tangential finding: OKX demo ticker.last vs mark_price drifts ~1.67%;
+algo trigger validation uses mark price (not last as 51280 message says).
+Captured as memory `project_okx_demo_mark_vs_last_drift`. Helper script
+uses mark price for trigger computation.
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 EOF
 )"
 ```
 
-- [ ] **Step 10: Remove debug print from okx.py**
+- [x] **Step 10: ✅ N/A — no source modification**
 
-Revert the temporary `[TASK0_CAPTURE]` print added in Step 3. This was a manual debug aid only, not committed code.
-
-Verify: `git diff src/integrations/exchange/okx.py` returns nothing.
+Original plan assumed direct `print` patch in okx.py (which would need revert). Helper script `iter6_task0_capture.py` uses `monkey-patch` instead, so no source code modification was made. `git diff src/integrations/exchange/okx.py` returns nothing throughout Task 0.
 
 ---
 
@@ -783,49 +792,56 @@ EOF
 
 ---
 
-## Task 5: OKX _infer_is_full_close + Tests (Task 0 outcome dependent)
+## Task 5: OKX _infer_is_full_close + Tests
 
 **Files:**
 - Modify: `src/integrations/exchange/okx.py:322` (`_parse_fill_event`)
 - Modify: `src/integrations/exchange/okx.py` (add `_infer_is_full_close` private method)
 - Test: `tests/test_alert_lifecycle.py` (append OKX tests)
-- (Conditional) Remediation A: extend `BaseExchange.create_order` signature; see Task 0 Step 8 outcome
+- Task 5b (NEW, separate task) implements Remediation A — see below
 
-- [ ] **Step 1: Add _infer_is_full_close helper to OKXExchange**
+**Task 0 outcome (closed 2026-04-28)**: Outcome B + 信号 4 → use 4-source fusion below + Task 5b implements Remediation A. No conditional branches.
+
+- [ ] **Step 1: Add _infer_is_full_close helper to OKXExchange (4-source fusion)**
 
 Insert after `_parse_fill_event` (around line 386) in `src/integrations/exchange/okx.py`:
 
 ```python
 def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bool:
-    """OKX 平仓判定：三源融合，任一命中即认 close.
+    """OKX 平仓判定：四源融合，任一命中即认 close.
 
     NOTE: 当前项目 convention 下 ALL CLOSE FILLS ARE FULL CLOSE
     (close_position / set_stop_loss / set_take_profit 都传 amount=pos.contracts)。
     所以本判定实质是 "is close direction", 等价于 is_full_close.
 
     若未来加 partial close 工具 (reduce_position(percent) 等), 此判定会
-    static-false-positive partial close (将 partial close 也判 True,
-    导致 alert 被全清而仓位仍存在). 届时需改为基于 fetch_positions /
+    static-false-positive partial close, 届时需改为基于 fetch_positions /
     in-memory position cache 的精确判定 (见 spec §6.3).
     """
-    # 信号 1: reduceOnly 显式 (OKX 强信号, 最可靠)
+    # 信号 1: reduceOnly 显式 (OKX 强信号).
+    # Task 0 实测: market close 路径下, 仅当 caller 显式传 params={"reduceOnly": True}
+    # 时 OKX 才回填 'true' (Task 5b 实施 Remediation A).
     if info.get("reduceOnly") in (True, "true"):
         return True
     # 信号 2: trigger_reason 派生 close 类型.
-    # 注意 "liquidation" 当前不可达 — _TRIGGER_REASON_MAP (okx.py:36-42)
-    # 只映射 stop / stop_market / take_profit / take_profit_market / market,
-    # 没有 liquidation key. OKX liquidation fill 实际靠信号 1 (reduceOnly) +
-    # 信号 3 (posSide+side) 兜底. "liquidation" 留在 list 是防御性占位 —
-    # 未来若 _TRIGGER_REASON_MAP 加入该映射, 本判定无需改动.
+    # 注意 "liquidation" 当前不可达 — _TRIGGER_REASON_MAP (okx.py:36-42) 没有该 key.
+    # Task 0 实测: algo (SL/TP) 触发后 OKX 推送 fill event 的 ordType="limit"
+    # → trigger_reason="unknown" → 信号 2 漏. algo 路径靠新增的信号 4 (algoId) 兜底.
     if trigger_reason in ("stop", "take_profit", "liquidation"):
         return True
-    # 信号 3: posSide + side 反向 (hedge mode + liquidation 的强信号).
-    # 项目强制 net_mode (okx.py:183), posSide 永远是 "net", 此分支当前不命中,
-    # 保留为防御未来 hedge mode 启用.
+    # 信号 3: posSide + side 反向 (hedge mode 强信号).
+    # 项目强制 net_mode (okx.py:183), posSide 永远是 "net", 此分支当前不命中.
     pos_side = info.get("posSide")
     if pos_side == "long" and side == "sell":
         return True
     if pos_side == "short" and side == "buy":
+        return True
+    # 信号 4 (Task 0 实测后新增): info.algoId 非空 → algo-triggered fill.
+    # algo 单 (SL/TP/conditional/OCO) 本质都是 reduce-only 语义, 触发后的 fill event
+    # 一定带 algoId. Task 0 1B/1C 实测确认: SL/TP 触发的 fill event 中 info.algoId
+    # 均非空; 普通用户下单 (1A/1D) algoId 为空. OKX 显式标识, 比信号 1/2/3 都强.
+    algo_id = info.get("algoId")
+    if algo_id and algo_id != "":
         return True
     return False
 ```
@@ -931,16 +947,46 @@ def test_okx_parse_fill_event_is_full_close_net_mode_with_reduce_only():
 
 
 def test_okx_parse_fill_event_open_no_close_signals():
-    """Open fill: no reduceOnly, no close-trigger, posSide='net' → is_full_close=False."""
+    """Open fill: no reduceOnly, no close-trigger, posSide='net', no algoId → is_full_close=False."""
     okx = make_okx_exchange()
-    info = {"posSide": "net", "reduceOnly": False}
+    info = {"posSide": "net", "reduceOnly": False, "algoId": ""}
+    assert okx._infer_is_full_close(info, "buy", "market") is False
+
+
+def test_okx_parse_fill_event_is_full_close_algo_id_non_empty():
+    """Signal 4 (NEW): info.algoId non-empty → is_full_close=True.
+
+    Task 0 实测 1B/1C: SL/TP triggered fills have algoId non-empty even though
+    ordType='limit' and reduceOnly='false'. algoId is the OKX-explicit close
+    signal for algo paths (SL/TP/conditional/OCO).
+    """
+    okx = make_okx_exchange()
+    # Mimics 1B/1C real fixture: ordType=limit (signal 2 miss), reduceOnly=false
+    # (signal 1 miss), posSide=net (signal 3 miss), but algoId non-empty
+    info = {
+        "posSide": "net",
+        "reduceOnly": "false",
+        "ordType": "limit",
+        "algoId": "3516926949270786048",  # real value from 1C fixture
+        "algoClOrdId": "6b9ad766b55dBCDE5cd2873d775bb62b",
+    }
+    assert okx._infer_is_full_close(info, "sell", "unknown") is True
+
+
+def test_okx_parse_fill_event_open_with_empty_algo_id_string():
+    """Signal 4 boundary: algoId="" (empty string, not non-empty) → False.
+
+    Defends against treating "" as truthy by accident.
+    """
+    okx = make_okx_exchange()
+    info = {"posSide": "net", "reduceOnly": False, "algoId": ""}
     assert okx._infer_is_full_close(info, "buy", "market") is False
 ```
 
 - [ ] **Step 5: Run new OKX tests**
 
 Run: `uv run pytest tests/test_alert_lifecycle.py -k "okx_parse_fill_event" -v`
-Expected: 7 passed, 2 skipped (signal 3 hedge mode tests intentionally skipped).
+Expected: 9 passed, 2 skipped (7 prior signal 1/2 tests + 2 new signal 4 tests; signal 3 hedge mode tests intentionally skipped).
 
 - [ ] **Step 6: Add OKX integration test using Task 0 fixture**
 
@@ -1021,23 +1067,252 @@ EOF
 )"
 ```
 
-- [ ] **Step 9: (CONDITIONAL — only if Task 0 outcome was B or C) Implement Remediation**
+- [x] **Step 9: ✅ Replaced by Task 5b (Remediation A) — see below**
 
-If Task 0 Step 8 chose Outcome B (Remediation A):
-- Add `params: dict | None = None` to `BaseExchange.create_order` abstract signature
-- Sim override accepts/ignores params
-- OKX override merges params into internal dict
-- `tools_execution.py:close_position` passes `params={"reduceOnly": True}`
-- Update all `mock_exchange.create_order` mocks in tests to accept params kwarg
-- Add 4 unit tests covering signature change + reduceOnly propagation
+Task 0 outcome B confirmed via 1A/1D实测 → Remediation A is required (not conditional). Lifted to standalone Task 5b for clarity.
 
-If Task 0 chose Outcome C (Remediation B):
-- Subscribe OKX positions WS channel in `start()`
-- Add `self._cached_positions: dict[str, Position]` field
-- Update `_infer_is_full_close` to compare amount vs cached size
-- Add 6 unit tests for cache sync, race conditions, fallback when cache cold
+---
 
-Commit separately with message describing remediation choice.
+## Task 5b: Remediation A — `BaseExchange.create_order` +params kwarg + close_position 显式 reduceOnly
+
+**Files:**
+- Modify: `src/integrations/exchange/base.py:98` (abstract `create_order` signature)
+- Modify: `src/integrations/exchange/simulated.py` (override `create_order`)
+- Modify: `src/integrations/exchange/okx.py:516-538` (override `create_order` merge params)
+- Modify: `src/agent/tools_execution.py:115-117` (`close_position` passes `params={"reduceOnly": True}`)
+- Modify: existing tests/mocks of `create_order` (sync to new kwarg)
+- Test: `tests/test_alert_lifecycle.py` (5 new tests)
+
+**Background**: Task 0 实测 (1A) shows OKX market close fill event has `info.reduceOnly='false'` when caller doesn't pass `reduceOnly` param. Task 0 1D 实测 confirms OKX echoes `reduceOnly='true'` when caller passes `params={"reduceOnly": True}`. Therefore market close path needs explicit `reduceOnly=True` to make signal 1 fire in `_infer_is_full_close`.
+
+- [ ] **Step 1: Extend `BaseExchange.create_order` abstract signature**
+
+Edit `src/integrations/exchange/base.py:98`:
+
+```python
+@abstractmethod
+async def create_order(
+    self,
+    symbol: str,
+    side: str,
+    order_type: str,
+    amount: float,
+    price: float | None = None,
+    params: dict | None = None,  # NEW
+) -> Order: ...
+```
+
+- [ ] **Step 2: Sim override — accept and ignore params**
+
+Edit `SimulatedExchange.create_order` (find the existing definition around simulated.py line 130-180; signature already takes price kwarg, just add params):
+
+```python
+async def create_order(
+    self,
+    symbol: str,
+    side: str,
+    order_type: str,
+    amount: float,
+    price: float | None = None,
+    params: dict | None = None,  # NEW: accept but ignore
+) -> Order:
+    # Sim doesn't need reduceOnly (its _is_close_order_static + position state
+    # logic handles full-close inference natively). Just accept the kwarg
+    # for API compatibility with OKX.
+    # ... existing body unchanged ...
+```
+
+- [ ] **Step 3: OKX override — merge caller params into internal dict**
+
+Edit `src/integrations/exchange/okx.py:516-538` `create_order`:
+
+```python
+@_retry()
+async def create_order(  # type: ignore[override]
+    self,
+    symbol: str,
+    side: str,
+    order_type: str,
+    amount: float,
+    price: float | None = None,
+    params: dict | None = None,  # NEW
+) -> Order:
+    merged_params: dict[str, Any] = {"tdMode": "isolated"}
+    if params:
+        merged_params.update(params)  # caller wins on conflict
+    is_algo = order_type in ("stop", "take_profit")
+    if is_algo and price is not None:
+        if order_type == "stop":
+            merged_params["stopLossPrice"] = price
+        else:  # take_profit
+            merged_params["takeProfitPrice"] = price
+
+    data = await self._client.create_order(
+        symbol, order_type, side, amount, price, params=merged_params,
+    )
+    # ... rest of existing logic unchanged (is_algo manual construction, etc.) ...
+```
+
+- [ ] **Step 4: `tools_execution.py:close_position` passes `reduceOnly=True`**
+
+Edit `src/agent/tools_execution.py:115-117` (inside `close_position` function):
+
+```python
+order = await deps.exchange.create_order(
+    symbol=deps.symbol, side=order_side, order_type="market",
+    amount=p.contracts,
+    params={"reduceOnly": True},  # NEW: ensures OKX echoes info.reduceOnly=true in fill event
+)
+```
+
+- [ ] **Step 5: Sync existing test mocks**
+
+Run: `grep -rn "create_order" tests/ | grep -i "mock\|MagicMock\|AsyncMock"`
+
+For each mock that asserts on `create_order` call args (e.g., uses `call_args` / `call_args_list` / `assert_called_with`), update to accept the new `params` kwarg. Examples:
+
+- If mock just does `AsyncMock()` with no arg verification → no change needed
+- If mock does `mock.create_order.assert_called_once_with(symbol="X", side="sell", ...)` → may need `params=ANY` from `unittest.mock`
+
+Check at minimum: `tests/test_simulated_exchange.py`, `tests/test_exchange.py`, `tests/test_tools_execution.py` (or wherever close_position tests live).
+
+- [ ] **Step 6: Add 5 new unit tests**
+
+Append to `tests/test_alert_lifecycle.py`:
+
+```python
+# ============ Task 5b: Remediation A — params kwarg + reduceOnly propagation ============
+
+@pytest.mark.asyncio
+async def test_sim_create_order_accepts_params_kwarg():
+    """Sim accepts params kwarg without crashing (transparent ignore)."""
+    sim = make_sim_exchange()
+    order = await sim.create_order(
+        "BTC/USDT:USDT", "buy", "market", 0.01,
+        params={"reduceOnly": True, "anything": "else"},
+    )
+    assert order is not None  # didn't crash on kwarg
+
+
+@pytest.mark.asyncio
+async def test_okx_create_order_merges_caller_params():
+    """OKX override merges caller params into internal {tdMode: isolated} dict."""
+    from unittest.mock import AsyncMock
+    okx = make_okx_exchange()
+    okx._client = AsyncMock()
+    okx._client.create_order = AsyncMock(return_value={
+        "id": "test-1", "symbol": "BTC/USDT:USDT", "side": "sell",
+        "type": "market", "amount": 0.01, "price": None, "status": "open",
+        "info": {"sz": "0.01"},
+    })
+    await okx.create_order(
+        "BTC/USDT:USDT", "sell", "market", 0.01,
+        params={"reduceOnly": True},
+    )
+    # Verify _client.create_order called with merged params
+    call_kwargs = okx._client.create_order.call_args.kwargs
+    assert call_kwargs["params"]["tdMode"] == "isolated"
+    assert call_kwargs["params"]["reduceOnly"] is True
+
+
+@pytest.mark.asyncio
+async def test_okx_create_order_no_caller_params_uses_defaults():
+    """OKX override with params=None → just {tdMode: isolated} (no reduceOnly)."""
+    from unittest.mock import AsyncMock
+    okx = make_okx_exchange()
+    okx._client = AsyncMock()
+    okx._client.create_order = AsyncMock(return_value={
+        "id": "test-1", "symbol": "BTC/USDT:USDT", "side": "buy",
+        "type": "market", "amount": 0.01, "price": None, "status": "open",
+        "info": {"sz": "0.01"},
+    })
+    await okx.create_order("BTC/USDT:USDT", "buy", "market", 0.01)
+    call_kwargs = okx._client.create_order.call_args.kwargs
+    assert call_kwargs["params"] == {"tdMode": "isolated"}
+    assert "reduceOnly" not in call_kwargs["params"]
+
+
+@pytest.mark.asyncio
+async def test_close_position_passes_reduce_only():
+    """tools_execution.py:close_position passes params={'reduceOnly': True}
+    to exchange.create_order. This is the Remediation A actuation point."""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.agent.tools_execution import close_position
+    from src.integrations.exchange.base import Position
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.db_engine = None
+    deps.session_id = "test-session"
+    deps.exchange = AsyncMock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(symbol="BTC/USDT:USDT", side="long", contracts=0.01,
+                 entry_price=50000.0, unrealized_pnl=0.0, leverage=10,
+                 liquidation_price=45000.0),
+    ])
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    deps.exchange.create_order = AsyncMock(return_value=MagicMock(id="order-1"))
+    # Bypass _check_approval (returns True if no human gate)
+    from unittest.mock import patch
+    with patch("src.agent.tools_execution._check_approval",
+               new=AsyncMock(return_value=True)):
+        result = await close_position(deps, reasoning="test close")
+
+    # Assert reduceOnly was passed
+    call_kwargs = deps.exchange.create_order.call_args.kwargs
+    assert call_kwargs.get("params") == {"reduceOnly": True}, \
+        f"close_position must pass params={{'reduceOnly': True}}, got {call_kwargs.get('params')}"
+
+
+@pytest.mark.asyncio
+async def test_okx_fill_event_reduce_only_true_with_remediation_a():
+    """End-to-end: OKX _infer_is_full_close returns True when fill event has
+    info.reduceOnly='true' (the result of Remediation A). Validates 1D fixture."""
+    okx = make_okx_exchange()
+    # Mimics 1D fixture: market close with reduceOnly=true echoed back
+    info = {
+        "posSide": "net",
+        "reduceOnly": "true",  # OKX echoed because caller passed it
+        "ordType": "market",
+        "algoId": "",  # market path, no algoId
+    }
+    assert okx._infer_is_full_close(info, "sell", "market") is True
+```
+
+- [ ] **Step 7: Run new tests + full regression**
+
+Run: `uv run pytest tests/test_alert_lifecycle.py -v 2>&1 | tail -10`
+Expected: 5 new Task 5b tests pass.
+
+Run: `uv run pytest tests/ -q 2>&1 | tail -5`
+Expected: All previously passing tests still pass (mock signature sync caught any breakage).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/integrations/exchange/base.py src/integrations/exchange/simulated.py src/integrations/exchange/okx.py src/agent/tools_execution.py tests/
+git commit -m "$(cat <<'EOF'
+feat(exchange): Remediation A — extend create_order with params + close_position reduceOnly
+
+Per Task 0 1A实测 (no params → reduceOnly=false in fill event) and
+1D 实测 (with params={"reduceOnly": True} → reduceOnly=true echoed),
+market close path requires explicit reduceOnly to make _infer_is_full_close
+signal 1 fire.
+
+- BaseExchange.create_order abstract signature: +params: dict | None = None
+- SimulatedExchange.create_order: accept and ignore params (sim doesn't need)
+- OKXExchange.create_order: merge caller params into internal {tdMode: isolated}
+- tools_execution.py:close_position: passes params={"reduceOnly": True}
+- 5 new unit tests covering signature compatibility + propagation + e2e
+
+Combined with signal 4 (algoId) added in Task 5, Iter 6 P0-5 alert clearance
+now closes both algo path (signal 4) and market close path (signal 1 via
+Remediation A) on OKX.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
+```
 
 ---
 
@@ -1666,7 +1941,7 @@ Expected: 4 passed.
 - [ ] **Step 9: Run full test suite**
 
 Run: `uv run pytest tests/ -q 2>&1 | tail -5`
-Expected: 881 passed + 3 skipped (857 baseline + ~26 new tests, where 2 hedge mode tests skip).
+Expected: 887 passed + 3 skipped (857 baseline + ~32 new tests, where 2 hedge mode tests skip).
 
 If failures: investigate per-test, but most likely culprits are (a) drift guard not synced, (b) display.py prefix typo mismatch with tool return string, (c) `_record_action` mock not handling new args.
 
@@ -1721,7 +1996,7 @@ Restore the commented line. Re-run to confirm green.
 - [ ] **Step 3: Run full test suite final check**
 
 Run: `uv run pytest tests/ -q 2>&1 | tail -10`
-Expected: 881 passed + 3 skipped (or higher if Task 0 chose Outcome B/C remediation tests).
+Expected: 887 passed + 3 skipped (or higher if Task 0 chose Outcome B/C remediation tests).
 
 - [ ] **Step 4: Verify acceptance criteria checklist**
 
@@ -1734,7 +2009,7 @@ Manually walk spec §7 acceptance criteria 1-11:
 5. ✅ Sim partial close preserves alert? (test `test_sim_partial_close_does_not_clear_alert`)
 6. ✅ Callback failure isolated? (test `test_dispatch_fill_event_callback_failure_isolated`)
 7. ✅ Drift guard 31→32 + comment sync? (test `test_registered_tool_names_matches_agent_tools` + Task 8 hardcode update)
-8. ✅ Total 881 passed + 3 skipped? (Step 3 result; +24 pass / +2 hedge skip vs 857+1 baseline)
+8. ✅ Total 887 passed + 3 skipped? (Step 3 result; +30 pass / +2 hedge skip vs 857+1 baseline)
 9. ✅ Iter 5 compliance: Args present? (Step 1 result)
 10. ✅ Task 0 OKX implementation completed (real fixtures or remediation)? (Task 0 outcome)
 11. ✅ display.py prefix + is_tool_error covered? (tests `test_is_tool_error_cancel_alert_success/not_found`)
@@ -1773,8 +2048,9 @@ Memory updates (`MEMORY.md` + relevant project memories) and `pre-next-observati
 - §3.4 partial close protection → Task 4 Step 7 (contract test) + spec §6.3 candidate ✓
 - §4.1 FillEvent +is_full_close → Task 2 Step 1 ✓
 - §4.2 Sim 5 sites → Task 4 Steps 1-5 ✓
-- §4.3 OKX three-source → Task 5 Step 1 ✓
-- §4.3.1 Task 0 hard gate → Task 0 ✓
+- §4.3 OKX four-source fusion → Task 5 Step 1 (含信号 4 algoId) ✓
+- §4.3.1 Task 0 hard gate → Task 0 (closed 2026-04-28, outcome B) ✓
+- §4.3.1.1 Task 0 实测结果 + Remediation A → Task 5b ✓
 - §4.4 base dispatch + 3 methods → Task 6 Steps 1-2 ✓
 - §4.5 call site replacement → Task 7 Steps 1-2 ✓
 - §4.6 cancel tool + display.py + record signature → Task 8 Steps 1-5 ✓
@@ -1790,5 +2066,7 @@ Memory updates (`MEMORY.md` + relevant project memories) and `pre-next-observati
 - `_dispatch_fill_event` / `_clear_stale_alerts_for_full_close` / `_invoke_fill_callback` matched to spec §4.4 ✓
 - `make_fill_event` factory signature matches usage in all tests ✓
 - REGISTERED_TOOL_NAMES count 31→32 + comment (10)→(11) consistent across spec + plan ✓
+- `BaseExchange.create_order` `params` kwarg signature consistent in Task 5b across base/sim/okx/close_position + 5 unit tests ✓
+- `_infer_is_full_close` 4-source fusion (Task 5 Step 1) matches signal definitions in spec §4.3 ✓
 
 **No issues found in self-review.**
