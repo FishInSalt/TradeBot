@@ -174,3 +174,17 @@ async def test_generic_exception_still_retries_3_times(monkeypatch):
 
     assert call_count["n"] == 3, f"应重试 3 次，实际 {call_count['n']}"
     assert result is not None, "第 3 次成功应返回 result"
+
+
+def test_usage_limit_total_tokens_capped_at_200k():
+    """T5: USAGE_LIMITS_PER_CYCLE.total_tokens_limit == 200_000.
+
+    pre-next-observation §T1-1c (W2 prep Iter 5) drift guard：W1 实测
+    max 141k tokens/cycle，200k 留 ~40% buffer 同时收紧病理 cycle 爆裂上限
+    （从 Iter 5 §3.1 引入时的 300k 兜底降下来）。
+    """
+    from src.cli.app import USAGE_LIMITS_PER_CYCLE
+    assert USAGE_LIMITS_PER_CYCLE.total_tokens_limit == 200_000, (
+        f"期望 200_000，实际 {USAGE_LIMITS_PER_CYCLE.total_tokens_limit}；"
+        "如需调整请同步更新 pre-next-observation §T1-1c 与本测试"
+    )

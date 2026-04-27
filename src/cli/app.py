@@ -36,12 +36,12 @@ from src.cli.wizard import WizardResult
 logger = logging.getLogger(__name__)
 
 # Iter 5 §3.1: 单 cycle 防爆裂兜底；非业务 throttle。
-# 正常 cycle ~10 tool calls / ~5 LLM requests，阈值留 5x buffer。
-# 观察期 W1 末校准（实测中位数 + safety buffer）。
+# request/tool_calls limit 留 5x buffer（typical cycle ~10 tool calls）。
+# total_tokens W2 prep Iter 5 校准（W1 实测 avg 70k / max 141k → 200k 留 1.4x）。
 USAGE_LIMITS_PER_CYCLE = UsageLimits(
     request_limit=50,            # = pydantic-ai default，显式传防 1.79+ 默认变化
     tool_calls_limit=50,
-    total_tokens_limit=300_000,  # 单 cycle 上限；外层 daily TokenBudget 是日累积
+    total_tokens_limit=200_000,  # 单 cycle 上限；外层 daily TokenBudget 是日累积
 )
 
 
