@@ -142,6 +142,38 @@ def test_create_model_groq():
     assert isinstance(model, GroqModel)
 
 
+def test_create_model_deepseek():
+    """create_model 应为 deepseek provider 返回 OpenAIChatModel（带 DeepSeekProvider）。"""
+    from src.services.model_manager import ModelManager, ModelConfig
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.deepseek import DeepSeekProvider
+
+    manager = ModelManager(config_path=Path("/dev/null"))
+    config = ModelConfig(id="dsv4", provider="deepseek", model="deepseek-v4-pro",
+                         api_key="sk-test", base_url=None)
+    model = manager.create_model(config)
+    assert isinstance(model, OpenAIChatModel)
+    # DeepSeekProvider 自带 base_url=https://api.deepseek.com，无需用户传
+    assert isinstance(model._provider, DeepSeekProvider)
+
+
+def test_get_optimal_settings_known_model():
+    """已枚举的 model 应返回带 thinking 配置的 ModelSettings。"""
+    from src.services.model_manager import get_optimal_settings
+
+    settings = get_optimal_settings("deepseek-v4-pro")
+    assert settings.get("thinking") == "high"
+    assert settings.get("extra_body") == {"thinking": {"type": "enabled"}}
+
+
+def test_get_optimal_settings_unknown_model():
+    """未列入表的 model 应返回空 dict（不强加 thinking）。"""
+    from src.services.model_manager import get_optimal_settings
+
+    assert get_optimal_settings("deepseek-chat") == {}
+    assert get_optimal_settings("gpt-4o") == {}
+
+
 def test_create_model_unsupported_provider():
     """不支持的 provider 应抛出 ValueError。"""
     from src.services.model_manager import ModelManager, ModelConfig
