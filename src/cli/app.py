@@ -183,14 +183,24 @@ async def run_agent_cycle(
                 logger.error(f"LLM call failed after 3 attempts: {e}")
                 return None
 
-    tokens = result.usage().total_tokens if result.usage() else 0
+    usage = result.usage()
+    tokens = usage.total_tokens if usage else 0
+    details = (usage.details or {}) if usage else {}
+
     # reasoning_tokens 由 DeepSeek/OpenAI o-series 等 thinking 模型返回；
     # > 0 即可验证 thinking mode 在本 cycle 真实生效。
-    reasoning_tokens = (
-        (result.usage().details or {}).get("reasoning_tokens", 0)
-        if result.usage() else 0
+    reasoning_tokens = details.get("reasoning_tokens", 0)
+    # DeepSeek prompt-cache 命中观测（pre-next-observation §B3 Step 1）：
+    # cycle 2+ hit_rate > 0 表明前缀 cache 工作，是 input token 削减最大杠杆。
+    cache_hit = details.get("prompt_cache_hit_tokens", 0)
+    cache_miss = details.get("prompt_cache_miss_tokens", 0)
+    input_total = cache_hit + cache_miss
+    hit_rate = (cache_hit / input_total * 100) if input_total > 0 else 0.0
+
+    logger.info(
+        f"cycle {cycle_id} tokens: total={tokens} reasoning={reasoning_tokens} "
+        f"cache_hit={cache_hit} cache_miss={cache_miss} rate={hit_rate:.1f}%"
     )
-    logger.info(f"cycle {cycle_id} tokens: total={tokens} reasoning={reasoning_tokens}")
     budget.record(tokens)
 
     # === A2: Extract tool calls from message history ===

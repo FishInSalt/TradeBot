@@ -47,7 +47,7 @@ async def test_usage_limits_passed_to_agent_run(monkeypatch):
     async def mock_run(prompt, **kwargs):
         captured_kwargs.update(kwargs)
         result = MagicMock()
-        result.usage = lambda: MagicMock(total_tokens=100)
+        result.usage = lambda: MagicMock(total_tokens=100, details=None)
         result.new_messages = lambda: []
         result.output = "test output"
         return result
@@ -158,7 +158,7 @@ async def test_generic_exception_still_retries_3_times(monkeypatch):
         if call_count["n"] < 3:
             raise RuntimeError("transient network error")
         result = MagicMock()
-        result.usage = lambda: MagicMock(total_tokens=100)
+        result.usage = lambda: MagicMock(total_tokens=100, details=None)
         result.new_messages = lambda: []
         result.output = "recovered"
         return result
