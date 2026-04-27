@@ -1962,7 +1962,7 @@ def test_registered_tool_names_includes_cancel_alert():
 - [ ] **Step 8: Run new tool tests**
 
 Run: `uv run pytest tests/test_alert_lifecycle.py -v -k "cancel or is_tool_error or includes" 2>&1 | tail -15`
-Expected: 4 passed.
+Expected: 5 passed (2 cancel tool + 2 is_tool_error + 1 drift guard includes_cancel_alert).
 
 - [ ] **Step 9: Run full test suite**
 
@@ -1990,7 +1990,7 @@ case; this tool covers regime-change / structural-shift dismissal.
   positive-list lookup auto-classifies it as business rejection
   (same mechanism as close_position "No positions to close" — display.py:163)
 - test_trader_agent.py:85-86: drift guard hardcode 31→32 + (20+10+1)→(20+11+1)
-- test_alert_lifecycle.py: 2 cancel tool tests + 2 is_tool_error tests
+- test_alert_lifecycle.py: 2 cancel tool tests + 2 is_tool_error tests + 1 drift guard test (test_registered_tool_names_includes_cancel_alert)
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 EOF
