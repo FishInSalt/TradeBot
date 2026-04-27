@@ -2,18 +2,25 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
-from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+# Iter 7 (T2-2 PR-C): conditional > alert > scheduled。未知 trigger_type 同 alert 级。
+# pre-next-observation §T2-2 — close fill conditional 不应被 stale alerts 在 FIFO 淹没。
+_PRIORITY_MAP = {"conditional": 0, "alert": 1, "scheduled": 2}
+
+
+@dataclass(order=True)
 class _TriggerEvent:
-    trigger_type: str
-    context: Any | None
+    priority: int
+    sequence: int
+    trigger_type: str = field(compare=False)
+    context: Any | None = field(default=None, compare=False)
 
 
 class Scheduler:
@@ -26,7 +33,8 @@ class Scheduler:
         self._callback = callback
         self._running = False
         self._cycle_running = False
-        self._pending_events: deque[_TriggerEvent] = deque()
+        self._pending_events: list[_TriggerEvent] = []  # heap
+        self._sequence_counter = 0
         self._wake_event = asyncio.Event()
         self._next_interval: float | None = None
 
@@ -35,7 +43,12 @@ class Scheduler:
         self._next_interval = seconds
 
     async def trigger(self, trigger_type: str, context: Any | None = None) -> None:
-        self._pending_events.append(_TriggerEvent(trigger_type, context))
+        priority = _PRIORITY_MAP.get(trigger_type, 1)
+        self._sequence_counter += 1
+        heapq.heappush(
+            self._pending_events,
+            _TriggerEvent(priority, self._sequence_counter, trigger_type, context),
+        )
         self._wake_event.set()
 
     async def start(self) -> None:
@@ -56,7 +69,7 @@ class Scheduler:
                 for _ in range(min(len(self._pending_events), 10)):
                     if not self._running or not self._pending_events:
                         break
-                    event = self._pending_events.popleft()
+                    event = heapq.heappop(self._pending_events)
                     await self._run_cycle(event.trigger_type, event.context)
             else:
                 await self._run_cycle("scheduled", None)

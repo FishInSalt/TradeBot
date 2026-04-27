@@ -121,8 +121,14 @@ async def test_scheduler_preserves_trigger_type():
     assert alert_events[0] == ("alert", "price_drop")
 
 
-async def test_scheduler_fifo_order():
-    """多个事件应按 FIFO 顺序处理，每个事件保留各自的 trigger_type 和 context。"""
+async def test_scheduler_priority_then_fifo():
+    """Iter 7 (T2-2): 跨优先级按 priority (conditional > alert > scheduled)，
+    同优先级内按 sequence FIFO。
+
+    pre-next-observation §T2-2：取代旧 test_scheduler_fifo_order；P0-6
+    cross-tick fix — close fill conditional 不应被 stale alerts 在 FIFO
+    淹没。
+    """
     from src.scheduler.scheduler import Scheduler
 
     fired = []
@@ -134,7 +140,7 @@ async def test_scheduler_fifo_order():
     task = asyncio.create_task(scheduler.start())
     await asyncio.sleep(0.05)
 
-    # 在 scheduler sleep 期间快速入队三个事件
+    # 入队: conditional fill_1 (p=0,seq=1) / alert (p=1,seq=2) / conditional fill_2 (p=0,seq=3)
     await scheduler.trigger("conditional", context="fill_1")
     await scheduler.trigger("alert", context="price_drop")
     await scheduler.trigger("conditional", context="fill_2")
@@ -143,12 +149,82 @@ async def test_scheduler_fifo_order():
     scheduler.stop()
     await task
 
-    # 排除首次 scheduled 触发
     non_scheduled = [(t, c) for t, c in fired if t != "scheduled"]
     assert len(non_scheduled) == 3
-    assert non_scheduled[0] == ("conditional", "fill_1")
-    assert non_scheduled[1] == ("alert", "price_drop")
-    assert non_scheduled[2] == ("conditional", "fill_2")
+    # 新语义：两个 conditional 先消费（同优先级 seq FIFO），alert 最后
+    assert non_scheduled[0] == ("conditional", "fill_1"), f"实际: {non_scheduled[0]}"
+    assert non_scheduled[1] == ("conditional", "fill_2"), f"实际: {non_scheduled[1]}"
+    assert non_scheduled[2] == ("alert", "price_drop"), f"实际: {non_scheduled[2]}"
+
+
+async def test_scheduler_priority_conditional_over_alert():
+    """Iter 7 (T2-2) §spec 直接验证：6 alert + 1 conditional 同时 enqueue，
+    conditional 必须最先消费（即使最后入队）。
+
+    P0-6 cross-tick：W1 #6 实测 close fill conditional 排在 ~6 stale alerts
+    后被淹没 16 min。优先级队列保证 conditional 不被 alert 数量淹没。
+    """
+    from src.scheduler.scheduler import Scheduler
+
+    fired = []
+
+    async def callback(trigger_type: str, context):
+        fired.append((trigger_type, context))
+
+    scheduler = Scheduler(interval_seconds=10, callback=callback)
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.05)
+
+    # 6 alert 先入队，1 conditional 后入队
+    for i in range(6):
+        await scheduler.trigger("alert", context=f"alert_{i}")
+    await scheduler.trigger("conditional", context="close_fill")
+    await asyncio.sleep(0.5)
+
+    scheduler.stop()
+    await task
+
+    non_scheduled = [(t, c) for t, c in fired if t != "scheduled"]
+    assert len(non_scheduled) == 7, f"应处理 7 事件，实际 {len(non_scheduled)}"
+    # 关键：conditional 最先消费（即使最后入队）
+    assert non_scheduled[0] == ("conditional", "close_fill"), (
+        f"conditional 应被优先消费，实际首个: {non_scheduled[0]}"
+    )
+    # 后 6 个全是 alert，按入队顺序
+    for i in range(6):
+        assert non_scheduled[1 + i] == ("alert", f"alert_{i}"), (
+            f"alert seq[{i}]: {non_scheduled[1 + i]}"
+        )
+
+
+async def test_scheduler_fifo_within_same_priority():
+    """Iter 7 (T2-2): 同优先级内 sequence tiebreak 保持 FIFO."""
+    from src.scheduler.scheduler import Scheduler
+
+    fired = []
+
+    async def callback(trigger_type: str, context):
+        fired.append((trigger_type, context))
+
+    scheduler = Scheduler(interval_seconds=10, callback=callback)
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.05)
+
+    # 3 conditional 全同优先级，按入队顺序消费
+    await scheduler.trigger("conditional", context="fill_1")
+    await scheduler.trigger("conditional", context="fill_2")
+    await scheduler.trigger("conditional", context="fill_3")
+    await asyncio.sleep(0.3)
+
+    scheduler.stop()
+    await task
+
+    non_scheduled = [(t, c) for t, c in fired if t != "scheduled"]
+    assert non_scheduled == [
+        ("conditional", "fill_1"),
+        ("conditional", "fill_2"),
+        ("conditional", "fill_3"),
+    ], f"同优先级应保持 FIFO，实际: {non_scheduled}"
 
 
 async def test_scheduler_context_not_lost_on_multiple_triggers():
