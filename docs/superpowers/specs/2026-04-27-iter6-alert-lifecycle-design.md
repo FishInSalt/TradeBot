@@ -199,7 +199,7 @@ level_alerts = self._check_price_levels(ticker.last, ticker.timestamp)    # ② 
 
 ### 4.1 FillEvent 契约扩展
 
-**改动**: `src/integrations/exchange/base.py:204`
+**改动**: `src/integrations/exchange/base.py:203` (FillEvent dataclass 起始行 `@dataclass`)
 
 ```python
 @dataclass
@@ -255,7 +255,7 @@ return FillEvent(..., is_full_close=is_full_close)
 
 ### 4.3 OKX 端填值规则
 
-**改动**: `src/integrations/exchange/okx.py` `_parse_fill_event`（line 322 内）
+**改动**: `src/integrations/exchange/okx.py:322-386` (`_parse_fill_event` 内；FillEvent return 在 :375-386)
 
 ```python
 async def _parse_fill_event(self, order_data: dict) -> FillEvent:
@@ -570,11 +570,11 @@ _EXECUTION_SUCCESS_PREFIXES = {
 }
 ```
 
-**为什么必加**: `is_tool_error` (display.py:273) 通过此白名单区分 success vs business rejection。
-- ✅ Success 返回 `"Price level alert cancelled (id={alert_id})"` 命中 prefix → `is_tool_error` 返回 False → UI 显示 success ✓
-- ⚠️ Not-found 返回 `"Alert {alert_id} not found ..."` **故意不**注册前缀 → 不命中 prefix → `is_tool_error` 走默认 True 路径 → UI 正确显示 business rejection ✓
+**为什么必加**: `is_tool_error` (display.py:273) 通过此白名单区分 success vs business rejection。机制是"工具名注册一组 success prefix，返回字符串以其中之一开头则判 success；否则 business rejection"。
+- ✅ Success 返回 `"Price level alert cancelled (id={alert_id})"` 以 `"Price level alert cancelled"` prefix 开头 → `is_tool_error` 返回 False → UI 显示 success ✓
+- ⚠️ Not-found 返回 `"Alert {alert_id} not found ..."` **不以 success prefix 开头** → `is_tool_error` 自动落 True 路径 → UI 正确显示 business rejection ✓
 
-**不注册 not-found 前缀是设计选择**：与现有 `close_position` "No positions to close." 处理同模式（display.py:163 注释明确"业务拒绝由 is_tool_error 兜底"）。
+**不需要单独"注册" not-found 前缀**：display.py 机制是 "未匹配 success prefix 即业务拒绝"，与现有 `close_position` "No positions to close." 同模式（display.py:163 注释明确"业务拒绝由 is_tool_error 兜底"）。
 
 **可选**: 不加 `_EXECUTION_PARSERS` 入口，cancel 操作 args 已自带 alert_id + reasoning，UI 默认渲染足够。
 
@@ -649,22 +649,24 @@ assert len(REGISTERED_TOOL_NAMES) == 32, (
 
 **实际规模盘点**（grep verified）:
 - 现存测试 `FillEvent(...)` 构造点共 **2 处**：`tests/test_exchange.py:204` + `:212`
-- 新增 23 个 Iter 6 测试也用工厂
+- 新增 26 个 Iter 6 测试也用工厂
 
 **迁移方案**:
 - 新建 `tests/_fixtures.py`（**当前不存在**），暴露 `make_fill_event(*, is_full_close=False, **overrides) -> FillEvent` 工厂
 - TDD 红期：先 `FillEvent` 加字段（无默认）→ 跑测试 → 2 处 fixture 红
-- 转绿：2 处替换为 `make_fill_event(...)` 调用 + 新增 23 测试用同工厂
+- 转绿：2 处替换为 `make_fill_event(...)` 调用 + 新增 26 测试用同工厂
 
 （"工厂层默认 vs dataclass 层默认"的 silent corruption 防护理由见 §4.1，此处不复述）
 
 ### 5.5 测试规模预估
 
 - 现有 baseline: 857 passed + 1 skipped
-- 新增: **~25 tests**（单元 11 + 集成 14）
-  - 单元 11：cancel tool ×2 / clear helper ×2 / dispatch ×4 / sim partial close 契约保护 ×1 / is_tool_error display.py ×2
-  - 集成 14：sim 端到端 ×4 / OKX `_parse_fill_event` 三源融合 ×7 + net mode 边界 ×1 / OKX `_watch_orders_loop` mock ×1 / drift guard ×1
-- 预期: **882 passed + 1 skipped**
+- baseline: **857 passed + 1 skipped**
+- 新增: **26 tests**（单元 11 + 集成 15）
+  - 单元 11（全 pass）：cancel tool ×2 / clear helper ×2 / dispatch ×4 / sim partial close 契约保护 ×1 / is_tool_error display.py ×2
+  - 集成 15：sim 端到端 ×4 / OKX `_parse_fill_event` 三源融合 ×7 (含 reduceOnly bool ×1 + reduceOnly string 变体 ×1 + trigger_reason ×3 + posSide hedge ×2 skip) + net mode 边界 ×1 / OKX `_watch_orders_loop` mock ×1 / drift guard ×1
+  - **2 hedge mode 测试 skipped**（net mode 项目下不可达，保留代码 + skip 标记防御未来）
+- 预期 final: **881 passed + 3 skipped**（857+24 passed / 1+2 skipped）
 
 ---
 
@@ -732,7 +734,7 @@ assert len(REGISTERED_TOOL_NAMES) == 32, (
 5. ✅ Sim 直接构造 partial close（`_close_position_core` amount < pos.contracts）→ alert **不** 清空（契约保护，未来 partial close 工具落地的安全网）
 6. ✅ Callback 失败 → logger.exception 但 dispatch 不传播，下一 fill 仍正常处理
 7. ✅ `REGISTERED_TOOL_NAMES` drift guard 31 → 32 + 计数注释同步
-8. ✅ 全套 857 baseline + 新增 ~25 tests = 882 通过，零 regression
+8. ✅ 全套 857 baseline + 新增 26 tests (24 pass + 2 hedge skip) = **881 passed + 3 skipped**，零 regression
 9. ✅ Iter 5 framework 合规保持：`cancel_price_level_alert` Args 描述齐全，startup 不 fail
 10. ✅ §4.3.1 OKX market close 信号 1 实测通过 — 场景 1-3（market close / SL / TP）fill event raw JSON 已归档到 `tests/fixtures/`；`info.reduceOnly` 全部命中，或补救方案 A/B 已 implemented + 测试覆盖。场景 4 (liquidation) 用手工 fixture（demo 不可控，已知盲区，§6.4 长远候选真实化）
 11. ✅ display.py prefix 注册 + `is_tool_error` 双测试覆盖（详见 §4.6 Step 3）
