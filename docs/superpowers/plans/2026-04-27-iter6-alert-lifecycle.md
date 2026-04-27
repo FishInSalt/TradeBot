@@ -21,7 +21,7 @@
 | Path | Responsibility |
 |---|---|
 | `tests/_fixtures.py` | `make_fill_event(*, is_full_close=False, **overrides) -> FillEvent` factory; default in factory layer (NOT dataclass) so callers must explicitly opt into close semantics |
-| `tests/test_alert_lifecycle.py` | All 25 new Iter 6 tests (unit 11 + integration 14) |
+| `tests/test_alert_lifecycle.py` | All 32 new Iter 6 tests (unit 11 + integration 16 + Task 5b Remediation A 5) |
 | `tests/fixtures/okx_watch_orders_market_close.json` | Task 0 real demo capture |
 | `tests/fixtures/okx_watch_orders_sl_fill.json` | Task 0 real demo capture |
 | `tests/fixtures/okx_watch_orders_tp_fill.json` | Task 0 real demo capture |
@@ -1001,7 +1001,11 @@ async def test_okx_dispatch_fill_event_clears_via_loop():
     """Integration: _watch_orders_loop receives close fill push, _parse_fill_event
     constructs is_full_close=True, _dispatch_fill_event clears stale alert.
 
-    Uses Task 0 captured fixture for market close scenario.
+    Uses 1D fixture (market close WITH params={"reduceOnly": True}, signal 1
+    reduceOnly='true' echoed by OKX). NOT 1A — that fixture has reduceOnly=false
+    and would fail the is_full_close=True assertion (per spec §4.3.1.1 outcome).
+    1A path is covered by Task 4/7 sim end-to-end tests; this test verifies
+    the OKX-specific dispatch path post-Remediation A.
     """
     okx = make_okx_exchange()
 
@@ -1014,8 +1018,8 @@ async def test_okx_dispatch_fill_event_clears_via_loop():
         "reasoning": "stale",
     })
 
-    # Load market close fixture
-    fixture_path = Path("tests/fixtures/okx_watch_orders_market_close.json")
+    # Load 1D fixture (market close with reduceOnly=true echoed)
+    fixture_path = Path("tests/fixtures/okx_watch_orders_market_close_reduce_only.json")
     with fixture_path.open() as f:
         order_data = json.load(f)
 
@@ -1027,7 +1031,7 @@ async def test_okx_dispatch_fill_event_clears_via_loop():
     # Parse fill event
     fill = await okx._parse_fill_event(order_data)
 
-    # Verify is_full_close=True per signal 1 (reduceOnly) or 2 (trigger_reason)
+    # Verify is_full_close=True per signal 1 (reduceOnly='true' echoed by OKX)
     assert fill.is_full_close is True
     assert fill.symbol == "BTC/USDT:USDT"
 
@@ -1040,27 +1044,32 @@ async def test_okx_dispatch_fill_event_clears_via_loop():
 - [ ] **Step 7: Run full test suite to verify zero regression**
 
 Run: `uv run pytest tests/ -q 2>&1 | tail -5`
-Expected: 866+ passed (857 baseline + ~9 new tests, depending on how many skip).
+Expected: 867+ passed (857 baseline + Task 4 partial close ×1 + Task 5 OKX 9 pass + 2 hedge skip = 867 passed + 2 skipped).
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add src/integrations/exchange/okx.py tests/test_alert_lifecycle.py
 git commit -m "$(cat <<'EOF'
-feat(okx): _infer_is_full_close three-source fusion + 7 unit tests
+feat(okx): _infer_is_full_close four-source fusion + 11 OKX tests
 
-Wires is_full_close into _parse_fill_event via three-source fusion:
-1. info.reduceOnly explicit (OKX strong signal)
+Wires is_full_close into _parse_fill_event via four-source fusion:
+1. info.reduceOnly explicit (Task 0 1D verified: OKX echoes 'true' when
+   caller passes params={"reduceOnly": True} — see Task 5b Remediation A)
 2. trigger_reason in {stop, take_profit, liquidation} (defensive)
-3. posSide + side reverse (hedge mode, currently unreachable)
+3. posSide + side reverse (hedge mode, currently unreachable in net_mode)
+4. info.algoId non-empty — algo-triggered fill (Task 0 1B/1C verified:
+   SL/TP triggers always carry non-empty algoId; plain orders never do)
 
 Currently equivalent to "is close direction" per project convention
 (all close fills are full close). Future partial close tools require
 remediation per spec §6.3.
 
-Tests: 7 unit (signal 1/2 coverage + open negative + net mode boundary),
-2 skipped (signal 3 hedge mode unreachable). 1 integration test for
-_watch_orders_loop pending Task 6 dispatch impl.
+Tests: 11 unit (signal 1 reduceOnly bool/string ×2 + signal 2 trigger_reason
+×3 + signal 4 algoId non-empty ×1 + algoId empty boundary ×1 + net mode
+×1 + open negative ×1 + 2 hedge mode signal 3 marked skip).
+1 integration test (test_okx_dispatch_fill_event_clears_via_loop) uses 1D
+fixture, marked skip until Task 6 dispatch impl lands.
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 EOF
@@ -1931,11 +1940,28 @@ def test_is_tool_error_cancel_alert_not_found_returns_true():
         outcome="success",
     )
     assert result is True
+
+
+def test_registered_tool_names_includes_cancel_alert():
+    """Explicit assertion that cancel_price_level_alert is in REGISTERED_TOOL_NAMES.
+
+    Redundant with test_trader_agent.py drift guard (which catches missing
+    registration via agent introspection), but provides explicit naming so
+    future readers can grep "includes_cancel_alert" to find this contract.
+    """
+    from src.agent.trader import REGISTERED_TOOL_NAMES
+
+    assert "cancel_price_level_alert" in REGISTERED_TOOL_NAMES
+    # Also verify position adjacent to add_price_level_alert (add/cancel pairing per §4.7)
+    add_idx = REGISTERED_TOOL_NAMES.index("add_price_level_alert")
+    cancel_idx = REGISTERED_TOOL_NAMES.index("cancel_price_level_alert")
+    assert cancel_idx == add_idx + 1, \
+        f"cancel_price_level_alert should be immediately after add_price_level_alert"
 ```
 
 - [ ] **Step 8: Run new tool tests**
 
-Run: `uv run pytest tests/test_alert_lifecycle.py -v -k "cancel or is_tool_error" 2>&1 | tail -15`
+Run: `uv run pytest tests/test_alert_lifecycle.py -v -k "cancel or is_tool_error or includes" 2>&1 | tail -15`
 Expected: 4 passed.
 
 - [ ] **Step 9: Run full test suite**
