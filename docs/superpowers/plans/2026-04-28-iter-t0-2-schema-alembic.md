@@ -17,7 +17,7 @@
 
 - ✅ Branch: `feature/iter-t0-2-schema-alembic` (already on)
 - ✅ Spec committed: `0bd77c9`
-- ⚠️ **Backup W1 DB before Task 5+** (`cp data/tradebot.db data/tradebot.db.iter3-backup`) — Task 10 will sandbox-validate against a copy, but having a hand-backup is cheap insurance.
+- ⚠️ **Backup W1 DB before any implementation work** (`cp data/tradebot.db data/tradebot.db.iter3-backup`) — paranoia insurance against implementer slip-ups (e.g. accidentally running `python main.py` without `TRADEBOT_DB_URL` override during Tasks 3-5 half-changed state). Strict minimum: before Task 10 (which `cp`'s W1 to sandbox; same backup also covers if sandbox upgrade goes sideways).
 
 ---
 
@@ -183,6 +183,7 @@ class TradeAction(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
+    cycle_id: Mapped[str | None] = mapped_column(String(50), nullable=True)        # Iter 3: §G3 — cycle correlation; nullable per §4.5 (历史数据约束); positioned next to session_id (mirrors ToolCall.cycle_id at line 162)
     action: Mapped[str] = mapped_column(String(30))
     order_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     symbol: Mapped[str] = mapped_column(String(50))
@@ -193,8 +194,9 @@ class TradeAction(Base):
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     fee: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    cycle_id: Mapped[str | None] = mapped_column(String(50), nullable=True)        # Iter 3: §G3 — cycle correlation; nullable per §4.5 (历史数据约束)
 ```
+
+> **Note on column position**: DB-layer `ALTER TABLE ... ADD COLUMN` always appends to the end (SQLite/PostgreSQL/MySQL all behave this way), so the actual DB column order will have `cycle_id` last. The model-source position (above, between `session_id` and `action`) is purely for **human readability consistency** with `ToolCall.cycle_id` (which sits next to `session_id`). SQLAlchemy ORM doesn't enforce column order at DB level for SELECT queries.
 
 - [ ] **Step 2: Modify DecisionLog — 3 changes (decision String length / status field / market_summary DEPRECATED comment / new index)**
 
@@ -291,7 +293,13 @@ EOF
 )"
 ```
 
-> ⚠️ **"Half-changed" state warning** (Tasks 3-5 in-progress): After this commit, `models.py` has new `status` column (NOT NULL) but `data/tradebot.db` does NOT yet (Task 6 changes init_db; Task 5 writes the migration). **DO NOT run `python main.py` against the W1 DB** during Tasks 3-5 — ORM writes will hit `OperationalError: no such column: status`. If you need to test interactively before Task 6 completes, use a fresh sandbox DB (`TRADEBOT_DB_URL=sqlite+aiosqlite:///$(mktemp -u --suffix=.db)`) which goes through `Base.metadata.create_all` (path 3) with the new schema directly.
+> ⚠️ **"Half-changed" state warning** (Tasks 3-5 in-progress): After this commit, `models.py` has new `status` column (NOT NULL) but `data/tradebot.db` does NOT yet (Task 6 changes init_db; Task 5 writes the migration). **DO NOT run `python main.py` against the W1 DB** during Tasks 3-5 — ORM writes will hit `OperationalError: no such column: status`. If you need to test interactively before Task 6 completes, use a fresh sandbox DB:
+> ```bash
+> TMP_DIR=$(mktemp -d)
+> TRADEBOT_DB_URL="sqlite+aiosqlite:///$TMP_DIR/sandbox.db" uv run python main.py
+> # ... then `rm -rf "$TMP_DIR"` after testing
+> ```
+> which goes through `Base.metadata.create_all` (path 3) with the new schema directly.
 
 ---
 
@@ -485,8 +493,12 @@ touch alembic/versions/.gitkeep
 Run:
 
 ```bash
-TRADEBOT_DB_URL="sqlite+aiosqlite:///$(mktemp -u --suffix=.db)" uv run alembic current 2>&1 | head -5
+TMP_DIR=$(mktemp -d)
+TRADEBOT_DB_URL="sqlite+aiosqlite:///$TMP_DIR/dryrun.db" uv run alembic current 2>&1 | head -5
+rm -rf "$TMP_DIR"
 ```
+
+> **Why `mktemp -d` not `mktemp -u --suffix=.db`**: `--suffix` is a GNU extension; macOS BSD mktemp does not support it (`mktemp: unrecognized option`). `mktemp -d` is cross-platform — same approach as Task 10 §5.4.
 
 Expected: No error; output may say "INFO  [alembic.runtime.migration] Context impl SQLiteImpl." then either empty or a revision line. Critically: no `ImportError` / `ModuleNotFoundError` / `KeyError`.
 
@@ -537,6 +549,8 @@ Expected: New file at `alembic/versions/<rev>_initial_iter3_schema_evolution.py`
 > 3. **Replace `downgrade()` body** (the `pass` placeholder)
 >
 > Section breakdown:
+
+> ⚠️ **CRITICAL — DO NOT copy `<ALEMBIC-GENERATED-DO-NOT-MODIFY>` placeholders into the real file**: Section A below shows what the auto-scaffolded header **already contains** (alembic generated unique `revision` / `down_revision` values during Step 1). The placeholders `<ALEMBIC-GENERATED-DO-NOT-MODIFY>` are **illustrative only** — DO NOT replace them; the real values are already in your file. Section A's only edit is **ADD one import line**.
 
 **Section A — Header (PRESERVE alembic-generated values; only ADD the import line)**
 
@@ -888,14 +902,20 @@ def alembic_cfg_factory(monkeypatch):
 def _create_pre_alembic_schema(db_path: Path) -> None:
     """Hand-write FULL W1 schema for migration testing (path 2 fixture).
 
-    MUST include all tables/indexes that migration upgrade() references:
+    Builds all 8 W1 business tables (matches spec §4.1 BEFORE Iter 3 changes).
+
+    Tables migration upgrade() references directly:
     - sim_orders + ix_sim_orders_session_status (Step 1 drops this index)
     - tool_calls + ix_tool_calls_session_tool_time + ix_tool_calls_cycle (Step 1 drops these)
     - decision_logs + ix_decision_logs_session_id (Step 4 batch_alter rebuilds this table)
     - trade_actions (Step 3 add column)
     - sessions (FK target for all above)
 
-    Schema matches spec §4.1 BEFORE Iter 3 changes.
+    Tables NOT touched by this migration but included for completeness (= simulate W1
+    production accurately, future migrations may touch these e.g. C档 drop market_summary):
+    - memory_entries (FK to sessions)
+    - sim_balances (PK = session_id, FK to sessions)
+    - sim_positions (UNIQUE(session_id, symbol), FK to sessions)
     """
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
@@ -982,6 +1002,40 @@ def _create_pre_alembic_schema(db_path: Path) -> None:
             FOREIGN KEY(session_id) REFERENCES sessions (id)
         );
         CREATE INDEX ix_sim_orders_session_status ON sim_orders (session_id, status);
+        CREATE TABLE memory_entries (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            memory_type VARCHAR(20) NOT NULL,
+            category VARCHAR(50) NOT NULL,
+            content TEXT NOT NULL,
+            relevance_score FLOAT NOT NULL,
+            created_at DATETIME NOT NULL,
+            expires_at DATETIME,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_memory_entries_session_id ON memory_entries (session_id);
+        CREATE TABLE sim_balances (
+            session_id VARCHAR(36) NOT NULL PRIMARY KEY,
+            free_usdt FLOAT NOT NULL,
+            used_usdt FLOAT NOT NULL,
+            frozen_usdt FLOAT NOT NULL,
+            updated_at DATETIME NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE TABLE sim_positions (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            symbol VARCHAR(50) NOT NULL,
+            side VARCHAR(10) NOT NULL,
+            contracts FLOAT NOT NULL,
+            entry_price FLOAT NOT NULL,
+            leverage INTEGER NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            UNIQUE (session_id, symbol),
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_sim_positions_session_id ON sim_positions (session_id);
     """)
     conn.commit()
     conn.close()
@@ -1065,6 +1119,11 @@ def test_upgrade_from_w1_like_data(tmp_path: Path, alembic_cfg_factory) -> None:
     assert decisions == {"legacy": 5}, f"expected all 5 rows decision='legacy', got {decisions}"
     statuses = dict(cur.execute("SELECT status, COUNT(*) FROM decision_logs GROUP BY status"))
     assert statuses == {"ok": 4, "usage_limit_exceeded": 1}, f"expected 4 ok + 1 usage_limit_exceeded, got {statuses}"
+
+    # Verify id preservation (spec §4.2 batch_alter contract: INSERT INTO _new SELECT * FROM old preserves id sequence).
+    # Last line of defense if future alembic versions change batch_alter semantics.
+    ids = [r[0] for r in cur.execute("SELECT id FROM decision_logs ORDER BY id")]
+    assert ids == [1, 2, 3, 4, 5], f"id sequence broken after batch_alter: expected [1,2,3,4,5], got {ids}"
     conn.close()
 
 
