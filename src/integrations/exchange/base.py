@@ -1,10 +1,13 @@
 from __future__ import annotations
+import logging
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,6 +92,7 @@ class BaseExchange(ABC):
         self._price_level_alerts: list[dict] = []
         self._latest_price: float | None = None
         self._alert_service: Any | None = None
+        self._fill_callback: Callable[['FillEvent'], Awaitable[None]] | None = None
 
     @abstractmethod
     async def fetch_ticker(self, symbol: str) -> Ticker: ...
@@ -134,8 +138,8 @@ class BaseExchange(ABC):
         pass
 
     def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
-        """注册 fill 回调。默认空实现。"""
-        pass
+        """注册 fill 回调。"""
+        self._fill_callback = callback
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         """注册价格异动回调。默认空实现。"""

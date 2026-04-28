@@ -76,7 +76,6 @@ class SimulatedExchange(BaseExchange):
         self._prev_ticker: Ticker | None = None
         self._running = False
         self._lock = asyncio.Lock()
-        self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._error_count = 0
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
 
@@ -772,9 +771,6 @@ class SimulatedExchange(BaseExchange):
         logger.info(f"Order cancelled: {order_id}")
 
     # --- Fill callback ---
-
-    def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
-        self._fill_callback = callback
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback

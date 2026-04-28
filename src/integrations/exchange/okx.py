@@ -118,7 +118,6 @@ class OKXExchange(BaseExchange):
             self._client.set_sandbox_mode(True)
         self._sandbox = sandbox
         self._symbol = symbol
-        self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
         self._running = False
         self._ws_client: Any | None = None
@@ -137,9 +136,6 @@ class OKXExchange(BaseExchange):
             )
 
     # --- Fill / Alert callback registration ---
-
-    def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
-        self._fill_callback = callback
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback
