@@ -2,12 +2,22 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Float, Integer, Text, DateTime, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import String, Float, Integer, Text, DateTime, ForeignKey, MetaData, UniqueConstraint, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
+# Spec §3.3: Alembic naming convention. Permanent constant — never changes.
+NAMING_CONVENTION = {
+    "ix": "ix_%(table_name)s_%(column_0_N_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_N_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
 def _utcnow() -> datetime:
