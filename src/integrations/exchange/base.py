@@ -212,6 +212,60 @@ class BaseExchange(ABC):
         self._price_level_alerts = remaining
         return triggered
 
+    def clear_level_alerts_by_symbol(self, symbol: str) -> int:
+        """Remove all price level alerts matching symbol. Returns count cleared.
+
+        Used by _clear_stale_alerts_for_full_close on close fills. Also exposed
+        as a standalone method for tests / future use.
+        """
+        before = len(self._price_level_alerts)
+        self._price_level_alerts = [
+            a for a in self._price_level_alerts if a["symbol"] != symbol
+        ]
+        return before - len(self._price_level_alerts)
+
+    async def _dispatch_fill_event(self, fill: 'FillEvent') -> None:
+        """Entry point for fill event dispatch.
+
+        Subclasses MUST route all FillEvent through this method, not call
+        self._fill_callback directly. Internal split into two SRP units:
+        alert hygiene (clear) and callback fan-out (invoke).
+
+        Order semantics: clear-before-callback. The callback observes the
+        final post-hygiene state (alert list already filtered). If a future
+        callback needs to capture stale-alert context for diagnostic logging,
+        either reorder the dispatch or add a pre-clear hook.
+        """
+        self._clear_stale_alerts_for_full_close(fill)
+        await self._invoke_fill_callback(fill)
+
+    def _clear_stale_alerts_for_full_close(self, fill: 'FillEvent') -> None:
+        """SRP unit 1: alert hygiene. Clear all level alerts for fill.symbol
+        if and only if the fill closes the position fully (is_full_close).
+        """
+        if not fill.is_full_close:
+            return
+        cleared = self.clear_level_alerts_by_symbol(fill.symbol)
+        if cleared > 0:
+            logger.info(
+                "Cleared %d stale price-level alert(s) on full close fill: "
+                "symbol=%s order_id=%s",
+                cleared, fill.symbol, fill.order_id,
+            )
+
+    async def _invoke_fill_callback(self, fill: 'FillEvent') -> None:
+        """SRP unit 2: callback fan-out with failure isolation.
+
+        Callback exceptions are logged, not propagated, so one fill's
+        callback failure does not block subsequent fill processing.
+        """
+        if self._fill_callback is None:
+            return
+        try:
+            await self._fill_callback(fill)
+        except Exception:
+            logger.exception("Fill callback failed for order %s", fill.order_id)
+
 @dataclass
 class FillEvent:
     order_id: str

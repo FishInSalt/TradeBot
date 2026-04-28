@@ -171,7 +171,6 @@ def test_okx_parse_fill_event_open_with_empty_algo_id_string():
 
 # ============ OKX _watch_orders_loop integration test ============
 
-@pytest.mark.skip(reason="depends on Task 6 _dispatch_fill_event impl")
 @pytest.mark.asyncio
 async def test_okx_dispatch_fill_event_clears_via_loop():
     """Integration: _watch_orders_loop receives close fill push, _parse_fill_event
@@ -313,3 +312,104 @@ async def test_okx_fill_event_reduce_only_true_with_remediation_a():
         "algoId": "",  # market path, no algoId
     }
     assert okx._infer_is_full_close(info, "sell", "market") is True
+
+
+# ============ clear_level_alerts_by_symbol helper ============
+
+def test_clear_level_alerts_by_symbol_filters_correct_symbol():
+    """Multi-symbol mix: clears only target symbol, returns count cleared."""
+    sim = make_sim_exchange()
+    sim._price_level_alerts = [
+        {"id": "a1", "symbol": "BTC/USDT:USDT", "price": 50000.0, "direction": "above"},
+        {"id": "a2", "symbol": "ETH/USDT:USDT", "price": 3000.0, "direction": "above"},
+        {"id": "a3", "symbol": "BTC/USDT:USDT", "price": 51000.0, "direction": "above"},
+    ]
+    cleared = sim.clear_level_alerts_by_symbol("BTC/USDT:USDT")
+    assert cleared == 2
+    assert len(sim._price_level_alerts) == 1
+    assert sim._price_level_alerts[0]["symbol"] == "ETH/USDT:USDT"
+
+
+def test_clear_level_alerts_by_symbol_returns_zero_when_empty():
+    """Symbol with no alerts → returns 0, list unchanged."""
+    sim = make_sim_exchange()
+    sim._price_level_alerts = [
+        {"id": "a1", "symbol": "ETH/USDT:USDT", "price": 3000.0, "direction": "above"},
+    ]
+    cleared = sim.clear_level_alerts_by_symbol("BTC/USDT:USDT")
+    assert cleared == 0
+    assert len(sim._price_level_alerts) == 1
+
+
+# ============ _dispatch_fill_event SRP units ============
+
+@pytest.mark.asyncio
+async def test_dispatch_fill_event_clears_on_full_close():
+    """is_full_close=True → alert cleared + callback invoked."""
+    sim = make_sim_exchange()
+    sim._price_level_alerts = [
+        {"id": "a1", "symbol": "BTC/USDT:USDT", "price": 51000.0, "direction": "above"},
+    ]
+    callback_called = []
+
+    async def cb(fill):
+        callback_called.append(fill)
+    sim._fill_callback = cb
+
+    fill = make_fill_event(symbol="BTC/USDT:USDT", is_full_close=True)
+    await sim._dispatch_fill_event(fill)
+
+    assert len(sim._price_level_alerts) == 0
+    assert len(callback_called) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_fill_event_skips_clear_when_not_full_close():
+    """is_full_close=False → alert preserved + callback invoked."""
+    sim = make_sim_exchange()
+    sim._price_level_alerts = [
+        {"id": "a1", "symbol": "BTC/USDT:USDT", "price": 51000.0, "direction": "above"},
+    ]
+    callback_called = []
+
+    async def cb(fill):
+        callback_called.append(fill)
+    sim._fill_callback = cb
+
+    fill = make_fill_event(symbol="BTC/USDT:USDT", is_full_close=False)
+    await sim._dispatch_fill_event(fill)
+
+    assert len(sim._price_level_alerts) == 1  # preserved
+    assert len(callback_called) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_fill_event_callback_failure_isolated(caplog):
+    """Callback raises → logger.exception called, exception NOT propagated."""
+    sim = make_sim_exchange()
+
+    async def failing_cb(fill):
+        raise RuntimeError("simulated failure")
+    sim._fill_callback = failing_cb
+
+    fill = make_fill_event(is_full_close=False)
+    # Must NOT raise
+    await sim._dispatch_fill_event(fill)
+
+    assert any("Fill callback failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_fill_event_no_callback_registered():
+    """No callback registered → only clears alert, no error."""
+    sim = make_sim_exchange()
+    sim._price_level_alerts = [
+        {"id": "a1", "symbol": "BTC/USDT:USDT", "price": 51000.0, "direction": "above"},
+    ]
+    sim._fill_callback = None
+
+    fill = make_fill_event(symbol="BTC/USDT:USDT", is_full_close=True)
+    # Must NOT raise
+    await sim._dispatch_fill_event(fill)
+
+    assert len(sim._price_level_alerts) == 0  # cleared
