@@ -113,7 +113,9 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
     for p in positions:
         order_side = "sell" if p.side == "long" else "buy"
         order = await deps.exchange.create_order(
-            symbol=deps.symbol, side=order_side, order_type="market", amount=p.contracts
+            symbol=deps.symbol, side=order_side, order_type="market",
+            amount=p.contracts,
+            params={"reduceOnly": True},  # ensures OKX echoes info.reduceOnly=true in fill event
         )
         order_ids.append(order.id)
         await _record_action(

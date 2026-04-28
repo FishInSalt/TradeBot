@@ -99,7 +99,15 @@ class BaseExchange(ABC):
     @abstractmethod
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]: ...
     @abstractmethod
-    async def create_order(self, symbol: str, side: str, order_type: str, amount: float, price: float | None = None) -> Order: ...
+    async def create_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        price: float | None = None,
+        params: dict | None = None,
+    ) -> Order: ...
     @abstractmethod
     async def fetch_balance(self) -> Balance: ...
     @abstractmethod

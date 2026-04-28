@@ -179,8 +179,18 @@ class SimulatedExchange(BaseExchange):
         return math.floor(amount * factor) / factor
 
     async def create_order(
-        self, symbol: str, side: str, order_type: str, amount: float, price: float | None = None,
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        price: float | None = None,
+        params: dict | None = None,
     ) -> Order:
+        # Sim doesn't need reduceOnly: its _is_close_order_static + position
+        # state logic handles full-close inference natively. Accept params for
+        # API parity with OKX (Remediation A); ignored at the sim layer.
+        del params  # explicitly unused
         self._validate_symbol(symbol)
         if amount <= 0:
             raise ValueError(f"amount must be > 0, got {amount}")

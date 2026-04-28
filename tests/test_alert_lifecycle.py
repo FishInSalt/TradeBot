@@ -215,3 +215,101 @@ async def test_okx_dispatch_fill_event_clears_via_loop():
     await okx._dispatch_fill_event(fill)
 
     assert len(okx._price_level_alerts) == 0
+
+
+# ============ Task 5b: Remediation A — params kwarg + reduceOnly propagation ============
+
+@pytest.mark.asyncio
+async def test_sim_create_order_accepts_params_kwarg():
+    """Sim accepts params kwarg without crashing (transparent ignore)."""
+    sim = make_sim_exchange()
+    order = await sim.create_order(
+        "BTC/USDT:USDT", "buy", "market", 0.01,
+        params={"reduceOnly": True, "anything": "else"},
+    )
+    assert order is not None  # didn't crash on kwarg
+
+
+@pytest.mark.asyncio
+async def test_okx_create_order_merges_caller_params():
+    """OKX override merges caller params into internal {tdMode: isolated} dict."""
+    from unittest.mock import AsyncMock
+    okx = make_okx_exchange()
+    okx._client = AsyncMock()
+    okx._client.create_order = AsyncMock(return_value={
+        "id": "test-1", "symbol": "BTC/USDT:USDT", "side": "sell",
+        "type": "market", "amount": 0.01, "price": None, "status": "open",
+        "info": {"sz": "0.01"},
+    })
+    await okx.create_order(
+        "BTC/USDT:USDT", "sell", "market", 0.01,
+        params={"reduceOnly": True},
+    )
+    # Verify _client.create_order called with merged params
+    call_kwargs = okx._client.create_order.call_args.kwargs
+    assert call_kwargs["params"]["tdMode"] == "isolated"
+    assert call_kwargs["params"]["reduceOnly"] is True
+
+
+@pytest.mark.asyncio
+async def test_okx_create_order_no_caller_params_uses_defaults():
+    """OKX override with params=None → just {tdMode: isolated} (no reduceOnly)."""
+    from unittest.mock import AsyncMock
+    okx = make_okx_exchange()
+    okx._client = AsyncMock()
+    okx._client.create_order = AsyncMock(return_value={
+        "id": "test-1", "symbol": "BTC/USDT:USDT", "side": "buy",
+        "type": "market", "amount": 0.01, "price": None, "status": "open",
+        "info": {"sz": "0.01"},
+    })
+    await okx.create_order("BTC/USDT:USDT", "buy", "market", 0.01)
+    call_kwargs = okx._client.create_order.call_args.kwargs
+    assert call_kwargs["params"] == {"tdMode": "isolated"}
+    assert "reduceOnly" not in call_kwargs["params"]
+
+
+@pytest.mark.asyncio
+async def test_close_position_passes_reduce_only():
+    """tools_execution.py:close_position passes params={'reduceOnly': True}
+    to exchange.create_order. This is the Remediation A actuation point."""
+    from unittest.mock import AsyncMock, MagicMock
+    from src.agent.tools_execution import close_position
+    from src.integrations.exchange.base import Position
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.db_engine = None
+    deps.session_id = "test-session"
+    deps.exchange = AsyncMock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(symbol="BTC/USDT:USDT", side="long", contracts=0.01,
+                 entry_price=50000.0, unrealized_pnl=0.0, leverage=10,
+                 liquidation_price=45000.0),
+    ])
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    deps.exchange.create_order = AsyncMock(return_value=MagicMock(id="order-1"))
+    # Bypass _check_approval (returns True if no human gate)
+    from unittest.mock import patch
+    with patch("src.agent.tools_execution._check_approval",
+               new=AsyncMock(return_value=True)):
+        result = await close_position(deps, reasoning="test close")
+
+    # Assert reduceOnly was passed
+    call_kwargs = deps.exchange.create_order.call_args.kwargs
+    assert call_kwargs.get("params") == {"reduceOnly": True}, \
+        f"close_position must pass params={{'reduceOnly': True}}, got {call_kwargs.get('params')}"
+
+
+@pytest.mark.asyncio
+async def test_okx_fill_event_reduce_only_true_with_remediation_a():
+    """End-to-end: OKX _infer_is_full_close returns True when fill event has
+    info.reduceOnly='true' (the result of Remediation A). Validates 1D fixture."""
+    okx = make_okx_exchange()
+    # Mimics 1D fixture: market close with reduceOnly=true echoed back
+    info = {
+        "posSide": "net",
+        "reduceOnly": "true",  # OKX echoed because caller passed it
+        "ordType": "market",
+        "algoId": "",  # market path, no algoId
+    }
+    assert okx._infer_is_full_close(info, "sell", "market") is True

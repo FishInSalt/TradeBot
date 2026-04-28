@@ -558,20 +558,23 @@ class OKXExchange(BaseExchange):
         order_type: str,
         amount: float,
         price: float | None = None,
+        params: dict | None = None,
     ) -> Order:
-        params: dict[str, Any] = {"tdMode": "isolated"}
+        merged_params: dict[str, Any] = {"tdMode": "isolated"}
+        if params:
+            merged_params.update(params)  # caller wins on conflict
         is_algo = order_type in ("stop", "take_profit")
         # Verified via scripts/iter2b_write_path_probe.py: Attempt B (stop)
         # + Attempt E (take_profit) both route to OKX algo endpoint with
         # info.algoId non-empty.
         if is_algo and price is not None:
             if order_type == "stop":
-                params["stopLossPrice"] = price
+                merged_params["stopLossPrice"] = price
             else:  # take_profit
-                params["takeProfitPrice"] = price
+                merged_params["takeProfitPrice"] = price
 
         data = await self._client.create_order(
-            symbol, order_type, side, amount, price, params=params,  # type: ignore[arg-type]
+            symbol, order_type, side, amount, price, params=merged_params,  # type: ignore[arg-type]
         )
 
         if is_algo:
