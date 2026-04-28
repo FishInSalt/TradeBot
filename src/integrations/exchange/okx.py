@@ -118,7 +118,6 @@ class OKXExchange(BaseExchange):
             self._client.set_sandbox_mode(True)
         self._sandbox = sandbox
         self._symbol = symbol
-        self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
         self._running = False
         self._ws_client: Any | None = None
@@ -136,10 +135,7 @@ class OKXExchange(BaseExchange):
                 "OKX live account initialized — ALL ORDERS WILL USE REAL FUNDS"
             )
 
-    # --- Fill / Alert callback registration ---
-
-    def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
-        self._fill_callback = callback
+    # --- Alert callback registration ---
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback
@@ -258,11 +254,7 @@ class OKXExchange(BaseExchange):
                             for k in keys[:len(keys) // 2]:
                                 del self._seen_order_ids[k]
                         fill_event = await self._parse_fill_event(order_data)
-                        if self._fill_callback:
-                            try:
-                                await self._fill_callback(fill_event)
-                            except Exception:
-                                logger.exception("Fill callback failed for order %s", order_data.get("id"))
+                        await self._dispatch_fill_event(fill_event)
                     elif filled > 0 and status != "closed":
                         logger.warning(
                             "Partial fill detected: order %s filled=%s status=%s (not processing)",
@@ -372,6 +364,8 @@ class OKXExchange(BaseExchange):
 
         timestamp = order_data.get("timestamp", 0) or 0
 
+        is_full_close = self._infer_is_full_close(info, side, trigger_reason)
+
         return FillEvent(
             order_id=order_id,
             symbol=symbol,
@@ -383,7 +377,46 @@ class OKXExchange(BaseExchange):
             fee=fee,
             pnl=pnl,
             timestamp=timestamp,
+            is_full_close=is_full_close,
         )
+
+    def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bool:
+        """OKX 平仓判定：四源融合，任一命中即认 close.
+
+        NOTE: 当前项目 convention 下 ALL CLOSE FILLS ARE FULL CLOSE
+        (close_position / set_stop_loss / set_take_profit 都传 amount=pos.contracts)。
+        所以本判定实质是 "is close direction", 等价于 is_full_close.
+
+        若未来加 partial close 工具 (reduce_position(percent) 等), 此判定会
+        static-false-positive partial close, 届时需改为基于 fetch_positions /
+        in-memory position cache 的精确判定 (见 spec §6.3).
+        """
+        # 信号 1: reduceOnly 显式 (OKX 强信号).
+        # Task 0 实测: market close 路径下, 仅当 caller 显式传 params={"reduceOnly": True}
+        # 时 OKX 才回填 'true' (Task 5b 实施 Remediation A).
+        if info.get("reduceOnly") in (True, "true"):
+            return True
+        # 信号 2: trigger_reason 派生 close 类型.
+        # 注意 "liquidation" 当前不可达 — _TRIGGER_REASON_MAP (okx.py:36-42) 没有该 key.
+        # Task 0 实测: algo (SL/TP) 触发后 OKX 推送 fill event 的 ordType="limit"
+        # → trigger_reason="unknown" → 信号 2 漏. algo 路径靠新增的信号 4 (algoId) 兜底.
+        if trigger_reason in ("stop", "take_profit", "liquidation"):
+            return True
+        # 信号 3: posSide + side 反向 (hedge mode 强信号).
+        # 项目强制 net_mode (okx.py:183), posSide 永远是 "net", 此分支当前不命中.
+        pos_side = info.get("posSide")
+        if pos_side == "long" and side == "sell":
+            return True
+        if pos_side == "short" and side == "buy":
+            return True
+        # 信号 4 (Task 0 实测后新增): info.algoId 非空 → algo-triggered fill.
+        # algo 单 (SL/TP/conditional/OCO) 本质都是 reduce-only 语义, 触发后的 fill event
+        # 一定带 algoId. Task 0 1B/1C 实测确认: SL/TP 触发的 fill event 中 info.algoId
+        # 均非空; 普通用户下单 (1A/1D) algoId 为空. OKX 显式标识, 比信号 1/2/3 都强.
+        algo_id = info.get("algoId")
+        if algo_id and algo_id != "":
+            return True
+        return False
 
     # --- REST interface ---
 
@@ -521,20 +554,23 @@ class OKXExchange(BaseExchange):
         order_type: str,
         amount: float,
         price: float | None = None,
+        params: dict | None = None,
     ) -> Order:
-        params: dict[str, Any] = {"tdMode": "isolated"}
+        merged_params: dict[str, Any] = {"tdMode": "isolated"}
+        if params:
+            merged_params.update(params)  # caller wins on conflict
         is_algo = order_type in ("stop", "take_profit")
         # Verified via scripts/iter2b_write_path_probe.py: Attempt B (stop)
         # + Attempt E (take_profit) both route to OKX algo endpoint with
         # info.algoId non-empty.
         if is_algo and price is not None:
             if order_type == "stop":
-                params["stopLossPrice"] = price
+                merged_params["stopLossPrice"] = price
             else:  # take_profit
-                params["takeProfitPrice"] = price
+                merged_params["takeProfitPrice"] = price
 
         data = await self._client.create_order(
-            symbol, order_type, side, amount, price, params=params,  # type: ignore[arg-type]
+            symbol, order_type, side, amount, price, params=merged_params,  # type: ignore[arg-type]
         )
 
         if is_algo:

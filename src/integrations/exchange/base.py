@@ -1,10 +1,13 @@
 from __future__ import annotations
+import logging
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,13 +92,22 @@ class BaseExchange(ABC):
         self._price_level_alerts: list[dict] = []
         self._latest_price: float | None = None
         self._alert_service: Any | None = None
+        self._fill_callback: Callable[['FillEvent'], Awaitable[None]] | None = None
 
     @abstractmethod
     async def fetch_ticker(self, symbol: str) -> Ticker: ...
     @abstractmethod
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]: ...
     @abstractmethod
-    async def create_order(self, symbol: str, side: str, order_type: str, amount: float, price: float | None = None) -> Order: ...
+    async def create_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        price: float | None = None,
+        params: dict | None = None,
+    ) -> Order: ...
     @abstractmethod
     async def fetch_balance(self) -> Balance: ...
     @abstractmethod
@@ -134,8 +146,8 @@ class BaseExchange(ABC):
         pass
 
     def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
-        """注册 fill 回调。默认空实现。"""
-        pass
+        """注册 fill 回调。"""
+        self._fill_callback = callback
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         """注册价格异动回调。默认空实现。"""
@@ -200,6 +212,60 @@ class BaseExchange(ABC):
         self._price_level_alerts = remaining
         return triggered
 
+    def clear_level_alerts_by_symbol(self, symbol: str) -> int:
+        """Remove all price level alerts matching symbol. Returns count cleared.
+
+        Used by _clear_stale_alerts_for_full_close on close fills. Also exposed
+        as a standalone method for tests / future use.
+        """
+        before = len(self._price_level_alerts)
+        self._price_level_alerts = [
+            a for a in self._price_level_alerts if a["symbol"] != symbol
+        ]
+        return before - len(self._price_level_alerts)
+
+    async def _dispatch_fill_event(self, fill: 'FillEvent') -> None:
+        """Entry point for fill event dispatch.
+
+        Subclasses MUST route all FillEvent through this method, not call
+        self._fill_callback directly. Internal split into two SRP units:
+        alert hygiene (clear) and callback fan-out (invoke).
+
+        Order semantics: clear-before-callback. The callback observes the
+        final post-hygiene state (alert list already filtered). If a future
+        callback needs to capture stale-alert context for diagnostic logging,
+        either reorder the dispatch or add a pre-clear hook.
+        """
+        self._clear_stale_alerts_for_full_close(fill)
+        await self._invoke_fill_callback(fill)
+
+    def _clear_stale_alerts_for_full_close(self, fill: 'FillEvent') -> None:
+        """SRP unit 1: alert hygiene. Clear all level alerts for fill.symbol
+        if and only if the fill closes the position fully (is_full_close).
+        """
+        if not fill.is_full_close:
+            return
+        cleared = self.clear_level_alerts_by_symbol(fill.symbol)
+        if cleared > 0:
+            logger.info(
+                "Cleared %d stale price-level alert(s) on full close fill: "
+                "symbol=%s order_id=%s",
+                cleared, fill.symbol, fill.order_id,
+            )
+
+    async def _invoke_fill_callback(self, fill: 'FillEvent') -> None:
+        """SRP unit 2: callback fan-out with failure isolation.
+
+        Callback exceptions are logged, not propagated, so one fill's
+        callback failure does not block subsequent fill processing.
+        """
+        if self._fill_callback is None:
+            return
+        try:
+            await self._fill_callback(fill)
+        except Exception:
+            logger.exception("Fill callback failed for order %s", fill.order_id)
+
 @dataclass
 class FillEvent:
     order_id: str
@@ -212,6 +278,7 @@ class FillEvent:
     fee: float
     pnl: float | None      # 已实现盈亏（开仓时 None）
     timestamp: int
+    is_full_close: bool    # True iff 该 fill 把 symbol 持仓清零（用于 alert 清理）
 
 
 @dataclass

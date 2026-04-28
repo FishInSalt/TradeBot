@@ -1,6 +1,8 @@
 import pytest
 from unittest.mock import AsyncMock
 
+from tests._fixtures import make_fill_event
+
 
 def test_order_has_fee_field():
     from src.integrations.exchange.base import Order
@@ -200,20 +202,14 @@ async def test_okx_create_order_fee_none_when_missing():
 
 def test_fill_event_from_base():
     """FillEvent should be importable from base.py with pnl field."""
-    from src.integrations.exchange.base import FillEvent
-    event = FillEvent(
-        order_id="o1", symbol="BTC/USDT:USDT", side="buy",
-        position_side="long", trigger_reason="market",
-        fill_price=60200.0, amount=0.001, fee=0.03,
-        pnl=None, timestamp=1712534400000,
+    event = make_fill_event(
+        order_id="o1", fill_price=60200.0, amount=0.001, fee=0.03, timestamp=1712534400000,
     )
     assert event.pnl is None
 
-    event_with_pnl = FillEvent(
-        order_id="o2", symbol="BTC/USDT:USDT", side="sell",
-        position_side="long", trigger_reason="stop",
-        fill_price=58394.0, amount=0.001, fee=0.03,
-        pnl=-1.35, timestamp=1712534401000,
+    event_with_pnl = make_fill_event(
+        order_id="o2", side="sell", trigger_reason="stop",
+        fill_price=58394.0, amount=0.001, fee=0.03, pnl=-1.35, timestamp=1712534401000,
     )
     assert event_with_pnl.pnl == -1.35
 

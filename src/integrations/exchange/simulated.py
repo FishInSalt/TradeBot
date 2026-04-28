@@ -76,7 +76,6 @@ class SimulatedExchange(BaseExchange):
         self._prev_ticker: Ticker | None = None
         self._running = False
         self._lock = asyncio.Lock()
-        self._fill_callback: Callable[[FillEvent], Awaitable[None]] | None = None
         self._error_count = 0
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
 
@@ -179,9 +178,18 @@ class SimulatedExchange(BaseExchange):
         factor = 10 ** decimals
         return math.floor(amount * factor) / factor
 
-    async def create_order(
-        self, symbol: str, side: str, order_type: str, amount: float, price: float | None = None,
+    async def create_order(  # noqa: ARG002
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        price: float | None = None,
+        params: dict | None = None,
     ) -> Order:
+        # Sim doesn't need reduceOnly: its _is_close_order_static + position
+        # state logic handles full-close inference natively. Accept params for
+        # API parity with OKX (Remediation A); ignored at the sim layer.
         self._validate_symbol(symbol)
         if amount <= 0:
             raise ValueError(f"amount must be > 0, got {amount}")
@@ -337,6 +345,7 @@ class SimulatedExchange(BaseExchange):
             position_side=position_side, trigger_reason="market",
             fill_price=fill_price, amount=order.amount, fee=actual_fee,
             pnl=None, timestamp=now_ms,
+            is_full_close=False,  # market open
         )
 
     def _fill_market_close(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
@@ -359,6 +368,8 @@ class SimulatedExchange(BaseExchange):
         self._frozen_usdt -= order.frozen_margin
         self._free_usdt += order.frozen_margin
 
+        is_full_close = order.symbol not in self._positions  # rely on _close_position_core having popped fully-closed symbols
+
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         logger.info(
             f"Market close filled: {order.side} {actual_amount} {order.symbol} @ {fill_price:.2f}, "
@@ -369,6 +380,7 @@ class SimulatedExchange(BaseExchange):
             position_side=position_side, trigger_reason="market",
             fill_price=fill_price, amount=actual_amount, fee=fee,
             pnl=pnl, timestamp=now_ms,
+            is_full_close=is_full_close,
         )
 
     def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
@@ -498,6 +510,7 @@ class SimulatedExchange(BaseExchange):
         pnl, fee, _ = self._close_position_core(
             order.symbol, pos.side, actual_amount, fill_price,
         )
+        is_full_close = order.symbol not in self._positions
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         return FillEvent(
             order_id=order.id, symbol=order.symbol, side=order.side,
@@ -505,6 +518,7 @@ class SimulatedExchange(BaseExchange):
             fill_price=fill_price, amount=actual_amount, fee=fee,
             pnl=pnl,
             timestamp=now_ms,
+            is_full_close=is_full_close,
         )
 
     def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
@@ -563,6 +577,7 @@ class SimulatedExchange(BaseExchange):
             position_side=position_side, trigger_reason="limit",
             fill_price=fill_price, amount=order.amount, fee=actual_fee,
             pnl=None, timestamp=now_ms,
+            is_full_close=False,  # limit open (no limit-close tool exists)
         )
 
     def _force_liquidate(self, pos: _Position, symbol: str, price: float) -> FillEvent:
@@ -570,6 +585,7 @@ class SimulatedExchange(BaseExchange):
         pnl, fee, _ = self._close_position_core(
             symbol, pos.side, contracts, price, pnl_cap=True,
         )
+        is_full_close = symbol not in self._positions  # always True for liquidation
         order_id = str(uuid.uuid4())
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         logger.warning(f"LIQUIDATION: {pos.side} {contracts} {symbol} @ {price:.2f}")
@@ -580,6 +596,7 @@ class SimulatedExchange(BaseExchange):
             fill_price=price, amount=contracts, fee=fee,
             pnl=pnl,
             timestamp=now_ms,
+            is_full_close=is_full_close,
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
@@ -671,8 +688,7 @@ class SimulatedExchange(BaseExchange):
 
         # Notify outside lock
         for fill in triggered:
-            if self._fill_callback:
-                await self._fill_callback(fill)
+            await self._dispatch_fill_event(fill)
 
         if alert_info and self._alert_callback:
             await self._alert_callback(alert_info)
@@ -771,10 +787,7 @@ class SimulatedExchange(BaseExchange):
                 await self._persist_state()
         logger.info(f"Order cancelled: {order_id}")
 
-    # --- Fill callback ---
-
-    def on_fill(self, callback: Callable[[FillEvent], Awaitable[None]]) -> None:
-        self._fill_callback = callback
+    # --- Alert callback ---
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback

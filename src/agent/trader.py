@@ -539,6 +539,30 @@ def create_trader_agent(
         return await _impl(ctx.deps, price, direction, reasoning=reasoning)
 
     @tool
+    async def cancel_price_level_alert(
+        ctx: RunContext[TradingDeps],
+        alert_id: str,
+        reasoning: str,
+    ) -> str:
+        """Cancel a previously-set price level alert by its ID.
+
+        Use this when an alert is no longer relevant — for example, if the
+        structural level it watched has been invalidated by a regime change
+        or if the position context that motivated it has shifted in a way
+        that the auto-clearing on close fill does not cover.
+
+        Note: alerts at SL/TP levels are auto-cleared when a position closes;
+        you usually do not need to call this for that case.
+
+        Args:
+            alert_id: the alert ID returned by add_price_level_alert.
+            reasoning: brief description of why this alert is being cancelled.
+        """
+        from src.agent.tools_execution import cancel_price_level_alert as _impl
+
+        return await _impl(ctx.deps, alert_id, reasoning=reasoning)
+
+    @tool
     async def set_next_wake(
         ctx: RunContext[TradingDeps],
         minutes: int,
@@ -634,7 +658,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_recent_trades",
     "get_multi_timeframe_snapshot",
     "get_price_pivots",
-    # --- 执行 (10) ---
+    # --- 执行 (11) ---
     "open_position",
     "close_position",
     "set_stop_loss",
@@ -643,6 +667,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "set_price_alert",
     "cancel_order",
     "add_price_level_alert",
+    "cancel_price_level_alert",
     "set_next_wake",
     "place_limit_order",
     # --- memory (1) ---

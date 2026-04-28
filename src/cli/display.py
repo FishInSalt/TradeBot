@@ -258,6 +258,7 @@ _EXECUTION_SUCCESS_PREFIXES = {
     "cancel_order": "Order cancelled:",
     "set_price_alert": "Price alert updated:",
     "add_price_level_alert": ("Price level alert set:", "Alert set"),
+    "cancel_price_level_alert": "Price level alert cancelled",
     "set_next_wake": "Next wake set to",
 }
 

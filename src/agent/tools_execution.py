@@ -113,7 +113,9 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
     for p in positions:
         order_side = "sell" if p.side == "long" else "buy"
         order = await deps.exchange.create_order(
-            symbol=deps.symbol, side=order_side, order_type="market", amount=p.contracts
+            symbol=deps.symbol, side=order_side, order_type="market",
+            amount=p.contracts,
+            params={"reduceOnly": True},  # ensures OKX echoes info.reduceOnly=true in fill event
         )
         order_ids.append(order.id)
         await _record_action(
@@ -255,6 +257,22 @@ async def add_price_level_alert(
             )
 
     return f"Price level alert set: {direction} {price:.2f} (id={alert_id})"
+
+
+async def cancel_price_level_alert(
+    deps: TradingDeps,
+    alert_id: str,
+    reasoning: str,
+) -> str:
+    """Remove a price level alert by ID."""
+    ok = deps.exchange.remove_price_level_alert(alert_id)
+    if ok:
+        await _record_action(
+            deps, action="cancel_price_level_alert",
+            reasoning=f"id={alert_id} | {reasoning}",
+        )
+        return f"Price level alert cancelled (id={alert_id})"
+    return f"Alert {alert_id} not found (already triggered or never existed)"
 
 
 async def set_next_wake(
