@@ -368,6 +368,8 @@ class OKXExchange(BaseExchange):
 
         timestamp = order_data.get("timestamp", 0) or 0
 
+        is_full_close = self._infer_is_full_close(info, side, trigger_reason)
+
         return FillEvent(
             order_id=order_id,
             symbol=symbol,
@@ -379,7 +381,46 @@ class OKXExchange(BaseExchange):
             fee=fee,
             pnl=pnl,
             timestamp=timestamp,
+            is_full_close=is_full_close,
         )
+
+    def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bool:
+        """OKX 平仓判定：四源融合，任一命中即认 close.
+
+        NOTE: 当前项目 convention 下 ALL CLOSE FILLS ARE FULL CLOSE
+        (close_position / set_stop_loss / set_take_profit 都传 amount=pos.contracts)。
+        所以本判定实质是 "is close direction", 等价于 is_full_close.
+
+        若未来加 partial close 工具 (reduce_position(percent) 等), 此判定会
+        static-false-positive partial close, 届时需改为基于 fetch_positions /
+        in-memory position cache 的精确判定 (见 spec §6.3).
+        """
+        # 信号 1: reduceOnly 显式 (OKX 强信号).
+        # Task 0 实测: market close 路径下, 仅当 caller 显式传 params={"reduceOnly": True}
+        # 时 OKX 才回填 'true' (Task 5b 实施 Remediation A).
+        if info.get("reduceOnly") in (True, "true"):
+            return True
+        # 信号 2: trigger_reason 派生 close 类型.
+        # 注意 "liquidation" 当前不可达 — _TRIGGER_REASON_MAP (okx.py:36-42) 没有该 key.
+        # Task 0 实测: algo (SL/TP) 触发后 OKX 推送 fill event 的 ordType="limit"
+        # → trigger_reason="unknown" → 信号 2 漏. algo 路径靠新增的信号 4 (algoId) 兜底.
+        if trigger_reason in ("stop", "take_profit", "liquidation"):
+            return True
+        # 信号 3: posSide + side 反向 (hedge mode 强信号).
+        # 项目强制 net_mode (okx.py:183), posSide 永远是 "net", 此分支当前不命中.
+        pos_side = info.get("posSide")
+        if pos_side == "long" and side == "sell":
+            return True
+        if pos_side == "short" and side == "buy":
+            return True
+        # 信号 4 (Task 0 实测后新增): info.algoId 非空 → algo-triggered fill.
+        # algo 单 (SL/TP/conditional/OCO) 本质都是 reduce-only 语义, 触发后的 fill event
+        # 一定带 algoId. Task 0 1B/1C 实测确认: SL/TP 触发的 fill event 中 info.algoId
+        # 均非空; 普通用户下单 (1A/1D) algoId 为空. OKX 显式标识, 比信号 1/2/3 都强.
+        algo_id = info.get("algoId")
+        if algo_id and algo_id != "":
+            return True
+        return False
 
     # --- REST interface ---
 
