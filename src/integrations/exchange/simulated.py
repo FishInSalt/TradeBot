@@ -178,7 +178,7 @@ class SimulatedExchange(BaseExchange):
         factor = 10 ** decimals
         return math.floor(amount * factor) / factor
 
-    async def create_order(
+    async def create_order(  # noqa: ARG002
         self,
         symbol: str,
         side: str,
@@ -190,7 +190,6 @@ class SimulatedExchange(BaseExchange):
         # Sim doesn't need reduceOnly: its _is_close_order_static + position
         # state logic handles full-close inference natively. Accept params for
         # API parity with OKX (Remediation A); ignored at the sim layer.
-        del params  # explicitly unused
         self._validate_symbol(symbol)
         if amount <= 0:
             raise ValueError(f"amount must be > 0, got {amount}")
@@ -369,7 +368,7 @@ class SimulatedExchange(BaseExchange):
         self._frozen_usdt -= order.frozen_margin
         self._free_usdt += order.frozen_margin
 
-        is_full_close = order.symbol not in self._positions  # NEW: post-_close_position_core dict state
+        is_full_close = order.symbol not in self._positions  # rely on _close_position_core having popped fully-closed symbols
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         logger.info(
@@ -511,7 +510,7 @@ class SimulatedExchange(BaseExchange):
         pnl, fee, _ = self._close_position_core(
             order.symbol, pos.side, actual_amount, fill_price,
         )
-        is_full_close = order.symbol not in self._positions  # NEW
+        is_full_close = order.symbol not in self._positions
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         return FillEvent(
             order_id=order.id, symbol=order.symbol, side=order.side,
@@ -586,7 +585,7 @@ class SimulatedExchange(BaseExchange):
         pnl, fee, _ = self._close_position_core(
             symbol, pos.side, contracts, price, pnl_cap=True,
         )
-        is_full_close = symbol not in self._positions  # NEW (always True for liquidation)
+        is_full_close = symbol not in self._positions  # always True for liquidation
         order_id = str(uuid.uuid4())
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         logger.warning(f"LIQUIDATION: {pos.side} {contracts} {symbol} @ {price:.2f}")

@@ -114,11 +114,13 @@ def install_parse_plain_workaround() -> None:
     """Workaround for OKX market order create response missing 'amount' field.
 
     OKX swap market order create response unified data sometimes returns
-    amount=None (size info lives in info.sz instead). _parse_plain (okx.py:481)
-    does float(data["amount"]) → TypeError. Fall back to info.sz or filled.
+    amount=None (size info lives in info.sz instead). _parse_plain in
+    src/integrations/exchange/okx.py does float(data["amount"]) → TypeError.
+    Fall back to info.sz or filled.
 
-    UPSTREAM TODO: this should be fixed in src/integrations/exchange/okx.py:481
-    as a defensive fallback (separate PR, not Iter 6 scope).
+    UPSTREAM TODO: this should be fixed in _parse_plain in
+    src/integrations/exchange/okx.py as a defensive fallback (separate PR,
+    not Iter 6 scope).
     """
     original = OKXExchange._parse_plain
 
