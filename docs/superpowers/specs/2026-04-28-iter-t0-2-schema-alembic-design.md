@@ -636,7 +636,8 @@ async def _record_action(
 | `test_args_serialized_to_json_dict` | `call.args = {"side": "long", "pct": 30}` → DB args = `'{"side":"long","pct":30}'` |
 | `test_args_strips_reasoning_key` | `call.args = {"side": "long", "reasoning": "long..."}` → DB args 不含 `"reasoning"` |
 | `test_args_truncated_at_4000` | 超长 args dict → DB args ≤ 4000 chars |
-| `test_args_none_when_empty` | `call.args = {}` 或 `None` → DB args = NULL |
+| `test_args_none_when_empty_dict` | `call.args = {}` → DB args = NULL |
+| `test_args_none_when_call_args_is_none` | `call.args = None` → DB args = NULL（与上 case 显式分离，覆盖 args_as_dict() str/dict/None 三态中的 None 入参分支）|
 
 **`tests/test_record_action_cycle_id.py`**
 
@@ -692,11 +693,11 @@ context.configure(..., include_object=include_object)
 ### 5.5 Regression
 
 ```bash
-uv run pytest                  # 898 + ~9 新 tests
+uv run pytest                  # 898 + ~11 新 tests
 uv run alembic check           # 一致性守门
 ```
 
-新增 tests 预估 ~9 个（migration 3 + recorder 4 + record_action 2），+0.5-1s 总耗时。
+新增 tests 预估 ~11 个（migration 4 + recorder 5 + record_action 2），+0.5-1s 总耗时。
 
 ---
 

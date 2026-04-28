@@ -34,7 +34,7 @@ NEW:
   alembic.ini                                           # Alembic config (script_location, file_template, prepend_sys_path)
 
   tests/test_alembic_migration.py                       # 4 migration tests
-  tests/test_tool_call_recorder_args.py                 # 4 args field tests (or extend existing test_tool_call_recorder.py)
+  tests/test_tool_call_recorder_args.py                 # 5 args field tests (or extend existing test_tool_call_recorder.py)
   tests/test_record_action_cycle_id.py                  # 2 cycle_id write tests
 
 MODIFY:
@@ -1335,7 +1335,7 @@ async def test_args_none_when_call_args_is_none(engine, deps):
 - [ ] **Step 2: Run tests — expect failures**
 
 Run: `uv run pytest tests/test_tool_call_recorder_args.py -v 2>&1 | tail -15`
-Expected: All 4 tests fail (likely all `args` returns None or column doesn't exist).
+Expected: All 5 tests fail (likely all `args` returns None or column doesn't exist).
 
 - [ ] **Step 3: Implement args write in tool_call_recorder.py**
 
@@ -1396,7 +1396,7 @@ import time
 - [ ] **Step 4: Run tests — expect pass**
 
 Run: `uv run pytest tests/test_tool_call_recorder_args.py -v 2>&1 | tail -15`
-Expected: All 4 tests pass.
+Expected: All 5 tests pass.
 
 - [ ] **Step 5: Run full suite — confirm no regression in existing recorder tests**
 
@@ -1418,7 +1418,7 @@ feat(iter-t0-2): tool_call_recorder writes args field with strip+truncate
   tolerated by analysis side)
 - Same args_as_dict() pattern as cli/app.py:215 display path
 
-4 tests cover: serialize JSON / strip reasoning / truncate / None when empty.
+5 tests cover: serialize JSON / strip reasoning / truncate / None for empty dict / None for None arg.
 
 Spec §4.4 / §5.3.
 
@@ -1666,7 +1666,7 @@ If false alarms about anonymous constraints (per spec §5.4 contingency): add `i
 uv run pytest -q 2>&1 | tail -10
 ```
 
-Expected: All 898 + ~10 new tests pass (4 migration + 4 args + 2 cycle_id).
+Expected: All 898 + ~11 new tests pass (4 migration + 5 args + 2 cycle_id).
 
 - [ ] **Step 6: Run 1-cycle smoke (optional, only if you're confident)**
 
