@@ -4,7 +4,7 @@
 
 **Goal:** Introduce Alembic + 5 schema changes (tool_calls.args / trade_actions.cycle_id / decision_logs.{status,decision,market_summary}) + 109-row backfill in single migration; 0 existing tests modified.
 
-**Architecture:** Three-state `init_db` sentinel (W1 pre-Alembic legacy DB walks `stamp base + upgrade head`); Cookbook "Sharing a Connection" + `engine.connect()` (no nested transactions); naming convention A.2 (decision_logs constraint align as batch_alter byproduct); `server_default="ok"` retained (avoids batch reconcile NULL violation).
+**Architecture:** Three-state `init_db` sentinel (W1 pre-Alembic legacy DB walks `stamp base + upgrade head`); Cookbook "Sharing a Connection" + `engine.begin()` outer transaction (alembic detects `_in_external_transaction → nullcontext`, shares outer tx, exits COMMIT — Round 13 calibration); naming convention A.2 (decision_logs constraint align as batch_alter byproduct); `server_default="ok"` retained (avoids batch reconcile NULL violation).
 
 **Tech Stack:** Python 3.12+ / SQLAlchemy 2.0 async / Alembic 1.13+ / pydantic-ai 1.78+ / SQLite (WAL mode).
 
@@ -401,7 +401,12 @@ def _resolved_sync_url() -> str:
         async_url = env_url
     else:
         # env_overrides={} 跳过 dotenv 读取（alembic 上下文不需要 OKX_* env vars）
-        async_url = load_settings(env_overrides={}).database.url
+        # path 锚定到 repo_root（避免 alembic CLI 从非 repo_root 启动时 cwd-relative path 失败）
+        repo_root = Path(__file__).resolve().parents[1]
+        async_url = load_settings(
+            path=repo_root / "config" / "settings.yaml",
+            env_overrides={},
+        ).database.url
     # 同步化 (sqlite+aiosqlite → sqlite)
     sync_url = async_url.replace("sqlite+aiosqlite:", "sqlite:")
     # Path normalization: 相对路径 → 绝对路径（锚定 repo root，alembic/env.py 在 repo_root/alembic/env.py）
@@ -419,7 +424,7 @@ def run_migrations_online() -> None:
     if connectable is None:
         # CLI 直调路径：自建 engine + connection（path normalization 见 _resolved_sync_url）
         sync_engine = create_engine(_resolved_sync_url(), poolclass=pool.NullPool)
-        with sync_engine.connect() as conn:
+        with sync_engine.begin() as conn:    # 外层开 transaction，alembic 内层 nullcontext 共享 (Round 13)
             do_run_migrations(conn)
     else:
         # init_db 注入路径：复用外层 sync_conn
@@ -433,7 +438,7 @@ def do_run_migrations(connection) -> None:
         # render_as_batch=True 让 SQLite 自动用 batch_alter（add column 等不需，alter type 必需）
         render_as_batch=True,
     )
-    # alembic 自管事务边界（与 init_db 外层 engine.connect() 配合）
+    # alembic 检测外层 transaction (init_db engine.begin() 或 CLI sync_engine.begin()) → nullcontext → 共享
     with context.begin_transaction():
         context.run_migrations()
 
@@ -729,8 +734,11 @@ _session_factories: dict[int, async_sessionmaker[AsyncSession]] = {}
 
 async def init_db(url: str) -> AsyncEngine:
     engine = create_async_engine(url, echo=False)
-    # engine.connect() 不开外层事务，让 alembic 自管事务边界（Cookbook "Sharing a Connection"）
-    async with engine.connect() as conn:
+    # engine.begin() 开外层 transaction；alembic 内层 context.begin_transaction()
+    # 检测 _in_external_transaction → nullcontext → 共享外层 transaction → 外层退出 COMMIT
+    # (Round 13 calibration: engine.connect() would auto-begin then ROLLBACK on async with exit
+    #  because alembic's nullcontext doesn't commit and no explicit outer commit)
+    async with engine.begin() as conn:
         has_alembic = await conn.run_sync(_has_alembic_version_table)
         if has_alembic:
             # 路径 1: 已 in-Alembic 链 → alembic upgrade head（no-op 若已 head）
@@ -845,7 +853,7 @@ Spec §3.1 / §4.3. Three branches:
    W1 current state — let legacy DB experience migration)
 3. empty DB / test fixture → create_all + stamp head (fast path)
 
-engine.connect() (no engine.begin()) avoids nested transaction with alembic.
+engine.begin() outer transaction; alembic _in_external_transaction → nullcontext → shares outer tx (Round 13 calibration; engine.connect() would auto-begin then ROLLBACK).
 Connection injection via cfg.attributes["connection"] (Cookbook "Sharing a
 Connection"). Config path anchored to repo_root (avoids cwd dependency).
 
@@ -1234,7 +1242,11 @@ from src.storage.models import ToolCall
 
 @pytest.fixture
 async def engine(tmp_path: Path):
-    return await init_db(f"sqlite+aiosqlite:///{tmp_path}/recorder.db")
+    eng = await init_db(f"sqlite+aiosqlite:///{tmp_path}/recorder.db")
+    try:
+        yield eng
+    finally:
+        await eng.dispose()    # cleanup _session_factories[id(engine)] avoid stale entries cross-test
 
 
 async def _run_recorder(engine, deps, call_args: Any) -> str | None:
@@ -1264,8 +1276,12 @@ async def _run_recorder(engine, deps, call_args: Any) -> str | None:
 
 
 @pytest.fixture
-def deps(engine):
-    """Mock TradingDeps minimum surface (session_id / cycle_id / db_engine)."""
+async def deps(engine):
+    """Mock TradingDeps minimum surface (session_id / cycle_id / db_engine).
+
+    async def: pytest-asyncio auto mode + sync fixture depending on async fixture
+    can yield un-awaited coroutine; async def ensures engine is properly resolved.
+    """
     d = MagicMock()
     d.session_id = "test-session"
     d.cycle_id = "test-cycle"
@@ -1302,9 +1318,17 @@ async def test_args_truncated_at_4000(engine, deps):
 
 
 @pytest.mark.asyncio
-async def test_args_none_when_empty(engine, deps):
+async def test_args_none_when_empty_dict(engine, deps):
     deps.db_engine = engine
     args = await _run_recorder(engine, deps, {})
+    assert args is None
+
+
+@pytest.mark.asyncio
+async def test_args_none_when_call_args_is_none(engine, deps):
+    """Direct None case (vs empty dict {}); ensures args_as_dict() three-state coverage."""
+    deps.db_engine = engine
+    args = await _run_recorder(engine, deps, None)
     assert args is None
 ```
 
@@ -1446,7 +1470,10 @@ async def engine(tmp_path: Path):
             token_budget=500000,
         ))
         await session.commit()
-    return eng
+    try:
+        yield eng
+    finally:
+        await eng.dispose()    # cleanup _session_factories[id(engine)] avoid stale entries cross-test
 
 
 def _make_deps(engine, cycle_id: str | None) -> MagicMock:
@@ -1686,7 +1713,7 @@ Before opening PR / handing off, manually verify:
 - [ ] Migration file imports `from src.storage.models import NAMING_CONVENTION` and uses it in `batch_alter_table(naming_convention=...)`
 - [ ] Migration `upgrade()` Step 5a (catch-net UPDATE WHERE decision='usage_limit_exceeded') runs BEFORE Step 5b (UPDATE all to 'legacy')
 - [ ] Migration `upgrade()` does NOT contain `batch_op.alter_column("status", server_default=None)` (server_default retained, batch reconcile bug avoided)
-- [ ] `database.py` uses `engine.connect()` not `engine.begin()` for the alembic call block
+- [ ] `database.py` uses **`engine.begin()`** (NOT `engine.connect()`) for the alembic call block — Round 13 critical: `engine.connect()` causes `async with` exit ROLLBACK in SQLAlchemy 2.0 strict mode (alembic's `_in_external_transaction → nullcontext` does not commit)
 - [ ] `database.py` has 6 helpers: `_has_alembic_version_table` / `_has_business_tables` / `_alembic_config` / `_alembic_upgrade_head` / `_alembic_stamp_head` / `_alembic_stamp_base`
 - [ ] `tool_call_recorder.py` uses `call.args_as_dict()` (NOT `isinstance(call.args, dict)`)
 - [ ] `tools_execution.py` `_record_action` reads `cycle_id` from `deps.cycle_id` (11 callers unchanged)
