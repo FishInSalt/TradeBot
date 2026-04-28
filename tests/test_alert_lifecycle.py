@@ -169,7 +169,7 @@ def test_okx_parse_fill_event_open_with_empty_algo_id_string():
     assert okx._infer_is_full_close(info, "buy", "market") is False
 
 
-# ============ OKX _watch_orders_loop integration test ============
+# ============ OKX dispatch-post-parse integration test ============
 
 @pytest.mark.asyncio
 async def test_okx_dispatch_fill_event_clears_post_parse():
@@ -559,3 +559,91 @@ async def test_dispatch_fill_event_callback_observes_post_clear_state():
     # Callback should have seen post-hygiene (empty) alert list
     assert len(captured_alerts) == 1
     assert captured_alerts[0] == []
+
+
+# ============ cancel_price_level_alert tool ============
+
+@pytest.mark.asyncio
+async def test_cancel_price_level_alert_tool_success():
+    """Successful cancel: returns success message + records action."""
+    from src.agent.tools_execution import cancel_price_level_alert
+
+    sim = make_sim_exchange()
+    alert_id = sim.add_price_level_alert(
+        price=51000.0, direction="above",
+        symbol="BTC/USDT:USDT", reasoning="test",
+    )
+    assert alert_id is not None
+
+    # Build minimal TradingDeps mock
+    # NOTE: db_engine=None is safe — _record_action source-verified to early-return
+    # at tools_execution.py:19 (`if deps.db_engine is None: return`). No DB I/O occurs.
+    deps = MagicMock()
+    deps.exchange = sim
+    deps.db_engine = None
+    deps.session_id = "test-session"
+
+    result = await cancel_price_level_alert(deps, alert_id, "no longer needed")
+
+    assert result == f"Price level alert cancelled (id={alert_id})"
+    assert len(sim.get_price_level_alerts()) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_price_level_alert_tool_not_found():
+    """Non-existent alert_id: returns not-found message."""
+    from src.agent.tools_execution import cancel_price_level_alert
+
+    sim = make_sim_exchange()
+    deps = MagicMock()
+    deps.exchange = sim
+    deps.db_engine = None
+    deps.session_id = "test-session"
+
+    result = await cancel_price_level_alert(deps, "nonexistent-id", "test")
+
+    assert "not found" in result
+    assert "nonexistent-id" in result
+
+
+# ============ display.py is_tool_error coverage ============
+
+def test_is_tool_error_cancel_alert_success_returns_false():
+    """Success message with prefix → is_tool_error returns False."""
+    from src.cli.display import is_tool_error
+
+    result = is_tool_error(
+        tool_name="cancel_price_level_alert",
+        content="Price level alert cancelled (id=abc12345)",
+        outcome="success",
+    )
+    assert result is False
+
+
+def test_is_tool_error_cancel_alert_not_found_returns_true():
+    """Not-found message doesn't match prefix → is_tool_error returns True (business rejection)."""
+    from src.cli.display import is_tool_error
+
+    result = is_tool_error(
+        tool_name="cancel_price_level_alert",
+        content="Alert nonexistent-id not found (already triggered or never existed)",
+        outcome="success",
+    )
+    assert result is True
+
+
+def test_registered_tool_names_includes_cancel_alert():
+    """Explicit assertion that cancel_price_level_alert is in REGISTERED_TOOL_NAMES.
+
+    Redundant with test_trader_agent.py drift guard (which catches missing
+    registration via agent introspection), but provides explicit naming so
+    future readers can grep "includes_cancel_alert" to find this contract.
+    """
+    from src.agent.trader import REGISTERED_TOOL_NAMES
+
+    assert "cancel_price_level_alert" in REGISTERED_TOOL_NAMES
+    # Also verify position adjacent to add_price_level_alert (add/cancel pairing per §4.7)
+    add_idx = REGISTERED_TOOL_NAMES.index("add_price_level_alert")
+    cancel_idx = REGISTERED_TOOL_NAMES.index("cancel_price_level_alert")
+    assert cancel_idx == add_idx + 1, \
+        f"cancel_price_level_alert should be immediately after add_price_level_alert"

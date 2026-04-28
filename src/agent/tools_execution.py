@@ -259,6 +259,22 @@ async def add_price_level_alert(
     return f"Price level alert set: {direction} {price:.2f} (id={alert_id})"
 
 
+async def cancel_price_level_alert(
+    deps: TradingDeps,
+    alert_id: str,
+    reasoning: str,
+) -> str:
+    """Remove a price level alert by ID."""
+    ok = deps.exchange.remove_price_level_alert(alert_id)
+    if ok:
+        await _record_action(
+            deps, action="cancel_price_level_alert",
+            reasoning=f"id={alert_id} | {reasoning}",
+        )
+        return f"Price level alert cancelled (id={alert_id})"
+    return f"Alert {alert_id} not found (already triggered or never existed)"
+
+
 async def set_next_wake(
     deps: TradingDeps,
     minutes: int,
