@@ -597,14 +597,16 @@ async def _record_action(
 
 ### 5.2 新增 Migration 测试: `tests/test_alembic_migration.py`
 
+> ⚠️ **关键认知（设计前提）**: 本 Iter 首个 migration 是 **ALTER pre-existing schema**（drop_index / add_column / batch_alter），**不是 CREATE FROM BASE**。空库直接跑 `alembic upgrade head` 第一行 `op.drop_index("ix_sim_orders_session_status", ...)` 立即撞 `OperationalError: no such index`。空库的 production 路径是 **init_db path 3**（`create_all + stamp head`），**不经过 migration 链**。Migration 链的设计前提是已有完整 W1 schema（path 2 pre-Alembic legacy 或 path 1 已 in-Alembic 后续升级）。
+
 | 测试 | 验证 |
 |---|---|
-| `test_upgrade_from_empty_db` | 空库 alembic upgrade head，所有字段就位（含 args / cycle_id / status / `ix_decision_logs_session_id_cycle_id`）|
-| `test_upgrade_from_w1_like_data` | **Pre-Alembic schema 来源**：测试内 hand-write `CREATE TABLE decision_logs (id INTEGER PK, session_id ..., cycle_id ..., trigger_type ..., market_summary TEXT, decision VARCHAR(50), reasoning TEXT, model_used VARCHAR(100), tokens_used INTEGER, created_at DATETIME)`（10 字段，不含 status；与 §4.1 (d) 改动前的 spec 字段列表一致，简单且自包含）。Mock 数据混合两种：4 行 `decision='completed'` + 1 行 `decision='usage_limit_exceeded'`，跑 upgrade，断言：(1) **migration 不抛异常**（覆盖 batch_alter 合并语义 + INSERT SELECT 不撞 NOT NULL 路径）；(2) 5 行全部 `decision='legacy'`；(3) 4 行 `status='ok'`（来自 server_default）+ **1 行 `status='usage_limit_exceeded'`（验证 §4.2 Step 5a catch-net 写对）**|
-| `test_downgrade_then_upgrade` | upgrade → downgrade -1 → upgrade head 可重入，验证幂等 |
-| `test_upgrade_when_already_head` | 已在 head 状态再次 `alembic upgrade head` 不报错、状态不变（**production 关键路径**：三态判定下 sentinel #1 分支每次 `init_db` 都跑 upgrade head，幂等性必须可验证）|
+| `test_init_db_path_3_for_empty_db` | 空库走 `init_db` path 3 (create_all + stamp head)，验证：(1) schema 完整（含 args / cycle_id / status / `ix_decision_logs_session_id_cycle_id`）；(2) `alembic_version` 表已 stamp 到 head revision。**关键**：不调 `alembic upgrade head`（首个 migration 是 ALTER 操作，空库会撞 `no such index`） |
+| `test_upgrade_from_w1_like_data` | **Pre-Alembic schema 来源**：测试内 hand-write **完整 W1 业务表 schema**（sessions + sim_orders + ix_sim_orders_session_status + decision_logs + trade_actions + tool_calls + 旧手写索引），让 migration upgrade Step 1 的 drop_index/alter 操作有目标。Mock 数据混合两种：4 行 `decision='completed'` + 1 行 `decision='usage_limit_exceeded'`，**直接跑 `command.upgrade(cfg, "head")`**（非 init_db，因测试目标是 migration 行为），断言：(1) **migration 不抛异常**（覆盖 batch_alter 合并语义 + INSERT SELECT 不撞 NOT NULL 路径）；(2) 5 行全部 `decision='legacy'`；(3) 4 行 `status='ok'`（来自 server_default）+ **1 行 `status='usage_limit_exceeded'`（验证 §4.2 Step 5a catch-net 写对）**|
+| `test_downgrade_then_upgrade` | 从 W1-like fixture 起步 → upgrade → downgrade -1 → upgrade head 可重入，验证幂等 |
+| `test_upgrade_when_already_head` | 已在 head 状态（从 W1-like fixture upgrade 后）再次 `alembic upgrade head` 不报错、状态不变（**production 关键路径**：三态判定下 sentinel #1 分支每次 `init_db` 都跑 upgrade head，幂等性必须可验证）|
 
-> Migration test 用 `alembic.command` Python API 调用（不走 subprocess），与现有 in-process 测试风格一致。
+> Migration test 用 `alembic.command` Python API 调用（不走 subprocess），与现有 in-process 测试风格一致。`test_init_db_path_3_for_empty_db` 用 `init_db()` API（path 3）。
 
 ### 5.3 写入路径测试
 
@@ -626,16 +628,27 @@ async def _record_action(
 
 ### 5.4 CI 一致性守门
 
-CI 加一步（pytest 后）。**关键：alembic check 不能跑在本地 W1 DB 上**（污染风险）；策略：临时空 DB + upgrade head + check：
+CI 加一步（pytest 后）。**关键**: (1) 不能跑在本地 W1 DB 上（污染风险）；(2) **不能直接 `alembic upgrade head`**（首个 migration 是 ALTER 操作，空库会撞 `no such index`，与 §5.2 关键认知一致）。**正确策略**: 临时空 DB → 走 `init_db` (path 3 = create_all + stamp head) 建 schema → `alembic check` 比对 ORM metadata vs DB head schema 一致性：
 
 ```bash
 # CI workflow（pytest 后）
 TMP_DIR=$(mktemp -d)
 TMP_DB="$TMP_DIR/ci_alembic_check.db"
-TRADEBOT_DB_URL="sqlite+aiosqlite:///$TMP_DB" uv run alembic upgrade head
+
+# 走 init_db path 3 (create_all + stamp head)，避免 alembic upgrade 空库撞 no such index
+TRADEBOT_DB_URL="sqlite+aiosqlite:///$TMP_DB" uv run python -c "
+import asyncio
+from src.storage.database import init_db
+asyncio.run(init_db('sqlite+aiosqlite:///$TMP_DB'))
+"
+
+# 检测 ORM metadata 与 DB schema (= migration head 等价 schema) 一致性
 TRADEBOT_DB_URL="sqlite+aiosqlite:///$TMP_DB" uv run alembic check   # diff 非空则 fail
+
 rm -rf "$TMP_DIR"
 ```
+
+**为什么这是正确审计**: `init_db` path 3 调 `Base.metadata.create_all` 把 ORM models 描述的 schema 物化到 DB；`alembic stamp head` 标记该状态等价于 migration head。`alembic check` 比较 ORM metadata vs DB schema → 如果一致，证明 "走 migration 链产物" 与 "走 create_all 产物" 等价（双轨 invariant 守护）。
 
 **前置实现已定型**：实测 `src/config.py:114-153` `load_settings` 仅注入 `OKX_*` / `FRED_API_KEY` 等业务 env vars，**不处理 `database.url`**——所以 spec env.py 的 `_resolved_sync_url()` 必须在最外层加 env var fallback（不能走 load_settings env_overrides 路径）。
 
