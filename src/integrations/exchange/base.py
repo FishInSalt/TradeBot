@@ -216,6 +216,7 @@ class FillEvent:
     fee: float
     pnl: float | None      # 已实现盈亏（开仓时 None）
     timestamp: int
+    is_full_close: bool    # NEW — True iff fill 把该 symbol 持仓清零（仅触发 alert 清理）
 
 
 @dataclass
