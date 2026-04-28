@@ -109,6 +109,7 @@ def make_okx_exchange():
     ex._latest_price = None
     ex._alert_service = None
     ex._fill_callback = None
+    ex._alert_callback = None  # NEW: parity with OKXExchange.__init__:121 (Task 2 review I1)
     # OKXExchange-specific minimal state for tests
     ex._symbol = "BTC/USDT:USDT"
     ex._sandbox = True
