@@ -331,13 +331,27 @@ def downgrade() -> None:
 
 **(1) connection 注入约定**：`alembic.command.upgrade(cfg, "head")` 默认行为是 `engine_from_config` 自建 Engine + Connection，**不会复用** init_db 外层的 connection。结果：同一 SQLite 文件被两个 connection 并发写，WAL 模式下 transaction 边界不清晰。Alembic cookbook "Sharing a Connection" 模式：调用方把 connection 注入 `cfg.attributes["connection"]`，env.py 优先读这个 attribute、缺失才自建。
 
-**(2) 用 `engine.connect()` 不是 `engine.begin()`**：Alembic env.py 内的 `do_run_migrations` 会调 `context.begin_transaction()` 自管事务边界。若外层 `engine.begin()` 已开 transaction，alembic 内层会变成 SAVEPOINT 而非真实事务——alembic_version 写入与 schema 变更的事务边界混乱，SQLite WAL 模式下行为不可预期。Cookbook 模式用 `engine.connect()`（无外层事务），让 alembic 自管。
+**(2) 用 `engine.begin()` 不是 `engine.connect()`** （**Round 13 关键校准**）：Alembic `MigrationContext.begin_transaction()` 实测源码行为（`alembic/runtime/migration.py`）：
+
+```python
+def begin_transaction(self, _per_migration: bool = False):
+    if self._in_external_transaction:
+        return nullcontext()    # 检测到外层已 in transaction → 完全不开 transaction、不 commit、不 rollback
+    ...
+```
+
+→ shared connection 模式下 alembic **完全依赖外层管理 transaction**：
+- ✅ 外层 `engine.begin()`：BEGIN → 内层 alembic 检测 in_external_transaction → nullcontext → ops 在外层 transaction 内执行 → 外层退出 COMMIT
+- ❌ 外层 `engine.connect()`（**spec round 1-12 错误设计**）：无 BEGIN → SELECT 触发 SQLAlchemy 2.0 auto-begin → alembic 检测 in_transaction → nullcontext 不 commit → `async with engine.connect()` 退出无显式 commit → **ROLLBACK 所有 schema 创建 + alembic_version stamp** → 全套 32 处 fixture 立刻撞 `OperationalError: no such table`
+
+第二轮某审查者基于对 cookbook 的误读建议 `engine.connect()`，spec 接受后 11 轮审查未发现，第十三轮通过 alembic 源码 + 官方默认 env.py 模板核实纠正（默认模板用 `connectable.connect()` 是 alembic 自建 engine 场景，内层 `context.begin_transaction()` 真正开 transaction；本项目是 share connection 场景，外层必须 begin）。
 
 ```python
 async def init_db(url: str) -> AsyncEngine:
     engine = create_async_engine(url, echo=False)
-    # engine.connect() 不开外层事务，让 alembic 自管事务边界（Cookbook "Sharing a Connection"）
-    async with engine.connect() as conn:
+    # engine.begin() 开外层 transaction；alembic 内层 context.begin_transaction()
+    # 检测 _in_external_transaction → nullcontext → 共享外层 transaction → 外层退出 COMMIT
+    async with engine.begin() as conn:
         has_alembic = await conn.run_sync(_has_alembic_version_table)
         if has_alembic:
             # 路径 1: 已 in-Alembic 链 → alembic upgrade head（no-op 若已 head）
@@ -446,7 +460,12 @@ def _resolved_sync_url() -> str:
         async_url = env_url
     else:
         # env_overrides={} 跳过 dotenv 读取（alembic 上下文不需要 OKX_* env vars）
-        async_url = load_settings(env_overrides={}).database.url
+        # path 锚定到 repo_root（避免 alembic CLI 从非 repo_root 启动时 cwd-relative path 失败）
+        repo_root = Path(__file__).resolve().parents[1]
+        async_url = load_settings(
+            path=repo_root / "config" / "settings.yaml",
+            env_overrides={},
+        ).database.url
     # 同步化 (sqlite+aiosqlite → sqlite)
     sync_url = async_url.replace("sqlite+aiosqlite:", "sqlite:")
     # Path normalization: 相对路径 → 绝对路径（锚定 repo root，alembic/env.py 在 repo_root/alembic/env.py）
@@ -464,7 +483,7 @@ def run_migrations_online() -> None:
     if connectable is None:
         # CLI 直调路径：自建 engine + connection（path normalization 见 _resolved_sync_url）
         sync_engine = create_engine(_resolved_sync_url(), poolclass=pool.NullPool)
-        with sync_engine.connect() as conn:
+        with sync_engine.begin() as conn:    # 外层开 transaction，alembic 内层 nullcontext 共享 (Round 13)
             do_run_migrations(conn)
     else:
         # init_db 注入路径：复用外层 sync_conn
@@ -478,7 +497,7 @@ def do_run_migrations(connection) -> None:
         # render_as_batch=True 让 SQLite 自动用 batch_alter（add column 等不需，alter type 必需）
         render_as_batch=True,
     )
-    # alembic 自管事务边界（与 init_db 外层 engine.connect() 配合）
+    # alembic 检测外层 transaction (init_db 的 engine.begin() 或 CLI 自建 engine.begin()) → nullcontext → 共享
     with context.begin_transaction():
         context.run_migrations()
 
