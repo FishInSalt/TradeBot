@@ -172,9 +172,11 @@ def test_okx_parse_fill_event_open_with_empty_algo_id_string():
 # ============ OKX _watch_orders_loop integration test ============
 
 @pytest.mark.asyncio
-async def test_okx_dispatch_fill_event_clears_via_loop():
-    """Integration: _watch_orders_loop receives close fill push, _parse_fill_event
-    constructs is_full_close=True, _dispatch_fill_event clears stale alert.
+async def test_okx_dispatch_fill_event_clears_post_parse():
+    """Integration: _parse_fill_event on a close fill produces is_full_close=True,
+    then _dispatch_fill_event clears stale alert. Exercises the post-parse half
+    of the _watch_orders_loop dispatch path (parse → dispatch); the loop iteration
+    itself is not exercised here.
 
     Uses 1D fixture (market close WITH params={"reduceOnly": True}, signal 1
     reduceOnly='true' echoed by OKX). NOT 1A — that fixture has reduceOnly=false
@@ -413,3 +415,147 @@ async def test_dispatch_fill_event_no_callback_registered():
     await sim._dispatch_fill_event(fill)
 
     assert len(sim._price_level_alerts) == 0  # cleared
+
+
+# ============ Sim end-to-end close fill → alert clearance ============
+
+@pytest.mark.asyncio
+async def test_sim_market_close_triggers_alert_clear():
+    """Open + add alert + market close → alert auto-cleared."""
+    sim = make_sim_exchange()
+
+    # Open position via create_order + _process_tick
+    await sim.create_order(
+        symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01,
+    )
+    await sim._process_tick(make_ticker(last=50000.0))
+    assert "BTC/USDT:USDT" in sim._positions
+
+    # Add alert
+    alert_id = sim.add_price_level_alert(
+        price=51000.0, direction="above",
+        symbol="BTC/USDT:USDT", reasoning="test",
+    )
+    assert alert_id is not None
+    assert len(sim.get_price_level_alerts()) == 1
+
+    # Market close
+    await sim.create_order(
+        symbol="BTC/USDT:USDT", side="sell", order_type="market", amount=0.01,
+    )
+    await sim._process_tick(make_ticker(last=50000.0, timestamp=1700000001000))
+
+    # Alert cleared via _dispatch_fill_event
+    assert "BTC/USDT:USDT" not in sim._positions
+    assert len(sim.get_price_level_alerts()) == 0
+
+
+@pytest.mark.asyncio
+async def test_sim_conditional_fill_triggers_alert_clear():
+    """Open + add alert + SL trigger → alert auto-cleared."""
+    sim = make_sim_exchange()
+
+    await sim.create_order(
+        symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01,
+    )
+    await sim._process_tick(make_ticker(last=50000.0))
+    assert "BTC/USDT:USDT" in sim._positions
+
+    # Set SL via conditional (stop) order — sim forces full position size
+    await sim.create_order(
+        symbol="BTC/USDT:USDT", side="sell", order_type="stop", amount=0.01, price=49000.0,
+    )
+
+    # Add alert
+    sim.add_price_level_alert(
+        price=51000.0, direction="above",
+        symbol="BTC/USDT:USDT", reasoning="test",
+    )
+    assert len(sim.get_price_level_alerts()) == 1
+
+    # Trigger SL via price drop (below 49000 trigger)
+    await sim._process_tick(make_ticker(last=48900.0, timestamp=1700000001000))
+
+    assert "BTC/USDT:USDT" not in sim._positions
+    assert len(sim.get_price_level_alerts()) == 0
+
+
+@pytest.mark.asyncio
+async def test_sim_liquidation_triggers_alert_clear():
+    """Open + add alert + liquidation → alert auto-cleared."""
+    sim = make_sim_exchange(initial_balance=100.0)  # small balance to enable liquidation
+    await sim.set_leverage("BTC/USDT:USDT", 100)
+
+    await sim.create_order(
+        symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01,
+    )
+    await sim._process_tick(make_ticker(last=50000.0))
+    assert "BTC/USDT:USDT" in sim._positions
+
+    sim.add_price_level_alert(
+        price=51000.0, direction="above",
+        symbol="BTC/USDT:USDT", reasoning="test",
+    )
+    assert len(sim.get_price_level_alerts()) == 1
+
+    # Crash price to trigger liquidation (100x leverage → ~1% drop kills it)
+    await sim._process_tick(make_ticker(last=40000.0, timestamp=1700000001000))
+
+    assert "BTC/USDT:USDT" not in sim._positions
+    assert len(sim.get_price_level_alerts()) == 0
+
+
+@pytest.mark.asyncio
+async def test_sim_open_fill_does_not_clear_alert():
+    """Open fill (is_full_close=False) → alert preserved.
+
+    Open fills don't create stale alerts; the alerts at structural levels
+    just placed BEFORE opening should remain valid post-open.
+    """
+    sim = make_sim_exchange()
+
+    # Add alert FIRST (before opening)
+    sim.add_price_level_alert(
+        price=51000.0, direction="above",
+        symbol="BTC/USDT:USDT", reasoning="test",
+    )
+    assert len(sim.get_price_level_alerts()) == 1
+
+    # Open fill via create_order + _process_tick
+    await sim.create_order(
+        symbol="BTC/USDT:USDT", side="buy", order_type="market", amount=0.01,
+    )
+    await sim._process_tick(make_ticker(last=50000.0))
+    assert "BTC/USDT:USDT" in sim._positions
+
+    # Alert preserved
+    assert len(sim.get_price_level_alerts()) == 1
+
+
+# ============ Order semantics: callback observes post-clear state ============
+
+@pytest.mark.asyncio
+async def test_dispatch_fill_event_callback_observes_post_clear_state():
+    """Order semantics: callback runs AFTER alert hygiene.
+
+    Verifies the clear-before-callback contract documented in
+    BaseExchange._dispatch_fill_event docstring. Callback inspects the
+    alerts list at invocation time; should observe post-hygiene state
+    (filtered list).
+    """
+    sim = make_sim_exchange()
+    sim._price_level_alerts = [
+        {"id": "a1", "symbol": "BTC/USDT:USDT", "price": 51000.0, "direction": "above"},
+    ]
+    captured_alerts = []
+
+    async def cb(fill):
+        captured_alerts.append(list(sim._price_level_alerts))
+    sim._fill_callback = cb
+
+    fill = make_fill_event(symbol="BTC/USDT:USDT", is_full_close=True)
+    await sim._dispatch_fill_event(fill)
+
+    # Callback should have seen post-hygiene (empty) alert list
+    assert len(captured_alerts) == 1
+    assert captured_alerts[0] == []

@@ -689,8 +689,7 @@ class SimulatedExchange(BaseExchange):
 
         # Notify outside lock
         for fill in triggered:
-            if self._fill_callback:
-                await self._fill_callback(fill)
+            await self._dispatch_fill_event(fill)
 
         if alert_info and self._alert_callback:
             await self._alert_callback(alert_info)
@@ -789,7 +788,7 @@ class SimulatedExchange(BaseExchange):
                 await self._persist_state()
         logger.info(f"Order cancelled: {order_id}")
 
-    # --- Fill callback ---
+    # --- Alert callback ---
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback

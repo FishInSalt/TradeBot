@@ -135,7 +135,7 @@ class OKXExchange(BaseExchange):
                 "OKX live account initialized — ALL ORDERS WILL USE REAL FUNDS"
             )
 
-    # --- Fill / Alert callback registration ---
+    # --- Alert callback registration ---
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback
@@ -254,11 +254,7 @@ class OKXExchange(BaseExchange):
                             for k in keys[:len(keys) // 2]:
                                 del self._seen_order_ids[k]
                         fill_event = await self._parse_fill_event(order_data)
-                        if self._fill_callback:
-                            try:
-                                await self._fill_callback(fill_event)
-                            except Exception:
-                                logger.exception("Fill callback failed for order %s", order_data.get("id"))
+                        await self._dispatch_fill_event(fill_event)
                     elif filled > 0 and status != "closed":
                         logger.warning(
                             "Partial fill detected: order %s filled=%s status=%s (not processing)",
