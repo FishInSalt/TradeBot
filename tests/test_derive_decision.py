@@ -45,3 +45,31 @@ async def test_t5_zero_actions_returns_hold():
             session, "sess-derive-test", "cycle-empty"
         )
     assert result == "hold"
+
+
+async def test_t1_open_long_derives():
+    """T1: cycle 含 open_position(side='long') → 'open_long'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-1",
+                         "open_position", side="long")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-1"
+        )
+    assert result == "open_long"
+
+
+async def test_t2_open_short_derives():
+    """T2: cycle 含 open_position(side='short') → 'open_short'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-2",
+                         "open_position", side="short")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-2"
+        )
+    assert result == "open_short"
