@@ -105,3 +105,42 @@ async def test_args_none_when_call_args_is_none(engine, deps):
     deps.db_engine = engine
     args = await _run_recorder(engine, deps, None)
     assert args is None
+
+
+@pytest.mark.asyncio
+async def test_args_does_not_mutate_caller_dict(engine, deps):
+    """Regression lock for commit e31e6b7: pydantic-ai args_as_dict() returns
+    self.args by reference for dict inputs (messages.py:1660). Recorder must
+    dict()-copy before pop("reasoning"); without the copy, the live
+    ToolCallPart.args dict is mutated in place — a latent defect for any
+    future post-run message inspection.
+
+    Note: cannot reuse _run_recorder helper because its `dict(call_args)`
+    return_value already makes a defensive copy, masking regressions of the
+    recorder's own `dict(call.args_as_dict())` wrapper. This test bypasses the
+    helper to mock args_as_dict returning the SAME reference (real pydantic-ai
+    behavior on dict input).
+    """
+    from src.services.tool_call_recorder import ToolCallRecorder
+
+    deps.db_engine = engine
+    original_args = {"side": "long", "reasoning": "must persist on caller"}
+
+    recorder = ToolCallRecorder()
+    call = MagicMock()
+    call.tool_name = "test_tool"
+    call.args = original_args
+    call.args_as_dict = MagicMock(return_value=original_args)   # same ref, NOT a copy
+
+    tool_def = MagicMock()
+    handler = AsyncMock(return_value="ok")
+    ctx = MagicMock()
+    ctx.deps = deps
+
+    await recorder.wrap_tool_execute(
+        ctx, call=call, tool_def=tool_def, args=MagicMock(), handler=handler,
+    )
+
+    # Caller's dict must be unchanged — recorder must not mutate ToolCallPart.args.
+    assert "reasoning" in original_args, "recorder mutated caller's dict (dict() wrapper regression)"
+    assert original_args == {"side": "long", "reasoning": "must persist on caller"}
