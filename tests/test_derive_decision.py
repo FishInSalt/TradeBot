@@ -189,3 +189,37 @@ async def test_t8_6_select_failure_falls_back_to_derive_error():
     )
     assert result == "derive_error", \
         f"DB 故障应 fallback 'derive_error'，实际 {result!r}"
+
+
+_ACTION_LITERAL_RE = re.compile(
+    r'_record_action\b[^)]*?\baction\s*=\s*["\']([a-z_]+)["\']',
+    re.DOTALL,
+)
+_EXPECTED_RECORD_ACTION_SITES = 11  # spec §8.3 实测
+
+
+def _grep_record_action_literals(path: str) -> set[str]:
+    """单行正则扫 _record_action(...) 调用块的 action 字面量。
+    Sanity check 站点数 == 11 防 regex false-empty。"""
+    src = Path(path).read_text()
+    matches = _ACTION_LITERAL_RE.findall(src)
+    assert len(matches) == _EXPECTED_RECORD_ACTION_SITES, (
+        f"扫描站点数 {len(matches)} ≠ 期望 {_EXPECTED_RECORD_ACTION_SITES}（spec §8.3）；"
+        f"可能 regex 失效或站点被重命名/新增 — 实测命中: {matches}"
+    )
+    return set(matches)
+
+
+def test_t11_adjust_actions_drift_guard():
+    """T11: tools_execution.py 内所有 _record_action action 字面量
+    必须落入 derive_decision_type 的分类，否则新增 action 漏分类会静默落 hold。
+
+    spec §5.4 — 与 Iter 5 D' tests/test_trader_agent.py:69 同款纪律。
+    """
+    from src.cli.app import ADJUST_ACTIONS
+
+    actual = _grep_record_action_literals("src/agent/tools_execution.py")
+    expected = ADJUST_ACTIONS | {"open_position", "close_position", "set_next_wake"}
+    drift = actual - expected
+    assert not drift, \
+        f"新增未分类的 action: {drift}（请更新 ADJUST_ACTIONS 或派生逻辑）"
