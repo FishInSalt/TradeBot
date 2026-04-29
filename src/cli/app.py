@@ -7,7 +7,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import update as sql_update
+from sqlalchemy import select, update as sql_update
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
@@ -43,6 +45,65 @@ USAGE_LIMITS_PER_CYCLE = UsageLimits(
     tool_calls_limit=50,
     total_tokens_limit=200_000,  # 单 cycle 上限；外层 daily TokenBudget 是日累积
 )
+
+
+# Iter 4 §3.2 — DecisionLog 派生类型分类常量
+# 8 个调整类 action（_record_action 站点实测，spec §8.3 + §C5 决议）
+# set_next_wake 单独归 hold（spec §C5）；open_position / close_position 单独分类
+ADJUST_ACTIONS = frozenset({
+    "set_stop_loss",
+    "set_take_profit",
+    "adjust_leverage",
+    "set_price_alert",
+    "add_price_level_alert",
+    "cancel_price_level_alert",
+    "place_limit_order",
+    "cancel_order",
+})
+
+
+async def _derive_decision_from_actions(
+    session: AsyncSession,
+    session_id: str,
+    cycle_id: str,
+) -> str:
+    """从 trade_actions 反查 cycle 内 actions，按优先级派生 decision 类型。
+
+    优先级（高 → 低）：open_position > close_position > adjust > hold
+    返回 5 类 enum: open_long / open_short / close / adjust / hold
+    DB 故障 fallback: derive_error（独立 enum，spec §8.1）
+
+    spec §3.2 — 复用 outer session 避免冗余连接。
+    """
+    try:
+        rows = (await session.execute(
+            select(TradeAction).where(
+                TradeAction.session_id == session_id,
+                TradeAction.cycle_id == cycle_id,
+            ).order_by(TradeAction.id)  # first-match 语义稳定
+        )).scalars().all()
+    except (SQLAlchemyError, OSError):
+        logger.exception(
+            f"derive_decision SELECT failed for cycle {cycle_id}; falling back to 'derive_error'"
+        )
+        return "derive_error"
+
+    for a in rows:
+        if a.action == "open_position":
+            if a.side not in ("long", "short"):
+                logger.warning(
+                    f"open_position with unexpected side={a.side!r} "
+                    f"in cycle {cycle_id}; skipping this row, downstream "
+                    f"classification (close/adjust/hold) takes over"
+                )
+                continue  # 跳过此 row，循环继续
+            return f"open_{a.side}"  # open_long / open_short
+
+    if any(a.action == "close_position" for a in rows):
+        return "close"
+    if any(a.action in ADJUST_ACTIONS for a in rows):
+        return "adjust"
+    return "hold"  # 0 actions OR 仅含 set_next_wake
 
 
 class TokenBudget:
@@ -163,12 +224,16 @@ async def run_agent_cycle(
             # 任何已成功 tool 调用的 tool_calls 行（不需要本路径协调 rollback）。
             logger.error(f"Cycle {cycle_id} hit usage limit: {e}")
             async with get_session(engine) as session:
+                decision = await _derive_decision_from_actions(
+                    session, deps.session_id, cycle_id
+                )
                 session.add(DecisionLog(
                     session_id=deps.session_id,
                     cycle_id=cycle_id,
                     trigger_type=trigger_type,
-                    decision="usage_limit_exceeded",
-                    reasoning=str(e)[:500],
+                    decision=decision,                    # spec §G2: 派生而非语义冲突
+                    status="usage_limit_exceeded",        # spec §G2: 双字段方案
+                    reasoning=str(e)[:4000],              # spec §G2: cap 500 → 4000
                     model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
                     tokens_used=0,  # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
                 ))
@@ -245,13 +310,17 @@ async def run_agent_cycle(
 
     # === Record to database ===
     async with get_session(engine) as session:
+        decision = await _derive_decision_from_actions(
+            session, deps.session_id, cycle_id
+        )
         session.add(
             DecisionLog(
                 session_id=deps.session_id,
                 cycle_id=cycle_id,
                 trigger_type=trigger_type,
-                decision="completed",
-                reasoning=result.output[:500],
+                decision=decision,            # spec §G1: 派生而非硬编码
+                status="ok",                  # spec §G1: 双字段方案
+                reasoning=result.output[:4000],  # spec §G1: cap 500 → 4000
                 model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
                 tokens_used=tokens,
             )
