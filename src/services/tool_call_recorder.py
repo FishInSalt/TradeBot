@@ -93,7 +93,11 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                     args_dict.pop("reasoning", None)   # strip 与 trade_actions.reasoning 重复存储
                     args_serialized = json.dumps(args_dict, ensure_ascii=False) if args_dict else None
                     if args_serialized and len(args_serialized) > 4000:
-                        args_serialized = args_serialized[:4000]    # char-level 截断，与 reasoning 一致
+                        # char-level 截断，与 reasoning 一致；spec §4.4 明牌选择"保留 partial JSON 给分析师"
+                        # 而非截断后置 None。99% 工具 args < 4000 chars，cap 仅做 outlier 防御信号。
+                        # 消费方契约：读 args 时必须 try/except json.JSONDecodeError —— 截断的 outlier 行
+                        # JSON 不完整，是预期而非 bug。需要严格 JSON 一致性的下游应在 4000 边界另存 partial=true 标记。
+                        args_serialized = args_serialized[:4000]
 
                     insert_start = time.monotonic()
                     async with get_session(ctx.deps.db_engine) as session:
