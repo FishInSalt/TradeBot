@@ -74,10 +74,6 @@ async def _derive_decision_from_actions(
     DB 故障 fallback: derive_error（独立 enum，spec §8.1）
 
     spec §3.2 — 复用 outer session 避免冗余连接。
-    TradeAction 由 app.py:32 module-level 导入。
-
-    NOTE (Task 1 中间态): 当前仅返回 'hold'，rows 由 SELECT 取出但未消费；
-    Task 2-4 增量补 open / close / adjust 分支后 rows 才被消费。
     """
     try:
         rows = (await session.execute(

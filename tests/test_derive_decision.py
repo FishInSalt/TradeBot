@@ -5,7 +5,6 @@ import re
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.storage.database import init_db, get_session

@@ -110,7 +110,7 @@ async def test_usage_limit_exceeded_writes_forensic_decision_log():
     assert row.decision == "hold", \
         f"forensic 路径无 trade_actions 该 cycle 派生应 'hold'，实际 {row.decision!r}"
     assert "test reason" in row.reasoning
-    assert row.tokens_used == 0
+    assert row.tokens_used == 0  # spec §3.1 #3 设计取舍
 
 
 async def test_usage_limit_exceeded_does_not_retry():
