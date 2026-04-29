@@ -4,6 +4,7 @@ See docs/superpowers/specs/2026-04-20-tool-call-metrics-design.md §3.1 for desi
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -86,6 +87,14 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                         raise RuntimeError(
                             "db_engine must be set on TradingDeps"
                         )
+                    # 序列化 args，strip reasoning（spec §T0-2 (b)）
+                    # 用 pydantic-ai 内置 helper 处理 str|dict|None 三态 + INVALID_JSON_KEY 兜底
+                    args_dict = call.args_as_dict()
+                    args_dict.pop("reasoning", None)   # strip 与 trade_actions.reasoning 重复存储
+                    args_serialized = json.dumps(args_dict, ensure_ascii=False) if args_dict else None
+                    if args_serialized and len(args_serialized) > 4000:
+                        args_serialized = args_serialized[:4000]    # char-level 截断，与 reasoning 一致
+
                     insert_start = time.monotonic()
                     async with get_session(ctx.deps.db_engine) as session:
                         session.add(ToolCall(
@@ -95,6 +104,7 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                             status=status,
                             duration_ms=duration_ms,
                             error_type=error_type,
+                            args=args_serialized,            # ← 新增 (Iter 3 §G2)
                         ))
                         await session.commit()
                     insert_ms = (time.monotonic() - insert_start) * 1000
