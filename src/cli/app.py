@@ -94,14 +94,19 @@ async def _derive_decision_from_actions(
 
     for a in rows:
         if a.action == "open_position":
+            if a.side not in ("long", "short"):
+                logger.warning(
+                    f"open_position with unexpected side={a.side!r} "
+                    f"in cycle {cycle_id}; skipping this row, downstream "
+                    f"classification (close/adjust/hold) takes over"
+                )
+                continue  # 跳过此 row，循环继续
             return f"open_{a.side}"  # open_long / open_short
 
     if any(a.action == "close_position" for a in rows):
         return "close"
-
     if any(a.action in ADJUST_ACTIONS for a in rows):
         return "adjust"
-
     return "hold"  # 0 actions OR 仅含 set_next_wake
 
 

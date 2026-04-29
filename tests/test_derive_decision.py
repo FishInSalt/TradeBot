@@ -154,3 +154,23 @@ async def test_t8_session_isolation():
             session, "sess-B", "cycle-shared"
         )
     assert result == "hold"
+
+
+async def test_t8_5_open_position_with_invalid_side_falls_through():
+    """T8.5: open_position(side=None) + set_stop_loss 同 cycle → 'adjust'。
+
+    spec §3.5: 派生函数对 side ∉ {'long', 'short'} 兜底 — skip 此 row 让 downstream 接管。
+    实测 cycle = [open_position(side=None), set_stop_loss] 应返回 'adjust' 不是 'open_None'。
+    """
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-85",
+                         "open_position", side=None)
+    await _insert_action(engine, "sess-derive-test", "cycle-85", "set_stop_loss")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-85"
+        )
+    assert result == "adjust", \
+        f"side=None open_position 应被 skip 让 adjust 接管，实际 {result!r}"
