@@ -100,14 +100,17 @@ async def test_usage_limit_exceeded_writes_forensic_decision_log():
 
     async with get_session(engine) as db:
         rows = (await db.execute(
-            select(DecisionLog).where(DecisionLog.decision == "usage_limit_exceeded")
+            select(DecisionLog).where(DecisionLog.status == "usage_limit_exceeded")
         )).scalars().all()
 
-    assert len(rows) == 1, f"应写 1 行 decision='usage_limit_exceeded'，实际 {len(rows)} 行"
+    assert len(rows) == 1, f"应写 1 行 status='usage_limit_exceeded'，实际 {len(rows)} 行"
     row = rows[0]
     assert row.session_id == "sess-t2"
+    assert row.status == "usage_limit_exceeded"
+    assert row.decision == "hold", \
+        f"forensic 路径无 trade_actions 该 cycle 派生应 'hold'，实际 {row.decision!r}"
     assert "test reason" in row.reasoning
-    assert row.tokens_used == 0  # spec §3.1 #3 设计取舍
+    assert row.tokens_used == 0
 
 
 async def test_usage_limit_exceeded_does_not_retry():
@@ -214,6 +217,62 @@ async def test_t9_success_path_writes_status_ok_and_long_reasoning():
         f"无 trade_actions 该 cycle 派生应 'hold'，实际 {row.decision!r}"
     assert len(row.reasoning) == 4000, \
         f"reasoning 应截断到 4000 chars，实际 {len(row.reasoning)}"
+
+
+async def test_t10_forensic_path_derives_from_committed_trade_actions(monkeypatch):
+    """T10: forensic 路径派生函数从 trade_actions 反查派生 — spec §5.3 集成测。
+
+    monkeypatch uuid.uuid4 钉住 cycle_id；预插一条 trade_action(open_position, side=long)；
+    跑 forensic 路径（mock UsageLimitExceeded）；
+    断言 DecisionLog 行 status='usage_limit_exceeded' AND decision='open_long'（派生联通）。
+    """
+    from pydantic_ai.exceptions import UsageLimitExceeded
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from src.storage.models import TradeAction
+
+    # 钉住 uuid.uuid4 让 cycle_id = "abcd1234"（前 8 chars）
+    class _FixedUUID:
+        def __str__(self):
+            return "abcd1234-rest-of-uuid-format"
+
+    # monkeypatch 改的是 src.cli.app 模块对 stdlib uuid 的引用 — 等同 patch uuid.uuid4
+    # 全局；pytest fixture 退出时自动恢复，不污染其他测试。
+    monkeypatch.setattr("src.cli.app.uuid.uuid4", lambda: _FixedUUID())
+
+    deps, engine = await _make_deps_and_engine(session_id="sess-t10")
+    budget = TokenBudget(daily_max=500_000)
+
+    # 预插 trade_action 用预知的 cycle_id="abcd1234"
+    async with get_session(engine) as db:
+        db.add(TradeAction(
+            session_id="sess-t10", cycle_id="abcd1234",
+            action="open_position", symbol="BTC/USDT:USDT", side="long",
+        ))
+        await db.commit()
+
+    # mock agent.run 抛 UsageLimitExceeded
+    async def boom(prompt, **kwargs):
+        raise UsageLimitExceeded("test t10")
+
+    mock_agent = MagicMock()
+    mock_agent.run = boom
+    mock_agent.model = "test-model"
+
+    await run_agent_cycle(
+        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        budget=budget, engine=engine,
+    )
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(
+            select(DecisionLog).where(DecisionLog.cycle_id == "abcd1234")
+        )).scalars().all()
+
+    assert len(rows) == 1, f"forensic 路径应写 1 行 DecisionLog，实际 {len(rows)}"
+    row = rows[0]
+    assert row.status == "usage_limit_exceeded"
+    assert row.decision == "open_long", \
+        f"派生函数应反查 trade_actions 得 'open_long'，实际 {row.decision!r}"
 
 
 def test_usage_limit_total_tokens_capped_at_200k():

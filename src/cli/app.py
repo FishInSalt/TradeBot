@@ -228,12 +228,16 @@ async def run_agent_cycle(
             # 任何已成功 tool 调用的 tool_calls 行（不需要本路径协调 rollback）。
             logger.error(f"Cycle {cycle_id} hit usage limit: {e}")
             async with get_session(engine) as session:
+                decision = await _derive_decision_from_actions(
+                    session, deps.session_id, cycle_id
+                )
                 session.add(DecisionLog(
                     session_id=deps.session_id,
                     cycle_id=cycle_id,
                     trigger_type=trigger_type,
-                    decision="usage_limit_exceeded",
-                    reasoning=str(e)[:500],
+                    decision=decision,                    # spec §G2: 派生而非语义冲突
+                    status="usage_limit_exceeded",        # spec §G2: 双字段方案
+                    reasoning=str(e)[:4000],              # spec §G2: cap 500 → 4000
                     model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
                     tokens_used=0,  # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
                 ))
