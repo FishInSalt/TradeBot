@@ -18,8 +18,11 @@ config = context.config
 # fileConfig 重置 root logger 级别，打断 pytest caplog 等 logging capture 工具。
 # 仅在 CLI 直调路径（无 connection 注入）时才配置 logging；programmatic 路径跳过，
 # 保留调用者的 logging 状态不变。
+# disable_existing_loggers=False: 默认值 True 会清空 pytest caplog 的 handler，
+# 即使本路径仅 CLI 触发，migration 测试用 alembic_cfg_factory 不注入 connection
+# 也走此分支 → 全套测试 caplog-用户测试会被 wipe handler 后失败（PR #28 review 发现）
 if config.config_file_name is not None and config.attributes.get("connection") is None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # 关键：必须显式赋值，autogenerate / alembic check 全靠这一行
 target_metadata = Base.metadata
