@@ -26,6 +26,7 @@ async def _record_action(deps: TradingDeps, action: str, order_id: str | None = 
         async with get_session(deps.db_engine) as session:
             session.add(TradeAction(
                 session_id=deps.session_id,
+                cycle_id=deps.cycle_id,        # ← 新增（从 deps 取，11 个 callers 0 改动）
                 action=action,
                 order_id=order_id,
                 symbol=deps.symbol,

@@ -1,0 +1,291 @@
+"""Iter 3 migration tests — covers three-state sentinel + batch_alter + backfill.
+
+Spec §5.2.
+"""
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+import pytest
+from alembic import command
+from alembic.config import Config
+
+
+@pytest.fixture
+def alembic_cfg_factory(monkeypatch):
+    """Factory that builds Alembic Config + sets TRADEBOT_DB_URL via monkeypatch (auto-cleanup).
+
+    Test isolation: monkeypatch reverts env var after each test; safe under pytest-xdist concurrency.
+    """
+    def _factory(db_path: Path) -> Config:
+        monkeypatch.setenv("TRADEBOT_DB_URL", f"sqlite+aiosqlite:///{db_path}")
+        repo_root = Path(__file__).resolve().parents[1]
+        return Config(str(repo_root / "alembic.ini"))
+    return _factory
+
+
+def _create_pre_alembic_schema(db_path: Path) -> None:
+    """Hand-write FULL W1 schema for migration testing (path 2 fixture).
+
+    Builds all 8 W1 business tables (matches spec §4.1 BEFORE Iter 3 changes).
+
+    Tables migration upgrade() references directly:
+    - sim_orders + ix_sim_orders_session_status (Step 1 drops this index)
+    - tool_calls + ix_tool_calls_session_tool_time + ix_tool_calls_cycle (Step 1 drops these)
+    - decision_logs + ix_decision_logs_session_id (Step 4 batch_alter rebuilds this table)
+    - trade_actions (Step 3 add column)
+    - sessions (FK target for all above)
+
+    Tables NOT touched by this migration but included for completeness (= simulate W1
+    production accurately, future migrations may touch these e.g. C档 drop market_summary):
+    - memory_entries (FK to sessions)
+    - sim_balances (PK = session_id, FK to sessions)
+    - sim_positions (UNIQUE(session_id, symbol), FK to sessions)
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.executescript("""
+        CREATE TABLE sessions (
+            id VARCHAR(36) NOT NULL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL UNIQUE,
+            symbol VARCHAR(50) NOT NULL,
+            persona_config TEXT,
+            model_config TEXT,
+            initial_balance FLOAT NOT NULL,
+            status VARCHAR(20) NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            exchange_type VARCHAR(20) NOT NULL,
+            timeframe VARCHAR(10) NOT NULL,
+            scheduler_interval_min INTEGER NOT NULL,
+            approval_enabled BOOLEAN NOT NULL,
+            alert_config TEXT,
+            fee_rate FLOAT,
+            token_budget INTEGER NOT NULL,
+            last_active_at DATETIME
+        );
+        CREATE TABLE decision_logs (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            cycle_id VARCHAR(50) NOT NULL,
+            trigger_type VARCHAR(20) NOT NULL,
+            market_summary TEXT,
+            decision VARCHAR(50) NOT NULL,
+            reasoning TEXT,
+            model_used VARCHAR(100),
+            tokens_used INTEGER NOT NULL,
+            created_at DATETIME NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_decision_logs_session_id ON decision_logs (session_id);
+        CREATE TABLE trade_actions (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            action VARCHAR(30) NOT NULL,
+            order_id VARCHAR(36),
+            symbol VARCHAR(50) NOT NULL,
+            side VARCHAR(10),
+            trigger_reason VARCHAR(20),
+            price FLOAT,
+            pnl FLOAT,
+            reasoning TEXT,
+            fee FLOAT,
+            created_at DATETIME NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_trade_actions_session_id ON trade_actions (session_id);
+        CREATE TABLE tool_calls (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            cycle_id VARCHAR(50) NOT NULL,
+            tool_name VARCHAR(60) NOT NULL,
+            status VARCHAR(10) NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            error_type VARCHAR(100),
+            created_at DATETIME NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_tool_calls_session_tool_time ON tool_calls (session_id, tool_name, created_at);
+        CREATE INDEX ix_tool_calls_cycle ON tool_calls (cycle_id);
+        CREATE TABLE sim_orders (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            order_id VARCHAR(36) NOT NULL UNIQUE,
+            symbol VARCHAR(50) NOT NULL,
+            side VARCHAR(10) NOT NULL,
+            position_side VARCHAR(10) NOT NULL,
+            order_type VARCHAR(20) NOT NULL,
+            amount FLOAT NOT NULL,
+            trigger_price FLOAT,
+            status VARCHAR(20) NOT NULL,
+            filled_price FLOAT,
+            fee FLOAT,
+            filled_at DATETIME,
+            created_at DATETIME NOT NULL,
+            frozen_margin FLOAT NOT NULL DEFAULT 0.0,
+            leverage INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_sim_orders_session_status ON sim_orders (session_id, status);
+        CREATE TABLE memory_entries (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            memory_type VARCHAR(20) NOT NULL,
+            category VARCHAR(50) NOT NULL,
+            content TEXT NOT NULL,
+            relevance_score FLOAT NOT NULL,
+            created_at DATETIME NOT NULL,
+            expires_at DATETIME,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_memory_entries_session_id ON memory_entries (session_id);
+        CREATE TABLE sim_balances (
+            session_id VARCHAR(36) NOT NULL PRIMARY KEY,
+            free_usdt FLOAT NOT NULL,
+            used_usdt FLOAT NOT NULL,
+            frozen_usdt FLOAT NOT NULL,
+            updated_at DATETIME NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE TABLE sim_positions (
+            id INTEGER NOT NULL PRIMARY KEY,
+            session_id VARCHAR(36) NOT NULL,
+            symbol VARCHAR(50) NOT NULL,
+            side VARCHAR(10) NOT NULL,
+            contracts FLOAT NOT NULL,
+            entry_price FLOAT NOT NULL,
+            leverage INTEGER NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            UNIQUE (session_id, symbol),
+            FOREIGN KEY(session_id) REFERENCES sessions (id)
+        );
+        CREATE INDEX ix_sim_positions_session_id ON sim_positions (session_id);
+    """)
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_init_db_path_3_for_empty_db(tmp_path: Path) -> None:
+    """Path 3 (empty DB → create_all + stamp head): NO migration upgrade run.
+
+    Critical: migration upgrade() in empty DB hits "no such index" — first migration is
+    ALTER not CREATE. Empty DB production path is init_db path 3.
+
+    Asserts:
+    1. Schema bootstrapped via Base.metadata.create_all (args / cycle_id / status / new index)
+    2. alembic_version table stamped to head (sentinel #1 for next init_db call)
+    """
+    from src.storage.database import init_db
+
+    db_path = tmp_path / "empty.db"
+    await init_db(f"sqlite+aiosqlite:///{db_path}")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    # 1. Schema completeness
+    cols = {r[1]: r for r in cur.execute("PRAGMA table_info(decision_logs)")}
+    assert "status" in cols, "status column missing"
+    assert cols["status"][3] == 1, "status should be NOT NULL"
+    assert cols["decision"][2] == "VARCHAR(20)", f"decision should be VARCHAR(20), got {cols['decision'][2]}"
+    assert "args" in {r[1] for r in cur.execute("PRAGMA table_info(tool_calls)")}
+    assert "cycle_id" in {r[1] for r in cur.execute("PRAGMA table_info(trade_actions)")}
+    indexes = {r[1] for r in cur.execute("SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='decision_logs'")}
+    assert "ix_decision_logs_session_id_cycle_id" in indexes
+
+    # 2. alembic_version stamped to head
+    av = list(cur.execute("SELECT version_num FROM alembic_version"))
+    assert len(av) == 1, f"alembic_version should have exactly 1 row, got {len(av)}"
+    conn.close()
+
+
+def test_upgrade_from_w1_like_data(tmp_path: Path, alembic_cfg_factory) -> None:
+    """Path 2: pre-Alembic legacy DB with mock rows → batch_alter + backfill.
+
+    Fixture builds FULL W1 schema (incl sim_orders) so migration Step 1 drop_index has target.
+    Mock data: 4 rows decision='completed' + 1 row decision='usage_limit_exceeded'.
+    Asserts:
+    1. Migration does not raise (covers batch_alter merge semantics + INSERT SELECT NOT NULL path)
+    2. All 5 rows have decision='legacy'
+    3. 4 rows status='ok' (from server_default) + 1 row status='usage_limit_exceeded' (catch-net)
+    """
+    db_path = tmp_path / "w1_like.db"
+    _create_pre_alembic_schema(db_path)
+
+    # Insert 5 rows (4 completed + 1 usage_limit_exceeded)
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sessions (id, name, symbol, initial_balance, status, created_at, updated_at,
+                              exchange_type, timeframe, scheduler_interval_min, approval_enabled,
+                              token_budget)
+        VALUES ('s1', 'test', 'BTC/USDT:USDT', 100.0, 'active',
+                '2026-04-27T00:00:00+00:00', '2026-04-27T00:00:00+00:00',
+                'simulated', '15m', 15, 1, 500000)
+    """)
+    for i, dec in enumerate(["completed", "completed", "completed", "completed", "usage_limit_exceeded"]):
+        cur.execute("""
+            INSERT INTO decision_logs (session_id, cycle_id, trigger_type, decision, tokens_used, created_at)
+            VALUES ('s1', ?, 'scheduled', ?, 0, '2026-04-27T00:00:00+00:00')
+        """, (f"cyc-{i}", dec))
+    conn.commit()
+    conn.close()
+
+    # Run migration (must not raise)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    # Verify backfill
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    decisions = dict(cur.execute("SELECT decision, COUNT(*) FROM decision_logs GROUP BY decision"))
+    assert decisions == {"legacy": 5}, f"expected all 5 rows decision='legacy', got {decisions}"
+    statuses = dict(cur.execute("SELECT status, COUNT(*) FROM decision_logs GROUP BY status"))
+    assert statuses == {"ok": 4, "usage_limit_exceeded": 1}, f"expected 4 ok + 1 usage_limit_exceeded, got {statuses}"
+
+    # Verify id preservation (spec §4.2 batch_alter contract: INSERT INTO _new SELECT * FROM old preserves id sequence).
+    # Last line of defense if future alembic versions change batch_alter semantics.
+    ids = [r[0] for r in cur.execute("SELECT id FROM decision_logs ORDER BY id")]
+    assert ids == [1, 2, 3, 4, 5], f"id sequence broken after batch_alter: expected [1,2,3,4,5], got {ids}"
+    conn.close()
+
+
+def test_downgrade_then_upgrade(tmp_path: Path, alembic_cfg_factory) -> None:
+    """From W1-like fixture: upgrade head → downgrade -1 → upgrade head reentrant + idempotent."""
+    db_path = tmp_path / "reentrant.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "-1")
+    command.upgrade(cfg, "head")
+
+    # Verify final state has all new fields
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    assert "status" in {r[1] for r in cur.execute("PRAGMA table_info(decision_logs)")}
+    assert "args" in {r[1] for r in cur.execute("PRAGMA table_info(tool_calls)")}
+    assert "cycle_id" in {r[1] for r in cur.execute("PRAGMA table_info(trade_actions)")}
+    conn.close()
+
+
+def test_upgrade_when_already_head(tmp_path: Path, alembic_cfg_factory) -> None:
+    """Production critical path: alembic upgrade head when already at head is no-op + no error.
+
+    Three-state sentinel #1 (alembic_version exists) runs upgrade head every init_db call.
+    """
+    db_path = tmp_path / "already_head.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+
+    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "head")  # Second call should be no-op
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    rows = list(cur.execute("SELECT version_num FROM alembic_version"))
+    assert len(rows) == 1
+    conn.close()
