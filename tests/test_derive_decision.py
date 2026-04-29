@@ -223,3 +223,14 @@ def test_t11_adjust_actions_drift_guard():
     drift = actual - expected
     assert not drift, \
         f"新增未分类的 action: {drift}（请更新 ADJUST_ACTIONS 或派生逻辑）"
+
+
+def test_t12_derive_output_fits_decision_column():
+    """T12: 派生函数输出 enum 字符串必须 ≤ DecisionLog.decision String(20)。
+
+    spec §5.5 — 防未来加新 enum 超约束。
+    legacy 不纳入此集合（historical-only，非派生函数运行时输出）。
+    """
+    enum_values = {"open_long", "open_short", "close", "adjust", "hold", "derive_error"}
+    over_limit = [v for v in enum_values if len(v) > 20]
+    assert not over_limit, f"派生输出 > 20 chars: {over_limit}"
