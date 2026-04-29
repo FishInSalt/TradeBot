@@ -174,3 +174,18 @@ async def test_t8_5_open_position_with_invalid_side_falls_through():
         )
     assert result == "adjust", \
         f"side=None open_position 应被 skip 让 adjust 接管，实际 {result!r}"
+
+
+async def test_t8_6_select_failure_falls_back_to_derive_error():
+    """T8.6: SELECT 抛 SQLAlchemyError → fallback 'derive_error'（spec §3.2）。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    # mock session.execute 抛 SQLAlchemyError
+    mock_session = AsyncMock()
+    mock_session.execute = AsyncMock(side_effect=SQLAlchemyError("DB unreachable"))
+
+    result = await _derive_decision_from_actions(
+        mock_session, "sess-x", "cycle-x"
+    )
+    assert result == "derive_error", \
+        f"DB 故障应 fallback 'derive_error'，实际 {result!r}"
