@@ -89,7 +89,7 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                         )
                     # 序列化 args，strip reasoning（spec §T0-2 (b)）
                     # 用 pydantic-ai 内置 helper 处理 str|dict|None 三态 + INVALID_JSON_KEY 兜底
-                    args_dict = call.args_as_dict()
+                    args_dict = dict(call.args_as_dict())   # shallow copy: pydantic-ai args_as_dict() returns self.args ref for dict inputs (messages.py:1660); avoid mutating live ToolCallPart
                     args_dict.pop("reasoning", None)   # strip 与 trade_actions.reasoning 重复存储
                     args_serialized = json.dumps(args_dict, ensure_ascii=False) if args_dict else None
                     if args_serialized and len(args_serialized) > 4000:
