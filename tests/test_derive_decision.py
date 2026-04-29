@@ -87,3 +87,16 @@ async def test_t3_close_derives():
             session, "sess-derive-test", "cycle-3"
         )
     assert result == "close"
+
+
+async def test_t4_adjust_derives_from_set_stop_loss():
+    """T4: cycle 仅含 set_stop_loss → 'adjust'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-4", "set_stop_loss")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-4"
+        )
+    assert result == "adjust"

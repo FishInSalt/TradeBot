@@ -99,8 +99,10 @@ async def _derive_decision_from_actions(
     if any(a.action == "close_position" for a in rows):
         return "close"
 
-    # 占位：adjust / hold（后续 task）
-    return "hold"
+    if any(a.action in ADJUST_ACTIONS for a in rows):
+        return "adjust"
+
+    return "hold"  # 0 actions OR 仅含 set_next_wake
 
 
 class TokenBudget:
