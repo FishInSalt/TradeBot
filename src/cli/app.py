@@ -7,7 +7,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import update as sql_update
+from sqlalchemy import select, update as sql_update
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
@@ -43,6 +45,55 @@ USAGE_LIMITS_PER_CYCLE = UsageLimits(
     tool_calls_limit=50,
     total_tokens_limit=200_000,  # 单 cycle 上限；外层 daily TokenBudget 是日累积
 )
+
+
+# Iter 4 §3.2 — DecisionLog 派生类型分类常量
+# 8 个调整类 action（_record_action 站点实测，spec §8.3 + §C5 决议）
+# set_next_wake 单独归 hold（spec §C5）；open_position / close_position 单独分类
+ADJUST_ACTIONS = frozenset({
+    "set_stop_loss",
+    "set_take_profit",
+    "adjust_leverage",
+    "set_price_alert",
+    "add_price_level_alert",
+    "cancel_price_level_alert",
+    "place_limit_order",
+    "cancel_order",
+})
+
+
+async def _derive_decision_from_actions(
+    session: AsyncSession,
+    session_id: str,
+    cycle_id: str,
+) -> str:
+    """从 trade_actions 反查 cycle 内 actions，按优先级派生 decision 类型。
+
+    优先级（高 → 低）：open_position > close_position > adjust > hold
+    返回 5 类 enum: open_long / open_short / close / adjust / hold
+    DB 故障 fallback: derive_error（独立 enum，spec §8.1）
+
+    spec §3.2 — 复用 outer session 避免冗余连接。
+    TradeAction 由 app.py:32 module-level 导入。
+
+    NOTE (Task 1 中间态): 当前仅返回 'hold'，rows 由 SELECT 取出但未消费；
+    Task 2-4 增量补 open / close / adjust 分支后 rows 才被消费。
+    """
+    try:
+        rows = (await session.execute(
+            select(TradeAction).where(
+                TradeAction.session_id == session_id,
+                TradeAction.cycle_id == cycle_id,
+            ).order_by(TradeAction.id)  # first-match 语义稳定
+        )).scalars().all()
+    except (SQLAlchemyError, OSError):
+        logger.exception(
+            f"derive_decision SELECT failed for cycle {cycle_id}; falling back to 'derive_error'"
+        )
+        return "derive_error"
+
+    # 占位：仅 hold 分支（后续 task 补 open / close / adjust）
+    return "hold"
 
 
 class TokenBudget:
