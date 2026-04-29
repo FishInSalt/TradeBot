@@ -31,7 +31,7 @@ async def engine(tmp_path: Path):
     try:
         yield eng
     finally:
-        await eng.dispose()    # cleanup _session_factories[id(engine)] avoid stale entries cross-test
+        await eng.dispose()    # closes pool connections; _session_factories isolation is implicit via unique id(engine) per tmp_path
 
 
 def _make_deps(engine, cycle_id: str | None) -> MagicMock:
