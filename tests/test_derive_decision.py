@@ -73,3 +73,17 @@ async def test_t2_open_short_derives():
             session, "sess-derive-test", "cycle-2"
         )
     assert result == "open_short"
+
+
+async def test_t3_close_derives():
+    """T3: cycle 含 close_position（无 open）→ 'close'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-3",
+                         "close_position", side="long")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-3"
+        )
+    assert result == "close"

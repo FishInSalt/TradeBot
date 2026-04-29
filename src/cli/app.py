@@ -96,7 +96,10 @@ async def _derive_decision_from_actions(
         if a.action == "open_position":
             return f"open_{a.side}"  # open_long / open_short
 
-    # 占位：close / adjust / hold（后续 task）
+    if any(a.action == "close_position" for a in rows):
+        return "close"
+
+    # 占位：adjust / hold（后续 task）
     return "hold"
 
 
