@@ -176,6 +176,46 @@ async def test_generic_exception_still_retries_3_times(monkeypatch):
     assert result is not None, "第 3 次成功应返回 result"
 
 
+async def test_t9_success_path_writes_status_ok_and_long_reasoning():
+    """T9: 成功路径写 decision=派生 / status='ok' / reasoning truncated to 4000."""
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps, engine = await _make_deps_and_engine(session_id="sess-t9")
+    budget = TokenBudget(daily_max=500_000)
+
+    # 喂 5000-char 长输出验证 cap 4000
+    long_output = "x" * 5000
+
+    async def mock_run(prompt, **kwargs):
+        result = MagicMock()
+        result.usage = lambda: MagicMock(total_tokens=100, details=None)
+        result.new_messages = lambda: []
+        result.output = long_output
+        return result
+
+    mock_agent = MagicMock()
+    mock_agent.run = mock_run
+    mock_agent.model = "test-model"
+
+    await run_agent_cycle(
+        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        budget=budget, engine=engine,
+    )
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(
+            select(DecisionLog).where(DecisionLog.session_id == "sess-t9")
+        )).scalars().all()
+
+    assert len(rows) == 1, f"应写 1 行 DecisionLog，实际 {len(rows)}"
+    row = rows[0]
+    assert row.status == "ok", f"成功路径 status 应 'ok'，实际 {row.status!r}"
+    assert row.decision == "hold", \
+        f"无 trade_actions 该 cycle 派生应 'hold'，实际 {row.decision!r}"
+    assert len(row.reasoning) == 4000, \
+        f"reasoning 应截断到 4000 chars，实际 {len(row.reasoning)}"
+
+
 def test_usage_limit_total_tokens_capped_at_200k():
     """T5: USAGE_LIMITS_PER_CYCLE.total_tokens_limit == 200_000.
 

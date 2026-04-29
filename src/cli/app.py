@@ -310,13 +310,17 @@ async def run_agent_cycle(
 
     # === Record to database ===
     async with get_session(engine) as session:
+        decision = await _derive_decision_from_actions(
+            session, deps.session_id, cycle_id
+        )
         session.add(
             DecisionLog(
                 session_id=deps.session_id,
                 cycle_id=cycle_id,
                 trigger_type=trigger_type,
-                decision="completed",
-                reasoning=result.output[:500],
+                decision=decision,            # spec §G1: 派生而非硬编码
+                status="ok",                  # spec §G1: 双字段方案
+                reasoning=result.output[:4000],  # spec §G1: cap 500 → 4000
                 model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
                 tokens_used=tokens,
             )
