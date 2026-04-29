@@ -268,6 +268,7 @@ def test_downgrade_then_upgrade(tmp_path: Path, alembic_cfg_factory) -> None:
     cur = conn.cursor()
     assert "status" in {r[1] for r in cur.execute("PRAGMA table_info(decision_logs)")}
     assert "args" in {r[1] for r in cur.execute("PRAGMA table_info(tool_calls)")}
+    assert "cycle_id" in {r[1] for r in cur.execute("PRAGMA table_info(trade_actions)")}
     conn.close()
 
 
