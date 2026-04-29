@@ -62,7 +62,7 @@ async def get_session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]
 
 
 def _has_alembic_version_table(sync_conn) -> bool:
-    """検測 alembic_version 表是否存在（sentinel #1: 已 in-Alembic 链）
+    """检测 alembic_version 表是否存在（sentinel #1: 已 in-Alembic 链）
 
     SQLite-specific: sqlite_master 是 SQLite 系统表；本 Iter 仅支持 SQLite。
     """
@@ -73,7 +73,7 @@ def _has_alembic_version_table(sync_conn) -> bool:
 
 
 def _has_business_tables(sync_conn) -> bool:
-    """検測核心业务表是否存在（sentinel #2: pre-Alembic legacy DB vs 空库）
+    """检测核心业务表是否存在（sentinel #2: pre-Alembic legacy DB vs 空库）
 
     用 sessions 作 sentinel（最早创建的核心表，所有 W1 DB 都有此表）。
     SQLite-specific: sqlite_master。
@@ -85,7 +85,7 @@ def _has_business_tables(sync_conn) -> bool:
 
 
 def _alembic_config(sync_conn) -> "Config":
-    """構造 Alembic Config，路径锚定到 repo root（避免 cwd 依赖）"""
+    """构造 Alembic Config，路径锚定到 repo root（避免 cwd 依赖）"""
     from alembic.config import Config
     # database.py 在 src/storage/，parents[2] = repo root
     repo_root = Path(__file__).resolve().parents[2]
@@ -95,7 +95,7 @@ def _alembic_config(sync_conn) -> "Config":
 
 
 def _alembic_upgrade_head(sync_conn) -> None:
-    """復用外层 conn 跑 upgrade head（路径 1 / 2 共用）"""
+    """复用外层 conn 跑 upgrade head（路径 1 / 2 共用）"""
     from alembic import command
     command.upgrade(_alembic_config(sync_conn), "head")
 
