@@ -512,12 +512,9 @@ def build_services(
         macro=macro_service,
         crypto_etf=crypto_etf_service,
         onchain=onchain_service,
+        wake_min_minutes=1,
+        wake_max_minutes=max_wake,
     )
-
-    # R2-5: wake bounds — explicit assignment matches original run() pattern
-    # + defends against TradingDeps default value drift in the future
-    deps.wake_min_minutes = 1
-    deps.wake_max_minutes = max_wake
 
     # Alert service
     if result.alert_enabled:

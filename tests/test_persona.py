@@ -5,7 +5,7 @@ from src.config import PersonaConfig
 def test_prompt_contains_layer1_identity():
     """Layer 1 keyword presence — scope limited to Layer 1 only (intent clarity).
     After Iter 4 slim-down Layer 1 only contains: market context (perpetual / one-way)
-    + 5 cross-tool bullets (fill / woken trigger responses). timeframe / memory
+    + 6 cross-tool bullets (fill / woken trigger responses + wake interval control). timeframe / memory
     coverage moves to Layer 2 tests; tool keywords (set_next_wake, save_memory etc.)
     live in docstrings (separate from system prompt).
     """
@@ -261,7 +261,7 @@ def test_layer1_cross_tool_bullet_count():
 
 def test_layer1_no_tool_invocation_descriptions():
     """After Iter 4, Layer 1 should not contain tool-name invocation patterns —
-    tool descriptions belong in docstrings (DRY). The 5 retained bullets describe
+    tool descriptions belong in docstrings (DRY). The 6 retained bullets describe
     cross-tool behavior, not single-tool invocation.
     """
     import re
@@ -376,3 +376,32 @@ def test_set_next_wake_no_decision_hints_in_description():
     # Sanity: factual content preserved
     assert "one-shot" in desc.lower(), \
         f"set_next_wake description should preserve 'one-shot' fact: {desc!r}"
+
+
+def test_set_next_wake_wrapper_layer1_reference_intact():
+    """R2-5 PR #34 I-1: wrapper docstring "Wake interval control" reference must point
+    to a real Layer 1 bullet by the same name (Single Source of Truth invariant).
+
+    G8 locks Layer 1 bullet header presence; G10 locks wrapper N5 wordlist absence;
+    neither catches an orphan reference if Layer 1 bullet is renamed without updating
+    wrapper Args.minutes. This test links them — both ends must contain the same string.
+
+    API path: parameters_json_schema for per-arg Args descriptions (vs .description for
+    first-paragraph text — see spec §3.6.1 + G10).
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    bullet_name = "Wake interval control"
+    layer1 = _build_layer1(RuntimeConfig())
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    minutes_desc = (
+        agent._function_toolset.tools["set_next_wake"]
+        .tool_def.parameters_json_schema["properties"]["minutes"]["description"]
+    )
+
+    assert bullet_name in minutes_desc, \
+        f"wrapper Args.minutes lost reference to {bullet_name!r}: {minutes_desc!r}"
+    assert bullet_name in layer1, \
+        f"Layer 1 missing {bullet_name!r} bullet that wrapper points to"
