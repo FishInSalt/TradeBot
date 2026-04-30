@@ -492,8 +492,8 @@ def create_trader_agent(
         current configuration.
 
         Args:
-            threshold_pct: alert threshold percent (0.5-50%).
-            window_minutes: time window in minutes (1-240).
+            threshold_pct: alert threshold percent (min 0.1, max 50).
+            window_minutes: time window in minutes (min 1, max 240).
             reasoning: brief description of your decision logic.
         """
         from src.agent.tools_execution import set_price_alert as _impl

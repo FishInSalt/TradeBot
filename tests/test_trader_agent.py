@@ -194,3 +194,26 @@ def test_missing_args_with_require_descriptions_triggers_fail():
         async def bad_tool(ctx: RunContext, x: int) -> str:
             """Missing Args section docstring."""
             return str(x)
+
+
+def test_set_price_alert_schema_exposes_threshold_range():
+    """R2-1 drift guard: set_price_alert tool schema must expose threshold_pct and
+    window_minutes range to LLM via pydantic-ai docstring sniffing.
+
+    First-of-kind drift guard走 .tool_def.<attr> 二级 attr 路径（Iter 5 既有 drift
+    guard 仅用一级 attr）。Spec 阶段已实测 pydantic-ai 1.78 verify。
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["set_price_alert"]
+    schema = tool.tool_def.parameters_json_schema
+
+    threshold_desc = schema["properties"]["threshold_pct"]["description"]
+    assert "min 0.1," in threshold_desc, f"lower bound 0.1 missing from LLM-visible schema: {threshold_desc!r}"
+    assert "max 50)" in threshold_desc, f"upper bound 50 missing from LLM-visible schema: {threshold_desc!r}"
+
+    window_desc = schema["properties"]["window_minutes"]["description"]
+    assert "min 1," in window_desc, f"window lower bound missing: {window_desc!r}"
+    assert "max 240)" in window_desc, f"window upper bound missing: {window_desc!r}"

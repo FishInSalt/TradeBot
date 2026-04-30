@@ -203,14 +203,14 @@ async def set_price_alert(
     window_minutes: int,
     reasoning: str,
 ) -> str:
-    """Adjust price alert parameters. threshold_pct: 0.5-50%, window_minutes: 1-240."""
+    """Adjust price alert parameters. threshold_pct: min 0.1, max 50, window_minutes: min 1, max 240."""
     # Check if alerts are enabled
     if deps.exchange.get_alert_params() is None:
         return "Alerts are disabled for this session. Enable alerts in wizard to use this feature."
 
     # Parameter validation
-    if not (0.5 <= threshold_pct <= 50.0):
-        return f"Invalid threshold_pct: must be 0.5-50.0, got {threshold_pct}"
+    if not (0.1 <= threshold_pct <= 50.0):
+        return f"Invalid threshold_pct: must be 0.1-50.0, got {threshold_pct}"
     if not (1 <= window_minutes <= 240):
         return f"Invalid window_minutes: must be 1-240, got {window_minutes}"
 

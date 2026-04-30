@@ -260,10 +260,10 @@ async def test_set_price_alert_valid(deps):
 
 
 async def test_set_price_alert_threshold_too_low(deps):
-    """threshold_pct < 0.5 时应返回错误，不调用 update。"""
+    """threshold_pct < 0.1 时应返回错误，不调用 update。"""
     from src.agent.tools_execution import set_price_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 0.1, 5, reasoning="test")
+    result = await set_price_alert(deps, 0.05, 5, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
 

@@ -18,8 +18,8 @@ class AlertInfo:
 class PriceAlertService:
     @staticmethod
     def _validate_params(threshold_pct: float, window_minutes: int) -> None:
-        if not (0.5 <= threshold_pct <= 50.0):
-            raise ValueError(f"threshold_pct must be 0.5-50.0, got {threshold_pct}")
+        if not (0.1 <= threshold_pct <= 50.0):
+            raise ValueError(f"threshold_pct must be 0.1-50.0, got {threshold_pct}")
         if not (1 <= window_minutes <= 240):
             raise ValueError(f"window_minutes must be 1-240, got {window_minutes}")
 
