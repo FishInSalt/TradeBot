@@ -717,6 +717,27 @@ async def test_set_price_alert_enabled():
     assert "updated" in result.lower() or "3.0%" in result
 
 
+async def test_set_price_alert_accepts_threshold_0_1():
+    """R2-1 T4: tool layer accepts threshold_pct=0.1 (new lower bound)."""
+    from src.agent.tools_execution import set_price_alert
+    deps = _make_deps()
+    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
+    deps.exchange.update_alert_params = MagicMock()
+    result = await set_price_alert(deps, threshold_pct=0.1, window_minutes=15, reasoning="test")
+    assert "Price alert updated" in result
+    assert "threshold=0.1%" in result  # `%` 锁尾防 0.15 子串误命中（spec P2-1）
+
+
+async def test_set_price_alert_rejects_threshold_below_0_1():
+    """R2-1 T5: tool layer rejects threshold_pct=0.05 with new error message."""
+    from src.agent.tools_execution import set_price_alert
+    deps = _make_deps()
+    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
+    deps.exchange.update_alert_params = MagicMock()
+    result = await set_price_alert(deps, threshold_pct=0.05, window_minutes=15, reasoning="test")
+    assert "Invalid threshold_pct: must be 0.1-50.0" in result
+
+
 async def test_cancel_order_success():
     from src.agent.tools_execution import cancel_order
 
