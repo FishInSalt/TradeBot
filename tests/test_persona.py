@@ -243,19 +243,20 @@ def test_prompt_minimum_length():
     assert len(prompt) > 500
 
 
-def test_layer1_bullet_count_5():
-    """Layer 1 bullet count drift guard (Iter 4: 25 → 5 — cross-tool behavior only).
-    Bullets are markdown rows starting with '\n- **' — matches `_build_layer1`'s format.
+def test_layer1_cross_tool_bullet_count():
+    """Layer 1 bullet count drift guard.
+
+    Iter 4 PR #25 reduced Layer 1 from 25 to 5 cross-tool bullets.
+    R2-5 PR # added 6th bullet "Wake interval control" (set_next_wake
+    × alert/fill/conditional triggers). Bullets are markdown rows
+    starting with '\\n- **' — matches `_build_layer1`'s format.
     """
     from src.agent.persona import generate_system_prompt
-    config = PersonaConfig()
-    prompt = generate_system_prompt(config)
-    # Guard: Layer 2 header — protects against silent false-pass if persona.py renames it
-    assert "## How to Think" in prompt, \
-        "Layer 2 header changed; update split key in this test"
+    from src.config import PersonaConfig
+    prompt = generate_system_prompt(PersonaConfig())
     layer1 = prompt.split("## How to Think")[0]
     bullet_count = layer1.count("\n- **")
-    assert bullet_count == 5, f"Expected 5 Layer 1 bullets, got {bullet_count}"
+    assert bullet_count == 6, f"Expected 6 Layer 1 bullets, got {bullet_count}"
 
 
 def test_layer1_no_tool_invocation_descriptions():
