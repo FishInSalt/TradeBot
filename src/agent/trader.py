@@ -8,7 +8,7 @@ from pydantic_ai import Agent, RunContext
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
-from src.agent.persona import generate_system_prompt
+from src.agent.persona import generate_system_prompt, RuntimeConfig
 from src.cli.approval import ApprovalGate
 from src.config import PersonaConfig
 from src.integrations.crypto_etf.service import CryptoEtfService
@@ -46,14 +46,16 @@ class TradingDeps:
 
 
 def create_trader_agent(
-    model: str, persona_config: PersonaConfig
+    model: str,
+    persona_config: PersonaConfig,
+    runtime: RuntimeConfig | None = None,
 ) -> Agent[TradingDeps, str]:
     # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
     # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
     from src.services.tool_call_recorder import ToolCallRecorder
     from src.services.model_manager import get_optimal_settings
 
-    system_prompt = generate_system_prompt(persona_config)
+    system_prompt = generate_system_prompt(persona_config, runtime)
     # model-specific 配置由 model_manager.get_optimal_settings() 统一管理，
     # trader 不感知具体 provider/model 细节，仅按 name 查表。
     # model 入参可能是 KnownModelName 字符串 (tests) 或 pydantic-ai Model 对象 (prod);

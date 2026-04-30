@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
+from src.agent.persona import RuntimeConfig
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse,
@@ -436,7 +437,14 @@ def build_services(
         console=sc,
     )
 
-    agent = create_trader_agent(model=result.model, persona_config=result.persona)
+    # R2-5: session-fixed runtime config injected into system prompt
+    max_wake = min(max(4 * result.scheduler_interval_min, 60), 180)
+    runtime_config = RuntimeConfig(wake_max_minutes=max_wake)
+    agent = create_trader_agent(
+        model=result.model,
+        persona_config=result.persona,
+        runtime=runtime_config,
+    )
 
     from src.services.metrics import MetricsService
     metrics_service = MetricsService(
@@ -505,6 +513,11 @@ def build_services(
         crypto_etf=crypto_etf_service,
         onchain=onchain_service,
     )
+
+    # R2-5: wake bounds — explicit assignment matches original run() pattern
+    # + defends against TradingDeps default value drift in the future
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = max_wake
 
     # Alert service
     if result.alert_enabled:
@@ -611,10 +624,7 @@ async def run(
     interval = result.scheduler_interval_min * 60
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
-    # R4: dynamic wake interval
-    max_wake = min(max(4 * result.scheduler_interval_min, 60), 180)
-    deps.wake_min_minutes = 1
-    deps.wake_max_minutes = max_wake
+    # R4: dynamic wake fn binds scheduler (wake bounds assembled in build_services)
     deps.set_next_wake_fn = lambda minutes: scheduler.set_next_interval(minutes * 60)
 
     def _create_fill_handler(sched, eng, sid):
