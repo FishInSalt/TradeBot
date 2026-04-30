@@ -555,7 +555,9 @@ def create_trader_agent(
         you usually do not need to call this for that case.
 
         Args:
-            alert_id: the alert ID returned by add_price_level_alert.
+            alert_id: 8-char hex id returned by add_price_level_alert (also visible
+                in get_active_alerts output as 'id=...'). Do not use the position
+                index '#N' from get_active_alerts — that is for display only.
             reasoning: brief description of why this alert is being cancelled.
         """
         from src.agent.tools_execution import cancel_price_level_alert as _impl
