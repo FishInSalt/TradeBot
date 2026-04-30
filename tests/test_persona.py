@@ -5,7 +5,7 @@ from src.config import PersonaConfig
 def test_prompt_contains_layer1_identity():
     """Layer 1 keyword presence — scope limited to Layer 1 only (intent clarity).
     After Iter 4 slim-down Layer 1 only contains: market context (perpetual / one-way)
-    + 5 cross-tool bullets (fill / woken trigger responses). timeframe / memory
+    + 6 cross-tool bullets (fill / woken trigger responses + wake interval control). timeframe / memory
     coverage moves to Layer 2 tests; tool keywords (set_next_wake, save_memory etc.)
     live in docstrings (separate from system prompt).
     """
@@ -243,24 +243,25 @@ def test_prompt_minimum_length():
     assert len(prompt) > 500
 
 
-def test_layer1_bullet_count_5():
-    """Layer 1 bullet count drift guard (Iter 4: 25 → 5 — cross-tool behavior only).
-    Bullets are markdown rows starting with '\n- **' — matches `_build_layer1`'s format.
+def test_layer1_cross_tool_bullet_count():
+    """Layer 1 bullet count drift guard.
+
+    Iter 4 PR #25 reduced Layer 1 from 25 to 5 cross-tool bullets.
+    R2-5 PR # added 6th bullet "Wake interval control" (set_next_wake
+    × alert/fill/conditional triggers). Bullets are markdown rows
+    starting with '\\n- **' — matches `_build_layer1`'s format.
     """
     from src.agent.persona import generate_system_prompt
-    config = PersonaConfig()
-    prompt = generate_system_prompt(config)
-    # Guard: Layer 2 header — protects against silent false-pass if persona.py renames it
-    assert "## How to Think" in prompt, \
-        "Layer 2 header changed; update split key in this test"
+    from src.config import PersonaConfig
+    prompt = generate_system_prompt(PersonaConfig())
     layer1 = prompt.split("## How to Think")[0]
     bullet_count = layer1.count("\n- **")
-    assert bullet_count == 5, f"Expected 5 Layer 1 bullets, got {bullet_count}"
+    assert bullet_count == 6, f"Expected 6 Layer 1 bullets, got {bullet_count}"
 
 
 def test_layer1_no_tool_invocation_descriptions():
     """After Iter 4, Layer 1 should not contain tool-name invocation patterns —
-    tool descriptions belong in docstrings (DRY). The 5 retained bullets describe
+    tool descriptions belong in docstrings (DRY). The 6 retained bullets describe
     cross-tool behavior, not single-tool invocation.
     """
     import re
@@ -304,3 +305,103 @@ def test_prompt_l65_softened():
     assert "at a structural level" not in prompt
     # Open question preserved
     assert "where is the logical stop loss" in prompt
+
+
+def test_layer1_contains_wake_interval_control_bullet():
+    """R2-5 G8: Layer 1 含 Wake interval control bullet (cross-tool with alert/fill/conditional)."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1 = _build_layer1(RuntimeConfig())
+    # bullet 标题
+    assert "**Wake interval control**" in layer1, \
+        "Layer 1 missing Wake interval control bullet header"
+    # cross-tool 关系断言（真正的 Layer 1 价值，比 bound 重要）
+    assert "Alerts, fills, and conditional triggers always interrupt sleep regardless of this setting" in layer1, \
+        "Layer 1 Wake interval control bullet missing cross-tool interrupt clause"
+
+
+def test_layer1_renders_dynamic_wake_max():
+    """R2-5 G11: _build_layer1 渲染 RuntimeConfig.wake_max_minutes 实际值（非 envelope 1-180）。"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    # sim #4 实证值（30min scheduler 配置下的 wake_max）
+    layer1_120 = _build_layer1(RuntimeConfig(wake_max_minutes=120))
+    assert "1-120 min for this session" in layer1_120, \
+        "wake_max=120 not rendered in bullet"
+    assert "1-60 min for this session" not in layer1_120, \
+        "default 60 leaked when explicit 120 passed"
+    # 默认 60（默认 15min scheduler 配置）
+    layer1_60 = _build_layer1(RuntimeConfig(wake_max_minutes=60))
+    assert "1-60 min for this session" in layer1_60, \
+        "wake_max=60 not rendered in bullet"
+
+
+def test_generate_system_prompt_default_runtime():
+    """R2-5 G9: generate_system_prompt(persona) 单参等价于显式 RuntimeConfig() 默认值。"""
+    from src.agent.persona import generate_system_prompt, RuntimeConfig
+    from src.config import PersonaConfig
+    prompt_default = generate_system_prompt(PersonaConfig())
+    prompt_explicit = generate_system_prompt(PersonaConfig(), RuntimeConfig())
+    assert prompt_default == prompt_explicit, \
+        "Single-arg call must equal explicit RuntimeConfig() — backwards compat broken"
+    # 渲染默认 wake_max=60
+    assert "1-60 min for this session" in prompt_default, \
+        "Default RuntimeConfig() should render 1-60 min"
+
+
+def test_set_next_wake_no_decision_hints_in_description():
+    """R2-5 G10: set_next_wake wrapper docstring fact-only verification.
+
+    Decision hints "shorten when X" / "lengthen when Y" are N5 banned —
+    they prescribe agent behavior based on conditions, violating fact-only
+    philosophy. This drift guard ensures wrapper docstring (rendered into
+    tool_def.description by pydantic-ai 1.78 griffe sniff) stays clean.
+
+    API path: agent._function_toolset.tools[name].tool_def.<attr>
+    (matches tests/test_trader_agent.py:210-211 access style; we use
+    .description for first-paragraph text vs .parameters_json_schema
+    for per-arg Args descriptions — see spec §3.6.1).
+    """
+    import re
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["set_next_wake"]
+    desc = tool.tool_def.description or ""
+
+    # N5 wordlist verification
+    assert not re.search(r"\bshorten when\b", desc, re.IGNORECASE), \
+        f"set_next_wake description contains banned 'shorten when': {desc!r}"
+    assert not re.search(r"\blengthen when\b", desc, re.IGNORECASE), \
+        f"set_next_wake description contains banned 'lengthen when': {desc!r}"
+    # Sanity: factual content preserved
+    assert "one-shot" in desc.lower(), \
+        f"set_next_wake description should preserve 'one-shot' fact: {desc!r}"
+
+
+def test_set_next_wake_wrapper_layer1_reference_intact():
+    """R2-5 PR #34 I-1: wrapper docstring "Wake interval control" reference must point
+    to a real Layer 1 bullet by the same name (Single Source of Truth invariant).
+
+    G8 locks Layer 1 bullet header presence; G10 locks wrapper N5 wordlist absence;
+    neither catches an orphan reference if Layer 1 bullet is renamed without updating
+    wrapper Args.minutes. This test links them — both ends must contain the same string.
+
+    API path: parameters_json_schema for per-arg Args descriptions (vs .description for
+    first-paragraph text — see spec §3.6.1 + G10).
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    bullet_name = "Wake interval control"
+    layer1 = _build_layer1(RuntimeConfig())
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    minutes_desc = (
+        agent._function_toolset.tools["set_next_wake"]
+        .tool_def.parameters_json_schema["properties"]["minutes"]["description"]
+    )
+
+    assert bullet_name in minutes_desc, \
+        f"wrapper Args.minutes lost reference to {bullet_name!r}: {minutes_desc!r}"
+    assert bullet_name in layer1, \
+        f"Layer 1 missing {bullet_name!r} bullet that wrapper points to"

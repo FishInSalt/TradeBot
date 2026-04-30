@@ -1,21 +1,64 @@
+from __future__ import annotations
+from dataclasses import dataclass
+
 from src.config import PersonaConfig
 
 
-def generate_system_prompt(config: PersonaConfig) -> str:
-    """Generate a three-layer system prompt based on persona configuration.
+@dataclass(frozen=True)
+class RuntimeConfig:
+    """Session-fixed runtime values injected into the system prompt.
 
-    Layer 1: Identity & Tools — who you are, key tool usage notes
+    Sibling to PersonaConfig:
+    - PersonaConfig: who I am as a trader (personality, trading style)
+    - RuntimeConfig: operational facts about this trading session
+      (tool bounds, exchange context, monitoring rhythm, etc.)
+
+    Per-cycle dynamic context (e.g., previous-cycle reasoning, current
+    position) is NOT here — that channel is reserved for separate
+    mechanisms (R2-8 N10 reasoning injection).
+
+    Field docstrings (PEP 257-extra convention): pyright/Sphinx/griffe
+    static tools recognize them, but Python runtime does not bind them
+    to __doc__ — inspect.getdoc(RuntimeConfig.wake_max_minutes) returns
+    None. If runtime reflection is needed, switch to
+    field(metadata={"doc": "..."}).
+    """
+    wake_max_minutes: int = 60
+    """Default 60 matches the cli/app.py formula at scheduler_interval_min=15
+    (min(max(4*15, 60), 180) = 60), but the value is **independent** — adjust
+    if the formula changes.
+
+    **Production paths MUST set this explicitly** via cli wiring
+    (`RuntimeConfig(wake_max_minutes=cli.app.max_wake)`); this default is
+    **for tests / temporary call sites only, NOT for production**. If a
+    production code path silently relies on the default 60, that is a bug —
+    flag and route through cli wiring instead."""
+
+
+def generate_system_prompt(
+    persona: PersonaConfig,
+    runtime: RuntimeConfig | None = None,
+) -> str:
+    """Generate a three-layer system prompt.
+
+    Layer 1: Identity & Tools — who you are, key cross-tool behavior
     Layer 2: Trader Thinking Framework — how to think (generic)
     Layer 3: Strategy Preferences — what style to trade (injection point)
+
+    Args:
+        persona: trader identity / style config.
+        runtime: session-fixed runtime values (tool bounds, etc).
+            Defaults to RuntimeConfig() — only for tests / temp call sites.
     """
-    layer1 = _build_layer1()
+    runtime = runtime or RuntimeConfig()
+    layer1 = _build_layer1(runtime)
     layer2 = _build_layer2()
-    layer3 = _build_layer3(config)
+    layer3 = _build_layer3(persona)
     return f"{layer1}\n\n{layer2}\n\n{layer3}"
 
 
-def _build_layer1() -> str:
-    return """You are a cryptocurrency trader operating autonomously. You analyze markets, manage positions, and make trading decisions using the tools available to you.
+def _build_layer1(runtime: RuntimeConfig) -> str:
+    return f"""You are a cryptocurrency trader operating autonomously. You analyze markets, manage positions, and make trading decisions using the tools available to you.
 
 ## Market Context
 
@@ -27,7 +70,8 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 - **Open fill response**: When woken by an order fill notification (conditional trigger) that opened a position, identify your stop loss and take profit levels and set them. Use market data to inform these levels.
 - **Close fill response**: When woken by a fill that closed a position (stop loss, take profit, or manual close), review the trade outcome: what worked, what didn't, and what you would do differently. Save actionable lessons to memory.
 - **Alert response**: When woken by a price alert, assess whether the price move changes your thesis. For a price level alert, evaluate whether the level held or broke and what that implies. For a volatility alert, determine if the move is the start of a trend or just noise before acting.
-- **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after."""
+- **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after.
+- **Wake interval control**: `set_next_wake(minutes)` requests the next scheduler wake-up when no external trigger fires. Valid range 1-{runtime.wake_max_minutes} min for this session. Alerts, fills, and conditional triggers always interrupt sleep regardless of this setting."""
 
 
 def _build_layer2() -> str:
