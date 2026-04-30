@@ -590,8 +590,12 @@ async def test_cancel_price_level_alert_tool_success():
 
 
 @pytest.mark.asyncio
-async def test_cancel_price_level_alert_tool_not_found():
-    """Non-existent alert_id: returns not-found message."""
+async def test_cancel_price_level_alert_tool_invalid_format():
+    """R2-2 T2: 协议错（agent 传非 8-char hex）→ format 错误信息引导查看 get_active_alerts。
+
+    sim #4 实证：agent 100% 传 `#1` / `"1"` / `"11"` 等 enumerate 索引误读，
+    永远匹配不到 uuid。原统一错误信息把"格式错"和"已触发"合并 → agent 诊断错方向。
+    """
     from src.agent.tools_execution import cancel_price_level_alert
 
     sim = make_sim_exchange()
@@ -600,10 +604,35 @@ async def test_cancel_price_level_alert_tool_not_found():
     deps.db_engine = None
     deps.session_id = "test-session"
 
-    result = await cancel_price_level_alert(deps, "nonexistent-id", "test")
+    # 三种典型协议错输入（含 # / 含 dash / 长度错）
+    for bad_id in ["#1", "nonexistent-id", "1"]:
+        result = await cancel_price_level_alert(deps, bad_id, "test")
+        assert "Invalid alert_id format" in result, f"协议错信息缺失 for {bad_id!r}: {result!r}"
+        assert "8-char hex" in result, f"格式提示缺失 for {bad_id!r}: {result!r}"
+        assert "get_active_alerts" in result, f"id 来源引导缺失 for {bad_id!r}: {result!r}"
+        assert repr(bad_id) in result or bad_id in result, f"用户输入回显缺失 for {bad_id!r}: {result!r}"
 
-    assert "not found" in result
-    assert "nonexistent-id" in result
+
+@pytest.mark.asyncio
+async def test_cancel_price_level_alert_tool_state_not_found():
+    """R2-2 T3: 状态错（合法 8-char hex 但 sim 中不存在）→ already triggered or expired。"""
+    from src.agent.tools_execution import cancel_price_level_alert
+
+    sim = make_sim_exchange()
+    deps = MagicMock()
+    deps.exchange = sim
+    deps.db_engine = None
+    deps.session_id = "test-session"
+
+    # 合法 8-char hex 格式（防真碰撞，不与任何活跃 uuid 重合 — sim 中无 alerts）
+    fake_id = "deadbeef"
+    result = await cancel_price_level_alert(deps, fake_id, "test")
+
+    assert "already triggered or expired" in result, f"状态错信息缺失: {result!r}"
+    assert fake_id in result, f"alert_id 回显缺失: {result!r}"
+    # 状态错不应混入"格式错"提示
+    assert "Invalid alert_id format" not in result
+    assert "8-char hex" not in result
 
 
 # ============ display.py is_tool_error coverage ============
@@ -620,13 +649,25 @@ def test_is_tool_error_cancel_alert_success_returns_false():
     assert result is False
 
 
-def test_is_tool_error_cancel_alert_not_found_returns_true():
-    """Not-found message doesn't match prefix → is_tool_error returns True (business rejection)."""
+def test_is_tool_error_cancel_alert_invalid_format_returns_true():
+    """R2-2 T4: 协议错信息不命中 success prefix → is_tool_error=True (business rejection)。"""
     from src.cli.display import is_tool_error
 
     result = is_tool_error(
         tool_name="cancel_price_level_alert",
-        content="Alert nonexistent-id not found (already triggered or never existed)",
+        content="Invalid alert_id format: '#1'. Expected 8-char hex (e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids.",
+        outcome="success",
+    )
+    assert result is True
+
+
+def test_is_tool_error_cancel_alert_state_not_found_returns_true():
+    """R2-2 T5: 状态错（已触发/过期）信息不命中 success prefix → is_tool_error=True。"""
+    from src.cli.display import is_tool_error
+
+    result = is_tool_error(
+        tool_name="cancel_price_level_alert",
+        content="Alert deadbeef already triggered or expired",
         outcome="success",
     )
     assert result is True
