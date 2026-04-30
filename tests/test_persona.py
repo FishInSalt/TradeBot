@@ -304,3 +304,43 @@ def test_prompt_l65_softened():
     assert "at a structural level" not in prompt
     # Open question preserved
     assert "where is the logical stop loss" in prompt
+
+
+def test_layer1_contains_wake_interval_control_bullet():
+    """R2-5 G8: Layer 1 含 Wake interval control bullet (cross-tool with alert/fill/conditional)."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1 = _build_layer1(RuntimeConfig())
+    # bullet 标题
+    assert "**Wake interval control**" in layer1, \
+        "Layer 1 missing Wake interval control bullet header"
+    # cross-tool 关系断言（真正的 Layer 1 价值，比 bound 重要）
+    assert "Alerts, fills, and conditional triggers always interrupt sleep regardless of this setting" in layer1, \
+        "Layer 1 Wake interval control bullet missing cross-tool interrupt clause"
+
+
+def test_layer1_renders_dynamic_wake_max():
+    """R2-5 G11: _build_layer1 渲染 RuntimeConfig.wake_max_minutes 实际值（非 envelope 1-180）。"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    # sim #4 实证值（30min scheduler 配置下的 wake_max）
+    layer1_120 = _build_layer1(RuntimeConfig(wake_max_minutes=120))
+    assert "1-120 min for this session" in layer1_120, \
+        "wake_max=120 not rendered in bullet"
+    assert "1-60 min for this session" not in layer1_120, \
+        "default 60 leaked when explicit 120 passed"
+    # 默认 60（默认 15min scheduler 配置）
+    layer1_60 = _build_layer1(RuntimeConfig(wake_max_minutes=60))
+    assert "1-60 min for this session" in layer1_60, \
+        "wake_max=60 not rendered in bullet"
+
+
+def test_generate_system_prompt_default_runtime():
+    """R2-5 G9: generate_system_prompt(persona) 单参等价于显式 RuntimeConfig() 默认值。"""
+    from src.agent.persona import generate_system_prompt, RuntimeConfig
+    from src.config import PersonaConfig
+    prompt_default = generate_system_prompt(PersonaConfig())
+    prompt_explicit = generate_system_prompt(PersonaConfig(), RuntimeConfig())
+    assert prompt_default == prompt_explicit, \
+        "Single-arg call must equal explicit RuntimeConfig() — backwards compat broken"
+    # 渲染默认 wake_max=60
+    assert "1-60 min for this session" in prompt_default, \
+        "Default RuntimeConfig() should render 1-60 min"
