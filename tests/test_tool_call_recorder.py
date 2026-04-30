@@ -1,6 +1,8 @@
 """Unit tests for ToolCallRecorder capability."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -8,6 +10,9 @@ from unittest.mock import MagicMock, AsyncMock
 
 from src.storage.database import init_db, get_session
 from src.storage.models import Session as SessionModel, ToolCall
+
+# R2-4 polish §I3 — drift guards 锚 __file__ 而非 cwd（与 test_alembic_migration.py:23 一致）
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def make_deps(engine: AsyncEngine, session_id: str, cycle_id: str | None = "cyc-test"):
@@ -411,10 +416,9 @@ def test_biz_error_types_drift_guard():
     扫 src/agent/tools_execution.py 内所有 note_biz_error 调用，断言 string literal 全部 ∈ BIZ_ERROR_TYPES。
     """
     import re
-    from pathlib import Path
     from src.services.tool_call_recorder import BIZ_ERROR_TYPES
 
-    src = Path("src/agent/tools_execution.py").read_text()
+    src = (_REPO_ROOT / "src/agent/tools_execution.py").read_text()
     pattern = re.compile(r'note_biz_error\(["\']([a-z_]+)["\']\)')
     cited = set(pattern.findall(src))
 

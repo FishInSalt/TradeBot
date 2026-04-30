@@ -10,6 +10,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.storage.database import init_db, get_session
 from src.storage.models import Session as SessionModel, TradeAction
 
+# R2-4 polish §I3 — drift guards 锚 __file__ 而非 cwd（与 test_alembic_migration.py:23 一致）
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 async def _make_engine_with_session(session_id: str = "sess-derive-test"):
     """In-memory SQLite + 1 个 SessionModel (FK target)。"""
@@ -225,7 +228,7 @@ def test_t11_adjust_actions_drift_guard():
     """
     from src.cli.app import ADJUST_ACTIONS
 
-    actual = _grep_record_action_literals("src/agent/tools_execution.py")
+    actual = _grep_record_action_literals(str(_REPO_ROOT / "src/agent/tools_execution.py"))
     # Sentinel: catch broken regex or renamed _record_action helper
     assert "set_stop_loss" in actual, \
         f"_grep_record_action_literals seems broken — known-stable 'set_stop_loss' not in result: {actual}"
@@ -277,6 +280,49 @@ def test_t12_derive_output_fits_decision_column():
 
     over_limit = [v for v in DERIVE_DECISION_VALUES if len(v) > 30]
     assert not over_limit, f"派生输出 > 30 chars: {over_limit}"
+
+
+def test_t12b_derive_function_returns_match_declared_enum():
+    """T12b (R2-4 polish §I1): 派生函数所有 return 字面量必须 ⊆ DERIVE_DECISION_VALUES。
+
+    AST 扫 `_derive_decision_from_actions` 函数体所有 `return "<literal>"` 节点，
+    加上 f-string `return f"open_{a.side}"` 的两个静态展开值（open_long / open_short），
+    断言全部 ⊆ DERIVE_DECISION_VALUES。
+
+    防止漂移场景: 未来 PR 加新 return value (如 'adjust_funding') 但忘记更新
+    DERIVE_DECISION_VALUES frozenset → t12 仅验长度 ≤30 不会 fail，本测试会 fail。
+    与 BIZ_ERROR_TYPES drift guard 形成对称覆盖。
+    """
+    import ast
+    import inspect
+    from src.cli import app as derive_module
+    from src.cli.app import DERIVE_DECISION_VALUES, _derive_decision_from_actions
+
+    src = inspect.getsource(_derive_decision_from_actions)
+    tree = ast.parse(src)
+    literals: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                literals.add(node.value.value)
+
+    # f-string `return f"open_{a.side}"` 静态展开：side 由 line 124 校验 ∈ {"long", "short"}
+    # 这两个值无法靠 AST 字面量扫到，显式认领（若未来重构 open_position 派生路径需更新此集合）
+    fstring_expansion = {"open_long", "open_short"}
+
+    actual = literals | fstring_expansion
+    drift = actual - DERIVE_DECISION_VALUES
+    assert not drift, (
+        f"派生函数 return 字面量漂移 — 出现 DERIVE_DECISION_VALUES 未声明的值: {drift}。"
+        f" 请在 src/cli/app.py:DERIVE_DECISION_VALUES 注册或修正字面量。"
+    )
+
+    # Sanity: 至少抓到 7 个字面量（close/adjust_protect/adjust_entry_order/adjust_leverage/
+    # adjust_alert/hold/derive_error），低于此说明 AST 扫失效或函数被改名/拆分
+    assert len(literals) >= 7, (
+        f"AST 扫到的字面量数 {len(literals)} < 7（期望 close/4 adjust_*/hold/derive_error），"
+        f"实测: {literals}。可能 _derive_decision_from_actions 被改名或派生路径重构。"
+    )
 
 
 async def test_t13_adjust_entry_order_derives_from_place_limit_order():

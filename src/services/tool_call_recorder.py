@@ -161,6 +161,8 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                         "tool_call_insert_ms=%.1f tool=%s", insert_ms, call.tool_name
                     )
                 except Exception as rec_err:
+                    # CAVEAT: swallow protects `return result` (line 121) — Python finally
+                    # 内未捕获异常会顶替 return → 破坏 LLM 透明度契约（recorder 是副作用）。
                     logger.error(
                         "tool_call_recorder failed for %s: %s",
                         call.tool_name, rec_err,
