@@ -88,8 +88,8 @@ async def test_t3_close_derives():
     assert result == "close"
 
 
-async def test_t4_adjust_derives_from_set_stop_loss():
-    """T4: cycle 仅含 set_stop_loss → 'adjust'。"""
+async def test_t4_adjust_protect_derives_from_set_stop_loss():
+    """T4 (R2-4 rename): cycle 仅含 set_stop_loss → 'adjust_protect'。"""
     from src.cli.app import _derive_decision_from_actions
 
     engine = await _make_engine_with_session()
@@ -98,7 +98,7 @@ async def test_t4_adjust_derives_from_set_stop_loss():
         result = await _derive_decision_from_actions(
             session, "sess-derive-test", "cycle-4"
         )
-    assert result == "adjust"
+    assert result == "adjust_protect"
 
 
 async def test_t6_set_next_wake_only_returns_hold():
@@ -115,7 +115,10 @@ async def test_t6_set_next_wake_only_returns_hold():
 
 
 async def test_t7_priority_open_beats_adjust():
-    """T7: cycle 含 open_position + set_stop_loss 同 cycle → 'open_long'（早期返回拦截）。"""
+    """T7: cycle 含 open_position + set_stop_loss 同 cycle → 'open_long'（早期返回拦截）。
+
+    R2-4 调整: set_stop_loss 单独本应派生 'adjust_protect'，但 open_position 优先级更高。
+    """
     from src.cli.app import _derive_decision_from_actions
 
     engine = await _make_engine_with_session()
@@ -126,7 +129,8 @@ async def test_t7_priority_open_beats_adjust():
         result = await _derive_decision_from_actions(
             session, "sess-derive-test", "cycle-7"
         )
-    assert result == "open_long"
+    assert result == "open_long", \
+        f"open_position 应优先于任意 adjust_*，实际 {result!r}"
 
 
 async def test_t8_session_isolation():
@@ -156,10 +160,11 @@ async def test_t8_session_isolation():
 
 
 async def test_t8_5_open_position_with_invalid_side_falls_through():
-    """T8.5: open_position(side=None) + set_stop_loss 同 cycle → 'adjust'。
+    """T8.5: open_position(side=None) + set_stop_loss 同 cycle → 'adjust_protect'。
 
     spec §3.5: 派生函数对 side ∉ {'long', 'short'} 兜底 — skip 此 row 让 downstream 接管。
-    实测 cycle = [open_position(side=None), set_stop_loss] 应返回 'adjust' 不是 'open_None'。
+    实测 cycle = [open_position(side=None), set_stop_loss] 应返回 'adjust_protect' 不是 'open_None'。
+    R2-4 调整: 'adjust' → 'adjust_protect'（PROTECT 子集）。
     """
     from src.cli.app import _derive_decision_from_actions
 
@@ -171,8 +176,8 @@ async def test_t8_5_open_position_with_invalid_side_falls_through():
         result = await _derive_decision_from_actions(
             session, "sess-derive-test", "cycle-85"
         )
-    assert result == "adjust", \
-        f"side=None open_position 应被 skip 让 adjust 接管，实际 {result!r}"
+    assert result == "adjust_protect", \
+        f"side=None open_position 应被 skip 让 adjust_protect 接管，实际 {result!r}"
 
 
 async def test_t8_6_select_failure_falls_back_to_derive_error():
@@ -210,29 +215,68 @@ def _grep_record_action_literals(path: str) -> set[str]:
 
 
 def test_t11_adjust_actions_drift_guard():
-    """T11: tools_execution.py 内所有 _record_action action 字面量
-    必须落入 derive_decision_type 的分类，否则新增 action 漏分类会静默落 hold。
+    """T11 (R2-4 改造): tools_execution.py 内所有 _record_action action 字面量
+    必须落入 ADJUST_ACTIONS union 或单独分类（open_position / close_position / set_next_wake）。
 
-    spec §5.4 — 与 Iter 5 D' tests/test_trader_agent.py:69 同款纪律。
+    R2-4 spec §7.2: 此测试是 ADJUST_ACTIONS union 兜底——
+    G5 (ALERT_ACTIONS) 子集漂移由 union 间接覆盖（union 含 ALERT_ACTIONS 全部元素，
+    新增/重命名 ALERT 类 action 会被 actual - expected drift 抓到）。
+    G2/G3/G4 (PROTECT/ENTRY_ORDER/LEVERAGE) 由独立 t11_protect/t11_entry_order/t11_leverage 各自精确断言。
     """
     from src.cli.app import ADJUST_ACTIONS
 
     actual = _grep_record_action_literals("src/agent/tools_execution.py")
+    # Sentinel: catch broken regex or renamed _record_action helper
+    assert "set_stop_loss" in actual, \
+        f"_grep_record_action_literals seems broken — known-stable 'set_stop_loss' not in result: {actual}"
     expected = ADJUST_ACTIONS | {"open_position", "close_position", "set_next_wake"}
     drift = actual - expected
     assert not drift, \
-        f"新增未分类的 action: {drift}（请更新 ADJUST_ACTIONS 或派生逻辑）"
+        f"新增未分类的 action: {drift}（请更新 ADJUST_ACTIONS 子集或派生逻辑）"
+
+
+def test_t11_protect_actions_drift_guard():
+    """T11 G2 (R2-4): PROTECT_ACTIONS 子集 vs trade_actions 字面 action 名一致性。
+
+    扫 tools_execution.py 内被分到 PROTECT_ACTIONS 的 action 名（手动列表，不靠 grep）。
+    防止 trade_actions 写入侧 / 派生侧字面量漂移。
+    """
+    from src.cli.app import PROTECT_ACTIONS
+
+    expected_protect = {"set_stop_loss", "set_take_profit"}
+    assert PROTECT_ACTIONS == expected_protect, \
+        f"PROTECT_ACTIONS 漂移: actual={PROTECT_ACTIONS}, expected={expected_protect}"
+
+
+def test_t11_entry_order_actions_drift_guard():
+    """T11 G3 (R2-4): ENTRY_ORDER_ACTIONS 子集 drift guard。"""
+    from src.cli.app import ENTRY_ORDER_ACTIONS
+
+    expected = {"place_limit_order", "cancel_order"}
+    assert ENTRY_ORDER_ACTIONS == expected, \
+        f"ENTRY_ORDER_ACTIONS 漂移: actual={ENTRY_ORDER_ACTIONS}, expected={expected}"
+
+
+def test_t11_leverage_actions_drift_guard():
+    """T11 G4 (R2-4): LEVERAGE_ACTIONS 子集 drift guard。"""
+    from src.cli.app import LEVERAGE_ACTIONS
+
+    expected = {"adjust_leverage"}
+    assert LEVERAGE_ACTIONS == expected, \
+        f"LEVERAGE_ACTIONS 漂移: actual={LEVERAGE_ACTIONS}, expected={expected}"
 
 
 def test_t12_derive_output_fits_decision_column():
-    """T12: 派生函数输出 enum 字符串必须 ≤ DecisionLog.decision String(20)。
+    """T12 (R2-4 调整): 派生函数输出 enum 字符串必须 ≤ DecisionLog.decision String(30)。
 
-    spec §5.5 — 防未来加新 enum 超约束。
-    legacy 不纳入此集合（historical-only，非派生函数运行时输出）。
+    R2-4 spec §5.2 容量 String(20) → String(30)。
+    legacy / adjust 不纳入此集合（不再写入）；historical-only。
+    Source-of-truth: DERIVE_DECISION_VALUES in src/cli/app.py (drift-guard via single import).
     """
-    enum_values = {"open_long", "open_short", "close", "adjust", "hold", "derive_error"}
-    over_limit = [v for v in enum_values if len(v) > 20]
-    assert not over_limit, f"派生输出 > 20 chars: {over_limit}"
+    from src.cli.app import DERIVE_DECISION_VALUES
+
+    over_limit = [v for v in DERIVE_DECISION_VALUES if len(v) > 30]
+    assert not over_limit, f"派生输出 > 30 chars: {over_limit}"
 
 
 async def test_t13_adjust_entry_order_derives_from_place_limit_order():

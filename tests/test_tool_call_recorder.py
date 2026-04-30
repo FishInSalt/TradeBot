@@ -425,3 +425,10 @@ def test_biz_error_types_drift_guard():
     # Sanity: R2-4 应 instrument ≥ 3 处（spec §4.3）
     assert len(cited) >= 3, \
         f"R2-4 应 instrument ≥3 处 note_biz_error；实测 {len(cited)} 处: {cited}"
+
+
+def test_tool_calls_status_values_fit_column():
+    """G7 (R2-4 spec §7.2): tool_calls.status 应用层 enum 取值 ⊆ String(20)。"""
+    enum_values = {"ok", "biz_error", "error"}
+    over_limit = [v for v in enum_values if len(v) > 20]
+    assert not over_limit, f"status enum > 20 chars: {over_limit}"

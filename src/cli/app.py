@@ -74,6 +74,15 @@ ADJUST_ACTIONS = (
     PROTECT_ACTIONS | ENTRY_ORDER_ACTIONS | LEVERAGE_ACTIONS | ALERT_ACTIONS
 )
 
+# R2-4 spec §7.2 G6 — Derive function output enum (single source of truth for tests)
+# Mirrors return values of `_derive_decision_from_actions` below; if you add a new
+# return value, append here so t12 capacity guard catches it.
+DERIVE_DECISION_VALUES: frozenset[str] = frozenset({
+    "open_long", "open_short", "close",
+    "adjust_protect", "adjust_entry_order", "adjust_leverage", "adjust_alert",
+    "hold", "derive_error",
+})
+
 
 async def _derive_decision_from_actions(
     session: AsyncSession,
