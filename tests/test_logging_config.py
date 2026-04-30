@@ -117,3 +117,25 @@ def test_setup_session_logging_returns_session_console(tmp_path: Path):
     sc.print("test output")
     sc.close()
     assert (log_dir / "session_sid-001.log").exists()
+
+
+def test_setup_system_logging_uses_timestamped_rotating_file_handler(tmp_path: Path):
+    """R2-3 drift guard: file handler must be TimestampedRotatingFileHandler with
+    maxBytes=100MB and backupCount=30.
+    """
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, TimestampedRotatingFileHandler)]
+    assert len(file_handlers) == 1, (
+        f"expected exactly 1 TimestampedRotatingFileHandler, got {len(file_handlers)} "
+        f"(all handlers: {[type(h).__name__ for h in root.handlers]})"
+    )
+    fh = file_handlers[0]
+    assert fh.maxBytes == 100 * 1024 * 1024, (
+        f"expected maxBytes=100MB ({100 * 1024 * 1024}), got {fh.maxBytes}"
+    )
+    assert fh.backupCount == 30, f"expected backupCount=30, got {fh.backupCount}"
