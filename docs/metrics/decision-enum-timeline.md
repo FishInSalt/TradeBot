@@ -10,9 +10,7 @@
 | `open_long` / `open_short` / `close` / `hold` | Iter 4 | PR #29 | 是 |
 | `derive_error` | Iter 4 | PR #29 | 是（DB 故障 fallback）|
 | `adjust` | Iter 4 | PR #29 | **否（R2-4 起停写）** |
-| `adjust_protect` / `adjust_entry_order` / `adjust_leverage` / `adjust_alert` | R2-4 | PR #TBD | 是 |
-
-> **PR # 占位**：R2-4 PR 编号在落 PR 时填实。
+| `adjust_protect` / `adjust_entry_order` / `adjust_leverage` / `adjust_alert` | R2-4 | PR #33 | 是 |
 
 ## 字段职责分工（设计锚点）
 
