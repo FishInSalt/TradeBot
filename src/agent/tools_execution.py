@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -266,6 +267,13 @@ async def cancel_price_level_alert(
     reasoning: str,
 ) -> str:
     """Remove a price level alert by ID."""
+    # 协议层：8-char hex 格式校验（uuid.uuid4()[:8] 生成，[0-9a-f]{8}）
+    if not re.fullmatch(r"[0-9a-f]{8}", alert_id):
+        return (
+            f"Invalid alert_id format: {alert_id!r}. Expected 8-char hex "
+            f"(e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids."
+        )
+    # 状态层：格式合法但 sim 中不存在
     ok = deps.exchange.remove_price_level_alert(alert_id)
     if ok:
         await _record_action(
@@ -273,7 +281,7 @@ async def cancel_price_level_alert(
             reasoning=f"id={alert_id} | {reasoning}",
         )
         return f"Price level alert cancelled (id={alert_id})"
-    return f"Alert {alert_id} not found (already triggered or never existed)"
+    return f"Alert {alert_id} already triggered or expired"
 
 
 async def set_next_wake(

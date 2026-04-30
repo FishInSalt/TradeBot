@@ -468,8 +468,8 @@ async def test_get_active_alerts_fact_only(mocker):
     # Scenario 2: alerts ON + 2 price levels
     deps.exchange.get_alert_params = mocker.Mock(return_value=(1.5, 30))
     deps.exchange.get_price_level_alerts = mocker.Mock(return_value=[
-        {"direction": "above", "price": 65000.0, "reasoning": "test"},
-        {"direction": "below", "price": 62000.0, "reasoning": "test"},
+        {"id": "abcd1234", "direction": "above", "price": 65000.0, "reasoning": "test"},
+        {"id": "ef567890", "direction": "below", "price": 62000.0, "reasoning": "test"},
     ])
     outputs.append(await get_active_alerts(deps))
 

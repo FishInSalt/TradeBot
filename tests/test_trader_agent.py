@@ -217,3 +217,24 @@ def test_set_price_alert_schema_exposes_threshold_range():
     window_desc = schema["properties"]["window_minutes"]["description"]
     assert "min 1," in window_desc, f"window lower bound missing: {window_desc!r}"
     assert "max 240)" in window_desc, f"window upper bound missing: {window_desc!r}"
+
+
+def test_cancel_price_level_alert_schema_exposes_id_format_and_source():
+    """R2-2 T1b drift guard: cancel_price_level_alert wrapper docstring 必须
+    暴露 alert_id 格式约束 (8-char hex) + id 来源引导 (get_active_alerts)
+    给 LLM via pydantic-ai docstring sniffing。
+
+    防 R2-2 修复回退：未来若 docstring 措辞被改弱，drift guard 立即失败。
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["cancel_price_level_alert"]
+    schema = tool.tool_def.parameters_json_schema
+
+    alert_id_desc = schema["properties"]["alert_id"]["description"]
+    assert "8-char hex" in alert_id_desc, \
+        f"id format constraint missing from LLM-visible schema: {alert_id_desc!r}"
+    assert "get_active_alerts" in alert_id_desc, \
+        f"id source guidance missing from LLM-visible schema: {alert_id_desc!r}"
