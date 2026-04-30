@@ -259,3 +259,162 @@ async def test_duration_ms_monotonic(engine, session_with_row):
     assert len(rows) == 1
     assert 40 <= rows[0].duration_ms <= 200, \
         f"duration_ms={rows[0].duration_ms} outside plausible band for 50ms sleep"
+
+
+# ---------------------------------------------------------------------------
+# R2-4 T2: ContextVar Hook + BIZ_ERROR_TYPES + Recorder改造
+# spec: docs/superpowers/specs/2026-04-30-iter-w2r2-4-biz-error-and-decision-subtypes-design.md §4
+# ---------------------------------------------------------------------------
+
+
+async def test_records_biz_error_when_note_biz_error_called(engine, session_with_row):
+    """工具内 note_biz_error → tool_calls.status='biz_error', error_type=<type>。"""
+    from src.services.tool_call_recorder import ToolCallRecorder, note_biz_error
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+
+    async def handler(args):
+        note_biz_error("invalid_threshold_range")
+        return "Invalid threshold_pct: must be 0.1-50.0, got 0.05"
+
+    result = await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("set_price_alert"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler,
+    )
+
+    # LLM 看到的字符串不变（fact 透明）
+    assert result == "Invalid threshold_pct: must be 0.1-50.0, got 0.05"
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "biz_error"
+    assert rows[0].error_type == "invalid_threshold_range"
+
+
+async def test_biz_error_does_not_leak_across_calls(engine, session_with_row):
+    """call A note_biz_error 后，call B 不 note → call B 仍 status='ok' (ContextVar reset)。"""
+    from src.services.tool_call_recorder import ToolCallRecorder, note_biz_error
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+
+    async def handler_a(args):
+        note_biz_error("invalid_threshold_range")
+        return "fail string"
+
+    async def handler_b(args):
+        return "success string"
+
+    await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("tool_a"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler_a,
+    )
+    await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("tool_b"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler_b,
+    )
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall).order_by(ToolCall.id))).scalars().all()
+    assert len(rows) == 2
+    assert rows[0].status == "biz_error"
+    assert rows[0].error_type == "invalid_threshold_range"
+    assert rows[1].status == "ok", \
+        f"ContextVar 应在 wrap_tool_execute 入口 reset；call B 不应继承 call A 的 biz_error"
+    assert rows[1].error_type is None
+
+
+async def test_exception_overrides_biz_error(engine, session_with_row):
+    """工具同时 note_biz_error 又抛 ValueError → status='error', error_type='ValueError'（exception 优先）。"""
+    from src.services.tool_call_recorder import ToolCallRecorder, note_biz_error
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+
+    async def handler(args):
+        note_biz_error("invalid_threshold_range")
+        raise ValueError("unexpected boom after note")
+
+    with pytest.raises(ValueError, match="unexpected boom"):
+        await recorder.wrap_tool_execute(
+            make_ctx(deps),
+            call=make_call("buggy_tool"),
+            tool_def=MagicMock(),
+            args={},
+            handler=handler,
+        )
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "error"
+    assert rows[0].error_type == "ValueError"
+
+
+async def test_note_biz_error_unknown_type_logs_and_skips(engine, session_with_row, caplog):
+    """fail-soft: 拼错 → logger.error 调用 + 不 set ContextVar；后续写 status='ok'（spec §4.2）。"""
+    import logging
+    from src.services.tool_call_recorder import ToolCallRecorder, note_biz_error
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+
+    async def handler(args):
+        note_biz_error("typo_xxx")  # 不在 BIZ_ERROR_TYPES
+        return "tool returned ok"
+
+    with caplog.at_level(logging.ERROR, logger="src.services.tool_call_recorder"):
+        result = await recorder.wrap_tool_execute(
+            make_ctx(deps),
+            call=make_call("any_tool"),
+            tool_def=MagicMock(),
+            args={},
+            handler=handler,
+        )
+
+    assert result == "tool returned ok"
+    assert any("typo_xxx" in rec.message for rec in caplog.records), \
+        f"应 logger.error 含拼错的 type；实际 records: {[r.message for r in caplog.records]}"
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "ok", \
+        "拼错应 fail-soft，ContextVar 不被 set，本次 tool call 仍记 'ok'"
+
+
+async def test_control_flow_exception_skips_biz_error_recording(engine, session_with_row):
+    """工具 note_biz_error + raise ApprovalRequired → 不写库（控制流路径优先 skip_record）。"""
+    from pydantic_ai.exceptions import ApprovalRequired
+    from src.services.tool_call_recorder import ToolCallRecorder, note_biz_error
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+
+    async def handler(args):
+        note_biz_error("invalid_threshold_range")
+        raise ApprovalRequired()  # pydantic_ai 1.78: __init__(self, metadata: dict|None=None)
+
+    with pytest.raises(ApprovalRequired):
+        await recorder.wrap_tool_execute(
+            make_ctx(deps),
+            call=make_call("any_tool"),
+            tool_def=MagicMock(),
+            args={},
+            handler=handler,
+        )
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 0, "控制流异常应 skip_record，不写 tool_calls"
