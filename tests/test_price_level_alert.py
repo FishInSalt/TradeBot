@@ -122,3 +122,35 @@ def test_add_price_level_alert_immediate_warning():
     # Alert is added (not blocked), but caller should check _latest_price
     assert alert_id is not None
     assert len(exchange._price_level_alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_active_alerts_displays_real_uuid():
+    """R2-2 T1a: get_active_alerts 输出必须主显真实 uuid 且与位置索引同行，
+    保证 agent 跨 cycle 能复制 id=<uuid> 真值给 cancel_price_level_alert。
+
+    sim #4 根因：原输出仅有位置索引 `#N`，跨 cycle agent 无法获取 uuid → 100% cancel 失败。
+    """
+    from unittest.mock import MagicMock
+    from src.agent.tools_perception import get_active_alerts
+
+    exchange = _make_exchange()
+    aid_a = exchange.add_price_level_alert(58000.0, "below", "BTC/USDT:USDT", "support")
+    aid_b = exchange.add_price_level_alert(62000.0, "above", "BTC/USDT:USDT", "resistance")
+    assert aid_a is not None and aid_b is not None
+
+    deps = MagicMock()
+    deps.exchange = exchange
+
+    result = await get_active_alerts(deps)
+
+    # 主显真实 uuid（agent 跨 cycle 复制 id 用）
+    assert f"id={aid_a}" in result, f"uuid {aid_a!r} not in output: {result!r}"
+    assert f"id={aid_b}" in result, f"uuid {aid_b!r} not in output: {result!r}"
+    # 保留位置索引（向后兼容现有显示习惯）
+    assert "#1" in result and "#2" in result
+    # 锁定显示格式：#N 与 id= 必须同行（防未来 reformatter 把 id 拆下一行 / 删位置索引）
+    assert any(f"#1 (id={aid_a})" in line for line in result.splitlines()), \
+        f"expected '#1 (id={aid_a})' on a single line, got: {result!r}"
+    assert any(f"#2 (id={aid_b})" in line for line in result.splitlines()), \
+        f"expected '#2 (id={aid_b})' on a single line, got: {result!r}"

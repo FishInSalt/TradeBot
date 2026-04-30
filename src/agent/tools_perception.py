@@ -468,7 +468,7 @@ async def get_active_alerts(deps: TradingDeps) -> str:
     lines = [f"=== Active Price Level Alerts ({count}/20) ==="]
     if alerts:
         for i, a in enumerate(alerts, 1):
-            lines.append(f'  #{i} {a["direction"]} {a["price"]:.2f} — "{a["reasoning"]}"')
+            lines.append(f'  #{i} (id={a["id"]}) {a["direction"]} {a["price"]:.2f} — "{a["reasoning"]}"')
     else:
         lines.append("  No active alerts.")
     sections.append("\n".join(lines))
