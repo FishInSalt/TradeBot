@@ -138,7 +138,7 @@ def test_update_params_boundary_validation():
     from src.services.price_alert import PriceAlertService
     service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     with pytest.raises(ValueError):
-        service.update_params(threshold_pct=0.1, window_minutes=60)
+        service.update_params(threshold_pct=0.05, window_minutes=60)
     with pytest.raises(ValueError):
         service.update_params(threshold_pct=55.0, window_minutes=60)
     with pytest.raises(ValueError):
@@ -153,3 +153,18 @@ def test_single_tick_no_alert():
     service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
     result = service.check(60000.0, 1_000_000_000_000)
     assert result is None
+
+
+def test_update_params_accepts_new_lower_bound():
+    """R2-1 T3: 0.1 is the new lower bound, must be accepted by update_params."""
+    from src.services.price_alert import PriceAlertService
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=5.0)
+    service.update_params(threshold_pct=0.1, window_minutes=60)
+    assert service.get_params() == (0.1, 60)
+
+
+def test_constructor_accepts_new_lower_bound():
+    """R2-1 T3: PriceAlertService init also accepts threshold_pct=0.1."""
+    from src.services.price_alert import PriceAlertService
+    service = PriceAlertService(symbol="BTC/USDT:USDT", window_minutes=60, threshold_pct=0.1)
+    assert service.get_params() == (0.1, 60)
