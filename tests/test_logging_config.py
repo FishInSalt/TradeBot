@@ -178,3 +178,38 @@ def test_setup_system_logging_rotation_creates_timestamped_archive(tmp_path: Pat
         f"archive suffix {suffix!r} does not match YYYYMMDD-HHMMSS-ffffff"
     )
     assert "before rollover" in archives[0].read_text()
+
+
+def test_setup_system_logging_rotation_prunes_oldest_beyond_backup_count(tmp_path: Path):
+    """R2-3 T3: when archive count exceeds backupCount, oldest (by mtime) is pruned.
+    """
+    import time
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    fh = next(
+        h for h in logging.getLogger().handlers
+        if isinstance(h, TimestampedRotatingFileHandler)
+    )
+    # Shrink backupCount for fast test (production is 30)
+    fh.backupCount = 2
+
+    test_logger = logging.getLogger("test.r2_3.prune")
+    contents = ["v1", "v2", "v3"]
+    for msg in contents:
+        test_logger.info(msg)
+        # Sleep to ensure distinct mtimes on coarse-grained filesystems
+        time.sleep(0.01)
+        fh.doRollover()
+
+    archives = sorted(log_dir.glob("system.log.*"))
+    assert len(archives) == 2, (
+        f"expected 2 archives after 3 rollovers with backupCount=2, "
+        f"got {[a.name for a in archives]}"
+    )
+    # Oldest content ("v1") should be pruned; newest two retained
+    surviving = "\n".join(a.read_text() for a in archives)
+    assert "v1" not in surviving, f"oldest content not pruned: {surviving!r}"
+    assert "v2" in surviving and "v3" in surviving
