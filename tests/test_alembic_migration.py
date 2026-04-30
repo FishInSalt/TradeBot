@@ -190,7 +190,7 @@ async def test_init_db_path_3_for_empty_db(tmp_path: Path) -> None:
     cols = {r[1]: r for r in cur.execute("PRAGMA table_info(decision_logs)")}
     assert "status" in cols, "status column missing"
     assert cols["status"][3] == 1, "status should be NOT NULL"
-    assert cols["decision"][2] == "VARCHAR(20)", f"decision should be VARCHAR(20), got {cols['decision'][2]}"
+    assert cols["decision"][2] == "VARCHAR(30)", f"decision should be VARCHAR(30), got {cols['decision'][2]}"
     assert "args" in {r[1] for r in cur.execute("PRAGMA table_info(tool_calls)")}
     assert "cycle_id" in {r[1] for r in cur.execute("PRAGMA table_info(trade_actions)")}
     indexes = {r[1] for r in cur.execute("SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='decision_logs'")}
@@ -289,3 +289,89 @@ def test_upgrade_when_already_head(tmp_path: Path, alembic_cfg_factory) -> None:
     rows = list(cur.execute("SELECT version_num FROM alembic_version"))
     assert len(rows) == 1
     conn.close()
+
+
+def test_r2_4_upgrade_widens_tool_calls_status(tmp_path: Path, alembic_cfg_factory):
+    """R2-4: tool_calls.status String(10) → String(20)。"""
+    db_path = tmp_path / "test.db"
+    _create_pre_alembic_schema(db_path)  # Iter 3 migration 是 ALTER 不是 CREATE，必须先建 W1 schema
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cols = {r[1]: r for r in cur.execute("PRAGMA table_info(tool_calls)")}
+    assert "status" in cols
+    assert cols["status"][2] == "VARCHAR(20)", \
+        f"tool_calls.status 期望 VARCHAR(20)，实际 {cols['status'][2]}"
+
+
+def test_r2_4_upgrade_widens_decision_logs_decision(tmp_path: Path, alembic_cfg_factory):
+    """R2-4: decision_logs.decision String(20) → String(30)。"""
+    db_path = tmp_path / "test.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cols = {r[1]: r for r in cur.execute("PRAGMA table_info(decision_logs)")}
+    assert "decision" in cols
+    assert cols["decision"][2] == "VARCHAR(30)", \
+        f"decision_logs.decision 期望 VARCHAR(30)，实际 {cols['decision'][2]}"
+
+
+def test_r2_4_upgrade_preserves_historical_adjust_rows(tmp_path: Path, alembic_cfg_factory):
+    """R2-4 不动 'adjust' 历史行（A 方案，spec §5.5）。"""
+    db_path = tmp_path / "test.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    # 跑到 Iter 3 head（不含 R2-4）
+    command.upgrade(cfg, "379f62306805")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    # 模拟 Iter 4 之后写入的 adjust 行（W1 schema sessions 多列 NOT NULL，沿用 line 222 INSERT 模板）
+    cur.execute("""
+        INSERT INTO sessions (id, name, symbol, initial_balance, status, created_at, updated_at,
+                              exchange_type, timeframe, scheduler_interval_min, approval_enabled,
+                              token_budget)
+        VALUES ('sess-x', 'pre-r2-4', 'BTC/USDT:USDT', 100.0, 'active',
+                '2026-04-30T00:00:00+00:00', '2026-04-30T00:00:00+00:00',
+                'simulated', '15m', 15, 1, 500000)
+    """)
+    cur.execute(
+        "INSERT INTO decision_logs "
+        "(session_id, cycle_id, trigger_type, decision, status, tokens_used, created_at) "
+        "VALUES ('sess-x', 'cyc-x', 'scheduled', 'adjust', 'ok', 0, datetime('now'))"
+    )
+    conn.commit()
+    conn.close()
+
+    # 跑 R2-4 upgrade
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    rows = list(cur.execute("SELECT decision FROM decision_logs WHERE cycle_id = 'cyc-x'"))
+    assert len(rows) == 1, f"期望 1 行，实际 {len(rows)}"
+    assert rows[0][0] == "adjust", \
+        f"R2-4 不应 backfill 历史 'adjust' → 实际 {rows[0][0]!r}"
+
+
+def test_r2_4_upgrade_preserves_existing_indexes(tmp_path: Path, alembic_cfg_factory):
+    """R2-4 不动 Iter 3 已建索引。"""
+    db_path = tmp_path / "test.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    indexes = {
+        r[1] for r in cur.execute(
+            "SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='decision_logs'"
+        )
+    }
+    assert "ix_decision_logs_session_id_cycle_id" in indexes, \
+        f"Iter 3 索引应保留，实际 indexes={indexes}"

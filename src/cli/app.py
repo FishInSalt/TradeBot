@@ -47,18 +47,40 @@ USAGE_LIMITS_PER_CYCLE = UsageLimits(
 )
 
 
-# Iter 4 §3.2 — DecisionLog 派生类型分类常量
-# 8 个调整类 action（_record_action 站点实测，spec §8.3 + §C5 决议）
-# set_next_wake 单独归 hold（spec §C5）；open_position / close_position 单独分类
-ADJUST_ACTIONS = frozenset({
+# Iter 4 §3.2 + R2-4 spec §5.3 — DecisionLog 派生类型分类常量
+# R2-4 拆 ADJUST_ACTIONS 为 4 子集 (sim4-issues §P0-3)
+# 派生优先级（业务直觉默认）: protect > entry_order > leverage > alert
+# trade_actions 留底，未来若数据反证可仅重派生历史 decision_logs.decision，无需 schema 演进
+PROTECT_ACTIONS = frozenset({
     "set_stop_loss",
     "set_take_profit",
+})
+ENTRY_ORDER_ACTIONS = frozenset({
+    "place_limit_order",
+    "cancel_order",
+})
+LEVERAGE_ACTIONS = frozenset({
     "adjust_leverage",
+})
+ALERT_ACTIONS = frozenset({
     "set_price_alert",
     "add_price_level_alert",
     "cancel_price_level_alert",
-    "place_limit_order",
-    "cancel_order",
+})
+
+# 兜底 union — 用于 drift guard 测试 (T5 t11) / 任何"任意 adjust"判断
+# set_next_wake 单独归 hold（spec §C5）；open_position / close_position 单独分类
+ADJUST_ACTIONS = (
+    PROTECT_ACTIONS | ENTRY_ORDER_ACTIONS | LEVERAGE_ACTIONS | ALERT_ACTIONS
+)
+
+# R2-4 spec §7.2 G6 — Derive function output enum (single source of truth for tests)
+# Mirrors return values of `_derive_decision_from_actions` below; if you add a new
+# return value, append here so t12 capacity guard catches it.
+DERIVE_DECISION_VALUES: frozenset[str] = frozenset({
+    "open_long", "open_short", "close",
+    "adjust_protect", "adjust_entry_order", "adjust_leverage", "adjust_alert",
+    "hold", "derive_error",
 })
 
 
@@ -69,11 +91,17 @@ async def _derive_decision_from_actions(
 ) -> str:
     """从 trade_actions 反查 cycle 内 actions，按优先级派生 decision 类型。
 
-    优先级（高 → 低）：open_position > close_position > adjust > hold
-    返回 5 类 enum: open_long / open_short / close / adjust / hold
-    DB 故障 fallback: derive_error（独立 enum，spec §8.1）
+    优先级（高 → 低）:
+        open_long > open_short > close
+        > adjust_protect > adjust_entry_order > adjust_leverage > adjust_alert
+        > hold
 
-    spec §3.2 — 复用 outer session 避免冗余连接。
+    返回 9 类 enum: open_long / open_short / close /
+    adjust_protect / adjust_entry_order / adjust_leverage / adjust_alert /
+    hold / derive_error
+
+    R2-4 spec §5.3 — 拆 'adjust' 单值为 4 子类（sim4-issues §P0-3）。
+    DB 故障 fallback: derive_error（独立 enum，spec §8.1）。
     """
     try:
         rows = (await session.execute(
@@ -88,6 +116,9 @@ async def _derive_decision_from_actions(
         )
         return "derive_error"
 
+    actions = {a.action for a in rows}
+
+    # 1. 开仓（最高优先级）
     for a in rows:
         if a.action == "open_position":
             if a.side not in ("long", "short"):
@@ -99,11 +130,22 @@ async def _derive_decision_from_actions(
                 continue  # 跳过此 row，循环继续
             return f"open_{a.side}"  # open_long / open_short
 
-    if any(a.action == "close_position" for a in rows):
+    # 2. 平仓
+    if "close_position" in actions:
         return "close"
-    if any(a.action in ADJUST_ACTIONS for a in rows):
-        return "adjust"
-    return "hold"  # 0 actions OR 仅含 set_next_wake
+
+    # 3. adjust 子类（按事件重要性优先级）
+    if actions & PROTECT_ACTIONS:
+        return "adjust_protect"
+    if actions & ENTRY_ORDER_ACTIONS:
+        return "adjust_entry_order"
+    if actions & LEVERAGE_ACTIONS:
+        return "adjust_leverage"
+    if actions & ALERT_ACTIONS:
+        return "adjust_alert"
+
+    # 4. hold（无任何 ADJUST_ACTIONS，含 cycle 仅有 set_next_wake 的情况）
+    return "hold"
 
 
 class TokenBudget:

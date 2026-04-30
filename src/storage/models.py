@@ -87,7 +87,7 @@ class DecisionLog(Base):
     cycle_id: Mapped[str] = mapped_column(String(50))                              # Unique ID for this decision cycle
     trigger_type: Mapped[str] = mapped_column(String(20))                          # scheduled / conditional / alert
     market_summary: Mapped[str | None] = mapped_column(Text, nullable=True)        # DEPRECATED — see brainstorm §B2 (Python 源码注释，非 SQLAlchemy comment= 参数：SQLite 不支持 column COMMENT 子句，且 comment= 会引入 alembic check noise)
-    decision: Mapped[str] = mapped_column(String(20))                              # String(50)→String(20) (spec §B1)
+    decision: Mapped[str] = mapped_column(String(30))                              # String(20)→String(30) (R2-4 spec §5.2)
     status: Mapped[str] = mapped_column(String(30), default="ok", server_default="ok")  # 新增 (B1 双字段方案；String(30) per brainstorm 校准；server_default="ok" 与 DB schema 一致避免 alembic check noise，详见 §4.2 Step 4 "为什么保留 server_default")
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)             # Agent's reasoning (truncated to 4000 chars by app.py write paths; Iter 4 §G1)
     model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)     # LLM model ID used for this cycle
@@ -178,7 +178,7 @@ class ToolCall(Base):
     # NOT NULL: 运行时所有 tool 调用都在 run_agent_cycle 内，cycle_id 必有值
     cycle_id: Mapped[str] = mapped_column(String(50), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(60))
-    status: Mapped[str] = mapped_column(String(10))  # "ok" / "error"
+    status: Mapped[str] = mapped_column(String(20))  # "ok" / "error" / "biz_error" (R2-4 spec §4.1: String(10)→String(20))
     duration_ms: Mapped[int] = mapped_column(Integer)
     # error_type 存异常类名（非 message / traceback），避免敏感数据泄露
     error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)

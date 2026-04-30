@@ -4,6 +4,8 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from src.services.tool_call_recorder import note_biz_error
+
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
 
@@ -211,6 +213,7 @@ async def set_price_alert(
 
     # Parameter validation
     if not (0.1 <= threshold_pct <= 50.0):
+        note_biz_error("invalid_threshold_range")
         return f"Invalid threshold_pct: must be 0.1-50.0, got {threshold_pct}"
     if not (1 <= window_minutes <= 240):
         return f"Invalid window_minutes: must be 1-240, got {window_minutes}"
@@ -269,6 +272,7 @@ async def cancel_price_level_alert(
     """Remove a price level alert by ID."""
     # 协议层：8-char hex 格式校验（uuid.uuid4()[:8] 生成，[0-9a-f]{8}）
     if not re.fullmatch(r"[0-9a-f]{8}", alert_id):
+        note_biz_error("invalid_alert_id_format")
         return (
             f"Invalid alert_id format: {alert_id!r}. Expected 8-char hex "
             f"(e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids."
@@ -281,6 +285,7 @@ async def cancel_price_level_alert(
             reasoning=f"id={alert_id} | {reasoning}",
         )
         return f"Price level alert cancelled (id={alert_id})"
+    note_biz_error("alert_not_found")
     return f"Alert {alert_id} already triggered or expired"
 
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +47,41 @@ _CONTROL_FLOW_EXCEPTIONS = (
     ToolRetryError,
 )
 
+# R2-4 §4.2 — biz_error side-channel
+# 工具内 note_biz_error("xxx") 上报；wrap_tool_execute 在 handler 返回后读
+# LLM 看到的工具返回字符串不变（fact 透明，零行为改造）
+_biz_error_type: ContextVar[str | None] = ContextVar(
+    "tool_call_biz_error_type", default=None
+)
+
+BIZ_ERROR_TYPES: frozenset[str] = frozenset({
+    "invalid_threshold_range",        # set_price_alert 阈值越界
+    "invalid_alert_id_format",        # cancel_price_level_alert 协议错（非 8-char hex）
+    "alert_not_found",                # cancel_price_level_alert 状态错（已触发/不存在）
+})
+
+
+def note_biz_error(error_type: str) -> None:
+    """工具内调用以标记本次 tool call 为业务失败。
+
+    LLM 看到的返回字符串不变（fact 透明）；ToolCallRecorder.wrap_tool_execute
+    在 handler 返回后读取此 ContextVar，写入 tool_calls.status='biz_error',
+    error_type=<type>。
+
+    拼错保护策略：fail-soft（运行期 logger.error + 跳过 ContextVar set）。
+    drift guard 测试期 strict 检查（test_biz_error_types_drift_guard）。
+
+    CAVEAT: 必须在工具协程主体内调用，不要在 asyncio.gather 子 task 内调
+    （Python ContextVar 子 task 修改不会回流父 frame）。
+    """
+    if error_type not in BIZ_ERROR_TYPES:
+        logger.error(
+            "note_biz_error called with unknown type: %r — drift guard expected to catch this",
+            error_type,
+        )
+        return
+    _biz_error_type.set(error_type)
+
 
 @dataclass
 class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引用
@@ -65,17 +101,26 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
         handler: WrapToolExecuteHandler,
     ) -> Any:
         start = time.monotonic()
+        # R2-4 §4.2 — reset per-call (隔离嵌套 / 异步任务 / 跨调用泄漏)
+        token = _biz_error_type.set(None)
         status, error_type = "ok", None
         skip_record = False
         try:
-            return await handler(args)
+            result = await handler(args)
         except _CONTROL_FLOW_EXCEPTIONS:
             skip_record = True  # 控制流信号直通
             raise
         except Exception as e:
             status, error_type = "error", type(e).__name__
             raise
+        else:
+            # handler 成功返回 — 检查是否被 note_biz_error 标记
+            biz = _biz_error_type.get()
+            if biz is not None:
+                status, error_type = "biz_error", biz
+            return result
         finally:
+            _biz_error_type.reset(token)
             if not skip_record:
                 try:
                     duration_ms = int((time.monotonic() - start) * 1000)
@@ -116,6 +161,8 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                         "tool_call_insert_ms=%.1f tool=%s", insert_ms, call.tool_name
                     )
                 except Exception as rec_err:
+                    # CAVEAT: swallow protects `return result` (line 121) — Python finally
+                    # 内未捕获异常会顶替 return → 破坏 LLM 透明度契约（recorder 是副作用）。
                     logger.error(
                         "tool_call_recorder failed for %s: %s",
                         call.tool_name, rec_err,
