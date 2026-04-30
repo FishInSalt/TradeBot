@@ -117,3 +117,141 @@ def test_setup_session_logging_returns_session_console(tmp_path: Path):
     sc.print("test output")
     sc.close()
     assert (log_dir / "session_sid-001.log").exists()
+
+
+def test_setup_system_logging_uses_timestamped_rotating_file_handler(tmp_path: Path):
+    """R2-3 drift guard: file handler must be TimestampedRotatingFileHandler with
+    maxBytes=100MB and backupCount=30.
+    """
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, TimestampedRotatingFileHandler)]
+    assert len(file_handlers) == 1, (
+        f"expected exactly 1 TimestampedRotatingFileHandler, got {len(file_handlers)} "
+        f"(all handlers: {[type(h).__name__ for h in root.handlers]})"
+    )
+    fh = file_handlers[0]
+    assert fh.maxBytes == 100 * 1024 * 1024, (
+        f"expected maxBytes=100MB ({100 * 1024 * 1024}), got {fh.maxBytes}"
+    )
+    assert fh.backupCount == 30, f"expected backupCount=30, got {fh.backupCount}"
+
+
+def test_setup_system_logging_rotation_creates_timestamped_archive(tmp_path: Path):
+    """R2-3 T2: doRollover() renames active log to a microsecond-stamped archive
+    (system.log.YYYYMMDD-HHMMSS-ffffff) and creates fresh system.log.
+    """
+    import re
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    test_logger = logging.getLogger("test.r2_3.rotation")
+    test_logger.info("before rollover")
+
+    fh = next(
+        h for h in logging.getLogger().handlers
+        if isinstance(h, TimestampedRotatingFileHandler)
+    )
+    fh.doRollover()
+    test_logger.info("after rollover")
+
+    # Active file exists, contains only post-rollover content
+    active = log_dir / "system.log"
+    assert active.exists()
+    active_content = active.read_text()
+    assert "after rollover" in active_content
+    assert "before rollover" not in active_content
+
+    # Exactly 1 archive with timestamped suffix
+    archives = sorted(log_dir.glob("system.log.*"))
+    assert len(archives) == 1, (
+        f"expected 1 archive, got {[a.name for a in archives]}"
+    )
+    suffix = archives[0].name[len("system.log."):]
+    assert re.fullmatch(r"\d{8}-\d{6}-\d{6}", suffix), (
+        f"archive suffix {suffix!r} does not match YYYYMMDD-HHMMSS-ffffff"
+    )
+    assert "before rollover" in archives[0].read_text()
+
+
+def test_setup_system_logging_rotation_prunes_oldest_beyond_backup_count(tmp_path: Path):
+    """R2-3 T3: when archive count exceeds backupCount, oldest (by mtime) is pruned.
+    """
+    import time
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    fh = next(
+        h for h in logging.getLogger().handlers
+        if isinstance(h, TimestampedRotatingFileHandler)
+    )
+    # Shrink backupCount for fast test (production is 30)
+    fh.backupCount = 2
+
+    test_logger = logging.getLogger("test.r2_3.prune")
+    contents = ["v1", "v2", "v3"]
+    for msg in contents:
+        test_logger.info(msg)
+        # Sleep to ensure distinct mtimes on coarse-grained filesystems
+        time.sleep(0.01)
+        fh.doRollover()
+
+    archives = sorted(log_dir.glob("system.log.*"))
+    assert len(archives) == 2, (
+        f"expected 2 archives after 3 rollovers with backupCount=2, "
+        f"got {[a.name for a in archives]}"
+    )
+    # Oldest content ("v1") should be pruned; newest two retained
+    surviving = "\n".join(a.read_text() for a in archives)
+    assert "v1" not in surviving, f"oldest content not pruned: {surviving!r}"
+    assert "v2" in surviving and "v3" in surviving
+
+
+def test_setup_system_logging_rotation_ignores_unrelated_files(tmp_path: Path):
+    """R2-3 T4: pruning regex filter excludes user-placed files like system.log.bak,
+    even when their mtime is older than rotation archives.
+    """
+    import time
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    # Drop a user-placed backup BEFORE any rotation, so its mtime is oldest
+    bak = log_dir / "system.log.bak"
+    bak.write_text("user manual backup")
+    time.sleep(0.01)  # ensure distinct mtime vs upcoming archives
+
+    fh = next(
+        h for h in logging.getLogger().handlers
+        if isinstance(h, TimestampedRotatingFileHandler)
+    )
+    fh.backupCount = 2
+
+    test_logger = logging.getLogger("test.r2_3.unrelated")
+    # 3 rollovers > backupCount=2, would prune oldest if .bak were eligible
+    for msg in ["v1", "v2", "v3"]:
+        test_logger.info(msg)
+        time.sleep(0.01)
+        fh.doRollover()
+
+    # .bak must survive (regex filter excludes non-timestamp suffixes)
+    assert bak.exists(), "user-placed system.log.bak was incorrectly pruned"
+    assert bak.read_text() == "user manual backup", "bak content corrupted"
+
+    # Timestamped archives still capped at 2
+    timestamped = [
+        p for p in log_dir.glob("system.log.*")
+        if p.name != "system.log.bak"
+    ]
+    assert len(timestamped) == 2, (
+        f"expected 2 timestamped archives, got {[p.name for p in timestamped]}"
+    )

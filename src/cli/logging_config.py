@@ -1,11 +1,59 @@
 # src/cli/logging_config.py
 from __future__ import annotations
 
+import glob
 import logging
+import os
+import re
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from rich.console import Console
 from rich.logging import RichHandler
+
+
+# Module-level constant: archive suffix must match this exact pattern to be
+# considered a rotation artifact (vs. user-placed files like system.log.bak).
+_ARCHIVE_SUFFIX_RE = re.compile(r"\d{8}-\d{6}-\d{6}$")  # YYYYMMDD-HHMMSS-ffffff
+
+
+class TimestampedRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler whose archive files carry a microsecond-precision
+    timestamp suffix instead of stdlib's sequential .1/.2/... numbering.
+
+    Archive name format: ``<baseFilename>.YYYYMMDD-HHMMSS-ffffff``
+    (e.g., ``system.log.20260430-160027-747099``).
+
+    The timestamp marks when the file was rotated out (i.e., the END of the
+    archive's data window). Microsecond resolution makes intra-process
+    collisions practically impossible.
+
+    Pruning keeps the newest ``backupCount`` archives by mtime; only files
+    matching the strict timestamp suffix are eligible — user-placed files
+    like ``system.log.bak`` are ignored (preserved across rotations).
+    """
+
+    def doRollover(self) -> None:
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        dfn = f"{self.baseFilename}.{ts}"
+        os.rename(self.baseFilename, dfn)
+        if self.backupCount > 0:
+            base_prefix_len = len(self.baseFilename) + 1  # +1 for the '.'
+            archives = sorted(
+                (
+                    p for p in glob.glob(f"{self.baseFilename}.*")
+                    if _ARCHIVE_SUFFIX_RE.fullmatch(p[base_prefix_len:])
+                ),
+                key=os.path.getmtime,
+            )
+            while len(archives) > self.backupCount:
+                os.remove(archives.pop(0))
+        if not self.delay:
+            self.stream = self._open()
 
 
 class SessionConsole:
@@ -37,8 +85,13 @@ def setup_system_logging(debug: bool, log_dir: Path) -> Console:
         h.close()
     root.handlers.clear()
 
-    # System log file — all levels
-    file_handler = logging.FileHandler(log_dir / "system.log")
+    # System log file — all levels (rotated by size with microsecond-stamped archives)
+    file_handler = TimestampedRotatingFileHandler(
+        log_dir / "system.log",
+        maxBytes=100 * 1024 * 1024,  # 100 MB per file
+        backupCount=30,              # ~30 archives → 3 GB cap, ~1 month at sim rate
+        encoding="utf-8",
+    )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)-7s] %(name)s: %(message)s",
