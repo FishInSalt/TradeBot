@@ -516,6 +516,13 @@ def build_services(
         wake_max_minutes=max_wake,
     )
 
+    # R2-5 PR #34 I-A: prompt range (RuntimeConfig) and clamp authority (TradingDeps)
+    # must agree by construction — fail-loud at startup if a future refactor breaks one
+    assert deps.wake_max_minutes == runtime_config.wake_max_minutes, (
+        f"R2-5 drift: prompt range {runtime_config.wake_max_minutes} vs "
+        f"clamp {deps.wake_max_minutes} must match"
+    )
+
     # Alert service
     if result.alert_enabled:
         alert_service = PriceAlertService(
