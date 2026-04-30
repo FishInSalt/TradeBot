@@ -139,3 +139,42 @@ def test_setup_system_logging_uses_timestamped_rotating_file_handler(tmp_path: P
         f"expected maxBytes=100MB ({100 * 1024 * 1024}), got {fh.maxBytes}"
     )
     assert fh.backupCount == 30, f"expected backupCount=30, got {fh.backupCount}"
+
+
+def test_setup_system_logging_rotation_creates_timestamped_archive(tmp_path: Path):
+    """R2-3 T2: doRollover() renames active log to a microsecond-stamped archive
+    (system.log.YYYYMMDD-HHMMSS-ffffff) and creates fresh system.log.
+    """
+    import re
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    test_logger = logging.getLogger("test.r2_3.rotation")
+    test_logger.info("before rollover")
+
+    fh = next(
+        h for h in logging.getLogger().handlers
+        if isinstance(h, TimestampedRotatingFileHandler)
+    )
+    fh.doRollover()
+    test_logger.info("after rollover")
+
+    # Active file exists, contains only post-rollover content
+    active = log_dir / "system.log"
+    assert active.exists()
+    active_content = active.read_text()
+    assert "after rollover" in active_content
+    assert "before rollover" not in active_content
+
+    # Exactly 1 archive with timestamped suffix
+    archives = sorted(log_dir.glob("system.log.*"))
+    assert len(archives) == 1, (
+        f"expected 1 archive, got {[a.name for a in archives]}"
+    )
+    suffix = archives[0].name[len("system.log."):]
+    assert re.fullmatch(r"\d{8}-\d{6}-\d{6}", suffix), (
+        f"archive suffix {suffix!r} does not match YYYYMMDD-HHMMSS-ffffff"
+    )
+    assert "before rollover" in archives[0].read_text()
