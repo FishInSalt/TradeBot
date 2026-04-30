@@ -213,3 +213,45 @@ def test_setup_system_logging_rotation_prunes_oldest_beyond_backup_count(tmp_pat
     surviving = "\n".join(a.read_text() for a in archives)
     assert "v1" not in surviving, f"oldest content not pruned: {surviving!r}"
     assert "v2" in surviving and "v3" in surviving
+
+
+def test_setup_system_logging_rotation_ignores_unrelated_files(tmp_path: Path):
+    """R2-3 T4: pruning regex filter excludes user-placed files like system.log.bak,
+    even when their mtime is older than rotation archives.
+    """
+    import time
+    from src.cli.logging_config import TimestampedRotatingFileHandler
+
+    log_dir = tmp_path / "logs"
+    setup_system_logging(debug=False, log_dir=log_dir)
+
+    # Drop a user-placed backup BEFORE any rotation, so its mtime is oldest
+    bak = log_dir / "system.log.bak"
+    bak.write_text("user manual backup")
+    time.sleep(0.01)  # ensure distinct mtime vs upcoming archives
+
+    fh = next(
+        h for h in logging.getLogger().handlers
+        if isinstance(h, TimestampedRotatingFileHandler)
+    )
+    fh.backupCount = 2
+
+    test_logger = logging.getLogger("test.r2_3.unrelated")
+    # 3 rollovers > backupCount=2, would prune oldest if .bak were eligible
+    for msg in ["v1", "v2", "v3"]:
+        test_logger.info(msg)
+        time.sleep(0.01)
+        fh.doRollover()
+
+    # .bak must survive (regex filter excludes non-timestamp suffixes)
+    assert bak.exists(), "user-placed system.log.bak was incorrectly pruned"
+    assert bak.read_text() == "user manual backup", "bak content corrupted"
+
+    # Timestamped archives still capped at 2
+    timestamped = [
+        p for p in log_dir.glob("system.log.*")
+        if p.name != "system.log.bak"
+    ]
+    assert len(timestamped) == 2, (
+        f"expected 2 timestamped archives, got {[p.name for p in timestamped]}"
+    )
