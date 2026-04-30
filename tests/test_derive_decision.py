@@ -233,3 +233,89 @@ def test_t12_derive_output_fits_decision_column():
     enum_values = {"open_long", "open_short", "close", "adjust", "hold", "derive_error"}
     over_limit = [v for v in enum_values if len(v) > 20]
     assert not over_limit, f"派生输出 > 20 chars: {over_limit}"
+
+
+async def test_t13_adjust_entry_order_derives_from_place_limit_order():
+    """T13: cycle 仅含 place_limit_order → 'adjust_entry_order'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-13", "place_limit_order")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-13"
+        )
+    assert result == "adjust_entry_order"
+
+
+async def test_t14_adjust_leverage_derives_from_adjust_leverage_action():
+    """T14: cycle 仅含 adjust_leverage → 'adjust_leverage'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-14", "adjust_leverage")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-14"
+        )
+    assert result == "adjust_leverage"
+
+
+async def test_t15_adjust_alert_derives_from_set_price_alert():
+    """T15: cycle 仅含 set_price_alert → 'adjust_alert'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-15", "set_price_alert")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-15"
+        )
+    assert result == "adjust_alert"
+
+
+async def test_t16_priority_protect_beats_alert_when_both_present():
+    """T16: cycle 含 set_stop_loss + set_take_profit + add_price_level_alert (sim #4 fdf20e56 场景)
+    → 'adjust_protect'（PROTECT 优先级高于 ALERT）。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-16", "set_stop_loss")
+    await _insert_action(engine, "sess-derive-test", "cycle-16", "set_take_profit")
+    await _insert_action(engine, "sess-derive-test", "cycle-16", "add_price_level_alert")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-16"
+        )
+    assert result == "adjust_protect", \
+        f"sim #4 fdf20e56 场景应派生 'adjust_protect' (PROTECT > ALERT)，实际 {result!r}"
+
+
+async def test_t17_priority_entry_order_beats_leverage_and_alert():
+    """T17: cycle 含 place_limit_order + adjust_leverage + set_price_alert
+    → 'adjust_entry_order'（ENTRY_ORDER 优先级高于 LEVERAGE/ALERT）。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-17", "place_limit_order")
+    await _insert_action(engine, "sess-derive-test", "cycle-17", "adjust_leverage")
+    await _insert_action(engine, "sess-derive-test", "cycle-17", "set_price_alert")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-17"
+        )
+    assert result == "adjust_entry_order"
+
+
+async def test_t18_priority_leverage_beats_alert():
+    """T18: cycle 含 adjust_leverage + set_price_alert → 'adjust_leverage'。"""
+    from src.cli.app import _derive_decision_from_actions
+
+    engine = await _make_engine_with_session()
+    await _insert_action(engine, "sess-derive-test", "cycle-18", "adjust_leverage")
+    await _insert_action(engine, "sess-derive-test", "cycle-18", "set_price_alert")
+    async with get_session(engine) as session:
+        result = await _derive_decision_from_actions(
+            session, "sess-derive-test", "cycle-18"
+        )
+    assert result == "adjust_leverage"
