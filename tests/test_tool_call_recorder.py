@@ -10,20 +10,6 @@ from src.storage.database import init_db, get_session
 from src.storage.models import Session as SessionModel, ToolCall
 
 
-@pytest.fixture
-async def engine() -> AsyncEngine:
-    return await init_db("sqlite+aiosqlite:///:memory:")
-
-
-@pytest.fixture
-async def session_with_row(engine: AsyncEngine) -> str:
-    """Insert a parent session row so ToolCall FK holds."""
-    async with get_session(engine) as db:
-        db.add(SessionModel(id="sess-test", name="unit-test"))
-        await db.commit()
-    return "sess-test"
-
-
 def make_deps(engine: AsyncEngine, session_id: str, cycle_id: str | None = "cyc-test"):
     """Construct a minimal TradingDeps for recorder tests."""
     from src.agent.trader import TradingDeps
@@ -418,3 +404,24 @@ async def test_control_flow_exception_skips_biz_error_recording(engine, session_
     async with get_session(engine) as db:
         rows = (await db.execute(select(ToolCall))).scalars().all()
     assert len(rows) == 0, "控制流异常应 skip_record，不写 tool_calls"
+
+
+def test_biz_error_types_drift_guard():
+    """BIZ_ERROR_TYPES 集合 vs `note_biz_error("...")` 字面引用一致。
+    扫 src/agent/tools_execution.py 内所有 note_biz_error 调用，断言 string literal 全部 ∈ BIZ_ERROR_TYPES。
+    """
+    import re
+    from pathlib import Path
+    from src.services.tool_call_recorder import BIZ_ERROR_TYPES
+
+    src = Path("src/agent/tools_execution.py").read_text()
+    pattern = re.compile(r'note_biz_error\(["\']([a-z_]+)["\']\)')
+    cited = set(pattern.findall(src))
+
+    drift = cited - BIZ_ERROR_TYPES
+    assert not drift, \
+        f"tools_execution.py 引用未注册的 biz error type: {drift}（请在 BIZ_ERROR_TYPES 注册或更正字面量）"
+
+    # Sanity: R2-4 应 instrument ≥ 3 处（spec §4.3）
+    assert len(cited) >= 3, \
+        f"R2-4 应 instrument ≥3 处 note_biz_error；实测 {len(cited)} 处: {cited}"

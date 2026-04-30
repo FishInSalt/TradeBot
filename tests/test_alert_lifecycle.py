@@ -13,6 +13,10 @@ from tests._fixtures import (
     make_sim_exchange,
     make_ticker,
 )
+from sqlalchemy import select
+from src.storage.database import get_session
+from src.storage.models import ToolCall
+from tests.test_tool_call_recorder import make_deps, make_ctx, make_call
 
 
 # ============ Sim partial close contract protection ============
@@ -688,3 +692,96 @@ def test_registered_tool_names_includes_cancel_alert():
     cancel_idx = REGISTERED_TOOL_NAMES.index("cancel_price_level_alert")
     assert cancel_idx == add_idx + 1, \
         f"cancel_price_level_alert should be immediately after add_price_level_alert"
+
+
+# ============ R2-4 T3: end-to-end biz_error instrumentation ============
+
+
+@pytest.mark.asyncio
+async def test_set_price_alert_invalid_threshold_records_biz_error(engine, session_with_row):
+    """端到端: set_price_alert 传 0.05 越界 → tool_calls 行 status='biz_error'."""
+    from src.agent.tools_execution import set_price_alert
+    from src.services.tool_call_recorder import ToolCallRecorder
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+    deps.exchange.get_alert_params.return_value = (1.0, 60)  # alerts enabled
+
+    async def handler(args):
+        return await set_price_alert(deps, threshold_pct=0.05, window_minutes=60, reasoning="t")
+
+    result = await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("set_price_alert"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler,
+    )
+
+    assert "Invalid threshold_pct" in result
+    assert "0.05" in result
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "biz_error"
+    assert rows[0].error_type == "invalid_threshold_range"
+
+
+@pytest.mark.asyncio
+async def test_cancel_price_level_alert_invalid_format_records_biz_error(engine, session_with_row):
+    """端到端: cancel_price_level_alert 传 '#1' (非 8-char hex) → biz_error 'invalid_alert_id_format'."""
+    from src.agent.tools_execution import cancel_price_level_alert
+    from src.services.tool_call_recorder import ToolCallRecorder
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+
+    async def handler(args):
+        return await cancel_price_level_alert(deps, alert_id="#1", reasoning="t")
+
+    result = await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("cancel_price_level_alert"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler,
+    )
+
+    assert "Invalid alert_id format" in result
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "biz_error"
+    assert rows[0].error_type == "invalid_alert_id_format"
+
+
+@pytest.mark.asyncio
+async def test_cancel_price_level_alert_not_found_records_biz_error(engine, session_with_row):
+    """端到端: cancel_price_level_alert 传合法 hex 但 alert 不存在 → biz_error 'alert_not_found'."""
+    from src.agent.tools_execution import cancel_price_level_alert
+    from src.services.tool_call_recorder import ToolCallRecorder
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+    deps.exchange.remove_price_level_alert.return_value = False  # 不存在
+
+    async def handler(args):
+        return await cancel_price_level_alert(deps, alert_id="a3f2b8c1", reasoning="t")
+
+    result = await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("cancel_price_level_alert"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler,
+    )
+
+    assert "already triggered or expired" in result
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "biz_error"
+    assert rows[0].error_type == "alert_not_found"
