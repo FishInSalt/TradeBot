@@ -572,14 +572,11 @@ def create_trader_agent(
         minutes: int,
         reasoning: str,
     ) -> str:
-        """Set how soon you want to check the market again.
-
-        One-shot: only affects the next wake, then reverts to the default
-        interval. Shorten when you have an open position or expect volatility;
-        lengthen when the market is quiet and you have no exposure.
+        """Set the next scheduler wake-up interval (one-shot; reverts to default after use).
 
         Args:
-            minutes: minutes until next wake.
+            minutes: target minutes until next wake. See "Wake interval control"
+                in the system prompt for valid range and trigger behavior.
             reasoning: brief description of your decision logic.
         """
         from src.agent.tools_execution import set_next_wake as _impl

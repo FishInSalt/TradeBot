@@ -345,3 +345,34 @@ def test_generate_system_prompt_default_runtime():
     # 渲染默认 wake_max=60
     assert "1-60 min for this session" in prompt_default, \
         "Default RuntimeConfig() should render 1-60 min"
+
+
+def test_set_next_wake_no_decision_hints_in_description():
+    """R2-5 G10: set_next_wake wrapper docstring fact-only verification.
+
+    Decision hints "shorten when X" / "lengthen when Y" are N5 banned —
+    they prescribe agent behavior based on conditions, violating fact-only
+    philosophy. This drift guard ensures wrapper docstring (rendered into
+    tool_def.description by pydantic-ai 1.78 griffe sniff) stays clean.
+
+    API path: agent._function_toolset.tools[name].tool_def.<attr>
+    (matches tests/test_trader_agent.py:210-211 access style; we use
+    .description for first-paragraph text vs .parameters_json_schema
+    for per-arg Args descriptions — see spec §3.6.1).
+    """
+    import re
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["set_next_wake"]
+    desc = tool.tool_def.description or ""
+
+    # N5 wordlist verification
+    assert not re.search(r"\bshorten when\b", desc, re.IGNORECASE), \
+        f"set_next_wake description contains banned 'shorten when': {desc!r}"
+    assert not re.search(r"\blengthen when\b", desc, re.IGNORECASE), \
+        f"set_next_wake description contains banned 'lengthen when': {desc!r}"
+    # Sanity: factual content preserved
+    assert "one-shot" in desc.lower(), \
+        f"set_next_wake description should preserve 'one-shot' fact: {desc!r}"
