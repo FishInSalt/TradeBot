@@ -109,7 +109,7 @@ def _alembic_stamp_head(sync_conn) -> None:
 def _alembic_stamp_base(sync_conn) -> None:
     """pre-Alembic legacy DB 标记到 migration 链起点之前（路径 2 起点）
 
-    后续 _alembic_upgrade_head 会从 base 跑全部 migration，包括 batch_alter 重建 decision_logs。
+    后续 _alembic_upgrade_head 会从 base 跑全部 migration，包括 batch_alter 重建 decision_logs (Iter 3) → agent_cycles (R2-7 rename)。
     """
     from alembic import command
     command.stamp(_alembic_config(sync_conn), "base")

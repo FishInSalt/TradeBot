@@ -205,8 +205,8 @@ async def test_parse_fill_event_pnl_rest_fallback():
 
 async def test_parse_fill_event_uses_algoid_for_order_id_when_present():
     """II-1 (round-3 review): hypothesis B — OKX 推底层 ord 事件含 info.algoId 时,
-    FillEvent.order_id 必须用 algoId, 否则与 decision_logs.order_id (= algoId from
-    create_order T5 manual construction) 对不齐, agent journal 关联断。"""
+    FillEvent.order_id 必须用 algoId, 否则与 trade_actions.order_id (= algoId from
+    create_order T5 manual construction) 对不齐 → get_trade_journal 关联失败。"""
     with patch("ccxt.async_support.okx") as mock_okx:
         mock_okx.return_value = MagicMock()
         from src.integrations.exchange.okx import OKXExchange

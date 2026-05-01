@@ -179,8 +179,8 @@ async def test_init_db_path_3_for_empty_db(tmp_path: Path) -> None:
     所以这里查的是 R2-7 schema, 不绑 R2-4 head（绑 R2-4 跑不通——path-3 不走 alembic upgrade）.
 
     Asserts:
-    1. Schema bootstrapped via Base.metadata.create_all (R2-7 agent_cycles 11 字段
-       + state_snapshot + Text NULLABLE decision; tool_calls.args; trade_actions.cycle_id)
+    1. Schema bootstrapped via Base.metadata.create_all (R2-7 agent_cycles 12 字段
+       含 state_snapshot + Text NULLABLE decision; tool_calls.args; trade_actions.cycle_id)
     2. alembic_version table stamped to head (sentinel #1 for next init_db call)
     """
     from src.storage.database import init_db

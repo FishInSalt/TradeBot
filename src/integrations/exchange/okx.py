@@ -317,13 +317,13 @@ class OKXExchange(BaseExchange):
         order_type = order_data.get("type", "")
         info = order_data.get("info", {})
         # algoId-aware order_id: agent stores algoId (= Order.id from create_order T5
-        # manual construction) in decision_logs / TradeAction.order_id. OKX algo fill
+        # manual construction) in trade_actions.order_id. OKX algo fill
         # events shape unverified pre-observation, two hypotheses (spec §3.1.3):
         #   A: info.ordType ∈ {conditional, oco}, order_data["id"] IS algoId
         #   B: info.ordType ∈ {market, limit}, order_data["id"] is underlying ordId,
         #      info.algoId is the algoId
         # Under A: info.algoId may be empty/None → fallback to order_data["id"] = algoId ✓
-        # Under B: info.algoId non-empty → use algoId, matches decision_logs ✓
+        # Under B: info.algoId non-empty → use algoId, matches trade_actions.order_id ✓
         # Plain (non-algo) fills: info.algoId absent → fallback to order_data["id"] ✓
         order_id = info.get("algoId") or order_data["id"]
 

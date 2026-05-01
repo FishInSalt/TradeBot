@@ -177,7 +177,7 @@ class ToolCall(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"))
-    # cycle_id: 应用层软关联 DecisionLog.cycle_id（不声明 DB FK —— 时序不允许）
+    # cycle_id: 应用层软关联 AgentCycle.cycle_id（不声明 DB FK —— 时序不允许）
     # NOT NULL: 运行时所有 tool 调用都在 run_agent_cycle 内，cycle_id 必有值
     cycle_id: Mapped[str] = mapped_column(String(50), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(60))
