@@ -98,6 +98,29 @@ class Settings(BaseModel):
 
 
 class PersonaConfig(BaseModel):
+    """Trader persona configuration.
+
+    Two field categories with very different runtime status:
+
+    Active (consumed by src/agent/persona.py to build the system prompt):
+    - personality: trader temperament (conservative / moderate / aggressive)
+    - trading_style: strategy preference (trend_following / swing / breakout)
+
+    P3 placeholders (kept in code for re-introduction at hard-risk-control
+    time before live trading; currently NOT injected into the prompt and
+    NOT validated at tool entry, by A1 design 2026-04-15 — see
+    docs/superpowers/specs/2026-04-15-agent-experience-design.md):
+    - position_sizing: only the "percentage" path is wired through
+      open_position / place_limit_order; "fixed" is reserved
+    - max_position_pct, preferred_leverage, stop_loss_pct, take_profit_pct:
+      numeric anchors deliberately withheld from the prompt so the
+      observation period can reveal the agent's true decision boundary
+
+    R2-6 (2026-05-01) reaffirmed wontfix-by-design after sim #4 P0-2
+    (39.94% effective vs 30% configured) traced back to this A1 decision.
+    Drift-guards in tests/test_persona.py and tests/test_wizard.py lock
+    the placeholder behavior — do not relax without revisiting A1.
+    """
     personality: Literal["conservative", "moderate", "aggressive"] | None = None
     trading_style: Literal["trend_following", "swing", "breakout"] | None = None
     position_sizing: Literal["fixed", "percentage"] = "percentage"
