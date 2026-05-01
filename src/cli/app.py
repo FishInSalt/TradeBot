@@ -49,12 +49,18 @@ USAGE_LIMITS_PER_CYCLE = UsageLimits(
 
 
 def _extract_thinking_text(messages) -> str | None:
-    """R2-7 §6.3: 遍历 result.new_messages() 找所有 ThinkingPart 拼接 content."""
+    """R2-7 §6.3: 遍历 result.new_messages() 找所有 ModelResponse 内的 ThinkingPart 拼接 content.
+
+    PR #35 I2: 用 isinstance(msg, ModelResponse) 显式收紧 — ThinkingPart 仅出现在 ModelResponse,
+    与下方 tool_calls extraction (line ~234-258) 同款 narrowing 模式. getattr 容错过宽会
+    silently 丢未来 pydantic-ai 新消息类型的 thinking content.
+    """
     parts: list[str] = []
     for msg in messages:
-        for part in getattr(msg, "parts", []):
-            if isinstance(part, ThinkingPart):
-                parts.append(part.content)
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, ThinkingPart):
+                    parts.append(part.content)
     return "\n\n".join(parts) if parts else None
 
 
@@ -132,6 +138,9 @@ async def run_agent_cycle(
     # (重复 capture 会让 IO 4× retry + state_snapshot 时刻漂移 + 违反 §6.7 不变量)
     trigger_context_var = _capture_trigger_context(cycle_id, trigger_type, context)
     state_snapshot_var = await _capture_state_snapshot(cycle_id, deps)
+    # PR #35 I3: 与 capture-once P8 同模式 — hoist model_id 到 retry loop 之前
+    # 防 forensic 路径在 except 块内 getattr/str(agent.model) raise 致整 cycle 写入丢失.
+    model_id_var = getattr(model, 'model_name', str(model)) if model else str(agent.model)
 
     prompt = (
         f"You have been woken up by a {trigger_type} trigger.\n"
@@ -193,7 +202,7 @@ async def run_agent_cycle(
                     reasoning=None,                              # R2-7 §6.5: forensic NULL
                     decision=None,
                     execution_status="usage_limit_exceeded",
-                    model_id=getattr(model, 'model_name', str(model)) if model else str(agent.model),
+                    model_id=model_id_var,
                     tokens_consumed=0,                            # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
                 ))
                 await session.commit()
@@ -280,7 +289,7 @@ async def run_agent_cycle(
                 reasoning=thinking_text,                          # R2-7 §6.3: thinking content
                 decision=result.output,                           # R2-7 §6.4: message content (no cap)
                 execution_status="ok",
-                model_id=getattr(model, 'model_name', str(model)) if model else str(agent.model),
+                model_id=model_id_var,
                 tokens_consumed=tokens,
             )
         )

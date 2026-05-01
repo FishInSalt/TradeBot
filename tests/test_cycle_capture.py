@@ -220,6 +220,36 @@ async def test_state_snapshot_pnl_pct_zero_position():
     assert snap["position"]["pnl_pct"] is None
 
 
+async def test_state_snapshot_always_returns_dict_never_none():
+    """T-SS-11 (PR #35 I1): _capture_state_snapshot 永不 return None / raise，
+    即使 deps.exchange / deps.market_data 全部 None 或抛异常仍返回完整 dict.
+
+    锁住 cli/app.py:json.dumps(state_snapshot_var) 无条件不会 TypeError 的契约.
+    schema state_snapshot 列虽然 nullable，但当前所有写入路径保证非 NULL.
+    """
+    # 极端 case: deps 几乎所有字段都设为 raise
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_positions = AsyncMock(side_effect=Exception("xxx"))
+    deps.exchange.fetch_balance = AsyncMock(side_effect=Exception("xxx"))
+    deps.exchange.fetch_open_orders = AsyncMock(side_effect=Exception("xxx"))
+    deps.exchange.get_price_level_alerts = MagicMock(side_effect=Exception("xxx"))
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(side_effect=Exception("xxx"))
+
+    snap = await _capture_state_snapshot("cyc-always-dict", deps)
+    # 必须是 dict (不是 None)
+    assert isinstance(snap, dict), f"应返回 dict 不是 {type(snap).__name__}"
+    # _cycle_id 必填（绝不 KeyError）
+    assert snap["_cycle_id"] == "cyc-always-dict"
+    # _errors 必填 list (即使空)
+    assert isinstance(snap["_errors"], list)
+    # json.dumps 必须不抛 TypeError (锁住 cli/app.py 写入路径契约)
+    serialized = json.dumps(snap)
+    assert isinstance(serialized, str) and len(serialized) > 0
+
+
 # === T-TC: trigger_context ===
 
 

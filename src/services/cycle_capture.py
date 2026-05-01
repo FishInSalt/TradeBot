@@ -83,6 +83,14 @@ def _capture_trigger_context(cycle_id: str, trigger_type: str, context) -> dict 
 async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
     """Capture system-side objective state at decision time. Best-effort per-field.
 
+    **Contract**: 永不 raise，永不 return None — 即使所有 5 个 fetch 全失败也返回完整 dict
+    (字段值为 None / [] + _errors 列出 5 个 fail 原因 + _cycle_id 仍填)。
+
+    存储层契约 (cli/app.py 写入)：调用方对 state_snapshot 字段无条件做 json.dumps，
+    DB state_snapshot 列实际**永非 NULL** (虽然 schema 声明 nullable=True)。schema
+    nullable 是 R2-7 数据驱动 evolution 哲学的占位，未来若加 schema validation 可
+    收紧 NOT NULL。当前消费者 (R2-8 display / W2 SQL pivot) 应假设非 NULL。
+
     Args:
         cycle_id: 当前 cycle_id (用于日志反查)
         deps: TradingDeps 含 exchange / market_data / symbol
