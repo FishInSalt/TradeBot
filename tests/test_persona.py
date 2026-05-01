@@ -96,7 +96,9 @@ def test_prompt_no_numerical_params():
         stop_loss_pct=3.0, take_profit_pct=6.0,
     )
     prompt = generate_system_prompt(config)
-    # Numerical params should NOT appear in prompt
+    # Numerical params should NOT appear in prompt — A1 design decision
+    # (P3 placeholders; see PersonaConfig docstring in src/config.py
+    # and R2-6 wontfix). Relaxing this drift-guard requires revisiting A1.
     assert "30%" not in prompt
     assert "3x" not in prompt
     assert "3.0%" not in prompt

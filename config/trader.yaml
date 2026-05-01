@@ -15,10 +15,15 @@ persona:
                                  #   breakout: act on consolidation breakouts with volume
                                  #   null (omit or set to null): agent chooses freely
 
-  position_sizing: percentage    # fixed: use a fixed USDT amount per trade
-                                 # percentage: use a % of available balance per trade
-
-  max_position_pct: 30           # Max single position as % of available balance (soft limit in prompt)
-  preferred_leverage: 3          # Preferred leverage multiplier (soft limit in prompt)
-  stop_loss_pct: 3.0             # Default stop loss distance from entry price (%)
-  take_profit_pct: 6.0           # Default take profit distance from entry price (%)
+  # P3 placeholder fields below — currently unused at runtime.
+  # Reserved for hard risk control before live trading. Not injected
+  # into the system prompt and not validated at tool entry, by A1
+  # design (2026-04-15) to avoid anchoring agent decisions during the
+  # observation period. See:
+  #   - docs/superpowers/specs/2026-04-15-agent-experience-design.md
+  #   - PersonaConfig docstring in src/config.py (R2-6 wontfix rationale)
+  position_sizing: percentage    # only "percentage" path is implemented; "fixed" reserved for P3
+  max_position_pct: 30           # P3 placeholder — currently unused
+  preferred_leverage: 3          # P3 placeholder — currently unused
+  stop_loss_pct: 3.0             # P3 placeholder — currently unused
+  take_profit_pct: 6.0           # P3 placeholder — currently unused
