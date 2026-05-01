@@ -529,6 +529,7 @@ class OKXExchange(BaseExchange):
             status=data["status"],
             fee=None,
             is_algo=True,
+            trigger_price=price,   # R2-7 §4.7: algo class trigger_price = price
         )
 
     def _make_oco(self, data: dict, sl_px: float, tp_px: float) -> list[Order]:
@@ -542,8 +543,8 @@ class OKXExchange(BaseExchange):
             "is_algo": True,
         }
         return [
-            Order(order_type="stop", price=sl_px, **common),
-            Order(order_type="take_profit", price=tp_px, **common),
+            Order(order_type="stop", price=sl_px, trigger_price=sl_px, **common),
+            Order(order_type="take_profit", price=tp_px, trigger_price=tp_px, **common),
         ]
 
     @_retry()

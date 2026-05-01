@@ -450,6 +450,7 @@ class SimulatedExchange(BaseExchange):
         return Order(
             id=order_id, symbol=symbol, side=side, order_type=order_type,
             amount=actual_amount, price=price, status="open",
+            trigger_price=price if order_type in ("stop", "take_profit") else None,
         )
 
     def _cancel_orphaned_orders(self) -> None:
@@ -703,9 +704,12 @@ class SimulatedExchange(BaseExchange):
         # Check in-memory pending orders first
         for o in self._pending_orders:
             if o.id == order_id:
-                return Order(id=o.id, symbol=o.symbol, side=o.side,
-                             order_type=o.order_type, amount=o.amount,
-                             price=o.trigger_price, status="open")
+                return Order(
+                    id=o.id, symbol=o.symbol, side=o.side,
+                    order_type=o.order_type, amount=o.amount,
+                    price=o.trigger_price, status="open",
+                    trigger_price=o.trigger_price if o.order_type in ("stop", "take_profit") else None,
+                )
         # Query DB for filled/cancelled orders
         if self._db_engine:
             from sqlalchemy import select
@@ -718,9 +722,12 @@ class SimulatedExchange(BaseExchange):
                 row = result.scalar_one_or_none()
                 if row:
                     price = row.filled_price if row.status == "closed" else row.trigger_price
-                    return Order(id=row.order_id, symbol=row.symbol, side=row.side,
-                                 order_type=row.order_type, amount=row.amount,
-                                 price=price, status=row.status, fee=row.fee)
+                    return Order(
+                        id=row.order_id, symbol=row.symbol, side=row.side,
+                        order_type=row.order_type, amount=row.amount,
+                        price=price, status=row.status, fee=row.fee,
+                        trigger_price=row.trigger_price if row.order_type in ("stop", "take_profit") else None,
+                    )
         raise ValueError(f"Order not found: {order_id}")
 
     async def fetch_open_orders(self, symbol: str) -> list[Order]:
@@ -729,6 +736,7 @@ class SimulatedExchange(BaseExchange):
             Order(
                 id=o.id, symbol=o.symbol, side=o.side, order_type=o.order_type,
                 amount=o.amount, price=o.trigger_price, status="open",
+                trigger_price=o.trigger_price if o.order_type in ("stop", "take_profit") else None,
             )
             for o in self._pending_orders
             if o.symbol == symbol
@@ -757,6 +765,7 @@ class SimulatedExchange(BaseExchange):
                     order_type=row.order_type, amount=row.amount,
                     price=row.filled_price if row.status == "closed" else row.trigger_price,
                     status=row.status, fee=row.fee,
+                    trigger_price=row.trigger_price if row.order_type in ("stop", "take_profit") else None,
                 )
                 for row in rows
             ]
