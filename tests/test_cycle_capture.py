@@ -290,3 +290,54 @@ def test_trigger_context_attribute_error_fallback():
     bad_ctx = MagicMock(spec=[])  # 无任何属性
     result = _capture_trigger_context("cyc-tc5", "conditional", bad_ctx)
     assert result is None
+
+
+# === T-TH: _extract_thinking_text ===
+
+
+def test_extract_thinking_from_messages_with_thinking_part():
+    """T-TH-1: thinking model (mock ThinkingPart) → reasoning = 拼接 content。"""
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+    from src.cli.app import _extract_thinking_text
+
+    msgs = [
+        ModelResponse(parts=[
+            ThinkingPart(content="reasoning step 1"),
+            TextPart(content="visible output"),
+        ])
+    ]
+    text = _extract_thinking_text(msgs)
+    assert text == "reasoning step 1"
+
+
+def test_extract_thinking_no_thinking_part_returns_none():
+    """T-TH-2: 非 thinking model (无 ThinkingPart) → reasoning = None。"""
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from src.cli.app import _extract_thinking_text
+
+    msgs = [ModelResponse(parts=[TextPart(content="output only")])]
+    assert _extract_thinking_text(msgs) is None
+
+
+def test_extract_thinking_multiple_parts_joined():
+    """T-TH-3: 多个 ThinkingPart → 用 \\n\\n 拼接。"""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart
+    from src.cli.app import _extract_thinking_text
+
+    msgs = [
+        ModelResponse(parts=[ThinkingPart(content="part 1")]),
+        ModelResponse(parts=[ThinkingPart(content="part 2")]),
+    ]
+    text = _extract_thinking_text(msgs)
+    assert text == "part 1\n\npart 2"
+
+
+def test_extract_thinking_no_truncation():
+    """T-TH-4: thinking content 长度 > 4000 → 不截断。"""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart
+    from src.cli.app import _extract_thinking_text
+
+    long_text = "x" * 5000
+    msgs = [ModelResponse(parts=[ThinkingPart(content=long_text)])]
+    text = _extract_thinking_text(msgs)
+    assert len(text) == 5000
