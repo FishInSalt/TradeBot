@@ -56,18 +56,48 @@ async def test_create_trade_action_with_pnl(db_session):
     assert action.trigger_reason == "stop"
 
 
-async def test_create_decision_log(db_session):
-    from src.storage.models import DecisionLog
-    log = DecisionLog(
+async def test_create_agent_cycle(db_session):
+    """R2-7: AgentCycle (was DecisionLog) with renamed fields."""
+    from src.storage.models import AgentCycle
+    log = AgentCycle(
         session_id="test-session",
-        cycle_id="c1", trigger_type="scheduled", decision="open_long",
-        reasoning="RSI oversold", model_used="claude-opus", tokens_used=1500,
+        cycle_id="c1",
+        triggered_by="scheduled",        # was trigger_type
+        decision="open_long",            # R2-7: free-form Text; placeholder str ok
+        reasoning="RSI oversold",
+        model_id="claude-opus",          # was model_used
+        tokens_consumed=1500,            # was tokens_used
     )
     db_session.add(log)
     await db_session.commit()
     await db_session.refresh(log)
-    assert log.tokens_used == 1500
+    assert log.tokens_consumed == 1500
     assert log.session_id == "test-session"
+
+
+def test_g1_agent_cycle_field_sot_drift_guard():
+    """G1 (R2-7 spec §14): AgentCycle 字段集合 SoT vs 实际 dataclass 比对。
+
+    加新字段忘改 SoT 集合 → CI fail。同款纪律见 Iter 4 ADJUST_ACTIONS drift guard.
+    """
+    from src.storage.models import AgentCycle
+    from sqlalchemy import inspect
+
+    EXPECTED_AGENT_CYCLE_FIELDS = {
+        "id", "session_id", "cycle_id",
+        "triggered_by", "trigger_context",
+        "state_snapshot",
+        "decision", "execution_status", "reasoning",
+        "model_id", "tokens_consumed",
+        "created_at",
+    }
+
+    actual = {col.name for col in inspect(AgentCycle).columns}
+    drift = actual ^ EXPECTED_AGENT_CYCLE_FIELDS  # symmetric diff
+    assert not drift, (
+        f"AgentCycle 字段集漂移: actual={actual}, expected={EXPECTED_AGENT_CYCLE_FIELDS}, "
+        f"diff={drift}. 加新字段需更新 EXPECTED_AGENT_CYCLE_FIELDS."
+    )
 
 
 async def test_create_memory_entry(db_session):
