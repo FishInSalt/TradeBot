@@ -375,3 +375,211 @@ def test_r2_4_upgrade_preserves_existing_indexes(tmp_path: Path, alembic_cfg_fac
     }
     assert "ix_decision_logs_session_id_cycle_id" in indexes, \
         f"Iter 3 索引应保留，实际 indexes={indexes}"
+
+
+# ===================== R2-7 §10.2 T-MIG-1~8: agent_cycle schema reframe =====================
+
+
+def test_t_mig_1_table_renamed_to_agent_cycles(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-1 (AC1): decision_logs 表 → agent_cycles 表 rename。"""
+    db_path = tmp_path / "t_mig_1.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "agent_cycles" in tables, f"agent_cycles 表应存在，实际 tables={tables}"
+    assert "decision_logs" not in tables, f"decision_logs 表应已 rename，实际 tables={tables}"
+    conn.close()
+
+
+def test_t_mig_2_columns_renamed(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-2 (AC1): 5 列 rename + state_snapshot 加列 + 精确等值列集合。"""
+    db_path = tmp_path / "t_mig_2.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(agent_cycles)")}
+    expected = {
+        "id", "session_id", "cycle_id", "triggered_by", "trigger_context",
+        "state_snapshot", "decision", "execution_status", "reasoning",
+        "model_id", "tokens_consumed", "created_at",
+    }
+    assert cols == expected, f"agent_cycles 列集合不匹配，差异={cols ^ expected}"
+    conn.close()
+
+
+def test_t_mig_3_decision_text_nullable(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-3 (AC2): decision String(30) NOT NULL → Text NULLABLE。"""
+    db_path = tmp_path / "t_mig_3.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cols = {r[1]: r for r in cur.execute("PRAGMA table_info(agent_cycles)")}
+    assert "decision" in cols
+    # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+    assert cols["decision"][2] == "TEXT", f"decision type 期望 TEXT，实际 {cols['decision'][2]!r}"
+    assert cols["decision"][3] == 0, f"decision 应 NULLABLE (notnull=0)，实际 notnull={cols['decision'][3]}"
+    conn.close()
+
+
+def test_t_mig_4_state_snapshot_column_exists(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-4 (AC10): state_snapshot Text NULLABLE 列加成功。"""
+    db_path = tmp_path / "t_mig_4.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cols = {r[1]: r for r in cur.execute("PRAGMA table_info(agent_cycles)")}
+    assert "state_snapshot" in cols, "state_snapshot 列应存在"
+    assert cols["state_snapshot"][2] == "TEXT", \
+        f"state_snapshot type 期望 TEXT，实际 {cols['state_snapshot'][2]!r}"
+    assert cols["state_snapshot"][3] == 0, \
+        f"state_snapshot 应 NULLABLE (notnull=0)，实际 notnull={cols['state_snapshot'][3]}"
+    conn.close()
+
+
+def test_t_mig_5_index_renamed(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-5: index ix_decision_logs_session_id_cycle_id → ix_agent_cycles_session_id_cycle_id。"""
+    db_path = tmp_path / "t_mig_5.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    indexes = {
+        r[1] for r in cur.execute(
+            "SELECT * FROM sqlite_master WHERE type='index' AND tbl_name='agent_cycles'"
+        )
+    }
+    assert "ix_agent_cycles_session_id_cycle_id" in indexes, \
+        f"新索引应存在，实际 indexes={indexes}"
+    assert "ix_decision_logs_session_id_cycle_id" not in indexes, \
+        f"旧索引应已 drop，实际 indexes={indexes}"
+    conn.close()
+
+
+def test_t_mig_6_historical_data_compat(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-6 (AC1): R2-4 head 历史 decision_logs 数据 → R2-7 upgrade 后保留 + decision 字面量原样。
+
+    两步 upgrade：先 R2-4 head 插数据（含 5 类 decision），再 R2-7 upgrade。
+    """
+    db_path = tmp_path / "t_mig_6.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    # 先升到 R2-4 head
+    command.upgrade(cfg, "e7b2bd73c131")
+
+    # 插历史数据（5 行覆盖 R2-4 子类型）
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sessions (id, name, symbol, initial_balance, status, created_at, updated_at,
+                              exchange_type, timeframe, scheduler_interval_min, approval_enabled,
+                              token_budget)
+        VALUES ('s_hist', 'hist', 'BTC/USDT:USDT', 100.0, 'active',
+                '2026-04-30T00:00:00+00:00', '2026-04-30T00:00:00+00:00',
+                'simulated', '15m', 15, 1, 500000)
+    """)
+    historical = [
+        ("cyc-h1", "open_long"),
+        ("cyc-h2", "close"),
+        ("cyc-h3", "adjust_protect"),
+        ("cyc-h4", "hold"),
+        ("cyc-h5", "derive_error"),
+    ]
+    for cyc, dec in historical:
+        cur.execute(
+            "INSERT INTO decision_logs "
+            "(session_id, cycle_id, trigger_type, decision, status, tokens_used, created_at) "
+            "VALUES ('s_hist', ?, 'scheduled', ?, 'ok', 0, datetime('now'))",
+            (cyc, dec),
+        )
+    conn.commit()
+    conn.close()
+
+    # 升到 R2-7 head
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    rows = list(cur.execute(
+        "SELECT cycle_id, decision FROM agent_cycles WHERE session_id='s_hist' ORDER BY cycle_id"
+    ))
+    assert len(rows) == 5, f"期望 5 行历史数据保留，实际 {len(rows)}"
+    actual = dict(rows)
+    expected = dict(historical)
+    assert actual == expected, f"decision 字面量应保留原样，差异={set(actual.items()) ^ set(expected.items())}"
+    conn.close()
+
+
+def test_t_mig_7_downgrade_no_null_decision(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-7: downgrade 路径在无 NULL decision 行时应成功（escape hatch 注释场景）。"""
+    db_path = tmp_path / "t_mig_7.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    # 先升到 R2-7 head
+    command.upgrade(cfg, "head")
+
+    # 插一行非 NULL decision（plan 设计：downgrade 必须在无 NULL 行下跑）
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sessions (id, name, symbol, initial_balance, status, created_at, updated_at,
+                              exchange_type, timeframe, scheduler_interval_min, approval_enabled,
+                              token_budget)
+        VALUES ('s_d', 'down', 'BTC/USDT:USDT', 100.0, 'active',
+                '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00',
+                'simulated', '15m', 15, 1, 500000)
+    """)
+    cur.execute(
+        "INSERT INTO agent_cycles "
+        "(session_id, cycle_id, triggered_by, decision, execution_status, tokens_consumed, created_at) "
+        "VALUES ('s_d', 'cyc-d1', 'scheduled', 'open_long', 'ok', 0, datetime('now'))"
+    )
+    conn.commit()
+    conn.close()
+
+    # downgrade -1 必须成功
+    command.downgrade(cfg, "-1")
+
+    # 验证：表名回滚，列名回滚
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "decision_logs" in tables and "agent_cycles" not in tables, \
+        f"downgrade 后表名应回滚，实际 tables={tables}"
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(decision_logs)")}
+    assert "trigger_type" in cols and "triggered_by" not in cols, \
+        f"downgrade 后列名应回滚，实际 cols={cols}"
+    assert "state_snapshot" not in cols, "state_snapshot 应已 drop"
+    conn.close()
+
+
+def test_t_mig_8_execution_status_server_default_preserved(tmp_path: Path, alembic_cfg_factory):
+    """T-MIG-8 (M5/AC14): execution_status server_default='ok' rename 后保留。"""
+    db_path = tmp_path / "t_mig_8.db"
+    _create_pre_alembic_schema(db_path)
+    cfg = alembic_cfg_factory(db_path)
+    command.upgrade(cfg, "head")
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cols = {r[1]: r for r in cur.execute("PRAGMA table_info(agent_cycles)")}
+    assert "execution_status" in cols
+    # PRAGMA table_info 第 5 列 dflt_value 可能含/不含引号
+    dflt = cols["execution_status"][4]
+    assert dflt in ("'ok'", "ok"), \
+        f"execution_status server_default 期望 'ok'，实际 {dflt!r}"
+    conn.close()

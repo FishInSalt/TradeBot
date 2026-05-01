@@ -74,24 +74,27 @@ class TradeAction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-class DecisionLog(Base):
-    """One agent decision cycle — records what the agent decided and why."""
+class AgentCycle(Base):
+    """One agent cycle record — captures前因 (triggered_by/trigger_context) →
+    决策时现状 (state_snapshot) → agent 推理 (reasoning=thinking) →
+    agent 决策 (decision=message). R2-7 五维度叙事 framing."""
 
-    __tablename__ = "decision_logs"
+    __tablename__ = "agent_cycles"
     __table_args__ = (
-        Index("ix_decision_logs_session_id_cycle_id", "session_id", "cycle_id"),   # Iter 3: §G7 (T3-1 merged)
+        Index("ix_agent_cycles_session_id_cycle_id", "session_id", "cycle_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), index=True)
-    cycle_id: Mapped[str] = mapped_column(String(50))                              # Unique ID for this decision cycle
-    trigger_type: Mapped[str] = mapped_column(String(20))                          # scheduled / conditional / alert
-    market_summary: Mapped[str | None] = mapped_column(Text, nullable=True)        # DEPRECATED — see brainstorm §B2 (Python 源码注释，非 SQLAlchemy comment= 参数：SQLite 不支持 column COMMENT 子句，且 comment= 会引入 alembic check noise)
-    decision: Mapped[str] = mapped_column(String(30))                              # String(20)→String(30) (R2-4 spec §5.2)
-    status: Mapped[str] = mapped_column(String(30), default="ok", server_default="ok")  # 新增 (B1 双字段方案；String(30) per brainstorm 校准；server_default="ok" 与 DB schema 一致避免 alembic check noise，详见 §4.2 Step 4 "为什么保留 server_default")
-    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)             # Agent's reasoning (truncated to 4000 chars by app.py write paths; Iter 4 §G1)
-    model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)     # LLM model ID used for this cycle
-    tokens_used: Mapped[int] = mapped_column(Integer, default=0)                   # Total tokens consumed in this cycle
+    cycle_id: Mapped[str] = mapped_column(String(50))
+    triggered_by: Mapped[str] = mapped_column(String(20))                  # scheduled / conditional / alert
+    trigger_context: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: trigger 瞬间客观快照
+    state_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON: 决策时系统层面客观状态 (R2-7 §4.4)
+    decision: Mapped[str | None] = mapped_column(Text, nullable=True)         # message content (R2-7: was String(30) enum, 改 Text+nullable)
+    execution_status: Mapped[str] = mapped_column(String(30), default="ok", server_default="ok")  # ok / usage_limit_exceeded
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)        # thinking content (R2-7: was result.output message)
+    model_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    tokens_consumed: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

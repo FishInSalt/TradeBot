@@ -32,7 +32,7 @@ from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
-from src.storage.models import DecisionLog, Session, TradeAction
+from src.storage.models import AgentCycle, Session, TradeAction
 from src.integrations.exchange.base import FillEvent, PriceLevelAlertInfo
 from src.cli.wizard import WizardResult
 
@@ -270,7 +270,7 @@ async def run_agent_cycle(
                 decision = await _derive_decision_from_actions(
                     session, deps.session_id, cycle_id
                 )
-                session.add(DecisionLog(
+                session.add(AgentCycle(
                     session_id=deps.session_id,
                     cycle_id=cycle_id,
                     trigger_type=trigger_type,
@@ -357,7 +357,7 @@ async def run_agent_cycle(
             session, deps.session_id, cycle_id
         )
         session.add(
-            DecisionLog(
+            AgentCycle(
                 session_id=deps.session_id,
                 cycle_id=cycle_id,
                 trigger_type=trigger_type,
