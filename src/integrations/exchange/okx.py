@@ -587,6 +587,7 @@ class OKXExchange(BaseExchange):
                 order_type=order_type,
                 amount=amount,
                 price=price,
+                trigger_price=price,
                 status="open",
                 fee=None,
                 is_algo=True,

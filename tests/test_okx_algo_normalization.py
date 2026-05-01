@@ -347,6 +347,29 @@ async def test_create_order_stop_returns_is_algo_true_with_input_price():
 
 
 @pytest.mark.asyncio
+async def test_create_order_algo_returns_order_with_trigger_price():
+    """T-ORD-2b (R2-7 C1): create_order algo branch must fill trigger_price=price.
+
+    Spec §4.7: algo class trigger_price = price (与 price 同值). Without this,
+    create-time and fetch-time paths return different trigger_price for the
+    same order — path-dependent vs state-dependent inconsistency that breaks
+    Task 2 state_snapshot.pending_orders consumer.
+    """
+    ex = _make_okx()
+    ex._client.create_order = AsyncMock(return_value={
+        "id": "algo-test-1", "info": {"algoId": "algo-test-1", "clOrdId": "", "tag": ""},
+    })
+    order = await ex.create_order(
+        symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+        amount=0.01, price=66000.0,
+    )
+    assert order.is_algo is True
+    assert order.order_type == "stop"
+    assert order.trigger_price == pytest.approx(66000.0)
+    assert order.price == pytest.approx(66000.0)
+
+
+@pytest.mark.asyncio
 async def test_create_order_plain_limit_unchanged_regression():
     ex = _make_okx()
     ex._client.create_order = AsyncMock(return_value={
