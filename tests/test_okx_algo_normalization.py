@@ -347,6 +347,29 @@ async def test_create_order_stop_returns_is_algo_true_with_input_price():
 
 
 @pytest.mark.asyncio
+async def test_create_order_algo_returns_order_with_trigger_price():
+    """T-ORD-2b (R2-7 C1): create_order algo branch must fill trigger_price=price.
+
+    Spec §4.7: algo class trigger_price = price (与 price 同值). Without this,
+    create-time and fetch-time paths return different trigger_price for the
+    same order — path-dependent vs state-dependent inconsistency that breaks
+    Task 2 state_snapshot.pending_orders consumer.
+    """
+    ex = _make_okx()
+    ex._client.create_order = AsyncMock(return_value={
+        "id": "algo-test-1", "info": {"algoId": "algo-test-1", "clOrdId": "", "tag": ""},
+    })
+    order = await ex.create_order(
+        symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+        amount=0.01, price=66000.0,
+    )
+    assert order.is_algo is True
+    assert order.order_type == "stop"
+    assert order.trigger_price == pytest.approx(66000.0)
+    assert order.price == pytest.approx(66000.0)
+
+
+@pytest.mark.asyncio
 async def test_create_order_plain_limit_unchanged_regression():
     ex = _make_okx()
     ex._client.create_order = AsyncMock(return_value={
@@ -686,3 +709,81 @@ async def test_watch_orders_loop_emits_algo_lineage_log_for_both_guard_branches(
     assert "conditional" in combined  # hypothesis A field
     # 5-field completeness spot-check
     assert "raw_ordType" in combined and "raw_state" in combined and "unified_status" in combined
+
+
+# ---------------------------------------------------------------------------
+# R2-7 §4.7 Task 1: BaseExchange.Order +trigger_price field (T-ORD-1~5)
+# ---------------------------------------------------------------------------
+
+
+def test_order_dataclass_has_trigger_price_field():
+    """T-ORD-1 (R2-7 §4.7): BaseExchange.Order 含 trigger_price 字段，默认 None。"""
+    from src.integrations.exchange.base import Order
+    import dataclasses
+
+    field_names = {f.name for f in dataclasses.fields(Order)}
+    assert "trigger_price" in field_names, \
+        f"Order dataclass 缺 trigger_price 字段；现有字段: {field_names}"
+
+    # 验证默认值（不传也能构造）
+    o = Order(
+        id="test-1", symbol="BTC/USDT:USDT", side="buy",
+        order_type="limit", amount=0.01, price=65000.0, status="open",
+    )
+    assert o.trigger_price is None, f"trigger_price 默认应为 None，实际 {o.trigger_price!r}"
+
+
+def test_oco_fills_trigger_price():
+    """T-ORD-2: OKX algoType=oco → 两 leg 都填 trigger_price (= sl_px / tp_px)."""
+    ex = _make_okx()
+    data = _load_fixture("okx_fetch_open_orders_oco_unified.json")
+    parsed = ex._parse_order(data)
+    assert all(o.trigger_price is not None for o in parsed), \
+        f"OCO legs 应都有 trigger_price，实际 {[o.trigger_price for o in parsed]}"
+    types_to_trigger = {o.order_type: o.trigger_price for o in parsed}
+    assert set(types_to_trigger.keys()) == {"stop", "take_profit"}
+    # 各腿 trigger_price 应等于 price (algo 类 trigger_price = price 同值)
+    for o in parsed:
+        assert o.trigger_price == o.price, \
+            f"OCO leg {o.order_type}: trigger_price ({o.trigger_price}) != price ({o.price})"
+
+
+def test_stop_algo_fills_trigger_price():
+    """T-ORD-3: OKX ordType=conditional + slTriggerPx → trigger_price 填充。"""
+    ex = _make_okx()
+    data = _load_fixture("okx_fetch_open_orders_conditional_sl_unified.json")
+    parsed = ex._parse_order(data)
+    assert len(parsed) == 1
+    o = parsed[0]
+    assert o.order_type == "stop"
+    assert o.trigger_price is not None
+    assert o.trigger_price == o.price
+
+
+def test_take_profit_algo_fills_trigger_price():
+    """T-ORD-4: OKX ordType=conditional + tpTriggerPx → trigger_price 填充。"""
+    ex = _make_okx()
+    base = _load_fixture("okx_fetch_open_orders_conditional_sl_unified.json")
+    data = {**base, "stopLossPrice": None, "takeProfitPrice": 60000.0}
+    data["info"] = {**base["info"], "slTriggerPx": "", "tpTriggerPx": "60000"}
+    parsed = ex._parse_order(data)
+    assert len(parsed) == 1
+    o = parsed[0]
+    assert o.order_type == "take_profit"
+    assert o.trigger_price == pytest.approx(60000.0)
+    assert o.trigger_price == o.price
+
+
+def test_plain_limit_no_trigger_price():
+    """T-ORD-5: OKX plain limit (无 trigger) → trigger_price = None (走 _parse_plain 路径)."""
+    ex = _make_okx()
+    data = {
+        "id": "plain_2", "symbol": "BTC/USDT:USDT", "side": "buy",
+        "type": "limit", "amount": 0.5, "price": 65000.0,
+        "status": "open", "fee": None,
+    }
+    parsed = ex._parse_order(data)
+    assert len(parsed) == 1
+    o = parsed[0]
+    assert o.order_type == "limit"
+    assert o.trigger_price is None

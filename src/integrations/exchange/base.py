@@ -43,6 +43,7 @@ class Order:
     status: str
     fee: float | None = None
     is_algo: bool = False
+    trigger_price: float | None = None   # R2-7 §4.7
 
 
 @dataclass

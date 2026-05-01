@@ -1417,3 +1417,47 @@ async def test_cancel_market_order_rejected():
     order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
     with pytest.raises(ValueError, match="Cannot cancel market orders"):
         await ex.cancel_order(order.id, "BTC/USDT:USDT")
+
+
+# ---------------------------------------------------------------------------
+# R2-7 §4.7 Task 1: Simulated transparent passthrough of SimOrder.trigger_price
+# ---------------------------------------------------------------------------
+
+
+async def test_simulated_fetch_open_orders_propagates_trigger_price():
+    """T-ORD-6 (R2-7 §4.7): SimulatedExchange.fetch_open_orders 返回的 stop/TP Order
+    含 trigger_price (透传 _PendingOrder.trigger_price)；plain limit/market: None。
+    """
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    # Open a position so conditional orders can attach
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill market open
+
+    # Place a stop and a take_profit
+    await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=93000.0)
+    await ex.create_order("BTC/USDT:USDT", "sell", "take_profit", 0.001, price=97000.0)
+    # Place a plain limit (open-direction → opposite side; use a fresh ex to avoid conflict)
+    # Stay on this exchange: the limit must match position side, but we already long.
+    # Skip limit here; T-ORD-6 focuses on stop/TP propagation. Validate plain limit
+    # via a separate simple fixture below.
+
+    open_orders = await ex.fetch_open_orders("BTC/USDT:USDT")
+    sl_orders = [o for o in open_orders if o.order_type == "stop"]
+    tp_orders = [o for o in open_orders if o.order_type == "take_profit"]
+    assert len(sl_orders) == 1
+    assert len(tp_orders) == 1
+    assert sl_orders[0].trigger_price == pytest.approx(93000.0)
+    assert tp_orders[0].trigger_price == pytest.approx(97000.0)
+
+
+async def test_simulated_fetch_open_orders_limit_has_no_trigger_price():
+    """T-ORD-6 (cont.): plain limit Order.trigger_price 应为 None (非 stop/TP 类)."""
+    ex = _make_exchange(initial_balance=10000.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    # No position → limit buy is open-direction long, allowed
+    await ex.create_order("BTC/USDT:USDT", "buy", "limit", 0.001, price=90000.0)
+    open_orders = await ex.fetch_open_orders("BTC/USDT:USDT")
+    limit_orders = [o for o in open_orders if o.order_type == "limit"]
+    assert len(limit_orders) == 1
+    assert limit_orders[0].trigger_price is None

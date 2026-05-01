@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select, update as sql_update
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
 from src.agent.persona import RuntimeConfig
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
-    ModelRequest, ModelResponse,
+    ModelRequest, ModelResponse, ThinkingPart,
     ToolCallPart, ToolReturnPart,
 )
 from pydantic_ai.usage import UsageLimits
@@ -30,9 +29,10 @@ from src.config import ExchangeConfig, Settings, load_settings, load_trader_conf
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
+from src.services.cycle_capture import _capture_state_snapshot, _capture_trigger_context
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
-from src.storage.models import DecisionLog, Session, TradeAction
+from src.storage.models import AgentCycle, Session, TradeAction
 from src.integrations.exchange.base import FillEvent, PriceLevelAlertInfo
 from src.cli.wizard import WizardResult
 
@@ -48,105 +48,20 @@ USAGE_LIMITS_PER_CYCLE = UsageLimits(
 )
 
 
-# Iter 4 §3.2 + R2-4 spec §5.3 — DecisionLog 派生类型分类常量
-# R2-4 拆 ADJUST_ACTIONS 为 4 子集 (sim4-issues §P0-3)
-# 派生优先级（业务直觉默认）: protect > entry_order > leverage > alert
-# trade_actions 留底，未来若数据反证可仅重派生历史 decision_logs.decision，无需 schema 演进
-PROTECT_ACTIONS = frozenset({
-    "set_stop_loss",
-    "set_take_profit",
-})
-ENTRY_ORDER_ACTIONS = frozenset({
-    "place_limit_order",
-    "cancel_order",
-})
-LEVERAGE_ACTIONS = frozenset({
-    "adjust_leverage",
-})
-ALERT_ACTIONS = frozenset({
-    "set_price_alert",
-    "add_price_level_alert",
-    "cancel_price_level_alert",
-})
+def _extract_thinking_text(messages) -> str | None:
+    """R2-7 §6.3: 遍历 result.new_messages() 找所有 ModelResponse 内的 ThinkingPart 拼接 content.
 
-# 兜底 union — 用于 drift guard 测试 (T5 t11) / 任何"任意 adjust"判断
-# set_next_wake 单独归 hold（spec §C5）；open_position / close_position 单独分类
-ADJUST_ACTIONS = (
-    PROTECT_ACTIONS | ENTRY_ORDER_ACTIONS | LEVERAGE_ACTIONS | ALERT_ACTIONS
-)
-
-# R2-4 spec §7.2 G6 — Derive function output enum (single source of truth for tests)
-# Mirrors return values of `_derive_decision_from_actions` below; if you add a new
-# return value, append here so t12 capacity guard catches it.
-DERIVE_DECISION_VALUES: frozenset[str] = frozenset({
-    "open_long", "open_short", "close",
-    "adjust_protect", "adjust_entry_order", "adjust_leverage", "adjust_alert",
-    "hold", "derive_error",
-})
-
-
-async def _derive_decision_from_actions(
-    session: AsyncSession,
-    session_id: str,
-    cycle_id: str,
-) -> str:
-    """从 trade_actions 反查 cycle 内 actions，按优先级派生 decision 类型。
-
-    优先级（高 → 低）:
-        open_long > open_short > close
-        > adjust_protect > adjust_entry_order > adjust_leverage > adjust_alert
-        > hold
-
-    返回 9 类 enum: open_long / open_short / close /
-    adjust_protect / adjust_entry_order / adjust_leverage / adjust_alert /
-    hold / derive_error
-
-    R2-4 spec §5.3 — 拆 'adjust' 单值为 4 子类（sim4-issues §P0-3）。
-    DB 故障 fallback: derive_error（独立 enum，spec §8.1）。
+    PR #35 I2: 用 isinstance(msg, ModelResponse) 显式收紧 — ThinkingPart 仅出现在 ModelResponse,
+    与下方 tool_calls extraction (line ~234-258) 同款 narrowing 模式. getattr 容错过宽会
+    silently 丢未来 pydantic-ai 新消息类型的 thinking content.
     """
-    try:
-        rows = (await session.execute(
-            select(TradeAction).where(
-                TradeAction.session_id == session_id,
-                TradeAction.cycle_id == cycle_id,
-            ).order_by(TradeAction.id)  # first-match 语义稳定
-        )).scalars().all()
-    except (SQLAlchemyError, OSError):
-        logger.exception(
-            f"derive_decision SELECT failed for cycle {cycle_id}; falling back to 'derive_error'"
-        )
-        return "derive_error"
-
-    actions = {a.action for a in rows}
-
-    # 1. 开仓（最高优先级）
-    for a in rows:
-        if a.action == "open_position":
-            if a.side not in ("long", "short"):
-                logger.warning(
-                    f"open_position with unexpected side={a.side!r} "
-                    f"in cycle {cycle_id}; skipping this row, downstream "
-                    f"classification (close/adjust/hold) takes over"
-                )
-                continue  # 跳过此 row，循环继续
-            return f"open_{a.side}"  # open_long / open_short
-
-    # 2. 平仓
-    if "close_position" in actions:
-        return "close"
-
-    # 3. adjust 子类（按事件重要性优先级）
-    if actions & PROTECT_ACTIONS:
-        return "adjust_protect"
-    if actions & ENTRY_ORDER_ACTIONS:
-        return "adjust_entry_order"
-    if actions & LEVERAGE_ACTIONS:
-        return "adjust_leverage"
-    if actions & ALERT_ACTIONS:
-        return "adjust_alert"
-
-    # 4. hold（无任何 ADJUST_ACTIONS，含 cycle 仅有 set_next_wake 的情况）
-    return "hold"
+    parts: list[str] = []
+    for msg in messages:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, ThinkingPart):
+                    parts.append(part.content)
+    return "\n\n".join(parts) if parts else None
 
 
 class TokenBudget:
@@ -216,6 +131,17 @@ async def run_agent_cycle(
 
     cycle_id = str(uuid.uuid4())[:8]
     deps.cycle_id = cycle_id   # propagate to ToolCallRecorder via ctx.deps (§3.4 of spec)
+
+    # R2-7 §6.7: capture trigger_context + state_snapshot 在 retry loop 之前
+    # (一次, success / forensic 两路径复用同一对 *_var)
+    # P8: 必须在 `for attempt in range(3):` retry loop 之前, 不能在 loop 内
+    # (重复 capture 会让 IO 4× retry + state_snapshot 时刻漂移 + 违反 §6.7 不变量)
+    trigger_context_var = _capture_trigger_context(cycle_id, trigger_type, context)
+    state_snapshot_var = await _capture_state_snapshot(cycle_id, deps)
+    # PR #35 I3: 与 capture-once P8 同模式 — hoist model_id 到 retry loop 之前
+    # 防 forensic 路径在 except 块内 getattr/str(agent.model) raise 致整 cycle 写入丢失.
+    model_id_var = getattr(model, 'model_name', str(model)) if model else str(agent.model)
+
     prompt = (
         f"You have been woken up by a {trigger_type} trigger.\n"
         f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"
@@ -267,18 +193,17 @@ async def run_agent_cycle(
             # 任何已成功 tool 调用的 tool_calls 行（不需要本路径协调 rollback）。
             logger.error(f"Cycle {cycle_id} hit usage limit: {e}")
             async with get_session(engine) as session:
-                decision = await _derive_decision_from_actions(
-                    session, deps.session_id, cycle_id
-                )
-                session.add(DecisionLog(
+                session.add(AgentCycle(
                     session_id=deps.session_id,
                     cycle_id=cycle_id,
-                    trigger_type=trigger_type,
-                    decision=decision,                    # spec §G2: 派生而非语义冲突
-                    status="usage_limit_exceeded",        # spec §G2: 双字段方案
-                    reasoning=str(e)[:4000],              # spec §G2: cap 500 → 4000
-                    model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
-                    tokens_used=0,  # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
+                    triggered_by=trigger_type,
+                    trigger_context=json.dumps(trigger_context_var) if trigger_context_var else None,
+                    state_snapshot=json.dumps(state_snapshot_var),
+                    reasoning=None,                              # R2-7 §6.5: forensic NULL
+                    decision=None,
+                    execution_status="usage_limit_exceeded",
+                    model_id=model_id_var,
+                    tokens_consumed=0,                            # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
                 ))
                 await session.commit()
             return None
@@ -352,20 +277,20 @@ async def run_agent_cycle(
                     )
 
     # === Record to database ===
+    thinking_text = _extract_thinking_text(result.new_messages())
     async with get_session(engine) as session:
-        decision = await _derive_decision_from_actions(
-            session, deps.session_id, cycle_id
-        )
         session.add(
-            DecisionLog(
+            AgentCycle(
                 session_id=deps.session_id,
                 cycle_id=cycle_id,
-                trigger_type=trigger_type,
-                decision=decision,            # spec §G1: 派生而非硬编码
-                status="ok",                  # spec §G1: 双字段方案
-                reasoning=result.output[:4000],  # spec §G1: cap 500 → 4000
-                model_used=getattr(model, 'model_name', str(model)) if model else str(agent.model),
-                tokens_used=tokens,
+                triggered_by=trigger_type,
+                trigger_context=json.dumps(trigger_context_var) if trigger_context_var else None,
+                state_snapshot=json.dumps(state_snapshot_var),
+                reasoning=thinking_text,                          # R2-7 §6.3: thinking content
+                decision=result.output,                           # R2-7 §6.4: message content (no cap)
+                execution_status="ok",
+                model_id=model_id_var,
+                tokens_consumed=tokens,
             )
         )
         await session.commit()

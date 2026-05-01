@@ -2,6 +2,10 @@
 
 观察期 §B3 Step 1：cycle log 输出 cache_hit / cache_miss / hit_rate
 让 W1 cache hit rate baseline 可量化、零除安全。
+
+R2-7 update (T5): 改用 capture-aware deps helper（exchange / market_data 用
+真实 Balance/Ticker mock 而非 AsyncMock）— run_agent_cycle 在 retry loop
+之前调 _capture_state_snapshot, AsyncMock 会触发 RuntimeWarning。
 """
 from __future__ import annotations
 
@@ -17,19 +21,39 @@ models.ALLOW_MODEL_REQUESTS = False
 
 
 async def _make_deps_and_engine(session_id: str = "sess-iter1"):
-    """Minimal TradingDeps + engine + session row。复用自 test_usage_limits 模式。"""
+    """TradingDeps + engine + session row, capture-path-safe.
+
+    Mirrors `_make_deps_engine_with_capture_mocks` in test_usage_limits.py:
+    real Balance / Ticker fixtures so `_capture_state_snapshot` succeeds
+    before the retry loop (R2-7 §6.7).
+    """
     from src.agent.trader import TradingDeps
+    from src.integrations.exchange.base import Balance, Ticker
 
     engine = await init_db("sqlite+aiosqlite:///:memory:")
     async with get_session(engine) as db:
         db.add(SessionModel(id=session_id, name="iter1"))
         await db.commit()
 
+    exchange = MagicMock()
+    exchange.fetch_positions = AsyncMock(return_value=[])
+    exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10000.0, free_usdt=10000.0, used_usdt=0.0,
+    ))
+    exchange.fetch_open_orders = AsyncMock(return_value=[])
+    exchange.get_price_level_alerts = MagicMock(return_value=[])
+
+    market_data = MagicMock()
+    market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=75000.0, bid=74999.0, ask=75001.0,
+        high=75500.0, low=74500.0, base_volume=1000.0, timestamp=1746098096000,
+    ))
+
     deps = TradingDeps(
         symbol="BTC/USDT:USDT",
         timeframe="15m",
-        market_data=AsyncMock(),
-        exchange=AsyncMock(),
+        market_data=market_data,
+        exchange=exchange,
         technical=MagicMock(),
         memory=AsyncMock(format_for_prompt=AsyncMock(return_value="No memories.")),
         session_id=session_id,
