@@ -648,50 +648,66 @@ def _render_footer(ctx: "CycleRenderContext") -> str:
     )
 
 
-def format_cycle_output(
-    cycle_id: str,
-    trigger_type: str,
-    tool_calls: list[dict],
-    agent_output: str,
-    tokens_used: int,
-    budget_remaining: int,
-) -> str:
+def format_cycle_output(ctx: CycleRenderContext) -> str:
     """Format a complete cycle's output for terminal/session log display.
 
-    Args:
-        cycle_id: Full 8-char cycle ID (first 4 shown in header).
-        trigger_type: "scheduled", "conditional", or "alert".
-        tool_calls: List of dicts with keys: tool_name, content, outcome, args (optional).
-        agent_output: Final agent text (from result.output).
-        tokens_used: Token count for this cycle.
-        budget_remaining: Remaining daily token budget.
-
-    Returns:
-        Formatted string with Rich markup for terminal display.
+    spec §5.2 algorithm: 时序遍历 ModelResponse 分组，每段 think→act→think→act→decision
+    交织。Forensic / retry-exhausted (messages=None) 短路渲染 Header + Footer + 占位 Decision.
     """
-    lines = []
+    lines = [_render_header(
+        cycle_id=ctx.cycle_id, trigger_type=ctx.trigger_type,
+        trigger_context=ctx.trigger_context, state_snapshot=ctx.state_snapshot,
+        cycle_started_at=ctx.cycle_started_at, stats=ctx.stats,
+    )]
 
-    # Header
-    short_id = cycle_id[:4]
-    lines.append(f"[dim]── Cycle {short_id} ({trigger_type}) {'─' * 30}[/]")
+    # === Forensic / retry-exhausted 短路 ===
+    if ctx.messages is None:
+        if ctx.forensic_reason and ctx.forensic_reason.startswith("aborted"):
+            err_part = ctx.forensic_reason[len("aborted: "):]
+            placeholder = f"[cycle aborted — 3 attempts failed: {err_part}]"
+        else:  # usage_limit_exceeded
+            placeholder = "[no decision — usage limit exceeded; partial messages unavailable]"
+        # 仅一次 escape (spec §5.2 round-7 校准 — 不 pre-escape err_part 避免双 escape
+        # 显示反斜杠 \[red]boom\[/])
+        lines.append(f"\n▾ Decision\n  {escape(placeholder)}")
+        lines.append(_render_footer(ctx))
+        return "\n".join(lines)
 
-    # Tool call summaries
-    for tc in tool_calls:
-        name = tc["tool_name"]
-        content = tc.get("content", "")
-        outcome = tc.get("outcome", "success")
-        args = tc.get("args")
+    # === Build tool_call_id → ToolReturnPart map ===
+    tool_returns_lookup: dict = {}
+    for msg in ctx.messages:
+        if isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart):
+                    tool_returns_lookup[part.tool_call_id] = part
 
-        icon, summary = resolve_tool_display(name, content, outcome, args)
-        lines.append(f"{icon} {name:<22} {summary}")
+    # === ②③ 时序段 ===
+    response_msgs = [m for m in ctx.messages if isinstance(m, ModelResponse)]
 
-    # Agent output
-    lines.append(f"\n[bold cyan]Agent:[/]\n{agent_output}")
+    # spec §4.2.3: 渲染层 thinking 提取 SoT 由 _extract_reasoning_per_response 集中
+    reasoning_per_response = _extract_reasoning_per_response(ctx.messages)
 
-    # Footer
-    lines.append(f"\n[dim]tokens: {tokens_used:,} | budget: {budget_remaining:,} remaining[/]")
-    lines.append(f"[dim]{'─' * 44}[/]")
+    for i, mr in enumerate(response_msgs):
+        thinking = reasoning_per_response[i]
+        tool_calls = [p for p in mr.parts if isinstance(p, ToolCallPart)]
 
+        if thinking:
+            lines.append(_render_reasoning(thinking))
+
+        if tool_calls:
+            lines.append(_render_action(tool_calls, tool_returns_lookup, ctx.cycle_id))
+
+    # === Decision 段 ===
+    # spec §4.4.2: 数据源 = ctx.final_text (= result.output) — 单源真相，
+    # 不从 messages 重新提取 TextPart (避免双源真相 + ctx.final_text 死字段)
+    if ctx.final_text:
+        lines.append(_render_decision(ctx.final_text))
+    elif ctx.final_text == "":
+        lines.append("\n▾ Decision\n  [empty decision text]")
+    else:  # None
+        lines.append("\n▾ Decision\n  [no decision text]")
+
+    lines.append(_render_footer(ctx))
     return "\n".join(lines)
 
 

@@ -149,6 +149,7 @@ async def run_agent_cycle(
         logger.warning("Daily LLM token budget exhausted, skipping cycle")
         return None
 
+    cycle_started_at = datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())[:8]
     deps.cycle_id = cycle_id   # propagate to ToolCallRecorder via ctx.deps (§3.4 of spec)
 
@@ -226,6 +227,21 @@ async def run_agent_cycle(
                     tokens_consumed=0,                            # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
                 ))
                 await session.commit()
+            # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
+            # Footer Duration 字段语义统一为 "实墙时间含 DB 写入"
+            cycle_ended_at = datetime.now(timezone.utc)
+            if console is not None:
+                from src.cli.display import CycleRenderContext
+                ctx = CycleRenderContext(
+                    cycle_id=cycle_id, trigger_type=trigger_type,
+                    trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
+                    messages=None, final_text=None,
+                    cycle_tokens=0, stats=stats, cache_hit_rate=None,
+                    cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+                    forensic_reason="usage_limit_exceeded",
+                )
+                console.print(format_cycle_output(ctx))
+            stats.record_cycle(0, cycle_ended_at)
             return None
         except Exception as e:
             if attempt < 2:
@@ -256,10 +272,10 @@ async def run_agent_cycle(
     )
     budget.record(tokens)
 
-    # === A2: Extract tool calls from message history ===
-    tool_calls = []
+    # === A2: System log per-tool INFO/DEBUG ===
+    # (R2-8a: 不再累积 tool_calls list 给 display 用 — ctx 直接消费 messages；
+    # _call_args_by_id 仅 lifetime 内 args lookup, 写完 logger 即弃)
     _call_args_by_id: dict[str, dict | None] = {}
-
     for msg in result.new_messages():
         if isinstance(msg, ModelResponse):
             for part in msg.parts:
@@ -279,14 +295,6 @@ async def run_agent_cycle(
                             f"tool_call_id mismatch for {part.tool_name}, using fallback"
                         )
                     args = _call_args_by_id.get(part.tool_call_id)
-                    tool_calls.append({
-                        "tool_name": part.tool_name,
-                        "content": content_str,
-                        "outcome": outcome,
-                        "args": args,
-                    })
-
-                    # System log: INFO summary, DEBUG full content
                     icon, summary = resolve_tool_display(
                         part.tool_name, content_str, outcome, args,
                     )
@@ -317,17 +325,20 @@ async def run_agent_cycle(
 
     logger.info(f"Cycle {cycle_id}: {tokens} tokens ({budget.remaining} remaining)")
 
-    # === A2: Display formatted cycle output ===
+    # === R2-8a: Build CycleRenderContext + render + record stats ===
+    cycle_ended_at = datetime.now(timezone.utc)
     if console is not None:
-        output = format_cycle_output(
-            cycle_id=cycle_id,
-            trigger_type=trigger_type,
-            tool_calls=tool_calls,
-            agent_output=result.output,
-            tokens_used=tokens,
-            budget_remaining=budget.remaining,
+        from src.cli.display import CycleRenderContext
+        ctx = CycleRenderContext(
+            cycle_id=cycle_id, trigger_type=trigger_type,
+            trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
+            messages=result.new_messages(), final_text=result.output,
+            cycle_tokens=tokens, stats=stats, cache_hit_rate=hit_rate,
+            cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+            forensic_reason=None,
         )
-        console.print(output)
+        console.print(format_cycle_output(ctx))
+    stats.record_cycle(tokens, cycle_ended_at)
 
     return result
 

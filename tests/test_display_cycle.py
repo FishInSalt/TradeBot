@@ -380,76 +380,91 @@ def test_is_tool_error_add_price_level_alert_immediate_trigger():
 
 def test_format_cycle_output_basic():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "get_market_data", "content": "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)", "outcome": "success"},
-        {"tool_name": "get_position", "content": "No open positions.", "outcome": "success"},
-    ]
-    result = format_cycle_output(
-        cycle_id="a3f2e1b4",
-        trigger_type="scheduled",
-        tool_calls=tool_calls,
-        agent_output="Market is quiet, no action taken.",
-        tokens_used=1200,
-        budget_remaining=48800,
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None],
+        tool_call_segments=[[
+            ("get_market_data", {}, "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)"),
+            ("get_position", {}, "No open positions."),
+        ]],
+        final_text="Market is quiet, no action taken.",
     )
-    assert "a3f2" in result
-    assert "scheduled" in result
-    assert "get_market_data" in result
-    assert "get_position" in result
-    assert "Agent:" in result
-    assert "Market is quiet" in result
-    assert "1,200" in result
-    assert "48,800" in result
+    out = format_cycle_output(_make_ctx(
+        cycle_id="a3f2e1b4", trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Market is quiet, no action taken.",
+        cycle_tokens=1200,
+    ))
+    assert "a3f2" in out
+    assert "SCHEDULED" in out  # uppercase per spec
+    assert "get_market_data" in out
+    assert "get_position" in out
+    assert "Market is quiet" in out
+    assert "1,200" in out
 
 
 def test_format_cycle_output_with_memory():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "save_memory", "content": "Memory saved [lesson] (importance=0.8): Always wait for confirmation", "outcome": "success", "args": {"category": "lesson", "content": "Always wait for RSI confirmation before entry", "importance": 0.8}},
-    ]
-    result = format_cycle_output(
-        cycle_id="b5c6d7e8",
-        trigger_type="conditional",
-        tool_calls=tool_calls,
-        agent_output="Lesson recorded.",
-        tokens_used=500,
-        budget_remaining=49500,
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None],
+        tool_call_segments=[[
+            ("save_memory",
+             {"category": "lesson", "content": "Always wait for RSI confirmation before entry", "importance": 0.8},
+             "Memory saved [lesson] (importance=0.8): Always wait for confirmation"),
+        ]],
+        final_text="Lesson recorded.",
     )
-    assert "✎" in result
-    assert "[lesson]" in result
-    assert "Always wait for RSI confirmation" in result  # full content from args
+    out = format_cycle_output(_make_ctx(
+        cycle_id="b5c6d7e8", trigger_type="conditional",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Lesson recorded.", cycle_tokens=500,
+    ))
+    assert "✎" in out
+    assert "[lesson]" in out
+    assert "Always wait for RSI confirmation" in out
 
 
 def test_format_cycle_output_with_error():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "open_position", "content": "Trade rejected by human approval.", "outcome": "success"},
-    ]
-    result = format_cycle_output(
-        cycle_id="c7d8e9f0",
-        trigger_type="scheduled",
-        tool_calls=tool_calls,
-        agent_output="Trade was rejected.",
-        tokens_used=800,
-        budget_remaining=49200,
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None],
+        tool_call_segments=[[
+            ("open_position", {}, "Trade rejected by human approval."),
+        ]],
+        final_text="Trade was rejected.",
     )
-    assert "✗" in result
+    out = format_cycle_output(_make_ctx(
+        cycle_id="c7d8e9f0", trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Trade was rejected.", cycle_tokens=800,
+    ))
+    assert "✗" in out
 
 
 def test_format_cycle_output_outcome_failed():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "get_market_data", "content": "Connection error", "outcome": "failed"},
-    ]
-    result = format_cycle_output(
-        cycle_id="d1e2f3a4",
-        trigger_type="scheduled",
-        tool_calls=tool_calls,
-        agent_output="Could not fetch data.",
-        tokens_used=300,
-        budget_remaining=49700,
+    from pydantic_ai.messages import (
+        ModelRequest, ModelResponse, TextPart,
+        ToolCallPart, ToolReturnPart,
     )
-    assert "✗" in result
+    tcp = ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1")
+    msgs = [
+        ModelResponse(parts=[tcp, TextPart(content="Could not fetch data.")]),
+        ModelRequest(parts=[
+            ToolReturnPart(
+                tool_name="get_market_data", tool_call_id="c1",
+                content="Connection error", outcome="failed",
+            ),
+        ]),
+    ]
+    out = format_cycle_output(_make_ctx(
+        cycle_id="d1e2f3a4", trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Could not fetch data.", cycle_tokens=300,
+    ))
+    assert "✗" in out
 
 
 # === R2-8a: Render helper unit tests (T-RH / T-RR / T-RA / T-RD / T-RF) ===
@@ -791,3 +806,278 @@ def test_render_footer_aborted_path():
     )
     out = _render_footer(ctx)
     assert "Cache    N/A (aborted)" in out
+
+
+# === R2-8a: format_cycle_output(ctx) integration tests (T-INT-*) ===
+
+
+from datetime import timedelta
+
+
+def _make_ctx(
+    cycle_id="9f57abcd",
+    trigger_type="alert",
+    trigger_context=None,
+    state_snapshot=None,
+    messages=None,
+    final_text="",
+    cycle_tokens=10_000,
+    stats=None,
+    cache_hit_rate=92.0,
+    cycle_started_at=None,
+    cycle_ended_at=None,
+    forensic_reason=None,
+):
+    from src.cli.display import CycleRenderContext
+    from src.cli.session_state import SessionStats
+    if stats is None:
+        stats = SessionStats()
+    if cycle_started_at is None:
+        cycle_started_at = datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc)
+    if cycle_ended_at is None:
+        cycle_ended_at = cycle_started_at + timedelta(seconds=4)
+    if state_snapshot is None:
+        state_snapshot = _make_state_snapshot()
+    if trigger_context is None:
+        trigger_context = {"type": "scheduled_tick"}
+    return CycleRenderContext(
+        cycle_id=cycle_id, trigger_type=trigger_type,
+        trigger_context=trigger_context, state_snapshot=state_snapshot,
+        messages=messages, final_text=final_text, cycle_tokens=cycle_tokens,
+        stats=stats, cache_hit_rate=cache_hit_rate,
+        cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+        forensic_reason=forensic_reason,
+    )
+
+
+def test_int_1a_section_structure_via_builder():
+    """T-INT-1a: 5 段架构结构断言 — Header / Reasoning / Action / Decision / Footer."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["Initial assessment.", "Need more data.", "Decision time."],
+        tool_call_segments=[
+            [("get_market_data", {}, "=== Ticker (BTC/USDT:USDT) ===\nPrice: 75212.0")],
+            [("get_position", {}, "No open positions.")],
+            [],
+        ],
+        final_text="Hold position. 5min wake.",
+    )
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="Hold position. 5min wake."))
+    # Header
+    assert "Cycle 9f57" in out
+    assert "Trigger" in out and "State" in out
+    # Reasoning + Action 交织 (3 Reasoning, 2 Action segments — final has no tools)
+    assert out.count("▾ Reasoning") == 3
+    assert out.count("▾ Action") == 2
+    # Decision precedes Footer
+    decision_idx = out.find("▾ Decision")
+    footer_idx = out.find("Tokens")
+    assert decision_idx > 0 and footer_idx > decision_idx, "Decision must precede Footer"
+    # Footer
+    assert "Cache" in out and "Duration" in out
+
+
+def test_int_1b_structural_fragments_vs_mockup():
+    """T-INT-1b: Structural fragments check against spec §3.2 mockup (illustrative —
+    not byte-equal verbatim per spec §3.2 注 'illustrative, non-byte-equal copy')."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["Z" * 892, "X" * 1247, "Y" * 1567, "W" * 445],
+        tool_call_segments=[
+            [("get_market_data", {}, "BTC $75,212"),
+             ("get_position", {}, "Short 0.265 @ $75,350"),
+             ("get_open_orders", {}, "1 orders")],
+            [("get_derivatives_data", {}, "Funding ..."),
+             ("get_recent_trades", {}, "Recent ..."),
+             ("get_higher_timeframe_view", {}, "HTF ..."),
+             ("get_multi_timeframe_snapshot", {}, "MTF ...")],
+            [("get_market_news", {}, "FGI Value: 26"),
+             ("get_price_pivots", {}, "Pivots ..."),
+             ("get_macro_context", {}, "BTC.D 58.00%")],
+            [("add_price_level_alert", {}, "Price level alert set: below 74,890"),
+             ("add_price_level_alert", {}, "Price level alert set: above 75,625"),
+             ("set_next_wake", {}, "Next wake set to 10 min")],
+        ],
+        final_text="## Situation Assessment: BTC Flash Crash\n\n**What happened**: BTC dropped ~1.6% in 10 minutes",
+    )
+    out = format_cycle_output(_make_ctx(
+        messages=msgs,
+        final_text="## Situation Assessment: BTC Flash Crash\n\n**What happened**: BTC dropped ~1.6% in 10 minutes",
+        cycle_tokens=41_947,
+    ))
+    assert "Cycle 9f57" in out
+    assert "(892 chars total)" in out
+    assert "(1247 chars total)" in out
+    assert "▾ Action (3 tools)" in out
+    assert "▾ Action (4 tools)" in out
+    assert "Situation Assessment" in out
+    assert "41,947 cycle" in out
+
+
+def test_int_2_non_thinking_model():
+    """T-INT-2: 非 thinking model → 跳过 ▾ Reasoning，▾ Action 紧接 Header."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None, None],
+        tool_call_segments=[[("get_position", {}, "FLAT")], []],
+        final_text="No action.",
+    )
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="No action."))
+    assert "▾ Reasoning" not in out, "non-thinking model 不应渲染 Reasoning 段"
+    assert "▾ Action" in out
+    assert "▾ Decision" in out
+
+
+def test_int_3_zero_tool_call_cycle():
+    """T-INT-3: 0 tool call cycle → 仅 Reasoning + Decision，无 ▾ Action."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["Direct decision, no info needed."],
+        tool_call_segments=[[]],
+        final_text="Hold.",
+    )
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="Hold."))
+    assert "▾ Reasoning" in out
+    assert "▾ Action" not in out
+    assert "▾ Decision" in out
+
+
+def test_int_4_forensic_usage_limit_exceeded():
+    """T-INT-4: forensic 路径 → Header + Footer + 占位 Decision，Cache N/A (forensic)."""
+    from src.cli.display import format_cycle_output
+    out = format_cycle_output(_make_ctx(
+        messages=None, final_text=None, cycle_tokens=0,
+        cache_hit_rate=None, forensic_reason="usage_limit_exceeded",
+    ))
+    assert "▾ Reasoning" not in out, "forensic 不渲染 partial Reasoning"
+    assert "▾ Action" not in out, "forensic 不渲染 partial Action"
+    assert "[no decision — usage limit exceeded; partial messages unavailable]" in out
+    assert "Cache    N/A (forensic)" in out
+
+
+def test_int_5_retry_exhausted_path():
+    """T-INT-5: retry-exhausted → 占位 Decision + Cache N/A (aborted)."""
+    from src.cli.display import format_cycle_output
+    out = format_cycle_output(_make_ctx(
+        messages=None, final_text=None, cycle_tokens=0,
+        cache_hit_rate=None,
+        forensic_reason="aborted: ConnectionError: timeout",
+    ))
+    assert "[cycle aborted — 3 attempts failed: ConnectionError: timeout]" in out
+    assert "Cache    N/A (aborted)" in out
+
+
+def test_int_5b_retry_exhausted_with_markup_in_error():
+    """T-INT-5b: retry-exhausted error message 含 markup 字面值 → 仅一次 escape，
+    终端显示自然字面值无反斜杠 (spec §5.2 round-7 校准)."""
+    from src.cli.display import format_cycle_output
+    out = format_cycle_output(_make_ctx(
+        messages=None, final_text=None, cycle_tokens=0,
+        cache_hit_rate=None,
+        forensic_reason="aborted: RuntimeError: [red]boom[/]",
+    ))
+    assert "RuntimeError" in out
+    assert "boom" in out
+    assert r"\\[red]" not in out  # double-escape signature
+
+
+def test_int_6_session_stats_累计_with_forensic():
+    """T-INT-6: 5 cycles 累加（含 1 forensic）→ footer Session 累计 / forensic 也计 cycle_count."""
+    from src.cli.display import format_cycle_output
+    from src.cli.session_state import SessionStats
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    stats = SessionStats()
+    base = datetime(2026, 5, 2, 18, 0, 0, tzinfo=timezone.utc)
+    stats.record_cycle(40_000, base)
+    stats.record_cycle(40_000, base + timedelta(minutes=5))
+    stats.record_cycle(0, base + timedelta(minutes=10))
+    stats.record_cycle(40_000, base + timedelta(minutes=15))
+    msgs = build_cycle_messages(
+        thinking_segments=["Decision."], tool_call_segments=[[]], final_text="OK.",
+    )
+    out = format_cycle_output(_make_ctx(
+        messages=msgs, final_text="OK.", cycle_tokens=40_000, stats=stats,
+        cycle_started_at=base + timedelta(minutes=20),
+        cycle_ended_at=base + timedelta(minutes=20, seconds=4),
+    ))
+    assert "Session 160k" in out
+    assert "5 cycles" in out
+    assert "avg 32k/cycle" in out
+
+
+def test_int_7_cache_hit_rate_normal_branch():
+    """T-INT-7: cache_hit_rate=92.0 → footer 'Cache    92.0% hit rate'."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="d", cache_hit_rate=92.0))
+    assert "Cache    92.0% hit rate" in out
+
+
+def test_int_8_session_stats_no_cross_day_reset():
+    """T-INT-8 / AC13: 跨日 last_cycle_ended_at 不重置 → Header 显示 +X min from prev."""
+    from src.cli.display import format_cycle_output
+    from src.cli.session_state import SessionStats
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    stats = SessionStats()
+    stats.record_cycle(40_000, datetime(2026, 5, 2, 23, 55, 0, tzinfo=timezone.utc))
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    out = format_cycle_output(_make_ctx(
+        messages=msgs, final_text="d", stats=stats,
+        cycle_started_at=datetime(2026, 5, 3, 3, 55, 0, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 3, 3, 55, 4, tzinfo=timezone.utc),
+    ))
+    assert "+240 min from prev" in out
+    assert "(first cycle)" not in out
+
+
+def test_int_9_first_cycle_short_label():
+    """AC10 / T-RH-2 集成版：首 cycle Header '(first cycle)' 不带 +X min from prev."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="d"))
+    assert "(first cycle)" in out
+
+
+def test_int_11_decision_uses_ctx_final_text_not_textpart():
+    """T-INT-11 (P1 reviewer 补): Decision 段 SoT = ctx.final_text，不依赖 messages 中
+    TextPart 提取 (spec §4.4.2)."""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart
+    from src.cli.display import format_cycle_output
+    msgs = [ModelResponse(parts=[ThinkingPart(content="thought.")])]
+    out = format_cycle_output(_make_ctx(
+        messages=msgs, final_text="Synthesized decision from ctx.",
+    ))
+    assert "▾ Decision" in out
+    assert "Synthesized decision from ctx." in out
+
+
+def test_int_12_decision_empty_string_placeholder():
+    """spec §4.4.3: ctx.final_text == "" → [empty decision text] 占位."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="")
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text=""))
+    assert "[empty decision text]" in out
+
+
+def test_int_10_unknown_trigger_type_fallback(caplog):
+    """T-INT-10 / T-EH-2 (renumbered): trigger_context.type 未知 → fallback {TYPE_UPPER} 不带详情."""
+    import logging
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    with caplog.at_level(logging.WARNING):
+        out = format_cycle_output(_make_ctx(
+            messages=msgs, final_text="d", trigger_type="alert",
+            trigger_context={"type": "unknown_future_type"},
+        ))
+    trigger_line = next(l for l in out.splitlines() if "Trigger" in l)
+    assert "ALERT" in trigger_line
+    assert "—" not in trigger_line
+    assert any("trigger_context.type unknown" in r.message for r in caplog.records)
