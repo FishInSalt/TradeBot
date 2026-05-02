@@ -478,7 +478,7 @@ def test_build_services_sim_path():
          patch("src.services.price_alert.PriceAlertService"):
         MockSim.return_value = MagicMock()
         mock_agent.return_value = MagicMock()
-        exchange, deps, agent, budget = build_services(
+        exchange, deps, agent, budget, _stats = build_services(
             result, mock_engine, "sid", mock_sc, mock_settings,
         )
 
@@ -523,7 +523,7 @@ def test_build_services_wires_news_when_enabled():
         mock_agent.return_value = MagicMock()
         news_instance = MagicMock()
         MockNewsService.return_value = news_instance
-        _, deps, _, _ = build_services(
+        _, deps, _, _, _stats = build_services(
             result, mock_engine, "sid", mock_sc, mock_settings,
         )
 
@@ -549,7 +549,7 @@ def test_build_services_omits_news_when_disabled():
          patch("src.integrations.news.service.NewsService") as MockNewsService:
         MockSim.return_value = MagicMock()
         mock_agent.return_value = MagicMock()
-        _, deps, _, _ = build_services(
+        _, deps, _, _, _stats = build_services(
             result, mock_engine, "sid", mock_sc, mock_settings,
         )
 

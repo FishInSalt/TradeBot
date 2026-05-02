@@ -25,6 +25,7 @@ from src.cli.display import (
     is_tool_error, resolve_tool_display,
 )
 from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging
+from src.cli.session_state import SessionStats
 from src.config import ExchangeConfig, Settings, load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
@@ -97,6 +98,22 @@ class TokenBudget:
         return self._used >= self._daily_max
 
 
+class _DummySessionStats(SessionStats):
+    """No-op SessionStats subclass for tests that pass run_agent_cycle without stats kwarg.
+
+    Inherits SessionStats so type annotations `stats: SessionStats` are LSP-compatible
+    (no mypy/pyright strict warning). __init__ inherits → properties return 0/None defaults.
+    Override only record_cycle to no-op (no per-cycle stat mutation).
+
+    Module-level singleton (`_DUMMY_STATS`) — avoid per-cycle instantiation overhead.
+    """
+    def record_cycle(self, cycle_tokens: int, cycle_ended_at: datetime) -> None:  # noqa: ARG002
+        pass  # no-op — discard inputs
+
+
+_DUMMY_STATS = _DummySessionStats()
+
+
 async def _record_action_from_fill(engine, session_id, event: FillEvent):
     """将 FillEvent 记录为 TradeAction。"""
     async with get_session(engine) as session:
@@ -124,7 +141,10 @@ async def run_agent_cycle(
     context=None,
     model=None,
     console=None,
+    stats: SessionStats | None = None,
 ):
+    if stats is None:
+        stats = _DUMMY_STATS
     if budget.exhausted:
         logger.warning("Daily LLM token budget exhausted, skipping cycle")
         return None
@@ -463,7 +483,8 @@ def build_services(
     else:
         sc.print("Alerts: OFF")
 
-    return exchange, deps, agent, budget
+    stats = SessionStats()
+    return exchange, deps, agent, budget, stats
 
 
 async def run(
@@ -512,7 +533,7 @@ async def run(
     sc = setup_session_logging(session_id, log_dir)
 
     # ── Phase 5: Build services ──
-    exchange, deps, agent, budget = build_services(
+    exchange, deps, agent, budget, stats = build_services(
         result, engine, session_id, sc, settings,
     )
 
@@ -533,7 +554,7 @@ async def run(
         try:
             await run_agent_cycle(
                 agent, deps, trigger_type, budget, engine,
-                context, model=result.model, console=sc,
+                context, model=result.model, console=sc, stats=stats,
             )
         except Exception:
             logger.exception("Agent cycle failed")
