@@ -1081,3 +1081,160 @@ def test_int_10_unknown_trigger_type_fallback(caplog):
     assert "ALERT" in trigger_line
     assert "—" not in trigger_line
     assert any("trigger_context.type unknown" in r.message for r in caplog.records)
+
+
+# === R2-8a: Drift guards (T-DG-1/2/3) ===
+
+
+def test_dg_1_extract_helpers_equivalent_at_smoke_baseline():
+    """T-DG-1: smoke baseline 下 _extract_thinking_text(messages) 等价于
+    "\\n\\n".join(_extract_reasoning_per_response 中非 None 项)."""
+    from src.cli.app import _extract_thinking_text
+    from src.cli.display import _extract_reasoning_per_response
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["alpha", "beta", "gamma"],
+        tool_call_segments=[[("get_market_data", {}, "x")], [], []],
+        final_text="done",
+    )
+    full_text = _extract_thinking_text(msgs)
+    per_resp = _extract_reasoning_per_response(msgs)
+    rejoined = "\n\n".join(t for t in per_resp if t)
+    assert full_text == rejoined, (
+        f"helper drift detected:\n  _extract_thinking_text => {full_text!r}\n"
+        f"  rejoin per-resp        => {rejoined!r}"
+    )
+
+
+def test_dg_2_thinking_part_precedes_toolcall_in_smoke_baseline():
+    """T-DG-2: smoke baseline 下 ThinkingPart 在 ToolCallPart 之前 (parts[0])."""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart, ToolCallPart
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["a", "b"],
+        tool_call_segments=[[("get_market_data", {}, "x")], []],
+        final_text="d",
+    )
+    for mr in [m for m in msgs if isinstance(m, ModelResponse)]:
+        kinds = [type(p).__name__ for p in mr.parts]
+        if "ThinkingPart" in kinds and "ToolCallPart" in kinds:
+            assert kinds.index("ThinkingPart") < kinds.index("ToolCallPart"), (
+                f"ThinkingPart 应先于 ToolCallPart: {kinds}"
+            )
+
+
+async def test_dg_3_state_snapshot_field_set_unchanged():
+    """T-DG-3: state_snapshot 7 字段集合 = R2-7 contract.
+    新增字段触发本测试 fail，提示 R2-8a 是否需消费."""
+    expected = {
+        "position", "balance", "market", "pending_orders",
+        "active_alerts", "_errors", "_cycle_id",
+    }
+    from unittest.mock import AsyncMock, MagicMock
+    from src.integrations.exchange.base import Balance, Ticker
+    from src.services.cycle_capture import _capture_state_snapshot
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=100.0, free_usdt=100.0, used_usdt=0.0,
+    ))
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=100.0, bid=99.0, ask=101.0,
+        high=110.0, low=90.0, base_volume=1.0, timestamp=0,
+    ))
+    snapshot = await _capture_state_snapshot("test-cycle", deps)
+    assert set(snapshot.keys()) == expected, (
+        f"state_snapshot 字段集合漂移: actual={set(snapshot.keys())} expected={expected}\n"
+        "  新增字段 → 检查 R2-8a 是否需消费 (header / footer / 段渲染)；\n"
+        "  字段移除 → 检查 R2-8a 渲染 fallback 是否需更新。"
+    )
+
+
+# === R2-8a: Edge case 细化 ===
+
+
+def test_eh_1_trigger_context_none_renders_bare_type():
+    """T-EH-1: trigger_context=None → Header 'Trigger    {TYPE_UPPER}' 不带详情."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("alert", None)
+    assert out == "ALERT"
+    out = _format_trigger_detail("conditional", None)
+    assert out == "CONDITIONAL"
+
+
+def test_eh_3_conditional_fill_missing_price_partial_degrade():
+    """T-EH-3 (spec §6.1): conditional fill 缺 fill_price → 部分降级保留 trigger_reason."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {
+        "type": "fill", "trigger_reason": "TP_FILL",
+    })
+    assert out == "CONDITIONAL — TP_FILL", (
+        f"spec §6.1 T-EH-3 要求保留 trigger_reason 部分降级；实际 {out!r}"
+    )
+
+
+def test_eh_3b_conditional_fill_no_trigger_reason_full_fallback():
+    """T-EH-3b: conditional fill 连 trigger_reason 都缺 → 全 fallback 到 {TYPE_UPPER}."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {"type": "fill"})
+    assert out == "CONDITIONAL"
+
+
+def test_es_1_state_snapshot_none_unavailable():
+    """T-ES-1: state_snapshot=None → State 段 [snapshot unavailable]."""
+    from src.cli.display import _format_state_line
+    assert _format_state_line(None) == "[snapshot unavailable]"
+
+
+def test_es_2_position_none_renders_flat():
+    """T-ES-2: position=None → 'FLAT'."""
+    from src.cli.display import _format_state_line
+    out = _format_state_line(_make_state_snapshot(
+        balance={"total_usdt": 10000.0, "free_usdt": 10000.0, "used_usdt": 0.0},
+    ))
+    assert "FLAT" in out
+    assert "Balance $10,000" in out
+
+
+def test_es_3_balance_none_omits_balance_segment():
+    """T-ES-3: balance=None → 省略 Balance 字段."""
+    from src.cli.display import _format_state_line
+    out = _format_state_line(_make_state_snapshot(
+        position={
+            "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
+            "entry_price": 75350.0, "leverage": 5, "unrealized_pnl": 75.0,
+            "liquidation_price": 0.0, "pnl_pct": 0.10,
+        },
+    ))
+    assert "Short 0.265" in out
+    assert "Balance" not in out
+
+
+def test_es_5_position_pnl_pct_none_omits_pnl_segment():
+    """T-ES-5: pnl_pct=None (notional 0 / 计算失败) → 省略 PnL 字段."""
+    from src.cli.display import _format_state_line
+    out = _format_state_line(_make_state_snapshot(
+        position={
+            "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
+            "entry_price": 75350.0, "leverage": 5, "unrealized_pnl": 0.0,
+            "liquidation_price": 0.0, "pnl_pct": None,
+        },
+        balance={"total_usdt": 10000.0, "free_usdt": 10000.0, "used_usdt": 0.0},
+    ))
+    assert "Short 0.265" in out
+    assert "PnL" not in out
+
+
+def test_re_2_thinking_empty_string_skipped():
+    """T-RE-2: ThinkingPart content == "" → Reasoning 段省略."""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart, TextPart
+    from src.cli.display import format_cycle_output
+    msgs = [ModelResponse(parts=[ThinkingPart(content=""), TextPart(content="d")])]
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="d"))
+    assert "▾ Reasoning" not in out, "空 ThinkingPart 不应渲染 Reasoning 段"

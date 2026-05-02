@@ -249,7 +249,41 @@ async def run_agent_cycle(
                 logger.warning(f"LLM call attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
                 await asyncio.sleep(delay)
             else:
+                # spec §6.5 D16: retry-exhausted forensic write + session log render — 避免 W2 SQL 黑洞
                 logger.error(f"LLM call failed after 3 attempts: {e}")
+                err_class = type(e).__name__
+                # spec §6.5 T-EX-2: > 200 chars 截断 + 省略号
+                err_raw = str(e)
+                err_msg = (err_raw[:200] + "...") if len(err_raw) > 200 else err_raw
+                async with get_session(engine) as session:
+                    session.add(AgentCycle(
+                        session_id=deps.session_id,
+                        cycle_id=cycle_id,
+                        triggered_by=trigger_type,
+                        trigger_context=json.dumps(trigger_context_var) if trigger_context_var else None,
+                        state_snapshot=json.dumps(state_snapshot_var),
+                        reasoning=None,
+                        decision=None,
+                        execution_status="retry_exhausted",
+                        model_id=model_id_var,
+                        tokens_consumed=0,
+                    ))
+                    await session.commit()
+                # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
+                # 时序对齐：Footer Duration 字段语义统一为 "实墙时间含 DB 写入"
+                cycle_ended_at = datetime.now(timezone.utc)
+                if console is not None:
+                    from src.cli.display import CycleRenderContext
+                    ctx = CycleRenderContext(
+                        cycle_id=cycle_id, trigger_type=trigger_type,
+                        trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
+                        messages=None, final_text=None,
+                        cycle_tokens=0, stats=stats, cache_hit_rate=None,
+                        cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+                        forensic_reason=f"aborted: {err_class}: {err_msg}",
+                    )
+                    console.print(format_cycle_output(ctx))
+                stats.record_cycle(0, cycle_ended_at)
                 return None
 
     usage = result.usage()
