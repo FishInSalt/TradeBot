@@ -91,7 +91,7 @@ class AgentCycle(Base):
     trigger_context: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: trigger 瞬间客观快照
     state_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON: 决策时系统层面客观状态 (R2-7 §4.4)
     decision: Mapped[str | None] = mapped_column(Text, nullable=True)         # message content (R2-7: was String(30) enum, 改 Text+nullable)
-    execution_status: Mapped[str] = mapped_column(String(30), default="ok", server_default="ok")  # ok / usage_limit_exceeded
+    execution_status: Mapped[str] = mapped_column(String(30), default="ok", server_default="ok")  # ok / usage_limit_exceeded / retry_exhausted
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)        # thinking content (R2-7: was result.output message)
     model_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     tokens_consumed: Mapped[int] = mapped_column(Integer, default=0)
