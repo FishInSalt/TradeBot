@@ -347,7 +347,10 @@ class CycleRenderContext:
         messages / final_text: None for forensic (UsageLimitExceeded — agent.run raised, result=None)
                                 and retry-exhausted (3 attempts failed)
         cycle_tokens: 0 for forensic / retry-exhausted (per spec §4.5.3 caveat — not physical 0)
-        cache_hit_rate: None triggers footer "N/A (forensic)" / "N/A (aborted)" branch
+        cache_hit_rate: percentage on 0-100 scale (e.g. 92.0 = 92%), NOT 0-1 fraction.
+                        Caller (app.py:301) computes `cache_hit / input_total * 100`;
+                        footer formats with `:.1f` directly. None triggers footer "N/A
+                        (forensic)" / "N/A (aborted)" branch.
         forensic_reason: "usage_limit_exceeded" | "aborted: <error class>: <msg[:200]>" | None
     """
     cycle_id: str
@@ -358,7 +361,7 @@ class CycleRenderContext:
     final_text: str | None
     cycle_tokens: int
     stats: SessionStats
-    cache_hit_rate: float | None
+    cache_hit_rate: float | None    # 0-100 scale percentage (NOT 0-1 fraction); see class docstring
     cycle_started_at: datetime
     cycle_ended_at: datetime
     forensic_reason: str | None
