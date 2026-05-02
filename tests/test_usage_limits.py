@@ -424,3 +424,161 @@ async def test_wp_3_forensic_path_writes_trigger_context():
         "trigger_context 应有 (scheduled trigger 也写非 None: {'type': 'scheduled_tick'})"
     parsed = json_mod.loads(row.trigger_context)
     assert parsed == {"type": "scheduled_tick"}
+
+
+# === R2-8a: T-EX retry-exhausted forensic write ===
+
+
+async def test_usage_limit_exceeded_renders_session_log_placeholder():
+    """T-FO-3 (R2-8a 加): UsageLimitExceeded 路径 session log 端到端渲染
+    [no decision — usage limit exceeded; partial messages unavailable] 占位 + Cache N/A (forensic)."""
+    from pydantic_ai.exceptions import UsageLimitExceeded
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-fo3")
+    budget = TokenBudget(daily_max=500_000)
+
+    async def boom(prompt, **kwargs):
+        raise UsageLimitExceeded("simulated runaway")
+
+    mock_agent = MagicMock()
+    mock_agent.run = boom
+    mock_agent.model = "test-model"
+
+    captured_print = []
+    mock_console = MagicMock()
+    mock_console.print = lambda s: captured_print.append(s)
+
+    result = await run_agent_cycle(
+        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        budget=budget, engine=engine, console=mock_console,
+    )
+    assert result is None
+    rendered = "\n".join(str(s) for s in captured_print)
+    assert "no decision — usage limit exceeded" in rendered, \
+        f"未渲染 forensic Decision 占位; rendered={rendered!r}"
+    assert "partial messages unavailable" in rendered
+    assert "N/A (forensic)" in rendered, "Footer Cache 行未走 forensic 分支"
+
+
+async def test_retry_exhausted_writes_forensic_agent_cycle():
+    """T-EX-1: 3 次重试都失败 → AgentCycle 行 execution_status='retry_exhausted'."""
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from src.storage.models import AgentCycle
+    from sqlalchemy import select
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-tex1")
+    budget = TokenBudget(daily_max=500_000)
+
+    call_count = {"n": 0}
+
+    async def boom(prompt, **kwargs):
+        call_count["n"] += 1
+        raise ConnectionError("simulated network failure")
+
+    mock_agent = MagicMock()
+    mock_agent.run = boom
+    mock_agent.model = "test-model"
+
+    result = await run_agent_cycle(
+        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        budget=budget, engine=engine,
+    )
+    assert result is None
+    assert call_count["n"] == 3, f"应重试 3 次，实际 {call_count['n']}"
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(
+            select(AgentCycle).where(AgentCycle.execution_status == "retry_exhausted")
+        )).scalars().all()
+    assert len(rows) == 1, f"应写 1 行 retry_exhausted，实际 {len(rows)}"
+    row = rows[0]
+    assert row.session_id == "sess-tex1"
+    assert row.execution_status == "retry_exhausted"
+    assert row.reasoning is None
+    assert row.decision is None
+    assert row.tokens_consumed == 0
+
+
+async def test_retry_exhausted_session_log_renders_aborted_placeholder():
+    """T-EX-2 (集成版): retry-exhausted 路径 session log 渲染 [cycle aborted ...]."""
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-tex2")
+    budget = TokenBudget(daily_max=500_000)
+
+    async def boom(prompt, **kwargs):
+        raise ConnectionError("timeout")
+
+    mock_agent = MagicMock()
+    mock_agent.run = boom
+    mock_agent.model = "test-model"
+
+    captured_print = []
+    mock_console = MagicMock()
+    mock_console.print = lambda s: captured_print.append(s)
+
+    result = await run_agent_cycle(
+        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        budget=budget, engine=engine, console=mock_console,
+    )
+    assert result is None
+    assert any("cycle aborted" in str(s) for s in captured_print), \
+        f"未渲染 [cycle aborted] 占位; captured={captured_print!r}"
+    assert any("ConnectionError" in str(s) for s in captured_print)
+    assert any("timeout" in str(s) for s in captured_print)
+
+
+async def test_retry_exhausted_records_session_stats():
+    """T-EX-3: retry-exhausted 调 stats.record_cycle(0, end_ts) — cycle_count 计入但 total_tokens 不增."""
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from src.cli.session_state import SessionStats
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-tex3")
+    budget = TokenBudget(daily_max=500_000)
+    stats = SessionStats()
+
+    async def boom(prompt, **kwargs):
+        raise ConnectionError("net err")
+
+    mock_agent = MagicMock()
+    mock_agent.run = boom
+    mock_agent.model = "test-model"
+
+    await run_agent_cycle(
+        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        budget=budget, engine=engine, stats=stats,
+    )
+    assert stats.cycle_count == 1
+    assert stats.total_tokens == 0
+    assert stats.last_cycle_ended_at is not None
+
+
+async def test_retry_exhausted_error_message_truncated_at_200():
+    """spec §6.5: error message 超 200 chars → 截断到 200 (forensic placeholder)."""
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-tex4")
+    budget = TokenBudget(daily_max=500_000)
+
+    long_msg = "x" * 500
+    async def boom(prompt, **kwargs):
+        raise ConnectionError(long_msg)
+
+    mock_agent = MagicMock()
+    mock_agent.run = boom
+    mock_agent.model = "test-model"
+
+    captured = []
+    mock_console = MagicMock()
+    mock_console.print = lambda s: captured.append(s)
+
+    await run_agent_cycle(
+        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        budget=budget, engine=engine, console=mock_console,
+    )
+    rendered = "\n".join(str(s) for s in captured)
+    assert "ConnectionError" in rendered
+    assert "x" * 200 in rendered
+    assert "x" * 250 not in rendered  # confirms truncation
+    assert "..." in rendered, "spec §6.5 T-EX-2 要求截断后追加省略号"

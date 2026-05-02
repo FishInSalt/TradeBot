@@ -62,7 +62,8 @@ def test_build_services_passes_sandbox_from_settings_to_okx_exchange():
          patch("src.cli.app.MemoryService"), \
          patch("src.cli.app.TokenBudget"), \
          patch("src.cli.app.ApprovalGate"), \
-         patch("src.cli.app.create_trader_agent"):
+         patch("src.cli.app.create_trader_agent"), \
+         patch("src.cli.app.SessionStats"):
         mock_okx_cls.return_value = MagicMock()
         from src.cli.app import build_services
         try:

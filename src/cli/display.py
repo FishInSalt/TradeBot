@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import dataclass
+from datetime import datetime
 
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
+from rich.markup import escape
 from rich.panel import Panel
 
+from src.cli.session_state import SessionStats
 from src.services.metrics import PerformanceMetrics
+
+logger = logging.getLogger(__name__)
 
 
 def format_metrics(metrics: PerformanceMetrics) -> str:
@@ -323,50 +338,386 @@ def resolve_tool_display(
     return "⚙", summarize_tool(tool_name, content)
 
 
-def format_cycle_output(
+@dataclass(frozen=True)
+class CycleRenderContext:
+    """Single-arg context for format_cycle_output(ctx). Constructed by run_agent_cycle
+    once per cycle; 3 paths (normal / forensic / retry-exhausted) share this dataclass.
+
+    Field nullability semantics:
+        messages / final_text: None for forensic (UsageLimitExceeded — agent.run raised, result=None)
+                                and retry-exhausted (3 attempts failed)
+        cycle_tokens: 0 for forensic / retry-exhausted (per spec §4.5.3 caveat — not physical 0)
+        cache_hit_rate: percentage on 0-100 scale (e.g. 92.0 = 92%), NOT 0-1 fraction.
+                        Caller (app.py:301) computes `cache_hit / input_total * 100`;
+                        footer formats with `:.1f` directly. None triggers footer "N/A
+                        (forensic)" / "N/A (aborted)" branch.
+        forensic_reason: "usage_limit_exceeded" | "aborted: <error class>: <msg[:200]>" | None
+    """
+    cycle_id: str
+    trigger_type: str               # "scheduled" / "conditional" / "alert"
+    trigger_context: dict | None    # in-memory dict from _capture_trigger_context
+    state_snapshot: dict | None     # in-memory dict from _capture_state_snapshot
+    messages: list | None
+    final_text: str | None
+    cycle_tokens: int
+    stats: SessionStats
+    cache_hit_rate: float | None    # 0-100 scale percentage (NOT 0-1 fraction); see class docstring
+    cycle_started_at: datetime
+    cycle_ended_at: datetime
+    forensic_reason: str | None
+
+
+# === R2-8a: Cycle log narrative render helpers (spec §4) ===
+
+
+def _extract_reasoning_per_response(messages: list) -> list[str | None]:
+    """每个 ModelResponse 仅取首个 ThinkingPart 的 content（与 pre-impl smoke baseline 一致）。
+
+    返回 list 长度 = ModelResponse 数；None = 该 Response 无 ThinkingPart。
+    与 src.cli.app._extract_thinking_text 行为分离：
+    - 渲染层（本 helper）接受 '每 Response 首 ThinkingPart' 限缩 — 时序渲染消费
+    - DB 写入层（_extract_thinking_text）保持全收集 — agent_cycles.reasoning 列写入
+    spec §4.2.3 drift guard T-DG-1 兜底两 helper 在 smoke baseline 行为等价。
+
+    Placement note: spec §5.3 列在 app.py，本 plan 改放 display.py（消费者所在层）
+    避免 display→app 循环 import；helper 唯一使用方是 format_cycle_output。
+    """
+    out: list[str | None] = []
+    for msg in messages:
+        if isinstance(msg, ModelResponse):
+            thinking_parts = [p for p in msg.parts if isinstance(p, ThinkingPart)]
+            if thinking_parts:
+                if len(thinking_parts) > 1:
+                    # spec §6.3 T-RE-6 + spec §4.2.4: smoke baseline 是每 Response 1 ThinkingPart;
+                    # 多 ThinkingPart per Response 出现 → drift signal (R2-8c / N12 议题接管)
+                    logger.warning(
+                        "ModelResponse has %d ThinkingParts (smoke baseline = 1); "
+                        "renderer takes only parts[0] — see spec §4.2.4 / R2-8c",
+                        len(thinking_parts),
+                    )
+                out.append(thinking_parts[0].content)
+            else:
+                out.append(None)
+    return out
+
+
+_TRIGGER_LINE_PREFIX = "  Trigger    "
+_STATE_LINE_PREFIX = "  State      "
+
+
+def _format_trigger_detail(trigger_type: str, ctx: dict | None) -> str:
+    """Format Header 'Trigger    ...' line per spec §4.1.3.
+
+    Returns the entire content after the column prefix; e.g.,
+        "ALERT — vol -1.6%/10min fired (BTC 76,225 → 75,448)"
+        "SCHEDULED"
+    """
+    type_upper = trigger_type.upper()
+    if not ctx:
+        return type_upper
+
+    ctx_type = ctx.get("type")
+
+    if ctx_type == "scheduled_tick":
+        # spec §4.1.3 verbatim: "Trigger    SCHEDULED" — 无 em-dash 后缀
+        return type_upper
+
+    if ctx_type == "fill":
+        # spec §6.1 T-EH-3 partial degradation: 缺 fill_price / 其他字段 → 保留 trigger_reason
+        # （TP/SL/liquidation/market_close 区分是 conditional cycle 排查关键信息）
+        tr = ctx.get("trigger_reason")
+        if tr is None:
+            return type_upper  # 连 trigger_reason 都缺 → 全 fallback
+        # FillEvent.pnl 开仓时正常即 None — PnL 段独立 try，不让 None 拖垮前段渲染
+        try:
+            symbol_short = (ctx.get("symbol") or "").split("/")[0]
+            front = (
+                f"{type_upper} — {tr} {ctx['position_side']} "
+                f"{symbol_short} {ctx['amount']} @ ${ctx['fill_price']:,.0f}"
+            )
+        except (KeyError, TypeError):
+            return f"{type_upper} — {tr}"  # spec §6.1 T-EH-3: 部分降级保留 trigger_reason
+        pnl = ctx.get("pnl")
+        if pnl is not None:
+            try:
+                return f"{front}, PnL {pnl:+.2f} USDT"
+            except (TypeError, ValueError):
+                pass  # pnl 字段类型异常 → 回落到无 PnL 段
+        return front
+
+    if ctx_type == "price_level_alert":
+        try:
+            symbol_short = (ctx.get("symbol") or "").split("/")[0]
+            return (
+                f"{type_upper} — {symbol_short} reached "
+                f"{ctx['current_price']:,.0f} ({ctx['direction']} "
+                f"${ctx['target_price']:,.0f} alert)"
+            )
+        except (KeyError, TypeError):
+            return type_upper
+
+    if ctx_type == "percentage_alert":
+        try:
+            symbol_short = (ctx.get("symbol") or "").split("/")[0]
+            return (
+                f"{type_upper} — vol {ctx['change_pct']:+.1f}%/{ctx['window_minutes']}min "
+                f"fired ({symbol_short} {ctx['reference_price']:,.0f} → "
+                f"{ctx['current_price']:,.0f})"
+            )
+        except (KeyError, TypeError):
+            return type_upper
+
+    # Unknown type (schema drift) — fallback to bare type
+    logger.warning(
+        "trigger_context.type unknown: %r (keys=%r)",
+        ctx_type, list(ctx.keys()) if ctx else None,
+    )
+    return type_upper
+
+
+def _format_state_line(state_snapshot: dict | None) -> str:
+    """Format Header 'State    ...' line per spec §4.1.4.
+
+    Examples:
+        持仓: "Short 0.265 @ $75,350 (5x) | PnL +0.10% | Balance $9,990"
+        无仓: "FLAT | Balance $10,000"
+        snapshot=None: "[snapshot unavailable]"
+    """
+    if state_snapshot is None:
+        return "[snapshot unavailable]"
+
+    pos = state_snapshot.get("position")
+    bal = state_snapshot.get("balance")
+    parts: list[str] = []
+
+    if pos is None:
+        parts.append("FLAT")
+    else:
+        try:
+            side = pos["side"].capitalize()
+            contracts = pos["contracts"]
+            entry = pos["entry_price"]
+            leverage = pos.get("leverage")
+            piece = f"{side} {contracts} @ ${entry:,.0f}"
+            if leverage:
+                piece += f" ({leverage}x)"
+            parts.append(piece)
+            pnl_pct = pos.get("pnl_pct")
+            if pnl_pct is not None:
+                parts.append(f"PnL {pnl_pct:+.2f}%")
+        except (KeyError, TypeError):
+            parts.append("[position malformed]")
+
+    if bal is not None:
+        try:
+            parts.append(f"Balance ${bal['total_usdt']:,.0f}")
+        except (KeyError, TypeError):
+            pass  # 缺字段 → 静默省略 Balance 段（spec §4.1.4）
+
+    return " | ".join(parts) if parts else "[snapshot unavailable]"
+
+
+def _render_header(
     cycle_id: str,
     trigger_type: str,
-    tool_calls: list[dict],
-    agent_output: str,
-    tokens_used: int,
-    budget_remaining: int,
+    trigger_context: dict | None,
+    state_snapshot: dict | None,
+    cycle_started_at: datetime,
+    stats: SessionStats,
 ) -> str:
+    """Render Header section per spec §4.1.1."""
+    short_id = cycle_id[:4]
+    start_ts = cycle_started_at.strftime("%H:%M:%S UTC")
+    if stats.last_cycle_ended_at is None:
+        delta_segment = "(first cycle)"
+    else:
+        delta_min = int((cycle_started_at - stats.last_cycle_ended_at).total_seconds() / 60)
+        delta_segment = f"+{delta_min} min from prev"
+
+    sep_top = "═" * 75
+    sep_mid = "─" * 75
+
+    trigger_line = _format_trigger_detail(trigger_type, trigger_context)
+    state_line = _format_state_line(state_snapshot)
+
+    return (
+        f"{sep_top}\n"
+        f"  Cycle {short_id}  •  {start_ts}  •  {delta_segment}\n"
+        f"{sep_mid}\n"
+        f"{_TRIGGER_LINE_PREFIX}{trigger_line}\n"
+        f"{_STATE_LINE_PREFIX}{state_line}\n"
+        f"{sep_top}"
+    )
+
+
+def _render_reasoning(thinking_text: str, max_chars: int = 800) -> str:
+    """Render Reasoning section per spec §4.2.1-§4.2.2.
+
+    Hard-truncate body to max_chars + ' ... [+N chars]' marker. Body must be
+    rich.markup.escape()'d — thinking content is LLM output, attack surface
+    of same shape as Decision body.
+    """
+    total = len(thinking_text)
+    if total <= max_chars:
+        body = thinking_text
+        suffix = ""
+    else:
+        body = thinking_text[:max_chars]
+        remaining = total - max_chars
+        suffix = f" ... [+{remaining} chars]"
+    indented = "\n".join(f"  {escape(line)}" for line in body.splitlines())
+    return f"\n▾ Reasoning ({total} chars total)\n{indented}{suffix}"
+
+
+def _render_action(
+    tool_calls: list,
+    returns_lookup: dict,
+    cycle_id: str,
+) -> str:
+    """Render Action section per spec §4.3.
+
+    `tool_calls` is list[ToolCallPart], `returns_lookup` is dict[tool_call_id, ToolReturnPart].
+    Tool summary line uses existing resolve_tool_display() (parser layer is R2-8c scope).
+    """
+    n = len(tool_calls)
+    plural = "tool" if n == 1 else "tools"
+    lines = [f"\n▾ Action ({n} {plural})"]
+
+    for tcp in tool_calls:
+        try:
+            args = tcp.args_as_dict()
+        except Exception:
+            args = None
+
+        ret = returns_lookup.get(tcp.tool_call_id)
+        if ret is None:
+            logger.warning(
+                "tool_call_id mismatch for %s in cycle %s",
+                tcp.tool_name, cycle_id,
+            )
+            line = f"  ⚙ {tcp.tool_name:<22} [no return captured]"
+        else:
+            content_str = str(ret.content)
+            outcome = getattr(ret, "outcome", "success")
+            icon, summary = resolve_tool_display(tcp.tool_name, content_str, outcome, args)
+            # body escape 防 markup attack（summary 来自 tool return content；
+            # 框架 markup icon / column padding 在 prefix 部分不动）
+            line = f"  {icon} {tcp.tool_name:<22} {escape(summary)}"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def _render_decision(text: str) -> str:
+    """Render Decision section per spec §4.4.1.
+
+    Full markdown body inlined with 2-space indent. Rich markup escape forced —
+    LLM output may contain [red]/[bold] literals that would otherwise be parsed
+    as Rich markup (attack surface widened by 'full markdown inlined' vs. legacy
+    short agent_output).
+    """
+    indented = "\n".join(f"  {line}" for line in escape(text).splitlines())
+    return f"\n▾ Decision\n{indented}"
+
+
+def _render_footer(ctx: "CycleRenderContext") -> str:
+    """Render Footer section per spec §4.5.1.
+
+    Projected stats (含当前 cycle): footer renders BEFORE stats.record_cycle is called,
+    so we add cycle_tokens / +1 cycle inline (spec §4.5.3 P1 fix — avoid lifecycle reorder
+    to prevent last_cycle_ended_at self-reference).
+    """
+    sep_mid = "─" * 75
+    sep_bot = "═" * 75
+
+    proj_total = ctx.stats.total_tokens + ctx.cycle_tokens
+    proj_count = ctx.stats.cycle_count + 1
+    proj_avg = proj_total // proj_count if proj_count > 0 else 0
+    session_total_k = round(proj_total / 1000)
+    session_avg_k = round(proj_avg / 1000)
+
+    # Cache line: forensic / aborted → N/A; normal → percentage
+    if ctx.cache_hit_rate is None:
+        if ctx.forensic_reason and ctx.forensic_reason.startswith("aborted"):
+            cache_line = "Cache    N/A (aborted)"
+        else:
+            cache_line = "Cache    N/A (forensic)"
+    else:
+        cache_line = f"Cache    {ctx.cache_hit_rate:.1f}% hit rate"
+
+    duration = (ctx.cycle_ended_at - ctx.cycle_started_at).total_seconds()
+    end_ts = ctx.cycle_ended_at.strftime("%H:%M:%S UTC")
+
+    return (
+        f"\n{sep_mid}\n"
+        f"  Tokens   {ctx.cycle_tokens:,} cycle  |  Session {session_total_k}k "
+        f"(avg {session_avg_k}k/cycle, {proj_count} cycles)\n"
+        f"  {cache_line}\n"
+        f"  Duration {duration:.1f}s  |  Ended {end_ts}\n"
+        f"{sep_bot}"
+    )
+
+
+def format_cycle_output(ctx: CycleRenderContext) -> str:
     """Format a complete cycle's output for terminal/session log display.
 
-    Args:
-        cycle_id: Full 8-char cycle ID (first 4 shown in header).
-        trigger_type: "scheduled", "conditional", or "alert".
-        tool_calls: List of dicts with keys: tool_name, content, outcome, args (optional).
-        agent_output: Final agent text (from result.output).
-        tokens_used: Token count for this cycle.
-        budget_remaining: Remaining daily token budget.
-
-    Returns:
-        Formatted string with Rich markup for terminal display.
+    spec §5.2 algorithm: 时序遍历 ModelResponse 分组，每段 think→act→think→act→decision
+    交织。Forensic / retry-exhausted (messages=None) 短路渲染 Header + Footer + 占位 Decision.
     """
-    lines = []
+    lines = [_render_header(
+        cycle_id=ctx.cycle_id, trigger_type=ctx.trigger_type,
+        trigger_context=ctx.trigger_context, state_snapshot=ctx.state_snapshot,
+        cycle_started_at=ctx.cycle_started_at, stats=ctx.stats,
+    )]
 
-    # Header
-    short_id = cycle_id[:4]
-    lines.append(f"[dim]── Cycle {short_id} ({trigger_type}) {'─' * 30}[/]")
+    # === Forensic / retry-exhausted 短路 ===
+    if ctx.messages is None:
+        if ctx.forensic_reason and ctx.forensic_reason.startswith("aborted"):
+            err_part = ctx.forensic_reason[len("aborted: "):]
+            placeholder = f"[cycle aborted — 3 attempts failed: {err_part}]"
+        else:  # usage_limit_exceeded
+            placeholder = "[no decision — usage limit exceeded; partial messages unavailable]"
+        # 仅一次 escape (spec §5.2 round-7 校准 — 不 pre-escape err_part 避免双 escape
+        # 显示反斜杠 \[red]boom\[/])
+        lines.append(f"\n▾ Decision\n  {escape(placeholder)}")
+        lines.append(_render_footer(ctx))
+        return "\n".join(lines)
 
-    # Tool call summaries
-    for tc in tool_calls:
-        name = tc["tool_name"]
-        content = tc.get("content", "")
-        outcome = tc.get("outcome", "success")
-        args = tc.get("args")
+    # === Build tool_call_id → ToolReturnPart map ===
+    tool_returns_lookup: dict = {}
+    for msg in ctx.messages:
+        if isinstance(msg, ModelRequest):
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart):
+                    tool_returns_lookup[part.tool_call_id] = part
 
-        icon, summary = resolve_tool_display(name, content, outcome, args)
-        lines.append(f"{icon} {name:<22} {summary}")
+    # === ②③ 时序段 ===
+    response_msgs = [m for m in ctx.messages if isinstance(m, ModelResponse)]
 
-    # Agent output
-    lines.append(f"\n[bold cyan]Agent:[/]\n{agent_output}")
+    # spec §4.2.3: 渲染层 thinking 提取 SoT 由 _extract_reasoning_per_response 集中
+    reasoning_per_response = _extract_reasoning_per_response(ctx.messages)
 
-    # Footer
-    lines.append(f"\n[dim]tokens: {tokens_used:,} | budget: {budget_remaining:,} remaining[/]")
-    lines.append(f"[dim]{'─' * 44}[/]")
+    for i, mr in enumerate(response_msgs):
+        thinking = reasoning_per_response[i]
+        tool_calls = [p for p in mr.parts if isinstance(p, ToolCallPart)]
 
+        if thinking:
+            lines.append(_render_reasoning(thinking))
+
+        if tool_calls:
+            lines.append(_render_action(tool_calls, tool_returns_lookup, ctx.cycle_id))
+
+    # === Decision 段 ===
+    # spec §4.4.2: 数据源 = ctx.final_text (= result.output) — 单源真相，
+    # 不从 messages 重新提取 TextPart (避免双源真相 + ctx.final_text 死字段)
+    if ctx.final_text:
+        lines.append(_render_decision(ctx.final_text))
+    elif ctx.final_text == "":
+        lines.append("\n▾ Decision\n  [empty decision text]")
+    else:  # None
+        lines.append("\n▾ Decision\n  [no decision text]")
+
+    lines.append(_render_footer(ctx))
     return "\n".join(lines)
 
 

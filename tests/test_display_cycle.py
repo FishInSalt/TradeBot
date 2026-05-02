@@ -380,73 +380,902 @@ def test_is_tool_error_add_price_level_alert_immediate_trigger():
 
 def test_format_cycle_output_basic():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "get_market_data", "content": "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)", "outcome": "success"},
-        {"tool_name": "get_position", "content": "No open positions.", "outcome": "success"},
-    ]
-    result = format_cycle_output(
-        cycle_id="a3f2e1b4",
-        trigger_type="scheduled",
-        tool_calls=tool_calls,
-        agent_output="Market is quiet, no action taken.",
-        tokens_used=1200,
-        budget_remaining=48800,
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None],
+        tool_call_segments=[[
+            ("get_market_data", {}, "=== Ticker (BTC/USDT:USDT) ===\nPrice: 84200.00 | Bid: 84190.00 | Ask: 84210.00\n\n=== Technical Indicators (15m) ===\nCurrent Price: 84200.00\n\nRSI(14): 62.30\n\n=== Market Context ===\nATR(14): 101.04 (0.12% of price, 15m candles)"),
+            ("get_position", {}, "No open positions."),
+        ]],
+        final_text="Market is quiet, no action taken.",
     )
-    assert "a3f2" in result
-    assert "scheduled" in result
-    assert "get_market_data" in result
-    assert "get_position" in result
-    assert "Agent:" in result
-    assert "Market is quiet" in result
-    assert "1,200" in result
-    assert "48,800" in result
+    out = format_cycle_output(_make_ctx(
+        cycle_id="a3f2e1b4", trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Market is quiet, no action taken.",
+        cycle_tokens=1200,
+    ))
+    assert "a3f2" in out
+    assert "SCHEDULED" in out  # uppercase per spec
+    assert "get_market_data" in out
+    assert "get_position" in out
+    assert "Market is quiet" in out
+    assert "1,200" in out
 
 
 def test_format_cycle_output_with_memory():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "save_memory", "content": "Memory saved [lesson] (importance=0.8): Always wait for confirmation", "outcome": "success", "args": {"category": "lesson", "content": "Always wait for RSI confirmation before entry", "importance": 0.8}},
-    ]
-    result = format_cycle_output(
-        cycle_id="b5c6d7e8",
-        trigger_type="conditional",
-        tool_calls=tool_calls,
-        agent_output="Lesson recorded.",
-        tokens_used=500,
-        budget_remaining=49500,
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None],
+        tool_call_segments=[[
+            ("save_memory",
+             {"category": "lesson", "content": "Always wait for RSI confirmation before entry", "importance": 0.8},
+             "Memory saved [lesson] (importance=0.8): Always wait for confirmation"),
+        ]],
+        final_text="Lesson recorded.",
     )
-    assert "✎" in result
-    assert "[lesson]" in result
-    assert "Always wait for RSI confirmation" in result  # full content from args
+    out = format_cycle_output(_make_ctx(
+        cycle_id="b5c6d7e8", trigger_type="conditional",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Lesson recorded.", cycle_tokens=500,
+    ))
+    assert "✎" in out
+    assert "[lesson]" in out
+    assert "Always wait for RSI confirmation" in out
 
 
 def test_format_cycle_output_with_error():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "open_position", "content": "Trade rejected by human approval.", "outcome": "success"},
-    ]
-    result = format_cycle_output(
-        cycle_id="c7d8e9f0",
-        trigger_type="scheduled",
-        tool_calls=tool_calls,
-        agent_output="Trade was rejected.",
-        tokens_used=800,
-        budget_remaining=49200,
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None],
+        tool_call_segments=[[
+            ("open_position", {}, "Trade rejected by human approval."),
+        ]],
+        final_text="Trade was rejected.",
     )
-    assert "✗" in result
+    out = format_cycle_output(_make_ctx(
+        cycle_id="c7d8e9f0", trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Trade was rejected.", cycle_tokens=800,
+    ))
+    assert "✗" in out
 
 
 def test_format_cycle_output_outcome_failed():
     from src.cli.display import format_cycle_output
-    tool_calls = [
-        {"tool_name": "get_market_data", "content": "Connection error", "outcome": "failed"},
-    ]
-    result = format_cycle_output(
-        cycle_id="d1e2f3a4",
-        trigger_type="scheduled",
-        tool_calls=tool_calls,
-        agent_output="Could not fetch data.",
-        tokens_used=300,
-        budget_remaining=49700,
+    from pydantic_ai.messages import (
+        ModelRequest, ModelResponse, TextPart,
+        ToolCallPart, ToolReturnPart,
     )
-    assert "✗" in result
+    tcp = ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1")
+    msgs = [
+        ModelResponse(parts=[tcp, TextPart(content="Could not fetch data.")]),
+        ModelRequest(parts=[
+            ToolReturnPart(
+                tool_name="get_market_data", tool_call_id="c1",
+                content="Connection error", outcome="failed",
+            ),
+        ]),
+    ]
+    out = format_cycle_output(_make_ctx(
+        cycle_id="d1e2f3a4", trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        messages=msgs, final_text="Could not fetch data.", cycle_tokens=300,
+    ))
+    assert "✗" in out
+
+
+# === R2-8a: Render helper unit tests (T-RH / T-RR / T-RA / T-RD / T-RF) ===
+
+from datetime import datetime, timezone
+
+
+def _make_state_snapshot(position=None, balance=None, errors=None):
+    """Helper: minimal state_snapshot dict matching cycle_capture._capture_state_snapshot output."""
+    return {
+        "position": position,
+        "balance": balance,
+        "market": None,
+        "pending_orders": [],
+        "active_alerts": [],
+        "_errors": errors or [],
+        "_cycle_id": "test-cycle",
+    }
+
+
+# --- T-RH: _render_header ---
+
+
+def test_render_header_full_alert_trigger():
+    """T-RH-1: 完整字段 — ALERT trigger + 持仓 + balance."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    stats = SessionStats()
+    stats.record_cycle(40_000, datetime(2026, 5, 2, 18, 2, 23, tzinfo=timezone.utc))
+    out = _render_header(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={
+            "type": "percentage_alert",
+            "symbol": "BTC/USDT:USDT",
+            "current_price": 75448.0,
+            "reference_price": 76225.0,
+            "change_pct": -1.6,
+            "window_minutes": 10,
+            "timestamp": "2026-05-02T18:14:23Z",
+        },
+        state_snapshot=_make_state_snapshot(
+            position={
+                "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
+                "entry_price": 75350.0, "unrealized_pnl": 75.0,
+                "leverage": 5, "liquidation_price": 0.0, "pnl_pct": 0.10,
+            },
+            balance={"total_usdt": 9990.0, "free_usdt": 9990.0, "used_usdt": 0.0},
+        ),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=stats,
+    )
+    assert "9f57" in out
+    assert "18:14:23 UTC" in out
+    assert "+12 min from prev" in out
+    assert "ALERT" in out
+    assert "vol -1.6%/10min" in out
+    assert "75,448" in out and "76,225" in out
+    assert "Short 0.265 @ $75,350" in out
+    assert "(5x)" in out
+    assert "PnL +0.10%" in out
+    assert "Balance $9,990" in out
+
+
+def test_render_header_first_cycle():
+    """T-RH-2: 首 cycle，stats.last_cycle_ended_at=None → '(first cycle)'."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    assert "(first cycle)" in out
+    assert "+0 min" not in out
+
+
+def test_render_header_trigger_context_none():
+    """T-RH-3: trigger_context=None → 仅 {TYPE_UPPER} 不带详情."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="alert",
+        trigger_context=None,
+        state_snapshot=_make_state_snapshot(),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    assert "ALERT" in out
+    assert "—" not in out.split("Trigger")[1].split("\n")[0]  # 无 em-dash 后缀
+
+
+def test_render_header_scheduled_no_metadata():
+    """spec §4.1.3: scheduled_tick verbatim "Trigger    SCHEDULED" 不带 em-dash 后缀."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    trigger_line = next(l for l in out.splitlines() if "Trigger" in l)
+    assert trigger_line.strip().startswith("Trigger") and "SCHEDULED" in trigger_line
+    assert "—" not in trigger_line
+
+
+def test_render_header_flat_no_position():
+    """§4.1.4: position=None → State 段渲染 'FLAT | Balance $X'."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(
+            balance={"total_usdt": 10000.0, "free_usdt": 10000.0, "used_usdt": 0.0},
+        ),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    state_line = next(l for l in out.splitlines() if "State" in l)
+    assert "FLAT" in state_line
+    assert "Balance $10,000" in state_line
+
+
+# --- T-RR: _render_reasoning ---
+
+
+def test_render_reasoning_under_800():
+    """T-RR-1: thinking < 800 chars → no truncation marker."""
+    from src.cli.display import _render_reasoning
+    text = "Position fine — limit short still pending at 75550."
+    out = _render_reasoning(text)
+    assert "▾ Reasoning" in out
+    assert f"({len(text)} chars total)" in out
+    assert "... [+" not in out
+    assert text in out
+
+
+def test_render_reasoning_at_800_exact():
+    """T-RR-2: thinking == 800 chars → no marker."""
+    from src.cli.display import _render_reasoning
+    text = "x" * 800
+    out = _render_reasoning(text)
+    assert "(800 chars total)" in out
+    assert "... [+" not in out
+
+
+def test_render_reasoning_over_800_truncated():
+    """T-RR-3: thinking > 800 chars → truncate to 800 + '... [+N chars]' marker."""
+    from src.cli.display import _render_reasoning
+    text = "y" * 1547
+    out = _render_reasoning(text)
+    assert "(1547 chars total)" in out
+    assert "... [+747 chars]" in out
+    # body length 800 chars + marker
+    assert out.count("y") == 800
+
+
+def test_render_reasoning_multiline_indent():
+    """T-RR-4: thinking 含 \\n → 每行加 2-space indent."""
+    from src.cli.display import _render_reasoning
+    text = "Line 1.\nLine 2.\nLine 3."
+    out = _render_reasoning(text)
+    body_lines = [l for l in out.splitlines() if l.startswith("  ")]
+    assert any("Line 1." in l for l in body_lines)
+    assert any("Line 2." in l for l in body_lines)
+    assert any("Line 3." in l for l in body_lines)
+
+
+def test_render_reasoning_escape_rich_markup():
+    """spec §4.2.2 P1 escape: thinking content 含 [red] / [bold] 等字面值需 escape，
+    避免 console.print 解析为 markup 渲染错乱."""
+    from src.cli.display import _render_reasoning
+    text = "Discussing [red]error handling[/] in code."
+    out = _render_reasoning(text)
+    # rich.markup.escape 把 '[red]' → '\\[red]'，body 含 escaped form
+    assert r"\[red]" in out
+
+
+# --- T-RA: _render_action ---
+
+
+def test_render_action_multi_tools():
+    """T-RA-1: 3 ToolCallPart → '▾ Action (3 tools)' 复数."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+    calls = [
+        ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1"),
+        ToolCallPart(tool_name="get_position", args={}, tool_call_id="c2"),
+        ToolCallPart(tool_name="get_open_orders", args={}, tool_call_id="c3"),
+    ]
+    returns = {
+        "c1": ToolReturnPart(tool_name="get_market_data", tool_call_id="c1",
+                              content="=== Ticker ===\nPrice: 75212.0"),
+        "c2": ToolReturnPart(tool_name="get_position", tool_call_id="c2",
+                              content="No open positions."),
+        "c3": ToolReturnPart(tool_name="get_open_orders", tool_call_id="c3",
+                              content="No pending orders."),
+    }
+    out = _render_action(calls, returns, cycle_id="9f57abcd")
+    assert "▾ Action (3 tools)" in out
+    assert "get_market_data" in out
+    assert "get_position" in out
+    assert "get_open_orders" in out
+
+
+def test_render_action_single_tool_singular():
+    """T-RA-2: 1 ToolCallPart → '▾ Action (1 tool)' 单数."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+    calls = [ToolCallPart(tool_name="set_next_wake", args={"minutes": 5}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(tool_name="set_next_wake", tool_call_id="c1",
+                              content="Next wake set to 5 min"),
+    }
+    out = _render_action(calls, returns, cycle_id="9f57abcd")
+    assert "▾ Action (1 tool)" in out
+    assert "▾ Action (1 tools)" not in out
+
+
+def test_render_action_missing_return_fallback():
+    """T-TC-4: ret lookup miss → '⚙ {tool_name} [no return captured]' + 不抛."""
+    from pydantic_ai.messages import ToolCallPart
+    from src.cli.display import _render_action
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="orphan")]
+    out = _render_action(calls, returns_lookup={}, cycle_id="9f57abcd")
+    assert "[no return captured]" in out
+    assert "get_market_data" in out
+
+
+# --- T-RD: _render_decision ---
+
+
+def test_render_decision_multiline_markdown_indented():
+    """T-RD-1: 完整 markdown 内嵌，每行 2-space indent."""
+    from src.cli.display import _render_decision
+    text = "## Title\n\n**Bold** text.\n- Item 1\n- Item 2"
+    out = _render_decision(text)
+    assert "▾ Decision" in out
+    body_lines = [l for l in out.splitlines() if l and not l.startswith("▾")]
+    for l in body_lines:
+        assert l.startswith("  "), f"Decision body not indented: {l!r}"
+
+
+def test_render_decision_escape_rich_markup():
+    """spec §4.4.1 attack surface: result.output 含 [red] 字面值 → 强制 escape."""
+    from src.cli.display import _render_decision
+    text = "Result: [red]rejected[/] by approval."
+    out = _render_decision(text)
+    assert r"\[red]" in out
+
+
+# --- T-RF: _render_footer ---
+
+
+def test_render_footer_full_normal_path():
+    """T-RF-1: 正常 cycle footer — 含 cycle_tokens / Session / Cache / Duration / Ended."""
+    from src.cli.display import _render_footer, CycleRenderContext
+    from src.cli.session_state import SessionStats
+    stats = SessionStats()
+    # Pretend 7 cycles already done (avg 47k each)
+    for i in range(7):
+        stats.record_cycle(47_000, datetime(2026, 5, 2, 18, i, 0, tzinfo=timezone.utc))
+    ctx = CycleRenderContext(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        messages=[],
+        final_text="",
+        cycle_tokens=41_947,
+        stats=stats,
+        cache_hit_rate=93.2,
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 2, 18, 14, 27, tzinfo=timezone.utc),
+        forensic_reason=None,
+    )
+    out = _render_footer(ctx)
+    assert "41,947 cycle" in out
+    # Projected total = 7*47000 + 41947 = 370947 → 371k rounded
+    assert "Session 371k" in out
+    # Projected count = 8 cycles
+    assert "8 cycles" in out
+    # Projected avg = 370947 // 8 = 46368 → 46k rounded
+    assert "avg 46k/cycle" in out
+    assert "Cache    93.2% hit rate" in out
+    assert "Duration 4.0s" in out
+    assert "Ended 18:14:27 UTC" in out
+
+
+def test_render_footer_forensic_path():
+    """spec §6.4: forensic → Cache N/A (forensic) + cycle_tokens=0."""
+    from src.cli.display import _render_footer, CycleRenderContext
+    from src.cli.session_state import SessionStats
+    ctx = CycleRenderContext(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        messages=None,
+        final_text=None,
+        cycle_tokens=0,
+        stats=SessionStats(),
+        cache_hit_rate=None,
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 2, 18, 14, 27, tzinfo=timezone.utc),
+        forensic_reason="usage_limit_exceeded",
+    )
+    out = _render_footer(ctx)
+    assert "Cache    N/A (forensic)" in out
+    assert "0 cycle" in out
+
+
+def test_render_footer_aborted_path():
+    """spec §6.5: retry-exhausted → Cache N/A (aborted)."""
+    from src.cli.display import _render_footer, CycleRenderContext
+    from src.cli.session_state import SessionStats
+    ctx = CycleRenderContext(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        messages=None,
+        final_text=None,
+        cycle_tokens=0,
+        stats=SessionStats(),
+        cache_hit_rate=None,
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 2, 18, 14, 30, tzinfo=timezone.utc),
+        forensic_reason="aborted: ConnectionError: timeout",
+    )
+    out = _render_footer(ctx)
+    assert "Cache    N/A (aborted)" in out
+
+
+# === R2-8a: format_cycle_output(ctx) integration tests (T-INT-*) ===
+
+
+from datetime import timedelta
+
+
+def _make_ctx(
+    cycle_id="9f57abcd",
+    trigger_type="alert",
+    trigger_context=None,
+    state_snapshot=None,
+    messages=None,
+    final_text="",
+    cycle_tokens=10_000,
+    stats=None,
+    cache_hit_rate=92.0,
+    cycle_started_at=None,
+    cycle_ended_at=None,
+    forensic_reason=None,
+):
+    from src.cli.display import CycleRenderContext
+    from src.cli.session_state import SessionStats
+    if stats is None:
+        stats = SessionStats()
+    if cycle_started_at is None:
+        cycle_started_at = datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc)
+    if cycle_ended_at is None:
+        cycle_ended_at = cycle_started_at + timedelta(seconds=4)
+    if state_snapshot is None:
+        state_snapshot = _make_state_snapshot()
+    if trigger_context is None:
+        trigger_context = {"type": "scheduled_tick"}
+    return CycleRenderContext(
+        cycle_id=cycle_id, trigger_type=trigger_type,
+        trigger_context=trigger_context, state_snapshot=state_snapshot,
+        messages=messages, final_text=final_text, cycle_tokens=cycle_tokens,
+        stats=stats, cache_hit_rate=cache_hit_rate,
+        cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+        forensic_reason=forensic_reason,
+    )
+
+
+def test_int_1a_section_structure_via_builder():
+    """T-INT-1a: 5 段架构结构断言 — Header / Reasoning / Action / Decision / Footer."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["Initial assessment.", "Need more data.", "Decision time."],
+        tool_call_segments=[
+            [("get_market_data", {}, "=== Ticker (BTC/USDT:USDT) ===\nPrice: 75212.0")],
+            [("get_position", {}, "No open positions.")],
+            [],
+        ],
+        final_text="Hold position. 5min wake.",
+    )
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="Hold position. 5min wake."))
+    # Header
+    assert "Cycle 9f57" in out
+    assert "Trigger" in out and "State" in out
+    # Reasoning + Action 交织 (3 Reasoning, 2 Action segments — final has no tools)
+    assert out.count("▾ Reasoning") == 3
+    assert out.count("▾ Action") == 2
+    # Decision precedes Footer
+    decision_idx = out.find("▾ Decision")
+    footer_idx = out.find("Tokens")
+    assert decision_idx > 0 and footer_idx > decision_idx, "Decision must precede Footer"
+    # Footer
+    assert "Cache" in out and "Duration" in out
+
+
+def test_int_1b_structural_fragments_vs_mockup():
+    """T-INT-1b: Structural fragments check against spec §3.2 mockup (illustrative —
+    not byte-equal verbatim per spec §3.2 注 'illustrative, non-byte-equal copy')."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["Z" * 892, "X" * 1247, "Y" * 1567, "W" * 445],
+        tool_call_segments=[
+            [("get_market_data", {}, "BTC $75,212"),
+             ("get_position", {}, "Short 0.265 @ $75,350"),
+             ("get_open_orders", {}, "1 orders")],
+            [("get_derivatives_data", {}, "Funding ..."),
+             ("get_recent_trades", {}, "Recent ..."),
+             ("get_higher_timeframe_view", {}, "HTF ..."),
+             ("get_multi_timeframe_snapshot", {}, "MTF ...")],
+            [("get_market_news", {}, "FGI Value: 26"),
+             ("get_price_pivots", {}, "Pivots ..."),
+             ("get_macro_context", {}, "BTC.D 58.00%")],
+            [("add_price_level_alert", {}, "Price level alert set: below 74,890"),
+             ("add_price_level_alert", {}, "Price level alert set: above 75,625"),
+             ("set_next_wake", {}, "Next wake set to 10 min")],
+        ],
+        final_text="## Situation Assessment: BTC Flash Crash\n\n**What happened**: BTC dropped ~1.6% in 10 minutes",
+    )
+    out = format_cycle_output(_make_ctx(
+        messages=msgs,
+        final_text="## Situation Assessment: BTC Flash Crash\n\n**What happened**: BTC dropped ~1.6% in 10 minutes",
+        cycle_tokens=41_947,
+    ))
+    assert "Cycle 9f57" in out
+    assert "(892 chars total)" in out
+    assert "(1247 chars total)" in out
+    assert "▾ Action (3 tools)" in out
+    assert "▾ Action (4 tools)" in out
+    assert "Situation Assessment" in out
+    assert "41,947 cycle" in out
+
+
+def test_int_2_non_thinking_model():
+    """T-INT-2: 非 thinking model → 跳过 ▾ Reasoning，▾ Action 紧接 Header."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=[None, None],
+        tool_call_segments=[[("get_position", {}, "FLAT")], []],
+        final_text="No action.",
+    )
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="No action."))
+    assert "▾ Reasoning" not in out, "non-thinking model 不应渲染 Reasoning 段"
+    assert "▾ Action" in out
+    assert "▾ Decision" in out
+
+
+def test_int_3_zero_tool_call_cycle():
+    """T-INT-3: 0 tool call cycle → 仅 Reasoning + Decision，无 ▾ Action."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["Direct decision, no info needed."],
+        tool_call_segments=[[]],
+        final_text="Hold.",
+    )
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="Hold."))
+    assert "▾ Reasoning" in out
+    assert "▾ Action" not in out
+    assert "▾ Decision" in out
+
+
+def test_int_4_forensic_usage_limit_exceeded():
+    """T-INT-4: forensic 路径 → Header + Footer + 占位 Decision，Cache N/A (forensic)."""
+    from src.cli.display import format_cycle_output
+    out = format_cycle_output(_make_ctx(
+        messages=None, final_text=None, cycle_tokens=0,
+        cache_hit_rate=None, forensic_reason="usage_limit_exceeded",
+    ))
+    assert "▾ Reasoning" not in out, "forensic 不渲染 partial Reasoning"
+    assert "▾ Action" not in out, "forensic 不渲染 partial Action"
+    assert "[no decision — usage limit exceeded; partial messages unavailable]" in out
+    assert "Cache    N/A (forensic)" in out
+
+
+def test_int_5_retry_exhausted_path():
+    """T-INT-5: retry-exhausted → 占位 Decision + Cache N/A (aborted)."""
+    from src.cli.display import format_cycle_output
+    out = format_cycle_output(_make_ctx(
+        messages=None, final_text=None, cycle_tokens=0,
+        cache_hit_rate=None,
+        forensic_reason="aborted: ConnectionError: timeout",
+    ))
+    assert "[cycle aborted — 3 attempts failed: ConnectionError: timeout]" in out
+    assert "Cache    N/A (aborted)" in out
+
+
+def test_int_5b_retry_exhausted_with_markup_in_error():
+    """T-INT-5b: retry-exhausted error message 含 markup 字面值 → 仅一次 escape，
+    终端显示自然字面值无反斜杠 (spec §5.2 round-7 校准)."""
+    from src.cli.display import format_cycle_output
+    out = format_cycle_output(_make_ctx(
+        messages=None, final_text=None, cycle_tokens=0,
+        cache_hit_rate=None,
+        forensic_reason="aborted: RuntimeError: [red]boom[/]",
+    ))
+    assert "RuntimeError" in out
+    assert "boom" in out
+    assert r"\\[red]" not in out  # double-escape signature
+
+
+def test_int_6_session_stats_累计_with_forensic():
+    """T-INT-6: 5 cycles 累加（含 1 forensic）→ footer Session 累计 / forensic 也计 cycle_count."""
+    from src.cli.display import format_cycle_output
+    from src.cli.session_state import SessionStats
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    stats = SessionStats()
+    base = datetime(2026, 5, 2, 18, 0, 0, tzinfo=timezone.utc)
+    stats.record_cycle(40_000, base)
+    stats.record_cycle(40_000, base + timedelta(minutes=5))
+    stats.record_cycle(0, base + timedelta(minutes=10))
+    stats.record_cycle(40_000, base + timedelta(minutes=15))
+    msgs = build_cycle_messages(
+        thinking_segments=["Decision."], tool_call_segments=[[]], final_text="OK.",
+    )
+    out = format_cycle_output(_make_ctx(
+        messages=msgs, final_text="OK.", cycle_tokens=40_000, stats=stats,
+        cycle_started_at=base + timedelta(minutes=20),
+        cycle_ended_at=base + timedelta(minutes=20, seconds=4),
+    ))
+    assert "Session 160k" in out
+    assert "5 cycles" in out
+    assert "avg 32k/cycle" in out
+
+
+def test_int_7_cache_hit_rate_normal_branch():
+    """T-INT-7: cache_hit_rate=92.0 → footer 'Cache    92.0% hit rate'."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="d", cache_hit_rate=92.0))
+    assert "Cache    92.0% hit rate" in out
+
+
+def test_int_8_session_stats_no_cross_day_reset():
+    """T-INT-8 / AC13: 跨日 last_cycle_ended_at 不重置 → Header 显示 +X min from prev."""
+    from src.cli.display import format_cycle_output
+    from src.cli.session_state import SessionStats
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    stats = SessionStats()
+    stats.record_cycle(40_000, datetime(2026, 5, 2, 23, 55, 0, tzinfo=timezone.utc))
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    out = format_cycle_output(_make_ctx(
+        messages=msgs, final_text="d", stats=stats,
+        cycle_started_at=datetime(2026, 5, 3, 3, 55, 0, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 3, 3, 55, 4, tzinfo=timezone.utc),
+    ))
+    assert "+240 min from prev" in out
+    assert "(first cycle)" not in out
+
+
+def test_int_9_first_cycle_short_label():
+    """AC10 / T-RH-2 集成版：首 cycle Header '(first cycle)' 不带 +X min from prev."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="d"))
+    assert "(first cycle)" in out
+
+
+def test_int_11_decision_uses_ctx_final_text_not_textpart():
+    """T-INT-11 (P1 reviewer 补): Decision 段 SoT = ctx.final_text，不依赖 messages 中
+    TextPart 提取 (spec §4.4.2)."""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart
+    from src.cli.display import format_cycle_output
+    msgs = [ModelResponse(parts=[ThinkingPart(content="thought.")])]
+    out = format_cycle_output(_make_ctx(
+        messages=msgs, final_text="Synthesized decision from ctx.",
+    ))
+    assert "▾ Decision" in out
+    assert "Synthesized decision from ctx." in out
+
+
+def test_int_12_decision_empty_string_placeholder():
+    """spec §4.4.3: ctx.final_text == "" → [empty decision text] 占位."""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="")
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text=""))
+    assert "[empty decision text]" in out
+
+
+def test_int_10_unknown_trigger_type_fallback(caplog):
+    """T-INT-10 / T-EH-2 (renumbered): trigger_context.type 未知 → fallback {TYPE_UPPER} 不带详情."""
+    import logging
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
+    with caplog.at_level(logging.WARNING):
+        out = format_cycle_output(_make_ctx(
+            messages=msgs, final_text="d", trigger_type="alert",
+            trigger_context={"type": "unknown_future_type"},
+        ))
+    trigger_line = next(l for l in out.splitlines() if "Trigger" in l)
+    assert "ALERT" in trigger_line
+    assert "—" not in trigger_line
+    assert any("trigger_context.type unknown" in r.message for r in caplog.records)
+
+
+# === R2-8a: Drift guards (T-DG-1/2/3) ===
+
+
+def test_dg_1_extract_helpers_equivalent_at_smoke_baseline():
+    """T-DG-1: smoke baseline 下 _extract_thinking_text(messages) 等价于
+    "\\n\\n".join(_extract_reasoning_per_response 中非 None 项)."""
+    from src.cli.app import _extract_thinking_text
+    from src.cli.display import _extract_reasoning_per_response
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["alpha", "beta", "gamma"],
+        tool_call_segments=[[("get_market_data", {}, "x")], [], []],
+        final_text="done",
+    )
+    full_text = _extract_thinking_text(msgs)
+    per_resp = _extract_reasoning_per_response(msgs)
+    rejoined = "\n\n".join(t for t in per_resp if t)
+    assert full_text == rejoined, (
+        f"helper drift detected:\n  _extract_thinking_text => {full_text!r}\n"
+        f"  rejoin per-resp        => {rejoined!r}"
+    )
+
+
+def test_dg_2_thinking_part_precedes_toolcall_in_smoke_baseline():
+    """T-DG-2: smoke baseline 下 ThinkingPart 在 ToolCallPart 之前 (parts[0])."""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart, ToolCallPart
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["a", "b"],
+        tool_call_segments=[[("get_market_data", {}, "x")], []],
+        final_text="d",
+    )
+    for mr in [m for m in msgs if isinstance(m, ModelResponse)]:
+        kinds = [type(p).__name__ for p in mr.parts]
+        if "ThinkingPart" in kinds and "ToolCallPart" in kinds:
+            assert kinds.index("ThinkingPart") < kinds.index("ToolCallPart"), (
+                f"ThinkingPart 应先于 ToolCallPart: {kinds}"
+            )
+
+
+async def test_dg_3_state_snapshot_field_set_unchanged():
+    """T-DG-3: state_snapshot 7 字段集合 = R2-7 contract.
+    新增字段触发本测试 fail，提示 R2-8a 是否需消费."""
+    expected = {
+        "position", "balance", "market", "pending_orders",
+        "active_alerts", "_errors", "_cycle_id",
+    }
+    from unittest.mock import AsyncMock, MagicMock
+    from src.integrations.exchange.base import Balance, Ticker
+    from src.services.cycle_capture import _capture_state_snapshot
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=100.0, free_usdt=100.0, used_usdt=0.0,
+    ))
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=100.0, bid=99.0, ask=101.0,
+        high=110.0, low=90.0, base_volume=1.0, timestamp=0,
+    ))
+    snapshot = await _capture_state_snapshot("test-cycle", deps)
+    assert set(snapshot.keys()) == expected, (
+        f"state_snapshot 字段集合漂移: actual={set(snapshot.keys())} expected={expected}\n"
+        "  新增字段 → 检查 R2-8a 是否需消费 (header / footer / 段渲染)；\n"
+        "  字段移除 → 检查 R2-8a 渲染 fallback 是否需更新。"
+    )
+
+
+# === R2-8a: Edge case 细化 ===
+
+
+def test_eh_1_trigger_context_none_renders_bare_type():
+    """T-EH-1: trigger_context=None → Header 'Trigger    {TYPE_UPPER}' 不带详情."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("alert", None)
+    assert out == "ALERT"
+    out = _format_trigger_detail("conditional", None)
+    assert out == "CONDITIONAL"
+
+
+def test_eh_3_conditional_fill_missing_price_partial_degrade():
+    """T-EH-3 (spec §6.1): conditional fill 缺 fill_price → 部分降级保留 trigger_reason."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {
+        "type": "fill", "trigger_reason": "TP_FILL",
+    })
+    assert out == "CONDITIONAL — TP_FILL", (
+        f"spec §6.1 T-EH-3 要求保留 trigger_reason 部分降级；实际 {out!r}"
+    )
+
+
+def test_eh_3b_conditional_fill_no_trigger_reason_full_fallback():
+    """T-EH-3b: conditional fill 连 trigger_reason 都缺 → 全 fallback 到 {TYPE_UPPER}."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {"type": "fill"})
+    assert out == "CONDITIONAL"
+
+
+def test_es_1_state_snapshot_none_unavailable():
+    """T-ES-1: state_snapshot=None → State 段 [snapshot unavailable]."""
+    from src.cli.display import _format_state_line
+    assert _format_state_line(None) == "[snapshot unavailable]"
+
+
+def test_es_2_position_none_renders_flat():
+    """T-ES-2: position=None → 'FLAT'."""
+    from src.cli.display import _format_state_line
+    out = _format_state_line(_make_state_snapshot(
+        balance={"total_usdt": 10000.0, "free_usdt": 10000.0, "used_usdt": 0.0},
+    ))
+    assert "FLAT" in out
+    assert "Balance $10,000" in out
+
+
+def test_es_3_balance_none_omits_balance_segment():
+    """T-ES-3: balance=None → 省略 Balance 字段."""
+    from src.cli.display import _format_state_line
+    out = _format_state_line(_make_state_snapshot(
+        position={
+            "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
+            "entry_price": 75350.0, "leverage": 5, "unrealized_pnl": 75.0,
+            "liquidation_price": 0.0, "pnl_pct": 0.10,
+        },
+    ))
+    assert "Short 0.265" in out
+    assert "Balance" not in out
+
+
+def test_es_5_position_pnl_pct_none_omits_pnl_segment():
+    """T-ES-5: pnl_pct=None (notional 0 / 计算失败) → 省略 PnL 字段."""
+    from src.cli.display import _format_state_line
+    out = _format_state_line(_make_state_snapshot(
+        position={
+            "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
+            "entry_price": 75350.0, "leverage": 5, "unrealized_pnl": 0.0,
+            "liquidation_price": 0.0, "pnl_pct": None,
+        },
+        balance={"total_usdt": 10000.0, "free_usdt": 10000.0, "used_usdt": 0.0},
+    ))
+    assert "Short 0.265" in out
+    assert "PnL" not in out
+
+
+def test_re_2_thinking_empty_string_skipped():
+    """T-RE-2: ThinkingPart content == "" → Reasoning 段省略."""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart, TextPart
+    from src.cli.display import format_cycle_output
+    msgs = [ModelResponse(parts=[ThinkingPart(content=""), TextPart(content="d")])]
+    out = format_cycle_output(_make_ctx(messages=msgs, final_text="d"))
+    assert "▾ Reasoning" not in out, "空 ThinkingPart 不应渲染 Reasoning 段"
+
+
+def test_eh_3c_conditional_open_fill_pnl_none_keeps_full_context():
+    """T-EH-3c (review 2nd round Important): 开仓 fill (trigger_reason=market, pnl=None) →
+    前段 symbol/side/amount/fill_price 必保留，仅 PnL 段省略。
+
+    spec §6.1 T-EH-3 部分降级原意是缺 fill_price 等字段时保留 trigger_reason；
+    但 FillEvent.pnl 在开仓时**正常即 None**（不是缺字段），不应触发 fallback
+    丢掉 symbol/side/amount 全部上下文。"""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {
+        "type": "fill", "trigger_reason": "market",
+        "symbol": "BTC/USDT:USDT", "side": "buy", "position_side": "long",
+        "amount": 0.265, "fill_price": 75350.0,
+        "fee": 5.0, "pnl": None,  # 开仓 fill: 已实现盈亏 None
+        "order_id": "abc123", "timestamp": 0, "is_full_close": False,
+    })
+    # 前段必保留 — symbol / side / amount / fill_price
+    assert "long" in out
+    assert "BTC" in out
+    assert "0.265" in out
+    assert "$75,350" in out
+    assert "market" in out  # trigger_reason
+    # PnL 段省略 (pnl=None)
+    assert "PnL" not in out, f"开仓 fill 不应渲染 PnL 段；实际 {out!r}"
+
+
+def test_eh_3d_conditional_close_fill_with_pnl_renders_pnl_segment():
+    """T-EH-3d: 平仓 fill (pnl 非 None) → 完整渲染含 PnL 段."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {
+        "type": "fill", "trigger_reason": "TP_FILL",
+        "symbol": "BTC/USDT:USDT", "side": "sell", "position_side": "long",
+        "amount": 0.265, "fill_price": 78000.0,
+        "fee": 5.0, "pnl": 700.50,
+        "order_id": "abc456", "timestamp": 0, "is_full_close": True,
+    })
+    assert "TP_FILL" in out
+    assert "long" in out
+    assert "$78,000" in out
+    assert "PnL +700.50 USDT" in out

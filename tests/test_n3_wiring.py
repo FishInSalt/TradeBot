@@ -89,7 +89,7 @@ async def test_build_services_all_n3_enabled():
 
     settings = _make_settings(True, True, True)
     result = _make_result()
-    exchange, deps, agent, budget = build_services(
+    exchange, deps, agent, budget, _stats = build_services(
         result, MagicMock(), "sid", MagicMock(), settings,
     )
     try:
@@ -108,7 +108,7 @@ async def test_build_services_macro_disabled():
     from src.cli.app import build_services
 
     settings = _make_settings(macro_enabled=False)
-    exchange, deps, agent, budget = build_services(
+    exchange, deps, agent, budget, _stats = build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     try:
@@ -125,7 +125,7 @@ async def test_build_services_all_n3_disabled():
     from src.cli.app import build_services
 
     settings = _make_settings(False, False, False)
-    exchange, deps, agent, budget = build_services(
+    exchange, deps, agent, budget, _stats = build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     assert deps.macro is None
@@ -138,7 +138,7 @@ async def test_build_services_crypto_etf_disabled_leaves_others_on():
 
     settings = _make_settings(macro_enabled=True, etf_enabled=False,
                               onchain_enabled=True)
-    exchange, deps, agent, budget = build_services(
+    exchange, deps, agent, budget, _stats = build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     try:
@@ -155,7 +155,7 @@ async def test_build_services_onchain_disabled_leaves_others_on():
 
     settings = _make_settings(macro_enabled=True, etf_enabled=True,
                               onchain_enabled=False)
-    exchange, deps, agent, budget = build_services(
+    exchange, deps, agent, budget, _stats = build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     try:

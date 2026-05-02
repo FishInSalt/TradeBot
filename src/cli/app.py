@@ -25,6 +25,7 @@ from src.cli.display import (
     is_tool_error, resolve_tool_display,
 )
 from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging
+from src.cli.session_state import SessionStats
 from src.config import ExchangeConfig, Settings, load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
@@ -97,6 +98,22 @@ class TokenBudget:
         return self._used >= self._daily_max
 
 
+class _DummySessionStats(SessionStats):
+    """No-op SessionStats subclass for tests that pass run_agent_cycle without stats kwarg.
+
+    Inherits SessionStats so type annotations `stats: SessionStats` are LSP-compatible
+    (no mypy/pyright strict warning). __init__ inherits → properties return 0/None defaults.
+    Override only record_cycle to no-op (no per-cycle stat mutation).
+
+    Module-level singleton (`_DUMMY_STATS`) — avoid per-cycle instantiation overhead.
+    """
+    def record_cycle(self, cycle_tokens: int, cycle_ended_at: datetime) -> None:  # noqa: ARG002
+        pass  # no-op — discard inputs
+
+
+_DUMMY_STATS = _DummySessionStats()
+
+
 async def _record_action_from_fill(engine, session_id, event: FillEvent):
     """将 FillEvent 记录为 TradeAction。"""
     async with get_session(engine) as session:
@@ -124,11 +141,15 @@ async def run_agent_cycle(
     context=None,
     model=None,
     console=None,
+    stats: SessionStats | None = None,
 ):
+    if stats is None:
+        stats = _DUMMY_STATS
     if budget.exhausted:
         logger.warning("Daily LLM token budget exhausted, skipping cycle")
         return None
 
+    cycle_started_at = datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())[:8]
     deps.cycle_id = cycle_id   # propagate to ToolCallRecorder via ctx.deps (§3.4 of spec)
 
@@ -206,6 +227,21 @@ async def run_agent_cycle(
                     tokens_consumed=0,                            # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
                 ))
                 await session.commit()
+            # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
+            # Footer Duration 字段语义统一为 "实墙时间含 DB 写入"
+            cycle_ended_at = datetime.now(timezone.utc)
+            if console is not None:
+                from src.cli.display import CycleRenderContext
+                ctx = CycleRenderContext(
+                    cycle_id=cycle_id, trigger_type=trigger_type,
+                    trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
+                    messages=None, final_text=None,
+                    cycle_tokens=0, stats=stats, cache_hit_rate=None,
+                    cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+                    forensic_reason="usage_limit_exceeded",
+                )
+                console.print(format_cycle_output(ctx))
+            stats.record_cycle(0, cycle_ended_at)
             return None
         except Exception as e:
             if attempt < 2:
@@ -213,7 +249,41 @@ async def run_agent_cycle(
                 logger.warning(f"LLM call attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
                 await asyncio.sleep(delay)
             else:
+                # spec §6.5 D16: retry-exhausted forensic write + session log render — 避免 W2 SQL 黑洞
                 logger.error(f"LLM call failed after 3 attempts: {e}")
+                err_class = type(e).__name__
+                # spec §6.5 T-EX-2: > 200 chars 截断 + 省略号
+                err_raw = str(e)
+                err_msg = (err_raw[:200] + "...") if len(err_raw) > 200 else err_raw
+                async with get_session(engine) as session:
+                    session.add(AgentCycle(
+                        session_id=deps.session_id,
+                        cycle_id=cycle_id,
+                        triggered_by=trigger_type,
+                        trigger_context=json.dumps(trigger_context_var) if trigger_context_var else None,
+                        state_snapshot=json.dumps(state_snapshot_var),
+                        reasoning=None,
+                        decision=None,
+                        execution_status="retry_exhausted",
+                        model_id=model_id_var,
+                        tokens_consumed=0,
+                    ))
+                    await session.commit()
+                # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
+                # 时序对齐：Footer Duration 字段语义统一为 "实墙时间含 DB 写入"
+                cycle_ended_at = datetime.now(timezone.utc)
+                if console is not None:
+                    from src.cli.display import CycleRenderContext
+                    ctx = CycleRenderContext(
+                        cycle_id=cycle_id, trigger_type=trigger_type,
+                        trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
+                        messages=None, final_text=None,
+                        cycle_tokens=0, stats=stats, cache_hit_rate=None,
+                        cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+                        forensic_reason=f"aborted: {err_class}: {err_msg}",
+                    )
+                    console.print(format_cycle_output(ctx))
+                stats.record_cycle(0, cycle_ended_at)
                 return None
 
     usage = result.usage()
@@ -236,10 +306,10 @@ async def run_agent_cycle(
     )
     budget.record(tokens)
 
-    # === A2: Extract tool calls from message history ===
-    tool_calls = []
+    # === A2: System log per-tool INFO/DEBUG ===
+    # (R2-8a: 不再累积 tool_calls list 给 display 用 — ctx 直接消费 messages；
+    # _call_args_by_id 仅 lifetime 内 args lookup, 写完 logger 即弃)
     _call_args_by_id: dict[str, dict | None] = {}
-
     for msg in result.new_messages():
         if isinstance(msg, ModelResponse):
             for part in msg.parts:
@@ -259,14 +329,6 @@ async def run_agent_cycle(
                             f"tool_call_id mismatch for {part.tool_name}, using fallback"
                         )
                     args = _call_args_by_id.get(part.tool_call_id)
-                    tool_calls.append({
-                        "tool_name": part.tool_name,
-                        "content": content_str,
-                        "outcome": outcome,
-                        "args": args,
-                    })
-
-                    # System log: INFO summary, DEBUG full content
                     icon, summary = resolve_tool_display(
                         part.tool_name, content_str, outcome, args,
                     )
@@ -297,17 +359,20 @@ async def run_agent_cycle(
 
     logger.info(f"Cycle {cycle_id}: {tokens} tokens ({budget.remaining} remaining)")
 
-    # === A2: Display formatted cycle output ===
+    # === R2-8a: Build CycleRenderContext + render + record stats ===
+    cycle_ended_at = datetime.now(timezone.utc)
     if console is not None:
-        output = format_cycle_output(
-            cycle_id=cycle_id,
-            trigger_type=trigger_type,
-            tool_calls=tool_calls,
-            agent_output=result.output,
-            tokens_used=tokens,
-            budget_remaining=budget.remaining,
+        from src.cli.display import CycleRenderContext
+        ctx = CycleRenderContext(
+            cycle_id=cycle_id, trigger_type=trigger_type,
+            trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
+            messages=result.new_messages(), final_text=result.output,
+            cycle_tokens=tokens, stats=stats, cache_hit_rate=hit_rate,
+            cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
+            forensic_reason=None,
         )
-        console.print(output)
+        console.print(format_cycle_output(ctx))
+    stats.record_cycle(tokens, cycle_ended_at)
 
     return result
 
@@ -463,7 +528,8 @@ def build_services(
     else:
         sc.print("Alerts: OFF")
 
-    return exchange, deps, agent, budget
+    stats = SessionStats()
+    return exchange, deps, agent, budget, stats
 
 
 async def run(
@@ -512,7 +578,7 @@ async def run(
     sc = setup_session_logging(session_id, log_dir)
 
     # ── Phase 5: Build services ──
-    exchange, deps, agent, budget = build_services(
+    exchange, deps, agent, budget, stats = build_services(
         result, engine, session_id, sc, settings,
     )
 
@@ -533,7 +599,7 @@ async def run(
         try:
             await run_agent_cycle(
                 agent, deps, trigger_type, budget, engine,
-                context, model=result.model, console=sc,
+                context, model=result.model, console=sc, stats=stats,
             )
         except Exception:
             logger.exception("Agent cycle failed")

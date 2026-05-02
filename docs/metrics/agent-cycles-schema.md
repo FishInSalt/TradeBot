@@ -14,7 +14,7 @@
 | trigger_context | TEXT NULL | JSON: trigger 瞬间客观快照 (FillEvent / PriceLevelAlertInfo / AlertInfo metadata) |
 | state_snapshot | TEXT NULL | JSON: 决策时系统层面客观快照 (position / balance / market / pending_orders / active_alerts + _errors) |
 | decision | TEXT NULL | agent 最终对外文本 (`result.output` message)；NULL for forensic path |
-| execution_status | VARCHAR(30) DEFAULT 'ok' | ok / usage_limit_exceeded |
+| execution_status | VARCHAR(30) DEFAULT 'ok' | ok / usage_limit_exceeded / retry_exhausted |
 | reasoning | TEXT NULL | agent thinking content (LLM ThinkingPart 拼接)；NULL if non-thinking model 或 forensic |
 | model_id | VARCHAR(100) NULL | LLM 模型 id |
 | tokens_consumed | INTEGER DEFAULT 0 | LLM token 计数 (cycle 总, forensic 路径 = 0) |
