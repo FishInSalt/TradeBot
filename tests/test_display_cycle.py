@@ -450,3 +450,344 @@ def test_format_cycle_output_outcome_failed():
         budget_remaining=49700,
     )
     assert "✗" in result
+
+
+# === R2-8a: Render helper unit tests (T-RH / T-RR / T-RA / T-RD / T-RF) ===
+
+from datetime import datetime, timezone
+
+
+def _make_state_snapshot(position=None, balance=None, errors=None):
+    """Helper: minimal state_snapshot dict matching cycle_capture._capture_state_snapshot output."""
+    return {
+        "position": position,
+        "balance": balance,
+        "market": None,
+        "pending_orders": [],
+        "active_alerts": [],
+        "_errors": errors or [],
+        "_cycle_id": "test-cycle",
+    }
+
+
+# --- T-RH: _render_header ---
+
+
+def test_render_header_full_alert_trigger():
+    """T-RH-1: 完整字段 — ALERT trigger + 持仓 + balance."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    stats = SessionStats()
+    stats.record_cycle(40_000, datetime(2026, 5, 2, 18, 2, 23, tzinfo=timezone.utc))
+    out = _render_header(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={
+            "type": "percentage_alert",
+            "symbol": "BTC/USDT:USDT",
+            "current_price": 75448.0,
+            "reference_price": 76225.0,
+            "change_pct": -1.6,
+            "window_minutes": 10,
+            "timestamp": "2026-05-02T18:14:23Z",
+        },
+        state_snapshot=_make_state_snapshot(
+            position={
+                "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
+                "entry_price": 75350.0, "unrealized_pnl": 75.0,
+                "leverage": 5, "liquidation_price": 0.0, "pnl_pct": 0.10,
+            },
+            balance={"total_usdt": 9990.0, "free_usdt": 9990.0, "used_usdt": 0.0},
+        ),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=stats,
+    )
+    assert "9f57" in out
+    assert "18:14:23 UTC" in out
+    assert "+12 min from prev" in out
+    assert "ALERT" in out
+    assert "vol -1.6%/10min" in out
+    assert "75,448" in out and "76,225" in out
+    assert "Short 0.265 @ $75,350" in out
+    assert "(5x)" in out
+    assert "PnL +0.10%" in out
+    assert "Balance $9,990" in out
+
+
+def test_render_header_first_cycle():
+    """T-RH-2: 首 cycle，stats.last_cycle_ended_at=None → '(first cycle)'."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    assert "(first cycle)" in out
+    assert "+0 min" not in out
+
+
+def test_render_header_trigger_context_none():
+    """T-RH-3: trigger_context=None → 仅 {TYPE_UPPER} 不带详情."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="alert",
+        trigger_context=None,
+        state_snapshot=_make_state_snapshot(),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    assert "ALERT" in out
+    assert "—" not in out.split("Trigger")[1].split("\n")[0]  # 无 em-dash 后缀
+
+
+def test_render_header_scheduled_no_metadata():
+    """spec §4.1.3: scheduled_tick verbatim "Trigger    SCHEDULED" 不带 em-dash 后缀."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    trigger_line = next(l for l in out.splitlines() if "Trigger" in l)
+    assert trigger_line.strip().startswith("Trigger") and "SCHEDULED" in trigger_line
+    assert "—" not in trigger_line
+
+
+def test_render_header_flat_no_position():
+    """§4.1.4: position=None → State 段渲染 'FLAT | Balance $X'."""
+    from src.cli.display import _render_header
+    from src.cli.session_state import SessionStats
+    out = _render_header(
+        cycle_id="aabbccdd",
+        trigger_type="scheduled",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(
+            balance={"total_usdt": 10000.0, "free_usdt": 10000.0, "used_usdt": 0.0},
+        ),
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        stats=SessionStats(),
+    )
+    state_line = next(l for l in out.splitlines() if "State" in l)
+    assert "FLAT" in state_line
+    assert "Balance $10,000" in state_line
+
+
+# --- T-RR: _render_reasoning ---
+
+
+def test_render_reasoning_under_800():
+    """T-RR-1: thinking < 800 chars → no truncation marker."""
+    from src.cli.display import _render_reasoning
+    text = "Position fine — limit short still pending at 75550."
+    out = _render_reasoning(text)
+    assert "▾ Reasoning" in out
+    assert f"({len(text)} chars total)" in out
+    assert "... [+" not in out
+    assert text in out
+
+
+def test_render_reasoning_at_800_exact():
+    """T-RR-2: thinking == 800 chars → no marker."""
+    from src.cli.display import _render_reasoning
+    text = "x" * 800
+    out = _render_reasoning(text)
+    assert "(800 chars total)" in out
+    assert "... [+" not in out
+
+
+def test_render_reasoning_over_800_truncated():
+    """T-RR-3: thinking > 800 chars → truncate to 800 + '... [+N chars]' marker."""
+    from src.cli.display import _render_reasoning
+    text = "y" * 1547
+    out = _render_reasoning(text)
+    assert "(1547 chars total)" in out
+    assert "... [+747 chars]" in out
+    # body length 800 chars + marker
+    assert out.count("y") == 800
+
+
+def test_render_reasoning_multiline_indent():
+    """T-RR-4: thinking 含 \\n → 每行加 2-space indent."""
+    from src.cli.display import _render_reasoning
+    text = "Line 1.\nLine 2.\nLine 3."
+    out = _render_reasoning(text)
+    body_lines = [l for l in out.splitlines() if l.startswith("  ")]
+    assert any("Line 1." in l for l in body_lines)
+    assert any("Line 2." in l for l in body_lines)
+    assert any("Line 3." in l for l in body_lines)
+
+
+def test_render_reasoning_escape_rich_markup():
+    """spec §4.2.2 P1 escape: thinking content 含 [red] / [bold] 等字面值需 escape，
+    避免 console.print 解析为 markup 渲染错乱."""
+    from src.cli.display import _render_reasoning
+    text = "Discussing [red]error handling[/] in code."
+    out = _render_reasoning(text)
+    # rich.markup.escape 把 '[red]' → '\\[red]'，body 含 escaped form
+    assert r"\[red]" in out
+
+
+# --- T-RA: _render_action ---
+
+
+def test_render_action_multi_tools():
+    """T-RA-1: 3 ToolCallPart → '▾ Action (3 tools)' 复数."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+    calls = [
+        ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1"),
+        ToolCallPart(tool_name="get_position", args={}, tool_call_id="c2"),
+        ToolCallPart(tool_name="get_open_orders", args={}, tool_call_id="c3"),
+    ]
+    returns = {
+        "c1": ToolReturnPart(tool_name="get_market_data", tool_call_id="c1",
+                              content="=== Ticker ===\nPrice: 75212.0"),
+        "c2": ToolReturnPart(tool_name="get_position", tool_call_id="c2",
+                              content="No open positions."),
+        "c3": ToolReturnPart(tool_name="get_open_orders", tool_call_id="c3",
+                              content="No pending orders."),
+    }
+    out = _render_action(calls, returns, cycle_id="9f57abcd")
+    assert "▾ Action (3 tools)" in out
+    assert "get_market_data" in out
+    assert "get_position" in out
+    assert "get_open_orders" in out
+
+
+def test_render_action_single_tool_singular():
+    """T-RA-2: 1 ToolCallPart → '▾ Action (1 tool)' 单数."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+    calls = [ToolCallPart(tool_name="set_next_wake", args={"minutes": 5}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(tool_name="set_next_wake", tool_call_id="c1",
+                              content="Next wake set to 5 min"),
+    }
+    out = _render_action(calls, returns, cycle_id="9f57abcd")
+    assert "▾ Action (1 tool)" in out
+    assert "▾ Action (1 tools)" not in out
+
+
+def test_render_action_missing_return_fallback():
+    """T-TC-4: ret lookup miss → '⚙ {tool_name} [no return captured]' + 不抛."""
+    from pydantic_ai.messages import ToolCallPart
+    from src.cli.display import _render_action
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="orphan")]
+    out = _render_action(calls, returns_lookup={}, cycle_id="9f57abcd")
+    assert "[no return captured]" in out
+    assert "get_market_data" in out
+
+
+# --- T-RD: _render_decision ---
+
+
+def test_render_decision_multiline_markdown_indented():
+    """T-RD-1: 完整 markdown 内嵌，每行 2-space indent."""
+    from src.cli.display import _render_decision
+    text = "## Title\n\n**Bold** text.\n- Item 1\n- Item 2"
+    out = _render_decision(text)
+    assert "▾ Decision" in out
+    body_lines = [l for l in out.splitlines() if l and not l.startswith("▾")]
+    for l in body_lines:
+        assert l.startswith("  "), f"Decision body not indented: {l!r}"
+
+
+def test_render_decision_escape_rich_markup():
+    """spec §4.4.1 attack surface: result.output 含 [red] 字面值 → 强制 escape."""
+    from src.cli.display import _render_decision
+    text = "Result: [red]rejected[/] by approval."
+    out = _render_decision(text)
+    assert r"\[red]" in out
+
+
+# --- T-RF: _render_footer ---
+
+
+def test_render_footer_full_normal_path():
+    """T-RF-1: 正常 cycle footer — 含 cycle_tokens / Session / Cache / Duration / Ended."""
+    from src.cli.display import _render_footer, CycleRenderContext
+    from src.cli.session_state import SessionStats
+    stats = SessionStats()
+    # Pretend 7 cycles already done (avg 47k each)
+    for i in range(7):
+        stats.record_cycle(47_000, datetime(2026, 5, 2, 18, i, 0, tzinfo=timezone.utc))
+    ctx = CycleRenderContext(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        messages=[],
+        final_text="",
+        cycle_tokens=41_947,
+        stats=stats,
+        cache_hit_rate=93.2,
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 2, 18, 14, 27, tzinfo=timezone.utc),
+        forensic_reason=None,
+    )
+    out = _render_footer(ctx)
+    assert "41,947 cycle" in out
+    # Projected total = 7*47000 + 41947 = 370947 → 371k rounded
+    assert "Session 371k" in out
+    # Projected count = 8 cycles
+    assert "8 cycles" in out
+    # Projected avg = 370947 // 8 = 46368 → 46k rounded
+    assert "avg 46k/cycle" in out
+    assert "Cache    93.2% hit rate" in out
+    assert "Duration 4.0s" in out
+    assert "Ended 18:14:27 UTC" in out
+
+
+def test_render_footer_forensic_path():
+    """spec §6.4: forensic → Cache N/A (forensic) + cycle_tokens=0."""
+    from src.cli.display import _render_footer, CycleRenderContext
+    from src.cli.session_state import SessionStats
+    ctx = CycleRenderContext(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        messages=None,
+        final_text=None,
+        cycle_tokens=0,
+        stats=SessionStats(),
+        cache_hit_rate=None,
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 2, 18, 14, 27, tzinfo=timezone.utc),
+        forensic_reason="usage_limit_exceeded",
+    )
+    out = _render_footer(ctx)
+    assert "Cache    N/A (forensic)" in out
+    assert "0 cycle" in out
+
+
+def test_render_footer_aborted_path():
+    """spec §6.5: retry-exhausted → Cache N/A (aborted)."""
+    from src.cli.display import _render_footer, CycleRenderContext
+    from src.cli.session_state import SessionStats
+    ctx = CycleRenderContext(
+        cycle_id="9f57abcd",
+        trigger_type="alert",
+        trigger_context={"type": "scheduled_tick"},
+        state_snapshot=_make_state_snapshot(),
+        messages=None,
+        final_text=None,
+        cycle_tokens=0,
+        stats=SessionStats(),
+        cache_hit_rate=None,
+        cycle_started_at=datetime(2026, 5, 2, 18, 14, 23, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 5, 2, 18, 14, 30, tzinfo=timezone.utc),
+        forensic_reason="aborted: ConnectionError: timeout",
+    )
+    out = _render_footer(ctx)
+    assert "Cache    N/A (aborted)" in out
