@@ -1238,3 +1238,44 @@ def test_re_2_thinking_empty_string_skipped():
     msgs = [ModelResponse(parts=[ThinkingPart(content=""), TextPart(content="d")])]
     out = format_cycle_output(_make_ctx(messages=msgs, final_text="d"))
     assert "▾ Reasoning" not in out, "空 ThinkingPart 不应渲染 Reasoning 段"
+
+
+def test_eh_3c_conditional_open_fill_pnl_none_keeps_full_context():
+    """T-EH-3c (review 2nd round Important): 开仓 fill (trigger_reason=market, pnl=None) →
+    前段 symbol/side/amount/fill_price 必保留，仅 PnL 段省略。
+
+    spec §6.1 T-EH-3 部分降级原意是缺 fill_price 等字段时保留 trigger_reason；
+    但 FillEvent.pnl 在开仓时**正常即 None**（不是缺字段），不应触发 fallback
+    丢掉 symbol/side/amount 全部上下文。"""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {
+        "type": "fill", "trigger_reason": "market",
+        "symbol": "BTC/USDT:USDT", "side": "buy", "position_side": "long",
+        "amount": 0.265, "fill_price": 75350.0,
+        "fee": 5.0, "pnl": None,  # 开仓 fill: 已实现盈亏 None
+        "order_id": "abc123", "timestamp": 0, "is_full_close": False,
+    })
+    # 前段必保留 — symbol / side / amount / fill_price
+    assert "long" in out
+    assert "BTC" in out
+    assert "0.265" in out
+    assert "$75,350" in out
+    assert "market" in out  # trigger_reason
+    # PnL 段省略 (pnl=None)
+    assert "PnL" not in out, f"开仓 fill 不应渲染 PnL 段；实际 {out!r}"
+
+
+def test_eh_3d_conditional_close_fill_with_pnl_renders_pnl_segment():
+    """T-EH-3d: 平仓 fill (pnl 非 None) → 完整渲染含 PnL 段."""
+    from src.cli.display import _format_trigger_detail
+    out = _format_trigger_detail("conditional", {
+        "type": "fill", "trigger_reason": "TP_FILL",
+        "symbol": "BTC/USDT:USDT", "side": "sell", "position_side": "long",
+        "amount": 0.265, "fill_price": 78000.0,
+        "fee": 5.0, "pnl": 700.50,
+        "order_id": "abc456", "timestamp": 0, "is_full_close": True,
+    })
+    assert "TP_FILL" in out
+    assert "long" in out
+    assert "$78,000" in out
+    assert "PnL +700.50 USDT" in out

@@ -428,15 +428,22 @@ def _format_trigger_detail(trigger_type: str, ctx: dict | None) -> str:
         tr = ctx.get("trigger_reason")
         if tr is None:
             return type_upper  # 连 trigger_reason 都缺 → 全 fallback
+        # FillEvent.pnl 开仓时正常即 None — PnL 段独立 try，不让 None 拖垮前段渲染
         try:
             symbol_short = (ctx.get("symbol") or "").split("/")[0]
-            return (
+            front = (
                 f"{type_upper} — {tr} {ctx['position_side']} "
-                f"{symbol_short} {ctx['amount']} @ ${ctx['fill_price']:,.0f}, "
-                f"PnL {ctx['pnl']:+.2f} USDT"
+                f"{symbol_short} {ctx['amount']} @ ${ctx['fill_price']:,.0f}"
             )
         except (KeyError, TypeError):
             return f"{type_upper} — {tr}"  # spec §6.1 T-EH-3: 部分降级保留 trigger_reason
+        pnl = ctx.get("pnl")
+        if pnl is not None:
+            try:
+                return f"{front}, PnL {pnl:+.2f} USDT"
+            except (TypeError, ValueError):
+                pass  # pnl 字段类型异常 → 回落到无 PnL 段
+        return front
 
     if ctx_type == "price_level_alert":
         try:
