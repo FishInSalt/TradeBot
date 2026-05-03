@@ -1754,6 +1754,76 @@ def test_snapshot_get_price_pivots_unavailable():
     _assert_perception_render("get_price_pivots", content, expected)
 
 
+def test_snapshot_get_price_pivots_with_swing_status_section():
+    """Snapshot — get_price_pivots conditional Swing Status section per spec §4.2.4."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== Levels Above Current Price ===\n"
+        "Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "=== Levels Below Current Price ===\n"
+        "Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "=== Swing Status ===\n"
+        "(No swing pivots in 100-bar window)"
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === Levels Above Current Price ===\n"
+        "    Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "    === Levels Below Current Price ===\n"
+        "    Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "    === Swing Status ===\n"
+        "    (No swing pivots in 100-bar window)"
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
+def test_snapshot_get_price_pivots_with_prior_period_section():
+    """Snapshot — get_price_pivots conditional Prior Period H/L section per spec §4.2.4."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== Levels Above Current Price ===\n"
+        "Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "=== Levels Below Current Price ===\n"
+        "Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "=== Prior Period H/L ===\n"
+        "Prior Weekly H/L: temporarily unavailable\n"
+        "Prior Monthly H/L: temporarily unavailable"
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === Levels Above Current Price ===\n"
+        "    Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "    Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "    === Levels Below Current Price ===\n"
+        "    Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "    Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "    === Prior Period H/L ===\n"
+        "    Prior Weekly H/L: temporarily unavailable\n"
+        "    Prior Monthly H/L: temporarily unavailable"
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
 def test_snapshot_get_recent_trades_happy_path():
     """Snapshot — get_recent_trades single-section bucket+total layout."""
     content = (
@@ -2187,6 +2257,41 @@ def test_snapshot_get_macro_context_happy_3_sections():
         "    === US Equities (Alpha Vantage) ===\n"
         "    SPY: $710.14 (+0.32%, as of 2026-04-30)\n"
         "    QQQ: $648.85 (+0.55%, as of 2026-04-30)"
+    )
+    _assert_perception_render("get_macro_context", content, expected)
+
+
+def test_snapshot_get_macro_context_partial_l3_fallback():
+    """Snapshot — get_macro_context partial L3 (FRED ok, Crypto + Equities unavailable).
+
+    Per spec §4.1.4 L3: per-source partial failure renders inline `Temporarily
+    unavailable.` short-description in the affected section without `Error:` prefix
+    (L2 error prefix reserved for whole-tool fallback).
+    """
+    content = (
+        "=== Crypto Market ===\n"
+        "Temporarily unavailable.\n"
+        "\n"
+        "=== US Macro (FRED) ===\n"
+        "USD Index (Broad TW): 105.20 (as of 2026-04-30)\n"
+        "VIX: 16.50 (as of 2026-05-02)\n"
+        "10Y Treasury: 4.25% (as of 2026-05-02)\n"
+        "\n"
+        "=== US Equities (Alpha Vantage) ===\n"
+        "Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_macro_context\n"
+        "    === Crypto Market ===\n"
+        "    Temporarily unavailable.\n"
+        "\n"
+        "    === US Macro (FRED) ===\n"
+        "    USD Index (Broad TW): 105.20 (as of 2026-04-30)\n"
+        "    VIX: 16.50 (as of 2026-05-02)\n"
+        "    10Y Treasury: 4.25% (as of 2026-05-02)\n"
+        "\n"
+        "    === US Equities (Alpha Vantage) ===\n"
+        "    Temporarily unavailable."
     )
     _assert_perception_render("get_macro_context", content, expected)
 
@@ -2833,6 +2938,11 @@ PATH_B_TOOLS = [
     "get_recent_trades", "get_order_book", "get_derivatives_data",
     "get_account_balance", "get_open_orders",
 ]
+# Note: get_market_news is NOT in PATH_B_TOOLS — its happy-path multi-source
+# (FGI + Symbol/General News) requires more elaborate mocking than other tools.
+# Coverage: inline snapshot tests (test_snapshot_get_market_news_*) cover happy
+# + L2 + L3 + dense-clip; PATH_A test (service=None / news=None early return)
+# covers the L2 fallback path.
 
 
 @pytest.mark.parametrize("tool_name", PATH_B_TOOLS)
@@ -2896,6 +3006,8 @@ _CRITICAL_FIELDS_PATH_B: dict[str, list[str]] = {
                                   "MA50", "MA100", "MA200"],
     "get_multi_timeframe_snapshot": ["Multi-TF Snapshot", "Current price",
                                      "Momentum", "Structure", "Volatility"],
+    # get_price_pivots: Swing Status / Prior Period H/L are conditional sections —
+    # tested via dedicated snapshots, not Path B happy-fixture lint.
     "get_price_pivots": ["Price Pivots", "Current Price",
                          "Levels Above Current Price",
                          "Levels Below Current Price"],

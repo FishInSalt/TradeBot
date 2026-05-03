@@ -1716,9 +1716,10 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     ]
     if swing_status:
         sections.append("")
+        sections.append("=== Swing Status ===")
         sections.append(swing_status)
     if prior_footer:
-        if not swing_status:
-            sections.append("")
+        sections.append("")
+        sections.append("=== Prior Period H/L ===")
         sections.extend(prior_footer)
     return "\n".join(sections)

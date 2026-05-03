@@ -413,7 +413,8 @@ async def test_pivots_main_tf_empty_with_prior_exceptions():
 @pytest.mark.asyncio
 async def test_pivots_full_main_tf_one_prior_failure_spacing():
     """100 bar main TF + 2 priors ok + 1 prior fails → swing_status None,
-    spacing branch in §4.4 ('if prior_footer and not swing_status:' inserts blank line) verified."""
+    Prior Period H/L conditional section header (spec §4.2.4) precedes the
+    failing-prior footer rows with a blank line separator."""
     deps = _PivotsDeps()
     deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
     main_df = _df_n_bars(100, with_pivots=True)
@@ -433,11 +434,16 @@ async def test_pivots_full_main_tf_one_prior_failure_spacing():
     # Daily + Monthly priors in above/below
     assert "Prior Daily H" in out
     assert "Prior Monthly H" in out
-    # Only weekly in footer
+    # Only weekly in footer (under === Prior Period H/L === conditional section)
+    assert "=== Prior Period H/L ===" in out
     assert "Prior Weekly H/L: temporarily unavailable" in out
     assert "Prior Daily H/L: temporarily unavailable" not in out
-    # Spacing: blank line precedes the weekly footer (footer not glued to below rows)
+    # Spacing: blank line precedes the === Prior Period H/L === header,
+    # header immediately precedes the weekly footer row (per spec §4.2.4).
     lines = out.split("\n")
+    header_idx = next(i for i, l in enumerate(lines) if l == "=== Prior Period H/L ===")
+    assert lines[header_idx - 1] == "", \
+        f"Expected blank line before Prior Period H/L header, got {lines[header_idx - 1]!r}"
     weekly_idx = next(i for i, l in enumerate(lines) if "Prior Weekly H/L: temporarily unavailable" in l)
-    assert lines[weekly_idx - 1] == "", \
-        f"Expected blank line before weekly footer, got {lines[weekly_idx - 1]!r}"
+    assert weekly_idx == header_idx + 1, \
+        f"Expected weekly footer immediately after header, got gap of {weekly_idx - header_idx} lines"
