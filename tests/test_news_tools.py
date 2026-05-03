@@ -380,7 +380,9 @@ async def test_derivatives_data_partial_failure():
 
     assert "Open Interest" in result
     assert "$1.00B" in result
-    assert "unavailable" in result.lower()  # degradation messages
+    # R2-8c §4.2.10: per-field L3 fallback emits "(unavailable)" inline.
+    assert "Funding Rate: (unavailable)" in result
+    assert "Long/Short Ratio: (unavailable)" in result
 
 
 async def test_derivatives_data_custom_symbol():

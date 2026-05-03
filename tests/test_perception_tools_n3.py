@@ -81,8 +81,8 @@ async def test_htf_view_format_1d():
 
     result = await get_higher_timeframe_view(deps, timeframe="1d")
 
-    assert "Higher Timeframe View (1d" in result
-    assert "BTC/USDT:USDT" in result
+    # R2-8c §4.1.1 param order: (symbol, timeframe).
+    assert "Higher Timeframe View (BTC/USDT:USDT, 1d)" in result
     assert "MA50:" in result
     assert "MA100:" in result
     assert "MA200:" in result
@@ -166,9 +166,11 @@ async def test_htf_view_upstream_failure_degrades():
     deps = _make_deps(market_data=market_data)
     result = await get_higher_timeframe_view(deps, timeframe="1d")
 
-    assert "temporarily unavailable" in result.lower()
-    # Context prefix added for clarity (spec §3.3)
-    assert "(1d, BTC/USDT:USDT)" in result
+    # R2-8c §4.2.2 sectioned form: `=== Higher Timeframe View ({symbol}, {timeframe}) ===`
+    # + `=== Error ===` + body line.
+    assert "=== Higher Timeframe View (BTC/USDT:USDT, 1d) ===" in result
+    assert "=== Error ===" in result
+    assert "Temporarily unavailable" in result
 
 
 async def test_htf_view_insufficient_data_for_ma200():
@@ -199,9 +201,11 @@ async def test_htf_empty_dataframe_returns_insufficient_data():
     deps = _make_deps(market_data=market_data)
     result = await get_higher_timeframe_view(deps, timeframe="1d")
 
-    assert "insufficient data" in result.lower()
-    assert "temporarily unavailable" not in result.lower()
-    assert "(1d, BTC/USDT:USDT)" in result
+    # R2-8c §4.2.2 sectioned form for insufficient-data degradation.
+    assert "=== Higher Timeframe View (BTC/USDT:USDT, 1d) ===" in result
+    assert "=== Error ===" in result
+    assert "Insufficient data" in result
+    assert "Temporarily unavailable" not in result
 
 
 async def test_htf_ma_format_includes_vs_ma_prefix():

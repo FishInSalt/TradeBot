@@ -148,21 +148,27 @@ async def test_recent_trades_typical():
 
 @pytest.mark.asyncio
 async def test_recent_trades_empty_cold_market():
-    """No trades in window → no trades message."""
+    """No trades in window → no trades message (L3 empty-state, single section)."""
     from src.agent.tools_perception import get_recent_trades
     deps = MockDeps()
     deps.market_data.get_recent_trades.return_value = []
     result = await get_recent_trades(deps, window_seconds=300)
-    assert "no trades in last 300s" in result
+    # R2-8c §4.2.9: single-section empty-state (NOT === Error ===).
+    assert "=== Recent Trades (BTC/USDT:USDT, last 300s) ===" in result
+    assert "No trades in last 300s." in result
+    assert "=== Error ===" not in result
 
 
 @pytest.mark.asyncio
 async def test_recent_trades_service_failure():
+    """Service failure → === Error === section (R2-8c §4.2.9)."""
     from src.agent.tools_perception import get_recent_trades
     deps = MockDeps()
     deps.market_data.get_recent_trades.side_effect = Exception("timeout")
     result = await get_recent_trades(deps)
-    assert "temporarily unavailable" in result
+    assert "=== Recent Trades (BTC/USDT:USDT) ===" in result
+    assert "=== Error ===" in result
+    assert "Temporarily unavailable." in result
 
 
 @pytest.mark.asyncio
@@ -316,7 +322,7 @@ async def test_multi_tf_snapshot_custom_tfs(mocker):
 
 @pytest.mark.asyncio
 async def test_multi_tf_snapshot_all_fail(mocker):
-    """All TFs raise → overall unavailable."""
+    """All TFs raise → overall unavailable (sectioned per R2-8c §4.2.3)."""
     from src.agent.tools_perception import get_multi_timeframe_snapshot
     deps = MockDeps()
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("down"))
@@ -325,7 +331,9 @@ async def test_multi_tf_snapshot_all_fail(mocker):
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
     result = await get_multi_timeframe_snapshot(deps)
-    assert "temporarily unavailable" in result
+    assert "=== Multi-TF Snapshot (BTC/USDT:USDT) ===" in result
+    assert "=== Error ===" in result
+    assert "Temporarily unavailable" in result
 
 
 @pytest.mark.asyncio

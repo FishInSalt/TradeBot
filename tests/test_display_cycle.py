@@ -1546,3 +1546,333 @@ def test_int_3_thinking_2500_chars_truncated_to_2000():
     out = _render_reasoning(text)
     assert "[+500 chars]" in out
     assert "2500 chars total" in out
+
+
+# === R2-8c per-tool snapshot fixtures ===
+
+# Snapshot helper — invoke _render_perception_tool with raw tool content fixture
+# and verify output matches expected. Inline fixtures (spec §5.2 plan决议).
+
+
+def _assert_perception_render(tool_name: str, content: str, expected: str):
+    """Helper: run _render_perception_tool and assert output equals expected."""
+    from src.cli.display import _render_perception_tool
+    actual = _render_perception_tool(tool_name, content)
+    assert actual == expected, (
+        f"Render mismatch for {tool_name}:\n"
+        f"--- expected ---\n{expected}\n"
+        f"--- actual ---\n{actual}"
+    )
+
+
+# --- Batch A: tier-1 high-frequency snapshots ---
+
+
+def test_snapshot_get_market_data_happy_path():
+    """Snapshot — get_market_data 4-section happy path render."""
+    content = (
+        "=== Ticker (BTC/USDT:USDT) ===\n"
+        "Price: 75212.00 | Bid: 75200.00 | Ask: 75215.00\n"
+        "24h High: 76225.00 | Low: 74893.00 | Volume: 8200.00\n"
+        "\n"
+        "=== Technical Indicators (5m) ===\n"
+        "RSI(14): 33.55\n"
+        "MACD: -131 (sig -98, hist -33)\n"
+        "\n"
+        "=== Market Context ===\n"
+        "ATR(14): 218.50 (0.29% of price, 5m candles)\n"
+        "\n"
+        "=== Recent Candles (5m, last 3) ===\n"
+        "Time         Open       High        Low      Close        Vol\n"
+        "14:00     75250.00  75300.00  75180.00  75220.00     320.5\n"
+        "14:05     75180.00  75220.00  75150.00  75212.00     310.2"
+    )
+    expected = (
+        "  ⚙ get_market_data\n"
+        "    === Ticker (BTC/USDT:USDT) ===\n"
+        "    Price: 75212.00 | Bid: 75200.00 | Ask: 75215.00\n"
+        "    24h High: 76225.00 | Low: 74893.00 | Volume: 8200.00\n"
+        "\n"
+        "    === Technical Indicators (5m) ===\n"
+        "    RSI(14): 33.55\n"
+        "    MACD: -131 (sig -98, hist -33)\n"
+        "\n"
+        "    === Market Context ===\n"
+        "    ATR(14): 218.50 (0.29% of price, 5m candles)\n"
+        "\n"
+        "    === Recent Candles (5m, last 3) ===\n"
+        "    Time         Open       High        Low      Close        Vol\n"
+        "    14:00     75250.00  75300.00  75180.00  75220.00     320.5\n"
+        "    14:05     75180.00  75220.00  75150.00  75212.00     310.2"
+    )
+    _assert_perception_render("get_market_data", content, expected)
+
+
+def test_snapshot_get_higher_timeframe_view_happy_path():
+    """Snapshot — get_higher_timeframe_view 4-section happy path (incl. 20-period Band header)."""
+    content = (
+        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== MA Distances ===\n"
+        "MA50: 73,200.00 (price vs MA: +2.7%)\n"
+        "MA100: 71,500.00 (price vs MA: +5.2%)\n"
+        "MA200: 68,800.00 (price vs MA: +9.3%)\n"
+        "\n"
+        "=== Range Position ===\n"
+        "100-period High: 78,500.00 (12 4h-bars ago)\n"
+        "100-period Low:  68,200.00 (45 4h-bars ago)\n"
+        "Current price within range: 68.1%\n"
+        "\n"
+        "=== 20-period Band ===\n"
+        "20-period High: 76,800.00\n"
+        "20-period Low:  74,100.00\n"
+        "20-period range width: 3.6%"
+    )
+    expected = (
+        "  ⚙ get_higher_timeframe_view\n"
+        "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === MA Distances ===\n"
+        "    MA50: 73,200.00 (price vs MA: +2.7%)\n"
+        "    MA100: 71,500.00 (price vs MA: +5.2%)\n"
+        "    MA200: 68,800.00 (price vs MA: +9.3%)\n"
+        "\n"
+        "    === Range Position ===\n"
+        "    100-period High: 78,500.00 (12 4h-bars ago)\n"
+        "    100-period Low:  68,200.00 (45 4h-bars ago)\n"
+        "    Current price within range: 68.1%\n"
+        "\n"
+        "    === 20-period Band ===\n"
+        "    20-period High: 76,800.00\n"
+        "    20-period Low:  74,100.00\n"
+        "    20-period range width: 3.6%"
+    )
+    _assert_perception_render("get_higher_timeframe_view", content, expected)
+
+
+def test_snapshot_get_higher_timeframe_view_unavailable():
+    """Snapshot — get_higher_timeframe_view L2 sectioned Error fallback."""
+    content = (
+        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "=== Error ===\n"
+        "Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_higher_timeframe_view\n"
+        "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "\n"
+        "    === Error ===\n"
+        "    Temporarily unavailable."
+    )
+    _assert_perception_render("get_higher_timeframe_view", content, expected)
+
+
+def test_snapshot_get_multi_timeframe_snapshot_happy_path():
+    """Snapshot — get_multi_timeframe_snapshot single-section flat row layout."""
+    content = (
+        "=== Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "Current price: 75212.00\n"
+        "Columns: Momentum (price vs primary MA) | Structure (MA alignment) | "
+        "Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, "
+        "0%=low / 100%=high)\n"
+        "\n"
+        "5m:  +0.5% vs MA20    | MA20 above MA50                          | "
+        "ATR 0.29%   | range pos 60%\n"
+        "1h:  +1.2% vs MA50    | MA50 above MA200                         | "
+        "ATR 0.78%   | range pos 72%"
+    )
+    expected = (
+        "  ⚙ get_multi_timeframe_snapshot\n"
+        "    === Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "    Current price: 75212.00\n"
+        "    Columns: Momentum (price vs primary MA) | Structure (MA alignment) | "
+        "Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, "
+        "0%=low / 100%=high)\n"
+        "\n"
+        "    5m:  +0.5% vs MA20    | MA20 above MA50                          | "
+        "ATR 0.29%   | range pos 60%\n"
+        "    1h:  +1.2% vs MA50    | MA50 above MA200                         | "
+        "ATR 0.78%   | range pos 72%"
+    )
+    _assert_perception_render("get_multi_timeframe_snapshot", content, expected)
+
+
+def test_snapshot_get_multi_timeframe_snapshot_unavailable():
+    """Snapshot — get_multi_timeframe_snapshot L2 sectioned Error fallback."""
+    content = (
+        "=== Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "=== Error ===\n"
+        "Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_multi_timeframe_snapshot\n"
+        "    === Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "\n"
+        "    === Error ===\n"
+        "    Temporarily unavailable."
+    )
+    _assert_perception_render("get_multi_timeframe_snapshot", content, expected)
+
+
+def test_snapshot_get_price_pivots_happy_path():
+    """Snapshot — get_price_pivots 3-section happy path render."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== Levels Above Current Price ===\n"
+        "Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "=== Levels Below Current Price ===\n"
+        "Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "Prior Daily L: 74,200.00 (-1.35%)"
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === Levels Above Current Price ===\n"
+        "    Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "    Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "    === Levels Below Current Price ===\n"
+        "    Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "    Prior Daily L: 74,200.00 (-1.35%)"
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
+def test_snapshot_get_price_pivots_unavailable():
+    """Snapshot — get_price_pivots L2 sectioned Error fallback (ticker fail)."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "=== Error ===\n"
+        "Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "\n"
+        "    === Error ===\n"
+        "    Temporarily unavailable."
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
+def test_snapshot_get_recent_trades_happy_path():
+    """Snapshot — get_recent_trades single-section bucket+total layout."""
+    content = (
+        "=== Recent Trades (BTC/USDT:USDT, last 300s, 5 × 60s buckets) ===\n"
+        "  t-5min  buy 1.2300 / sell 0.4500  (net +0.7800)\n"
+        "  t-4min  buy 0.8000 / sell 1.1000  (net -0.3000)\n"
+        "  t-3min  buy 0.5500 / sell 0.6500  (net -0.1000)\n"
+        "  t-2min  buy 0.7800 / sell 0.7900  (net -0.0100)\n"
+        "  t-1min  buy 1.4500 / sell 0.6200  (net +0.8300)\n"
+        "Total: buy 4.8100 / sell 3.6100 (net +1.2000, 57% taker buy)\n"
+        "Trade count: 100 | Avg size: 0.0842 BTC"
+    )
+    # Body has 7 rows (< 10 clip threshold) → keep all rows verbatim.
+    expected = (
+        "  ⚙ get_recent_trades\n"
+        "    === Recent Trades (BTC/USDT:USDT, last 300s, 5 × 60s buckets) ===\n"
+        "      t-5min  buy 1.2300 / sell 0.4500  (net +0.7800)\n"
+        "      t-4min  buy 0.8000 / sell 1.1000  (net -0.3000)\n"
+        "      t-3min  buy 0.5500 / sell 0.6500  (net -0.1000)\n"
+        "      t-2min  buy 0.7800 / sell 0.7900  (net -0.0100)\n"
+        "      t-1min  buy 1.4500 / sell 0.6200  (net +0.8300)\n"
+        "    Total: buy 4.8100 / sell 3.6100 (net +1.2000, 57% taker buy)\n"
+        "    Trade count: 100 | Avg size: 0.0842 BTC"
+    )
+    _assert_perception_render("get_recent_trades", content, expected)
+
+
+def test_snapshot_get_recent_trades_no_trades():
+    """Snapshot — get_recent_trades L3 empty-state (single-section, NO === Error ===)."""
+    content = (
+        "=== Recent Trades (BTC/USDT:USDT, last 300s) ===\n"
+        "No trades in last 300s."
+    )
+    expected = (
+        "  ⚙ get_recent_trades\n"
+        "    === Recent Trades (BTC/USDT:USDT, last 300s) ===\n"
+        "    No trades in last 300s."
+    )
+    _assert_perception_render("get_recent_trades", content, expected)
+
+
+def test_snapshot_get_recent_trades_unavailable():
+    """Snapshot — get_recent_trades L2 sectioned Error fallback (service exception)."""
+    content = (
+        "=== Recent Trades (BTC/USDT:USDT) ===\n"
+        "=== Error ===\n"
+        "Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_recent_trades\n"
+        "    === Recent Trades (BTC/USDT:USDT) ===\n"
+        "\n"
+        "    === Error ===\n"
+        "    Temporarily unavailable."
+    )
+    _assert_perception_render("get_recent_trades", content, expected)
+
+
+def test_snapshot_get_derivatives_data_happy_path():
+    """Snapshot — get_derivatives_data single-section happy path (per §4.2.10)."""
+    content = (
+        "=== Derivatives Data (BTC/USDT:USDT) ===\n"
+        "Funding Rate: +0.0125% (next settlement in 3h 42m)\n"
+        "  Positive rate — longs pay shorts\n"
+        "Open Interest: $4.82B\n"
+        "Long/Short Ratio: 1.35 (57.4% long / 42.6% short)\n"
+        "Data as of: 2026-04-16 14:30 UTC"
+    )
+    expected = (
+        "  ⚙ get_derivatives_data\n"
+        "    === Derivatives Data (BTC/USDT:USDT) ===\n"
+        "    Funding Rate: +0.0125% (next settlement in 3h 42m)\n"
+        "      Positive rate — longs pay shorts\n"
+        "    Open Interest: $4.82B\n"
+        "    Long/Short Ratio: 1.35 (57.4% long / 42.6% short)\n"
+        "    Data as of: 2026-04-16 14:30 UTC"
+    )
+    _assert_perception_render("get_derivatives_data", content, expected)
+
+
+def test_snapshot_get_derivatives_data_partial_failure():
+    """Snapshot — get_derivatives_data per-field L3 fallback (1 ok, 2 fail)."""
+    content = (
+        "=== Derivatives Data (BTC/USDT:USDT) ===\n"
+        "Funding Rate: (unavailable)\n"
+        "Open Interest: $1.00B\n"
+        "Long/Short Ratio: (unavailable)"
+    )
+    expected = (
+        "  ⚙ get_derivatives_data\n"
+        "    === Derivatives Data (BTC/USDT:USDT) ===\n"
+        "    Funding Rate: (unavailable)\n"
+        "    Open Interest: $1.00B\n"
+        "    Long/Short Ratio: (unavailable)"
+    )
+    _assert_perception_render("get_derivatives_data", content, expected)
+
+
+def test_snapshot_get_derivatives_data_all_failed():
+    """Snapshot — get_derivatives_data L2 all-3-failed sectioned Error fallback."""
+    content = (
+        "=== Derivatives Data (BTC/USDT:USDT) ===\n"
+        "=== Error ===\n"
+        "Temporarily unavailable (all 3 data sources failed)."
+    )
+    expected = (
+        "  ⚙ get_derivatives_data\n"
+        "    === Derivatives Data (BTC/USDT:USDT) ===\n"
+        "\n"
+        "    === Error ===\n"
+        "    Temporarily unavailable (all 3 data sources failed)."
+    )
+    _assert_perception_render("get_derivatives_data", content, expected)

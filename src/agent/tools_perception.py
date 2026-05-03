@@ -704,8 +704,7 @@ async def get_derivatives_data(
     from datetime import datetime, timezone
 
     symbol = symbol or deps.symbol
-    sections = [f"=== Derivatives Data ({symbol}) ==="]
-    errors: list[str] = []
+    field_lines: list[str] = []
     timestamps_ms: list[int] = []
 
     # Fetch all three concurrently — each has independent cache + upstream.
@@ -717,9 +716,21 @@ async def get_derivatives_data(
         return_exceptions=True,
     )
 
-    # Funding rate
+    # All-3-failed L2: emit single Error section.
+    if (
+        isinstance(funding, Exception)
+        and isinstance(oi, Exception)
+        and isinstance(lsr, Exception)
+    ):
+        return (
+            f"=== Derivatives Data ({symbol}) ===\n"
+            f"=== Error ===\n"
+            f"Temporarily unavailable (all 3 data sources failed)."
+        )
+
+    # Funding rate (per-field L3 fallback for partial failure)
     if isinstance(funding, Exception):
-        errors.append("Funding rate temporarily unavailable")
+        field_lines.append("Funding Rate: (unavailable)")
     else:
         direction = "longs pay shorts" if funding.rate >= 0 else "shorts pay longs"
         sign = "Positive rate" if funding.rate >= 0 else "Negative rate"
@@ -727,16 +738,16 @@ async def get_derivatives_data(
         remaining_ms = max(0, funding.next_funding_time - now_ms)
         hours = remaining_ms // (3600 * 1000)
         minutes = (remaining_ms % (3600 * 1000)) // (60 * 1000)
-        sections.append(
-            f"Funding Rate: {funding.rate:+.4%} (next settlement in {hours}h {minutes}m)\n"
-            f"  {sign} — {direction}"
+        field_lines.append(
+            f"Funding Rate: {funding.rate:+.4%} (next settlement in {hours}h {minutes}m)"
         )
+        field_lines.append(f"  {sign} — {direction}")
         if funding.timestamp:
             timestamps_ms.append(funding.timestamp)
 
     # Open interest
     if isinstance(oi, Exception):
-        errors.append("Open interest temporarily unavailable")
+        field_lines.append("Open Interest: (unavailable)")
     else:
         if oi.open_interest_value >= 1e9:
             oi_str = f"${oi.open_interest_value / 1e9:.2f}B"
@@ -744,22 +755,20 @@ async def get_derivatives_data(
             oi_str = f"${oi.open_interest_value / 1e6:.2f}M"
         else:
             oi_str = f"${oi.open_interest_value:,.0f}"
-        sections.append(f"Open Interest: {oi_str}")
+        field_lines.append(f"Open Interest: {oi_str}")
         if oi.timestamp:
             timestamps_ms.append(oi.timestamp)
 
     # Long/short ratio
     if isinstance(lsr, Exception):
-        errors.append("Long/short ratio temporarily unavailable")
+        field_lines.append("Long/Short Ratio: (unavailable)")
     else:
-        sections.append(
+        field_lines.append(
             f"Long/Short Ratio: {lsr.long_short_ratio:.2f} "
             f"({lsr.long_ratio:.1%} long / {lsr.short_ratio:.1%} short)"
         )
         if lsr.timestamp:
             timestamps_ms.append(lsr.timestamp)
-
-    sections.extend(errors)
 
     # Show the oldest upstream timestamp across the 3 fetches — this is the
     # lower bound of data age (i.e. "at least one slice is this old"), giving
@@ -767,9 +776,9 @@ async def get_derivatives_data(
     # age, not whether TTLCache served an extended stale-fallback entry.
     if timestamps_ms:
         oldest_dt = datetime.fromtimestamp(min(timestamps_ms) / 1000, tz=timezone.utc)
-        sections.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
+        field_lines.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
 
-    return "\n".join(sections)
+    return f"=== Derivatives Data ({symbol}) ===\n" + "\n".join(field_lines)
 
 
 # Unit labels for "N periods ago" rendered below range highs/lows.
@@ -806,15 +815,23 @@ async def get_higher_timeframe_view(
         df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=250)
     except Exception:
         logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
-        return f"Higher timeframe view ({timeframe}, {symbol}): temporarily unavailable"
+        return (
+            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
+            f"=== Error ===\n"
+            f"Temporarily unavailable."
+        )
 
     if df.empty:
-        return f"Higher timeframe view ({timeframe}, {symbol}): insufficient data"
+        return (
+            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
+            f"=== Error ===\n"
+            f"Insufficient data."
+        )
 
     last_close = float(df["close"].iloc[-1])
 
     sections: list[str] = [
-        f"=== Higher Timeframe View ({timeframe}, {symbol}) ===",
+        f"=== Higher Timeframe View ({symbol}, {timeframe}) ===",
         f"Current Price: {last_close:,.2f}",
         "",
         "=== MA Distances ===",
@@ -863,6 +880,7 @@ async def get_higher_timeframe_view(
         width_pct = 0.0 if lo20 == 0 else (hi20 - lo20) / lo20 * 100.0
         sections.extend([
             "",
+            "=== 20-period Band ===",
             f"20-period High: {hi20:,.2f}",
             f"20-period Low:  {lo20:,.2f}",
             f"20-period range width: {width_pct:.1f}%",
@@ -1242,10 +1260,17 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
         trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
     except Exception:
         logger.exception("get_recent_trades failed for %s", symbol)
-        return f"Recent trades ({symbol}): temporarily unavailable"
+        return (
+            f"=== Recent Trades ({symbol}) ===\n"
+            f"=== Error ===\n"
+            f"Temporarily unavailable."
+        )
 
     if not trades:
-        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+        return (
+            f"=== Recent Trades ({symbol}, last {window_seconds}s) ===\n"
+            f"No trades in last {window_seconds}s."
+        )
 
     now_ms = int(time.time() * 1000)
     window_ms = window_seconds * 1000
@@ -1270,7 +1295,10 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
         in_window.append(t)
 
     if not in_window:
-        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+        return (
+            f"=== Recent Trades ({symbol}, last {window_seconds}s) ===\n"
+            f"No trades in last {window_seconds}s."
+        )
 
     lines = [f"=== Recent Trades ({symbol}, last {window_seconds}s, {RECENT_TRADES_BUCKET_COUNT} × {bucket_duration_ms // 1000}s buckets) ==="]
     total_buy = 0.0
@@ -1334,7 +1362,11 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         current_price = ticker.last
     except Exception:
         logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
-        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+        return (
+            f"=== Multi-TF Snapshot ({symbol}) ===\n"
+            f"=== Error ===\n"
+            f"Temporarily unavailable."
+        )
 
     async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
         try:
@@ -1347,7 +1379,11 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
 
     # All failed?
     if all(isinstance(r[1], Exception) for r in results):
-        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+        return (
+            f"=== Multi-TF Snapshot ({symbol}) ===\n"
+            f"=== Error ===\n"
+            f"Temporarily unavailable (all timeframes failed)."
+        )
 
     rows: list[str] = []
     for tf, df_or_err in results:
@@ -1539,7 +1575,11 @@ async def get_price_pivots(deps: TradingDeps) -> str:
         current_price = ticker.last
     except Exception:
         logger.exception("get_price_pivots ticker fetch failed for %s", symbol)
-        return f"Price pivots ({symbol}, main TF: {main_tf}): temporarily unavailable"
+        return (
+            f"=== Price Pivots ({symbol}, main TF: {main_tf}) ===\n"
+            f"=== Error ===\n"
+            f"Temporarily unavailable."
+        )
 
     async def _fetch(tf: str, limit: int):
         try:
