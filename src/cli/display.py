@@ -306,7 +306,20 @@ def is_tool_error(tool_name: str, content: str, outcome: str = "success") -> boo
 
 # === Public API ===
 
-_PERCEPTION_PARSERS = {
+# === System log perception parsers (R2-8c review P2-1 namespace narrowing) ===
+#
+# 8 parser functions kept post-R2-8c — consumed ONLY by:
+#   - resolve_tool_display() / summarize_tool() (this file) — system log INFO 摘要
+#     (cli/app.py:332 `icon, summary = resolve_tool_display(...)` → line 335
+#     `logger.info(f"  {icon} {part.tool_name}: {summary}")`); 注意 cli/app.py:337
+#     的 `logger.debug return={content_str[:500]}` 是独立 raw dump，不走 parser chain
+#   - scripts/tool_call_summary.py (offline analysis 脚本)
+#
+# NOT consumed by _render_perception_tool (R2-8c multi-line render) — that path
+# bypasses parser layer entirely and reads raw section content via _parse_sections.
+#
+# 重构这些 parser 应保持向后兼容（system log 形态不破），不影响 R2-8c display 路径。
+_SYSTEM_LOG_PERCEPTION_PARSERS = {
     "get_market_data": _summarize_get_market_data,
     "get_position": _summarize_get_position,
     "get_account_balance": _summarize_get_account_balance,
@@ -938,9 +951,17 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
 
 
 def summarize_tool(tool_name: str, content: str) -> str:
-    """Summarize a tool's return value into a one-line display string."""
+    """Summarize a tool's return value into a one-line display string.
+
+    Used by system log INFO 摘要 path only (cli/app.py:332 resolve_tool_display
+    → line 335 logger.info chain). R2-8c display path uses _render_perception_tool
+    directly, bypassing this function.
+    """
     content_str = str(content)
-    parser = _PERCEPTION_PARSERS.get(tool_name) or _EXECUTION_PARSERS.get(tool_name)
+    parser = (
+        _SYSTEM_LOG_PERCEPTION_PARSERS.get(tool_name)
+        or _EXECUTION_PARSERS.get(tool_name)
+    )
     if parser:
         try:
             return parser(content_str)
