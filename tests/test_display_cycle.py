@@ -1279,3 +1279,145 @@ def test_eh_3d_conditional_close_fill_with_pnl_renders_pnl_segment():
     assert "long" in out
     assert "$78,000" in out
     assert "PnL +700.50 USDT" in out
+
+
+# === R2-8c helper tests ===
+
+# --- T-PARSE: _parse_sections ---
+
+
+def test_parse_sections_multi_sections():
+    """T-PARSE-1: 多 sections 完整 parse — header + body 分组。"""
+    from src.cli.display import _parse_sections, Section
+    content = (
+        "=== Ticker (BTC/USDT:USDT) ===\n"
+        "Price: 75212.00\n"
+        "Bid: 75200.00\n"
+        "\n"
+        "=== Technical Indicators (5m) ===\n"
+        "RSI(14): 33.55\n"
+        "MACD: -131"
+    )
+    out = _parse_sections(content)
+    assert out == [
+        Section(header="Ticker (BTC/USDT:USDT)",
+                body=("Price: 75212.00", "Bid: 75200.00")),
+        Section(header="Technical Indicators (5m)",
+                body=("RSI(14): 33.55", "MACD: -131")),
+    ]
+
+
+def test_parse_sections_no_header_fallback():
+    """T-PARSE-2: 无 header → 单 unnamed section (fallback path, get_memories case)."""
+    from src.cli.display import _parse_sections, Section
+    content = "Plain text line 1\nPlain text line 2"
+    out = _parse_sections(content)
+    assert out == [Section(header=None, body=("Plain text line 1", "Plain text line 2"))]
+
+
+def test_parse_sections_empty_content():
+    """T-PARSE-3: 空 content → 单 unnamed empty section。"""
+    from src.cli.display import _parse_sections, Section
+    out = _parse_sections("")
+    assert out == [Section(header=None, body=())]
+
+
+# --- T-CLIP: _clip_body ---
+
+
+def test_clip_body_under_threshold_keep_all():
+    """T-CLIP-1: body < 10 行 → keep all (D7 universal rule)."""
+    from src.cli.display import _clip_body
+    body = tuple(f"line {i}" for i in range(9))
+    assert _clip_body(body) == body
+
+
+def test_clip_body_at_or_above_threshold_head_tail():
+    """T-CLIP-2: body ≥ 10 行 → head=2 + '[N rows omitted]' + tail=2 (D7 校准 head/tail=2)."""
+    from src.cli.display import _clip_body
+    body = tuple(f"line {i}" for i in range(15))
+    out = _clip_body(body)
+    assert out == (
+        "line 0", "line 1",
+        "[... 11 rows omitted ...]",
+        "line 13", "line 14",
+    )
+
+
+def test_clip_body_exact_threshold_triggers_clipping():
+    """T-CLIP-3: body == 10 行 (边界) → head/tail 触发 (>= n)."""
+    from src.cli.display import _clip_body
+    body = tuple(f"line {i}" for i in range(10))
+    out = _clip_body(body)
+    assert out == (
+        "line 0", "line 1",
+        "[... 6 rows omitted ...]",
+        "line 8", "line 9",
+    )
+
+
+# --- T-RPT: _render_perception_tool ---
+
+
+def test_render_perception_tool_single_section():
+    """T-RPT-1: 单 section keep all → '  ⚙ tool\n    === Section ===\n    body...'."""
+    from src.cli.display import _render_perception_tool
+    content = (
+        "=== Account Balance ===\n"
+        "Total: 998.00 USDT\n"
+        "Free: 800.00"
+    )
+    out = _render_perception_tool("get_account_balance", content)
+    assert out == (
+        "  ⚙ get_account_balance\n"
+        "    === Account Balance ===\n"
+        "    Total: 998.00 USDT\n"
+        "    Free: 800.00"
+    )
+
+
+def test_render_perception_tool_multi_section_blank_separator():
+    """T-RPT-2: 多 sections 间插入 display-only blank line。"""
+    from src.cli.display import _render_perception_tool
+    content = (
+        "=== Sec A ===\n"
+        "a1\n"
+        "a2\n"
+        "\n"
+        "=== Sec B ===\n"
+        "b1"
+    )
+    out = _render_perception_tool("get_market_data", content)
+    assert out == (
+        "  ⚙ get_market_data\n"
+        "    === Sec A ===\n"
+        "    a1\n"
+        "    a2\n"
+        "\n"
+        "    === Sec B ===\n"
+        "    b1"
+    )
+
+
+def test_render_perception_tool_dense_section_clipped():
+    """T-RPT-3: section body ≥ 10 → head/tail clipping in render output."""
+    from src.cli.display import _render_perception_tool
+    body_lines = "\n".join(f"row {i}" for i in range(15))
+    content = f"=== Recent Candles ===\n{body_lines}"
+    out = _render_perception_tool("get_market_data", content)
+    assert "    [... 11 rows omitted ...]" in out
+    assert "    row 0" in out
+    assert "    row 14" in out
+    assert "    row 7" not in out  # middle row dropped
+
+
+def test_render_perception_tool_fallback_no_header():
+    """T-RPT-4: content 无 sections → unnamed section fallback (get_memories backend path)."""
+    from src.cli.display import _render_perception_tool
+    content = "Memory entry 1\nMemory entry 2"
+    out = _render_perception_tool("get_memories", content)
+    assert out == (
+        "  ⚙ get_memories\n"
+        "    Memory entry 1\n"
+        "    Memory entry 2"
+    )
