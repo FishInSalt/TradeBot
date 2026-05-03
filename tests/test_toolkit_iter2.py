@@ -38,7 +38,7 @@ async def test_order_book_typical_output_format():
     assert "Best ask:" in result
     assert "Spread:" in result
     assert "Bid share:" in result
-    assert "Depth (top 20 each side)" in result
+    assert "=== Depth (top 20 each side) ===" in result
 
 
 @pytest.mark.asyncio
@@ -50,7 +50,10 @@ async def test_order_book_empty_insufficient():
         symbol="BTC/USDT:USDT", bids=[], asks=[], timestamp=0,
     )
     result = await get_order_book(deps, depth=20)
-    assert "insufficient data" in result
+    # R2-8c §4.2.20 — L2 sectioned form
+    assert "=== Order Book (BTC/USDT:USDT) ===" in result
+    assert "=== Error ===" in result
+    assert "Insufficient data" in result
     assert "requested depth 20" in result
     assert "got 0" in result
 
@@ -62,7 +65,10 @@ async def test_order_book_service_failure():
     deps = MockDeps()
     deps.market_data.get_order_book.side_effect = Exception("connection reset")
     result = await get_order_book(deps)
-    assert "temporarily unavailable" in result
+    # R2-8c §4.2.20 — L2 sectioned form
+    assert "=== Order Book (BTC/USDT:USDT) ===" in result
+    assert "=== Error ===" in result
+    assert "Temporarily unavailable." in result
 
 
 @pytest.mark.asyncio
@@ -117,7 +123,8 @@ async def test_order_book_concentrated_truncation_to_10():
         symbol="BTC/USDT:USDT", bids=bids, asks=asks, timestamp=0,
     )
     result = await get_order_book(deps)
-    assert "Concentrated levels" in result
+    # R2-8c §4.2.20 — promoted to explicit sub-section header
+    assert "=== Concentrated Levels" in result
     # Count rendered concentrated rows (each starts with "  Bid  " or "  Ask  ")
     concentrated_lines = [l for l in result.splitlines() if l.startswith("  Bid  ") or l.startswith("  Ask  ")]
     assert len(concentrated_lines) <= 10, f"Expected ≤ 10 truncated rows, got {len(concentrated_lines)}"
@@ -424,7 +431,8 @@ async def test_get_position_empty_short_circuit(mocker):
     deps = MockDeps()
     deps.exchange.fetch_positions = AsyncMock(return_value=[])
     result = await get_position(deps)
-    assert result == "No open positions."
+    # R2-8c §4.2.11 — sectioned empty-state
+    assert result == "=== Position ===\nNo open positions."
     # Verify other IOs never called
     deps.exchange.fetch_balance.assert_not_called()
 
@@ -457,12 +465,13 @@ async def test_get_position_enhanced_output(mocker):
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
 
     result = await get_position(deps)
-    assert "Risk exposure:" in result
+    # R2-8c §4.2.11 — promoted to explicit section headers
+    assert "=== Risk Exposure ===" in result
     assert "Notional value:" in result
     assert "Margin used:" in result
     assert "ATR(1h)" in result
     assert "× ATR(1h)" in result
-    assert "Exit orders:" in result
+    assert "=== Exit Orders ===" in result
     assert "Stop loss:" in result
     assert "Take profit:" in result
 
@@ -512,7 +521,8 @@ async def test_get_position_atr_unavailable_degrade(mocker):
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
 
     result = await get_position(deps)
-    assert "Risk exposure:" in result
+    # R2-8c §4.2.11 — promoted to explicit section header
+    assert "=== Risk Exposure ===" in result
     assert "ATR(1h)" not in result  # suffix omitted on ATR failure
 
 
@@ -597,7 +607,8 @@ async def test_get_position_filters_none_price_exit_orders(mocker):
 @pytest.mark.asyncio
 async def test_get_position_phase2_hard_failure_degradation(mocker):
     """Phase 2 gather hard failure (e.g., fetch_balance timeout) → degrade to
-    position-only + 'Risk exposure + Exit orders: temporarily unavailable' footer.
+    Position + PnL preserved + Risk Exposure + Exit Orders sections set to
+    `(unavailable)` body (R2-8c §4.2.11 sectioned hard-failure form).
 
     Covers the outer try/except around asyncio.gather in get_position (spec §2.4
     deviation from §3.3 return_exceptions=True — hard failures collapse to a single
@@ -621,11 +632,12 @@ async def test_get_position_phase2_hard_failure_degradation(mocker):
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
 
     result = await get_position(deps)
-    # Core position lines preserved
-    assert "Current Position:" in result
-    assert "LONG" in result
-    assert "64000.00" in result
+    # Core position lines preserved (R2-8c sectioned form)
+    assert "=== Position (BTC/USDT:USDT) ===" in result
+    assert "Side: Long" in result
+    assert "64,000.00" in result or "64000.00" in result
     # PnL preserved (Phase-1 data only)
+    assert "=== PnL ===" in result
     assert "PnL:" in result
     assert "of initial capital" in result
     # Duration preserved — depends only on p.created_at from Phase-1, must NOT be
@@ -635,9 +647,10 @@ async def test_get_position_phase2_hard_failure_degradation(mocker):
     # Duration is non-N/A.
     assert "Duration:" in result
     assert "Duration: N/A" not in result
-    # Degradation footer present
-    assert "Risk exposure + Exit orders: temporarily unavailable" in result
-    # Enhanced sections absent (hard-failure collapse)
+    # Degradation: Risk Exposure + Exit Orders sections present with (unavailable) body
+    assert "=== Risk Exposure ===\n(unavailable)" in result
+    assert "=== Exit Orders ===\n(unavailable)" in result
+    # Enhanced numeric fields absent (hard-failure collapse)
     assert "Notional value:" not in result
     assert "Stop loss:" not in result
     assert "Take profit:" not in result
@@ -655,7 +668,8 @@ async def test_order_book_all_zero_amounts_insufficient(mocker):
         timestamp=0,
     )
     result = await get_order_book(deps, depth=20)
-    # Should degrade, not raise ZeroDivisionError
-    assert "insufficient data" in result
+    # Should degrade, not raise ZeroDivisionError (R2-8c §4.2.20 sectioned form)
+    assert "Insufficient data" in result
+    assert "=== Error ===" in result
     # Should not contain Bid share (didn't reach that branch)
     assert "Bid share:" not in result

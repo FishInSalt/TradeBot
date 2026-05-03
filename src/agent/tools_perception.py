@@ -153,7 +153,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     # Phase 1: positions only — early return if empty
     positions = await deps.exchange.fetch_positions(symbol)
     if not positions:
-        return "No open positions."
+        return "=== Position ===\nNo open positions."
 
     p = positions[0]
 
@@ -176,19 +176,29 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             return None
 
     def _render_position_core() -> list[str]:
-        """Render position header + PnL + Duration — the lines that depend ONLY on
-        Phase-1 fetch_positions data (no Phase-2 IO required). Shared between the
-        happy path and the hard-failure degradation branch so Duration is preserved
-        when ticker/balance/orders/contract_size fail (it would otherwise be lost
-        even though `p.created_at` is fully available).
+        """Render Position + PnL sections (Phase-1 fields only).
+
+        Returns a list of 2 fully-formed sections (each "=== Header ===\\n<body>"
+        joined string) so callers can append further sections via "\\n\\n".join.
+        Shared between happy path and hard-failure degradation branch so PnL +
+        Duration are preserved when ticker/balance/orders/contract_size fail
+        (would otherwise be lost even though `p.created_at` is fully available).
         """
-        out = ["Current Position:"]
-        out.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
+        pos_lines = [f"=== Position ({symbol}) ===",
+                     f"Side: {p.side.capitalize()} | Contracts: {p.contracts} | Entry: {p.entry_price:,.2f}",
+                     f"Leverage: {p.leverage}x"]
+        if p.liquidation_price is not None:
+            pos_lines.append(f"Liquidation: {p.liquidation_price:,.2f}")
+        pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT")
+
+        pnl_lines = ["=== PnL ==="]
         if deps.initial_balance > 0:
             pnl_pct_inner = (p.unrealized_pnl / deps.initial_balance) * 100
-            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)")
+            pnl_lines.append(
+                f"PnL: {p.unrealized_pnl:+.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)"
+            )
         else:
-            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
+            pnl_lines.append(f"PnL: {p.unrealized_pnl:+.2f} USDT")
         if p.created_at is not None:
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
@@ -200,10 +210,10 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
                 dur_str = f"{total_minutes // 60}h {total_minutes % 60}m"
             else:
                 dur_str = f"{total_minutes // 1440}d {(total_minutes % 1440) // 60}h"
-            out.append(f"  Duration: {dur_str}")
+            pnl_lines.append(f"Duration: {dur_str}")
         else:
-            out.append("  Duration: N/A")
-        return out
+            pnl_lines.append("Duration: N/A")
+        return ["\n".join(pos_lines), "\n".join(pnl_lines)]
 
     try:
         ticker, balance, ohlcv_df, open_orders, contract_size = await asyncio.gather(
@@ -216,10 +226,10 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         )
     except Exception:
         logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
-        lines = _render_position_core()
-        lines.append("")
-        lines.append("Risk exposure + Exit orders: temporarily unavailable")
-        return "\n".join(lines)
+        sections = _render_position_core()
+        sections.append("=== Risk Exposure ===\n(unavailable)")
+        sections.append("=== Exit Orders ===\n(unavailable)")
+        return "\n\n".join(sections)
 
     # ATR(1h) — may be None if OHLCV failed
     atr_1h = None
@@ -228,9 +238,9 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         atr_1h = indicators.get("atr_14")
     current_price = ticker.last
 
-    lines = _render_position_core()
+    sections = _render_position_core()
 
-    # === Risk exposure ===
+    # === Risk Exposure ===
     notional = p.contracts * p.entry_price * contract_size
     equity = balance.total_usdt
     exp_pct = notional / equity * 100 if equity > 0 else 0.0
@@ -238,19 +248,19 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     margin_pct = margin_used / equity * 100 if equity > 0 else 0.0
     atr_pct_1h = atr_1h / current_price * 100 if atr_1h is not None and current_price > 0 else None
 
-    lines.append("")
-    lines.append("Risk exposure:")
-    lines.append(f"  Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
-    lines.append(f"  Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
+    risk_lines = ["=== Risk Exposure ==="]
+    risk_lines.append(f"Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
+    risk_lines.append(f"Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
     if p.liquidation_price is not None and current_price > 0:
         liq_dist_pct = abs(current_price - p.liquidation_price) / current_price * 100
         if atr_pct_1h is not None and atr_pct_1h > 0:
             atr_mult = liq_dist_pct / atr_pct_1h
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
+            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
         else:
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+    sections.append("\n".join(risk_lines))
 
-    # === Exit orders ===
+    # === Exit Orders ===
     # Filter out None-price orders defensively. Iter 2b OKX algo-order normalization
     # is expected to always populate `price` from slTriggerPx/tpTriggerPx, but guarding
     # here keeps _fmt_exit free of None-handling branches and crashes explicitly if the
@@ -266,8 +276,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
          if o.order_type == "take_profit" and o.symbol == symbol and o.price is not None],
         key=lambda o: o.price,
     )
-    lines.append("")
-    lines.append("Exit orders:")
+    exit_lines = ["=== Exit Orders ==="]
 
     def _fmt_exit(o, kind: str) -> str:
         dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100
@@ -282,17 +291,18 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
 
     if sl_orders:
         for o in sl_orders:
-            lines.append(_fmt_exit(o, "Stop loss"))
+            exit_lines.append(_fmt_exit(o, "Stop loss"))
     else:
-        lines.append("  Stop loss: not set")
+        exit_lines.append("  Stop loss: not set")
 
     if tp_orders:
         for o in tp_orders:
-            lines.append(_fmt_exit(o, "Take profit"))
+            exit_lines.append(_fmt_exit(o, "Take profit"))
     else:
-        lines.append("  Take profit: not set")
+        exit_lines.append("  Take profit: not set")
+    sections.append("\n".join(exit_lines))
 
-    return "\n".join(lines)
+    return "\n\n".join(sections)
 
 
 async def get_account_balance(deps: TradingDeps) -> str:
@@ -301,11 +311,11 @@ async def get_account_balance(deps: TradingDeps) -> str:
     ret_usdt = balance.total_usdt - deps.initial_balance
     ret_pct = (ret_usdt / deps.initial_balance) * 100 if deps.initial_balance > 0 else 0.0
     return (
-        f"Account Balance:\n"
-        f"  Total: {balance.total_usdt:.2f} USDT (initial: {deps.initial_balance:.2f})\n"
-        f"  Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
-        f"  Free: {balance.free_usdt:.2f} USDT\n"
-        f"  Used: {balance.used_usdt:.2f} USDT"
+        f"=== Account Balance ===\n"
+        f"Total: {balance.total_usdt:.2f} USDT (initial: {deps.initial_balance:.2f})\n"
+        f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
+        f"Free: {balance.free_usdt:.2f} USDT\n"
+        f"Used: {balance.used_usdt:.2f} USDT"
     )
 
 
@@ -341,7 +351,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
     """Get all pending orders with distance from current price."""
     orders = await deps.exchange.fetch_open_orders(deps.symbol)
     if not orders:
-        return "No pending orders."
+        return "=== Pending Orders ===\nNo pending orders."
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     current = ticker.last
@@ -351,7 +361,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
     for o in orders:
         by_id.setdefault(o.id, []).append(o)
 
-    lines = ["Pending Orders:"]
+    lines = ["=== Pending Orders ==="]
     for order_id, group in by_id.items():
         is_oco = (
             len(group) == 2
@@ -544,7 +554,11 @@ async def get_market_news(
     import asyncio
 
     if deps.news is None:
-        return "News service not configured."
+        return (
+            "=== News ===\n"
+            "=== Error ===\n"
+            "News service not configured."
+        )
 
     from src.integrations.news.models import extract_base_currency
 
@@ -1161,11 +1175,19 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         ob = await deps.market_data.get_order_book(symbol, depth=depth)
     except Exception:
         logger.exception("get_order_book failed for %s", symbol)
-        return f"Order book ({symbol}): temporarily unavailable"
+        return (
+            f"=== Order Book ({symbol}) ===\n"
+            "=== Error ===\n"
+            "Temporarily unavailable."
+        )
 
     actual = min(len(ob.bids), len(ob.asks))
     if not ob.bids or not ob.asks or actual < depth:
-        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
+        return (
+            f"=== Order Book ({symbol}) ===\n"
+            "=== Error ===\n"
+            f"Insufficient data (requested depth {depth}, got {actual})."
+        )
 
     best_bid = ob.bids[0]
     best_ask = ob.asks[0]
@@ -1179,7 +1201,11 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     # Spec §2.1 — all-zero amounts across both sides: degrade to insufficient data
     # (real OKX / Sim cannot produce this, but spec mandates explicit guard)
     if total_sum == 0:
-        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
+        return (
+            f"=== Order Book ({symbol}) ===\n"
+            "=== Error ===\n"
+            f"Insufficient data (requested depth {depth}, got {actual})."
+        )
     bid_deep_pct = (ob.bids[0].price - ob.bids[depth - 1].price) / ob.bids[0].price * 100
     ask_deep_pct = (ob.asks[depth - 1].price - ob.asks[0].price) / ob.asks[0].price * 100
 
@@ -1199,15 +1225,18 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
             bid_ratio = total_bid / total_ask if total_ask > 0 else float("inf")
             share_line = f"Bid share: {bid_share:.1f}% (bid : ask = {bid_ratio:.2f} : 1)"
 
-    lines = [
-        f"=== Order Book ({symbol}) ===",
-        f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} {base_currency}  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} {base_currency}",
-        f"Spread: {spread:.2f} ({spread_pct:.3f}%)",
-        "",
-        f"Depth (top {depth} each side):",
-        f"  Bids cumulative: {total_bid:.4f} {base_currency} over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)",
-        f"  Asks cumulative: {total_ask:.4f} {base_currency} over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)",
-        f"  {share_line}",
+    sections = [
+        (
+            f"=== Order Book ({symbol}) ===\n"
+            f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} {base_currency}  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} {base_currency}\n"
+            f"Spread: {spread:.2f} ({spread_pct:.3f}%)"
+        ),
+        (
+            f"=== Depth (top {depth} each side) ===\n"
+            f"  Bids cumulative: {total_bid:.4f} {base_currency} over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)\n"
+            f"  Asks cumulative: {total_ask:.4f} {base_currency} over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)\n"
+            f"  {share_line}"
+        ),
     ]
 
     # Concentrated levels (per-side median)
@@ -1233,13 +1262,17 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         concentrated = concentrated[:ORDER_BOOK_MAX_CONCENTRATED_LEVELS]
         bids_conc = sorted([c for c in concentrated if c[0] == "Bid"], key=lambda c: -c[1])  # price desc
         asks_conc = sorted([c for c in concentrated if c[0] == "Ask"], key=lambda c: c[1])   # price asc
-        lines.append("")
-        lines.append(f"Concentrated levels (size > {ORDER_BOOK_CONCENTRATION_MULTIPLIER:.0f}× median of top {depth}):")
+        conc_header = (
+            f"=== Concentrated Levels "
+            f"(size > {ORDER_BOOK_CONCENTRATION_MULTIPLIER:.0f}× median of top {depth}) ==="
+        )
+        conc_rows = []
         for side, price, amount, dist_pct, is_bid in bids_conc + asks_conc:
             direction = "below mid" if is_bid else "above mid"
-            lines.append(f"  {side}  {price:.2f}  {amount:.4f} {base_currency}  ({dist_pct:.2f}% {direction})")
+            conc_rows.append(f"  {side}  {price:.2f}  {amount:.4f} {base_currency}  ({dist_pct:.2f}% {direction})")
+        sections.append(conc_header + "\n" + "\n".join(conc_rows))
 
-    return "\n".join(lines)
+    return "\n\n".join(sections)
 
 
 async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRADES_WINDOW_DEFAULT) -> str:

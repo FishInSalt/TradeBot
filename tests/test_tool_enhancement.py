@@ -521,18 +521,19 @@ async def test_get_position_enhanced():
     )
 
     result = await get_position(deps)
-    assert "LONG" in result
-    assert "74761.10" in result
+    assert "=== Position (BTC/USDT:USDT) ===" in result
+    assert "Side: Long" in result
+    assert "74761.10" in result or "74,761.10" in result
     # PnL percentage of initial capital
     assert "% of initial capital" in result.lower() or "of initial capital" in result
     # Liquidation distance
     assert "away" in result.lower()
     # Duration
     assert "Duration" in result or "duration" in result.lower() or "min" in result.lower()
-    # New Iter 2 fields (Task 10 enhancement)
-    assert "Risk exposure:" in result
+    # New Iter 2 fields (Task 10 enhancement) — R2-8c sectioned form
+    assert "=== Risk Exposure ===" in result
     assert "Notional" in result or "notional" in result.lower()
-    assert "Exit orders:" in result
+    assert "=== Exit Orders ===" in result
 
 
 async def test_get_position_created_at_none():
@@ -917,8 +918,8 @@ async def test_get_open_orders_merges_oco_into_single_line():
     ]
     out = await get_open_orders(_make_oco_deps(orders))
     lines = out.splitlines()
-    # Only one rendered row besides the header
-    assert lines[0] == "Pending Orders:"
+    # Only one rendered row besides the header (R2-8c explicit section header)
+    assert lines[0] == "=== Pending Orders ==="
     data_lines = [l for l in lines[1:] if l.strip()]
     assert len(data_lines) == 1, f"expected 1 merged OCO line, got {data_lines}"
     row = data_lines[0]

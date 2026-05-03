@@ -1876,3 +1876,284 @@ def test_snapshot_get_derivatives_data_all_failed():
         "    Temporarily unavailable (all 3 data sources failed)."
     )
     _assert_perception_render("get_derivatives_data", content, expected)
+
+
+# --- Batch B: mid-frequency + implicit→explicit snapshots ---
+
+
+def test_snapshot_get_account_balance_happy_path():
+    """Snapshot — get_account_balance single-section render (R2-8c §4.2.12)."""
+    content = (
+        "=== Account Balance ===\n"
+        "Total: 998.00 USDT (initial: 1000.00)\n"
+        "Return: -0.20% (-2.00 USDT) (incl. unrealized)\n"
+        "Free: 800.00 USDT\n"
+        "Used: 198.00 USDT"
+    )
+    expected = (
+        "  ⚙ get_account_balance\n"
+        "    === Account Balance ===\n"
+        "    Total: 998.00 USDT (initial: 1000.00)\n"
+        "    Return: -0.20% (-2.00 USDT) (incl. unrealized)\n"
+        "    Free: 800.00 USDT\n"
+        "    Used: 198.00 USDT"
+    )
+    _assert_perception_render("get_account_balance", content, expected)
+
+
+def test_snapshot_get_open_orders_empty():
+    """Snapshot — get_open_orders no-orders empty-state, sectioned (§4.2.14)."""
+    content = "=== Pending Orders ===\nNo pending orders."
+    expected = (
+        "  ⚙ get_open_orders\n"
+        "    === Pending Orders ===\n"
+        "    No pending orders."
+    )
+    _assert_perception_render("get_open_orders", content, expected)
+
+
+def test_snapshot_get_open_orders_with_orders():
+    """Snapshot — pending orders 1 OCO leg + 1 limit (§4.2.14)."""
+    content = (
+        "=== Pending Orders ===\n"
+        "  [OCO] sell 0.025 stop 74000.00 (-1.60% from current) / "
+        "tp 76500.00 (+1.73% from current) | algoId: oco-1 (cancel removes both legs)\n"
+        "  [LIMIT] buy 0.025 @ 74500.00 (-0.93% from current) | ID: lim-1"
+    )
+    expected = (
+        "  ⚙ get_open_orders\n"
+        "    === Pending Orders ===\n"
+        "      [OCO] sell 0.025 stop 74000.00 (-1.60% from current) / "
+        "tp 76500.00 (+1.73% from current) | algoId: oco-1 (cancel removes both legs)\n"
+        "      [LIMIT] buy 0.025 @ 74500.00 (-0.93% from current) | ID: lim-1"
+    )
+    _assert_perception_render("get_open_orders", content, expected)
+
+
+def test_snapshot_get_position_no_position():
+    """Snapshot — get_position no open positions empty-state, sectioned (§4.2.11)."""
+    content = "=== Position ===\nNo open positions."
+    expected = (
+        "  ⚙ get_position\n"
+        "    === Position ===\n"
+        "    No open positions."
+    )
+    _assert_perception_render("get_position", content, expected)
+
+
+def test_snapshot_get_position_with_stats():
+    """Snapshot — get_position 4 sections (Position / PnL / Risk Exposure / Exit Orders)."""
+    content = (
+        "=== Position (BTC/USDT:USDT) ===\n"
+        "Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "Leverage: 5x\n"
+        "Liquidation: 70,666.00\n"
+        "Unrealized: +0.20 USDT\n"
+        "\n"
+        "=== PnL ===\n"
+        "PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "Duration: 2h 30m\n"
+        "\n"
+        "=== Risk Exposure ===\n"
+        "Notional value: 1962.95 USDT (4.2% of equity 998.00)\n"
+        "Margin used: 392.59 USDT (39.3% of equity, from balance.used_usdt)\n"
+        "Liquidation: 70666.00 (10.0% away = 5.8× ATR(1h))\n"
+        "\n"
+        "=== Exit Orders ===\n"
+        "  Stop loss: not set\n"
+        "  Take profit: not set"
+    )
+    expected = (
+        "  ⚙ get_position\n"
+        "    === Position (BTC/USDT:USDT) ===\n"
+        "    Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "    Leverage: 5x\n"
+        "    Liquidation: 70,666.00\n"
+        "    Unrealized: +0.20 USDT\n"
+        "\n"
+        "    === PnL ===\n"
+        "    PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "    Duration: 2h 30m\n"
+        "\n"
+        "    === Risk Exposure ===\n"
+        "    Notional value: 1962.95 USDT (4.2% of equity 998.00)\n"
+        "    Margin used: 392.59 USDT (39.3% of equity, from balance.used_usdt)\n"
+        "    Liquidation: 70666.00 (10.0% away = 5.8× ATR(1h))\n"
+        "\n"
+        "    === Exit Orders ===\n"
+        "      Stop loss: not set\n"
+        "      Take profit: not set"
+    )
+    _assert_perception_render("get_position", content, expected)
+
+
+def test_snapshot_get_position_hard_failure_degradation():
+    """Snapshot — get_position hard-failure: Position + PnL preserved,
+    Risk Exposure + Exit Orders degraded to (unavailable) bodies (§4.2.11)."""
+    content = (
+        "=== Position (BTC/USDT:USDT) ===\n"
+        "Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "Leverage: 5x\n"
+        "Liquidation: 70,666.00\n"
+        "Unrealized: +0.20 USDT\n"
+        "\n"
+        "=== PnL ===\n"
+        "PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "Duration: 2h 30m\n"
+        "\n"
+        "=== Risk Exposure ===\n"
+        "(unavailable)\n"
+        "\n"
+        "=== Exit Orders ===\n"
+        "(unavailable)"
+    )
+    expected = (
+        "  ⚙ get_position\n"
+        "    === Position (BTC/USDT:USDT) ===\n"
+        "    Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "    Leverage: 5x\n"
+        "    Liquidation: 70,666.00\n"
+        "    Unrealized: +0.20 USDT\n"
+        "\n"
+        "    === PnL ===\n"
+        "    PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "    Duration: 2h 30m\n"
+        "\n"
+        "    === Risk Exposure ===\n"
+        "    (unavailable)\n"
+        "\n"
+        "    === Exit Orders ===\n"
+        "    (unavailable)"
+    )
+    _assert_perception_render("get_position", content, expected)
+
+
+def test_snapshot_get_market_news_l2_not_configured():
+    """Snapshot — news service=None L2 emits === News === + === Error === sub-section."""
+    content = (
+        "=== News ===\n"
+        "=== Error ===\n"
+        "News service not configured."
+    )
+    expected = (
+        "  ⚙ get_market_news\n"
+        "    === News ===\n"
+        "\n"
+        "    === Error ===\n"
+        "    News service not configured."
+    )
+    _assert_perception_render("get_market_news", content, expected)
+
+
+def test_snapshot_get_market_news_happy_short():
+    """Snapshot — news happy path with FGI + 2 symbol headlines (body < 10, keep all)."""
+    content = (
+        "=== Fear & Greed Index ===\n"
+        "Value: Fear (35)\n"
+        "(Updated: 2026-05-03)\n"
+        "\n"
+        "=== Symbol News (BTC, 2) ===\n"
+        "[2026-05-03 14:00] BTC tests $75k support\n"
+        "  Source: CoinDesk | Currencies: BTC\n"
+        "[2026-05-03 13:30] Funding rates flip negative\n"
+        "  Source: The Block | Currencies: BTC, ETH"
+    )
+    expected = (
+        "  ⚙ get_market_news\n"
+        "    === Fear & Greed Index ===\n"
+        "    Value: Fear (35)\n"
+        "    (Updated: 2026-05-03)\n"
+        "\n"
+        "    === Symbol News (BTC, 2) ===\n"
+        "    [2026-05-03 14:00] BTC tests $75k support\n"
+        "      Source: CoinDesk | Currencies: BTC\n"
+        "    [2026-05-03 13:30] Funding rates flip negative\n"
+        "      Source: The Block | Currencies: BTC, ETH"
+    )
+    _assert_perception_render("get_market_news", content, expected)
+
+
+def test_snapshot_get_market_news_dense_general_news_clipped():
+    """Snapshot — General Crypto News with 12 entries (each 2 lines = 24 body lines)
+    triggers head=2/tail=2 clipping. Multi-entry boundary trade-off (spec §4.3.2)
+    acknowledged: head/tail may split entries — trader sees first 2 + last 2 lines.
+    """
+    entries = []
+    for i in range(12):
+        entries.append(f"[2026-05-03 1{i:02d}:00] Headline {i}\n  Source: src{i} | Currencies: ALT{i}")
+    content = "=== General Crypto News (12) ===\n" + "\n".join(entries)
+    # Body: 12 × 2 = 24 lines, ≥ 10 → head=2 + omitted + tail=2
+    from src.cli.display import _render_perception_tool
+    out = _render_perception_tool("get_market_news", content)
+    assert "    === General Crypto News (12) ===" in out
+    assert "    [2026-05-03 100:00] Headline 0" in out  # head[0]
+    assert "      Source: src0 | Currencies: ALT0" in out  # head[1]
+    assert "    [... 20 rows omitted ...]" in out
+    # Last 2 lines of body — entry 11's two lines
+    assert "    [2026-05-03 111:00] Headline 11" in out  # tail[-2]
+    assert "      Source: src11 | Currencies: ALT11" in out  # tail[-1]
+
+
+def test_snapshot_get_order_book_happy_path():
+    """Snapshot — order book 2 sub-sections (Order Book + Depth) without concentrated."""
+    content = (
+        "=== Order Book (BTC/USDT:USDT) ===\n"
+        "Best bid: 75200.00 × 0.5000 BTC  |  Best ask: 75205.00 × 0.4500 BTC\n"
+        "Spread: 5.00 (0.007%)\n"
+        "\n"
+        "=== Depth (top 20 each side) ===\n"
+        "  Bids cumulative: 5.4500 BTC over 75200.00 - 75150.00 (0.07% deep)\n"
+        "  Asks cumulative: 6.2000 BTC over 75205.00 - 75260.00 (0.07% deep)\n"
+        "  Bid share: ~50% (balanced)"
+    )
+    expected = (
+        "  ⚙ get_order_book\n"
+        "    === Order Book (BTC/USDT:USDT) ===\n"
+        "    Best bid: 75200.00 × 0.5000 BTC  |  Best ask: 75205.00 × 0.4500 BTC\n"
+        "    Spread: 5.00 (0.007%)\n"
+        "\n"
+        "    === Depth (top 20 each side) ===\n"
+        "      Bids cumulative: 5.4500 BTC over 75200.00 - 75150.00 (0.07% deep)\n"
+        "      Asks cumulative: 6.2000 BTC over 75205.00 - 75260.00 (0.07% deep)\n"
+        "      Bid share: ~50% (balanced)"
+    )
+    _assert_perception_render("get_order_book", content, expected)
+
+
+def test_snapshot_get_order_book_l2_unavailable():
+    """Snapshot — order book L2 (service exception) emits === Error === section."""
+    content = (
+        "=== Order Book (BTC/USDT:USDT) ===\n"
+        "=== Error ===\n"
+        "Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_order_book\n"
+        "    === Order Book (BTC/USDT:USDT) ===\n"
+        "\n"
+        "    === Error ===\n"
+        "    Temporarily unavailable."
+    )
+    _assert_perception_render("get_order_book", content, expected)
+
+
+def test_snapshot_get_active_alerts_with_alerts():
+    """Snapshot — active alerts vol param + 2 price level alerts (§4.1.1 verified-no-change)."""
+    content = (
+        "=== Price Alert Settings ===\n"
+        "Volatility alert: 1.5% in 10min window\n"
+        "\n"
+        "=== Active Price Level Alerts (2/20) ===\n"
+        '  #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
+        '  #2 (id=alert-2) below 74000.00 — "support break"'
+    )
+    expected = (
+        "  ⚙ get_active_alerts\n"
+        "    === Price Alert Settings ===\n"
+        "    Volatility alert: 1.5% in 10min window\n"
+        "\n"
+        "    === Active Price Level Alerts (2/20) ===\n"
+        '      #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
+        '      #2 (id=alert-2) below 74000.00 — "support break"'
+    )
+    _assert_perception_render("get_active_alerts", content, expected)
