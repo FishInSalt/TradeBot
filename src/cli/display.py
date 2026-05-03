@@ -306,7 +306,20 @@ def is_tool_error(tool_name: str, content: str, outcome: str = "success") -> boo
 
 # === Public API ===
 
-_PERCEPTION_PARSERS = {
+# === System log perception parsers (R2-8c review P2-1 namespace narrowing) ===
+#
+# 8 parser functions kept post-R2-8c — consumed ONLY by:
+#   - resolve_tool_display() / summarize_tool() (this file) — system log INFO 摘要
+#     (cli/app.py:332 `icon, summary = resolve_tool_display(...)` → line 335
+#     `logger.info(f"  {icon} {part.tool_name}: {summary}")`); 注意 cli/app.py:337
+#     的 `logger.debug return={content_str[:500]}` 是独立 raw dump，不走 parser chain
+#   - scripts/tool_call_summary.py (offline analysis 脚本)
+#
+# NOT consumed by _render_perception_tool (R2-8c multi-line render) — that path
+# bypasses parser layer entirely and reads raw section content via _parse_sections.
+#
+# 重构这些 parser 应保持向后兼容（system log 形态不破），不影响 R2-8c display 路径。
+_SYSTEM_LOG_PERCEPTION_PARSERS = {
     "get_market_data": _summarize_get_market_data,
     "get_position": _summarize_get_position,
     "get_account_balance": _summarize_get_account_balance,
@@ -316,6 +329,179 @@ _PERCEPTION_PARSERS = {
     "get_active_alerts": _summarize_get_active_alerts,
     "get_performance": _summarize_get_performance,
 }
+
+
+# === R2-8c: Section parsing & clipping helpers (spec §4.3) ===
+
+
+@dataclass(frozen=True)
+class Section:
+    """Parsed tool output section (spec §4.3.1)."""
+    header: str | None  # None = unnamed (fallback for tool output without `=== Section ===`)
+    body: tuple[str, ...]  # immutable for frozen dataclass equality / set membership
+
+
+_SECTION_HEADER_RE = re.compile(r"^=== (.+) ===$")
+
+
+def _parse_sections(content: str) -> list[Section]:
+    """Parse tool content into sections by '=== {name} ===' headers (spec §4.3.1).
+
+    Algorithm:
+      1. Split content by '\n'
+      2. Lines matching r'^=== (.+) ===$' are section starts
+      3. Lines until next header form the section body
+      4. Strip blank lines at start/end of each body
+      5. No header in entire content → [Section(header=None, body=lines stripped)]
+      6. Empty content → [Section(header=None, body=())]
+    """
+    if not content:
+        return [Section(header=None, body=())]
+
+    lines = content.split("\n")
+    sections: list[tuple[str | None, list[str]]] = []
+    current_header: str | None = None
+    current_body: list[str] = []
+
+    for line in lines:
+        m = _SECTION_HEADER_RE.match(line)
+        if m:
+            # flush previous
+            sections.append((current_header, current_body))
+            current_header = m.group(1)
+            current_body = []
+        else:
+            current_body.append(line)
+    sections.append((current_header, current_body))
+
+    # First entry is "before any header" — drop only when it has no header AND empty body
+    # (otherwise it's a legitimate fallback section per T-PARSE-2)
+    if sections and sections[0][0] is None and not _strip_blanks(sections[0][1]):
+        if len(sections) > 1:
+            sections = sections[1:]
+
+    return [Section(header=h, body=tuple(_strip_blanks(b))) for h, b in sections]
+
+
+def _strip_blanks(lines: list[str]) -> list[str]:
+    """Remove leading + trailing blank lines (preserve internal blanks)."""
+    start = 0
+    end = len(lines)
+    while start < end and lines[start].strip() == "":
+        start += 1
+    while end > start and lines[end - 1].strip() == "":
+        end -= 1
+    return lines[start:end]
+
+
+def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...]:
+    """D4 universal clipping (head=2 / tail=2, spec §4.3.2 review-校准).
+
+    body length:
+      < n  → keep all
+      >= n → (body[0], body[1],
+              f"[... {len(body)-4} rows omitted ...]",
+              body[-2], body[-1])
+    """
+    if len(body) < n:
+        return tuple(body)
+    return (
+        body[0], body[1],
+        f"[... {len(body) - 4} rows omitted ...]",
+        body[-2], body[-1],
+    )
+
+
+def _render_perception_tool(tool_name: str, content: str) -> str:
+    """Multi-line section render for perception tools (D8 + D13 byte-equal, spec §4.3.3).
+
+    Output format:
+      "  ⚙ {tool_name}\n"
+      "    === {section.header} ===\n"     # (if present; render re-wraps `=== ... ===`)
+      "    {body line 1}\n"
+      ...
+      "\n"                                 # blank between sections
+      "    === {next section.header} ===\n"
+      ...
+
+    Section.header stores the inner name only (e.g. "Account Balance") because
+    _parse_sections strips the `=== ... ===` wrapping at parse time; render
+    re-wraps so the rendered output matches the byte-equal Section convention
+    (T-RPT / T-BE-1 / batch snapshot tests all expect the wrapped form).
+
+    Escape applied to section header / body (markup attack surface — content
+    from tool returns may include LLM-or-API-sourced literal markup like
+    `[bold]`); framework markup (icon / indent / blank lines / `=== ===`
+    wrapping) preserved.
+    """
+    sections = _parse_sections(content)
+    lines = [f"  ⚙ {tool_name}"]
+    for i, section in enumerate(sections):
+        if i > 0:
+            lines.append("")  # display-only blank between sections
+        if section.header is not None:
+            lines.append(f"    === {escape(section.header)} ===")
+        clipped = _clip_body(section.body)
+        for row in clipped:
+            # Empty body rows render as "" (no indent prefix) — avoids trailing
+            # whitespace in cycle log file output (cleaner cat / less / git diff).
+            # Section model byte-equal preserved (escape("") == "" + Section.body
+            # contains "" still parsed back identically via _strip_blanks
+            # internal-blank semantics).
+            if row == "":
+                lines.append("")
+            else:
+                lines.append(f"    {escape(row)}")
+    return "\n".join(lines)
+
+
+# === R2-8c: dispatch sets (spec §4.4) ===
+
+_PERCEPTION_TOOL_NAMES: frozenset[str] = frozenset({
+    # Tier-1 high frequency (B2 ≥ 70%)
+    "get_market_data",
+    "get_higher_timeframe_view",
+    "get_multi_timeframe_snapshot",
+    "get_price_pivots",
+    "get_recent_trades",
+    "get_derivatives_data",
+    # Mid (B2 50-70%)
+    "get_market_news",
+    "get_order_book",
+    # Long-tail
+    "get_macro_context",
+    "get_position",
+    "get_account_balance",
+    "get_memories",
+    "get_open_orders",
+    "get_trade_journal",
+    "get_active_alerts",
+    "get_performance",
+    "get_exchange_announcements",
+    "get_macro_calendar",
+    "get_etf_flows",
+    "get_stablecoin_supply",
+})
+
+_SECTIONED_PERCEPTION_TOOL_NAMES: frozenset[str] = (
+    _PERCEPTION_TOOL_NAMES - frozenset({"get_memories"})
+)
+# get_memories 是 backend-dependent format 例外（spec §4.2.13 / §8.8）;
+# T-DG-1 sectioning lint 跳过此工具。
+
+_EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
+    "open_position",
+    "close_position",
+    "set_stop_loss",
+    "set_take_profit",
+    "adjust_leverage",
+    "place_limit_order",
+    "cancel_order",
+    "set_price_alert",
+    "add_price_level_alert",
+    "cancel_price_level_alert",
+    "set_next_wake",
+})
 
 
 def resolve_tool_display(
@@ -550,12 +736,15 @@ def _render_header(
     )
 
 
-def _render_reasoning(thinking_text: str, max_chars: int = 800) -> str:
-    """Render Reasoning section per spec §4.2.1-§4.2.2.
+def _render_reasoning(thinking_text: str, max_chars: int = 2000) -> str:
+    """Render Reasoning section per spec §4.2.1-§4.2.2 (R2-8c D10: 800 → 2000).
 
     Hard-truncate body to max_chars + ' ... [+N chars]' marker. Body must be
     rich.markup.escape()'d — thinking content is LLM output, attack surface
     of same shape as Decision body.
+
+    R2-8c D10 raises max_chars 800 → 2000 (smoke #6 B3 截断率 47/80 = 58.8%
+    @ 800; 2000 预计降到 ~25%).
     """
     total = len(thinking_text)
     if total <= max_chars:
@@ -574,36 +763,79 @@ def _render_action(
     returns_lookup: dict,
     cycle_id: str,
 ) -> str:
-    """Render Action section per spec §4.3.
+    """Render Action section per spec §4.3 + §4.4 dispatch.
 
-    `tool_calls` is list[ToolCallPart], `returns_lookup` is dict[tool_call_id, ToolReturnPart].
-    Tool summary line uses existing resolve_tool_display() (parser layer is R2-8c scope).
+    Dispatch (mutually exclusive, full coverage of 32 registered tools per T-DG-2):
+      1. ret None → R2-8a `[no return captured]` line (orphan tool_call_id)
+      2. is_tool_error → R2-8a `✗` single-line (L1 failure path)
+      3. tool_name == 'save_memory' → R2-8a `✎` single-line + summarize_save_memory
+      4. tool_name in _EXECUTION_TOOL_NAMES → R2-8a `⚙` single-line + <22 padding
+      5. tool_name in _PERCEPTION_TOOL_NAMES → multi-line _render_perception_tool
+      6. else → R2-8a single-line + warning log (drift signal, T-EC-11)
     """
     n = len(tool_calls)
     plural = "tool" if n == 1 else "tools"
     lines = [f"\n▾ Action ({n} {plural})"]
 
     for tcp in tool_calls:
-        try:
-            args = tcp.args_as_dict()
-        except Exception:
-            args = None
-
         ret = returns_lookup.get(tcp.tool_call_id)
         if ret is None:
             logger.warning(
                 "tool_call_id mismatch for %s in cycle %s",
                 tcp.tool_name, cycle_id,
             )
-            line = f"  ⚙ {tcp.tool_name:<22} [no return captured]"
-        else:
-            content_str = str(ret.content)
-            outcome = getattr(ret, "outcome", "success")
-            icon, summary = resolve_tool_display(tcp.tool_name, content_str, outcome, args)
-            # body escape 防 markup attack（summary 来自 tool return content；
-            # 框架 markup icon / column padding 在 prefix 部分不动）
-            line = f"  {icon} {tcp.tool_name:<22} {escape(summary)}"
-        lines.append(line)
+            lines.append(f"  ⚙ {tcp.tool_name:<22} [no return captured]")
+            continue
+
+        content_str = str(ret.content)
+        outcome = getattr(ret, "outcome", "success")
+
+        # Branch 2: L1 failure (R2-8a single-line + ✗) — does not enter multi-line
+        if is_tool_error(tcp.tool_name, content_str, outcome):
+            lines.append(
+                f"  ✗ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+            )
+            continue
+
+        # Branch 3: save_memory (R2-8a single-line + ✎)
+        if tcp.tool_name == "save_memory":
+            try:
+                args = tcp.args_as_dict()
+            except Exception:
+                args = None
+            icon, summary = resolve_tool_display(
+                tcp.tool_name, content_str, outcome, args,
+            )
+            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
+            continue
+
+        # Branch 4: execution (R2-8a single-line + <22 padding)
+        if tcp.tool_name in _EXECUTION_TOOL_NAMES:
+            try:
+                args = tcp.args_as_dict()
+            except Exception:
+                args = None
+            icon, summary = resolve_tool_display(
+                tcp.tool_name, content_str, outcome, args,
+            )
+            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
+            continue
+
+        # Branch 5: perception (multi-line section render, includes get_memories
+        # backend-dependent fallback path via _parse_sections)
+        if tcp.tool_name in _PERCEPTION_TOOL_NAMES:
+            lines.append(_render_perception_tool(tcp.tool_name, content_str))
+            continue
+
+        # Branch 6: drift — unregistered tool name (T-EC-11)
+        logger.warning(
+            "tool_name %s not in _PERCEPTION_TOOL_NAMES / _EXECUTION_TOOL_NAMES / save_memory "
+            "— falling back to R2-8a single-line",
+            tcp.tool_name,
+        )
+        lines.append(
+            f"  ⚙ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+        )
 
     return "\n".join(lines)
 
@@ -722,9 +954,17 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
 
 
 def summarize_tool(tool_name: str, content: str) -> str:
-    """Summarize a tool's return value into a one-line display string."""
+    """Summarize a tool's return value into a one-line display string.
+
+    Used by system log INFO 摘要 path only (cli/app.py:332 resolve_tool_display
+    → line 335 logger.info chain). R2-8c display path uses _render_perception_tool
+    directly, bypassing this function.
+    """
     content_str = str(content)
-    parser = _PERCEPTION_PARSERS.get(tool_name) or _EXECUTION_PARSERS.get(tool_name)
+    parser = (
+        _SYSTEM_LOG_PERCEPTION_PARSERS.get(tool_name)
+        or _EXECUTION_PARSERS.get(tool_name)
+    )
     if parser:
         try:
             return parser(content_str)

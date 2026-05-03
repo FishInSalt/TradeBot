@@ -621,10 +621,14 @@ def test_render_reasoning_at_800_exact():
 
 
 def test_render_reasoning_over_800_truncated():
-    """T-RR-3: thinking > 800 chars → truncate to 800 + '... [+N chars]' marker."""
+    """T-RR-3: thinking > 800 chars → truncate to 800 + '... [+N chars]' marker.
+
+    Note (R2-8c D10): default max_chars 800 → 2000; this test preserves the
+    original 800 boundary intent by passing explicit max_chars=800.
+    """
     from src.cli.display import _render_reasoning
     text = "y" * 1547
-    out = _render_reasoning(text)
+    out = _render_reasoning(text, max_chars=800)
     assert "(1547 chars total)" in out
     assert "... [+747 chars]" in out
     # body length 800 chars + marker
@@ -1279,3 +1283,1791 @@ def test_eh_3d_conditional_close_fill_with_pnl_renders_pnl_segment():
     assert "long" in out
     assert "$78,000" in out
     assert "PnL +700.50 USDT" in out
+
+
+# === R2-8c helper tests ===
+
+# --- T-PARSE: _parse_sections ---
+
+
+def test_parse_sections_multi_sections():
+    """T-PARSE-1: 多 sections 完整 parse — header + body 分组。"""
+    from src.cli.display import _parse_sections, Section
+    content = (
+        "=== Ticker (BTC/USDT:USDT) ===\n"
+        "Price: 75212.00\n"
+        "Bid: 75200.00\n"
+        "\n"
+        "=== Technical Indicators (5m) ===\n"
+        "RSI(14): 33.55\n"
+        "MACD: -131"
+    )
+    out = _parse_sections(content)
+    assert out == [
+        Section(header="Ticker (BTC/USDT:USDT)",
+                body=("Price: 75212.00", "Bid: 75200.00")),
+        Section(header="Technical Indicators (5m)",
+                body=("RSI(14): 33.55", "MACD: -131")),
+    ]
+
+
+def test_parse_sections_no_header_fallback():
+    """T-PARSE-2: 无 header → 单 unnamed section (fallback path, get_memories case)."""
+    from src.cli.display import _parse_sections, Section
+    content = "Plain text line 1\nPlain text line 2"
+    out = _parse_sections(content)
+    assert out == [Section(header=None, body=("Plain text line 1", "Plain text line 2"))]
+
+
+def test_parse_sections_empty_content():
+    """T-PARSE-3: 空 content → 单 unnamed empty section。"""
+    from src.cli.display import _parse_sections, Section
+    out = _parse_sections("")
+    assert out == [Section(header=None, body=())]
+
+
+# --- T-CLIP: _clip_body ---
+
+
+def test_clip_body_under_threshold_keep_all():
+    """T-CLIP-1: body < 10 行 → keep all (D7 universal rule)."""
+    from src.cli.display import _clip_body
+    body = tuple(f"line {i}" for i in range(9))
+    assert _clip_body(body) == body
+
+
+def test_clip_body_at_or_above_threshold_head_tail():
+    """T-CLIP-2: body ≥ 10 行 → head=2 + '[N rows omitted]' + tail=2 (D7 校准 head/tail=2)."""
+    from src.cli.display import _clip_body
+    body = tuple(f"line {i}" for i in range(15))
+    out = _clip_body(body)
+    assert out == (
+        "line 0", "line 1",
+        "[... 11 rows omitted ...]",
+        "line 13", "line 14",
+    )
+
+
+def test_clip_body_exact_threshold_triggers_clipping():
+    """T-CLIP-3: body == 10 行 (边界) → head/tail 触发 (>= n)."""
+    from src.cli.display import _clip_body
+    body = tuple(f"line {i}" for i in range(10))
+    out = _clip_body(body)
+    assert out == (
+        "line 0", "line 1",
+        "[... 6 rows omitted ...]",
+        "line 8", "line 9",
+    )
+
+
+# --- T-RPT: _render_perception_tool ---
+
+
+def test_render_perception_tool_single_section():
+    """T-RPT-1: 单 section keep all → '  ⚙ tool\n    === Section ===\n    body...'."""
+    from src.cli.display import _render_perception_tool
+    content = (
+        "=== Account Balance ===\n"
+        "Total: 998.00 USDT\n"
+        "Free: 800.00"
+    )
+    out = _render_perception_tool("get_account_balance", content)
+    assert out == (
+        "  ⚙ get_account_balance\n"
+        "    === Account Balance ===\n"
+        "    Total: 998.00 USDT\n"
+        "    Free: 800.00"
+    )
+
+
+def test_render_perception_tool_multi_section_blank_separator():
+    """T-RPT-2: 多 sections 间插入 display-only blank line。"""
+    from src.cli.display import _render_perception_tool
+    content = (
+        "=== Sec A ===\n"
+        "a1\n"
+        "a2\n"
+        "\n"
+        "=== Sec B ===\n"
+        "b1"
+    )
+    out = _render_perception_tool("get_market_data", content)
+    assert out == (
+        "  ⚙ get_market_data\n"
+        "    === Sec A ===\n"
+        "    a1\n"
+        "    a2\n"
+        "\n"
+        "    === Sec B ===\n"
+        "    b1"
+    )
+
+
+def test_render_perception_tool_dense_section_clipped():
+    """T-RPT-3: section body ≥ 10 → head/tail clipping in render output."""
+    from src.cli.display import _render_perception_tool
+    body_lines = "\n".join(f"row {i}" for i in range(15))
+    content = f"=== Recent Candles ===\n{body_lines}"
+    out = _render_perception_tool("get_market_data", content)
+    assert "    [... 11 rows omitted ...]" in out
+    assert "    row 0" in out
+    assert "    row 14" in out
+    assert "    row 7" not in out  # middle row dropped
+
+
+def test_render_perception_tool_fallback_no_header():
+    """T-RPT-4: content 无 sections → unnamed section fallback (get_memories backend path)."""
+    from src.cli.display import _render_perception_tool
+    content = "Memory entry 1\nMemory entry 2"
+    out = _render_perception_tool("get_memories", content)
+    assert out == (
+        "  ⚙ get_memories\n"
+        "    Memory entry 1\n"
+        "    Memory entry 2"
+    )
+
+
+# --- T-DG: drift guards ---
+
+
+def test_dg_2_dispatch_sets_partition_all_registered_tools():
+    """T-DG-2: 三层集合 + save_memory branch 互斥 + 完整覆盖 32 registered tools.
+
+    Spec §4.4: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (11) ∪ {save_memory}
+    必须等于 REGISTERED_TOOL_NAMES (32)，且互不重叠。
+    _SECTIONED_PERCEPTION_TOOL_NAMES (19) ⊂ _PERCEPTION_TOOL_NAMES（仅 get_memories 例外）。
+    """
+    from src.cli.display import (
+        _PERCEPTION_TOOL_NAMES,
+        _SECTIONED_PERCEPTION_TOOL_NAMES,
+        _EXECUTION_TOOL_NAMES,
+    )
+    from src.agent.trader import REGISTERED_TOOL_NAMES
+
+    perception = _PERCEPTION_TOOL_NAMES
+    sectioned = _SECTIONED_PERCEPTION_TOOL_NAMES
+    execution = _EXECUTION_TOOL_NAMES
+    save = frozenset({"save_memory"})
+
+    # Sectioned ⊂ perception, only get_memories excluded
+    assert sectioned <= perception
+    assert perception - sectioned == frozenset({"get_memories"})
+
+    # 三层 + save_memory 互斥
+    assert perception.isdisjoint(execution)
+    assert perception.isdisjoint(save)
+    assert execution.isdisjoint(save)
+
+    # 完整覆盖 32 registered
+    union = perception | execution | save
+    declared = set(REGISTERED_TOOL_NAMES)
+    assert union == declared, (
+        f"Dispatch sets ≠ REGISTERED_TOOL_NAMES:\n"
+        f"  Missing from dispatch: {declared - union}\n"
+        f"  Extra in dispatch: {union - declared}"
+    )
+
+    # Counts per spec §4.4
+    assert len(perception) == 20
+    assert len(sectioned) == 19
+    assert len(execution) == 11
+
+
+def test_ec_11_unregistered_tool_falls_back_with_warning(caplog):
+    """T-EC-11: 未注册 tool name → R2-8a single-line + warning log."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [ToolCallPart(tool_name="get_unknown_drift", args={}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(tool_name="get_unknown_drift", tool_call_id="c1",
+                              content="some content"),
+    }
+    with caplog.at_level("WARNING", logger="src.cli.display"):
+        out = _render_action(calls, returns, cycle_id="abcd1234")
+
+    assert "get_unknown_drift" in out
+    assert "some content" in out  # _fallback_summary kept
+    assert any("not in" in r.getMessage() and "get_unknown_drift" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_int_1_render_action_mixed_perception_execution():
+    """T-INT-1: 完整 cycle render — perception 走 multi-line + execution 走 R2-8a single-line."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [
+        ToolCallPart(
+            tool_name="get_account_balance", args={}, tool_call_id="c1",
+        ),
+        ToolCallPart(
+            tool_name="set_next_wake", args={"minutes": 5}, tool_call_id="c2",
+        ),
+    ]
+    returns = {
+        "c1": ToolReturnPart(
+            tool_name="get_account_balance", tool_call_id="c1",
+            content="=== Account Balance ===\nTotal: 998.00 USDT",
+        ),
+        "c2": ToolReturnPart(
+            tool_name="set_next_wake", tool_call_id="c2",
+            content="Next wake set to 5 min",
+        ),
+    }
+    out = _render_action(calls, returns, cycle_id="abcd1234")
+
+    # Header
+    assert "▾ Action (2 tools)" in out
+    # Perception multi-line: 4-space indent + section
+    assert "  ⚙ get_account_balance" in out
+    assert "    === Account Balance ===" in out
+    assert "    Total: 998.00 USDT" in out
+    # Execution single-line + <22 padding (R2-8a 维持)
+    assert "  ⚙ set_next_wake          5min" in out  # <22 padding 长度 22
+
+
+# --- T-INT-3: thinking 截断升级 800→2000 (D10) ---
+
+
+def test_int_3_thinking_1500_chars_keep_all():
+    """T-INT-3a: 1500-char thinking < 2000 → keep all (no truncation suffix)."""
+    from src.cli.display import _render_reasoning
+    text = "x" * 1500
+    out = _render_reasoning(text)
+    assert "[+" not in out  # no truncation marker
+    assert "1500 chars total" in out
+
+
+def test_int_3_thinking_2500_chars_truncated_to_2000():
+    """T-INT-3b: 2500-char thinking → truncate at 2000 + ' ... [+500 chars]' suffix."""
+    from src.cli.display import _render_reasoning
+    text = "y" * 2500
+    out = _render_reasoning(text)
+    assert "[+500 chars]" in out
+    assert "2500 chars total" in out
+
+
+# === R2-8c per-tool snapshot fixtures ===
+
+# Snapshot helper — invoke _render_perception_tool with raw tool content fixture
+# and verify output matches expected. Inline fixtures (spec §5.2 plan决议).
+
+
+def _assert_perception_render(tool_name: str, content: str, expected: str):
+    """Helper: run _render_perception_tool and assert output equals expected."""
+    from src.cli.display import _render_perception_tool
+    actual = _render_perception_tool(tool_name, content)
+    assert actual == expected, (
+        f"Render mismatch for {tool_name}:\n"
+        f"--- expected ---\n{expected}\n"
+        f"--- actual ---\n{actual}"
+    )
+
+
+# --- Batch A: tier-1 high-frequency snapshots ---
+
+
+def test_snapshot_get_market_data_happy_path():
+    """Snapshot — get_market_data 4-section happy path render."""
+    content = (
+        "=== Ticker (BTC/USDT:USDT) ===\n"
+        "Price: 75212.00 | Bid: 75200.00 | Ask: 75215.00\n"
+        "24h High: 76225.00 | Low: 74893.00 | Volume: 8200.00\n"
+        "\n"
+        "=== Technical Indicators (5m) ===\n"
+        "RSI(14): 33.55\n"
+        "MACD: -131 (sig -98, hist -33)\n"
+        "\n"
+        "=== Market Context ===\n"
+        "ATR(14): 218.50 (0.29% of price, 5m candles)\n"
+        "\n"
+        "=== Recent Candles (5m, last 3) ===\n"
+        "Time         Open       High        Low      Close        Vol\n"
+        "14:00     75250.00  75300.00  75180.00  75220.00     320.5\n"
+        "14:05     75180.00  75220.00  75150.00  75212.00     310.2"
+    )
+    expected = (
+        "  ⚙ get_market_data\n"
+        "    === Ticker (BTC/USDT:USDT) ===\n"
+        "    Price: 75212.00 | Bid: 75200.00 | Ask: 75215.00\n"
+        "    24h High: 76225.00 | Low: 74893.00 | Volume: 8200.00\n"
+        "\n"
+        "    === Technical Indicators (5m) ===\n"
+        "    RSI(14): 33.55\n"
+        "    MACD: -131 (sig -98, hist -33)\n"
+        "\n"
+        "    === Market Context ===\n"
+        "    ATR(14): 218.50 (0.29% of price, 5m candles)\n"
+        "\n"
+        "    === Recent Candles (5m, last 3) ===\n"
+        "    Time         Open       High        Low      Close        Vol\n"
+        "    14:00     75250.00  75300.00  75180.00  75220.00     320.5\n"
+        "    14:05     75180.00  75220.00  75150.00  75212.00     310.2"
+    )
+    _assert_perception_render("get_market_data", content, expected)
+
+
+def test_snapshot_get_higher_timeframe_view_happy_path():
+    """Snapshot — get_higher_timeframe_view 4-section happy path (incl. 20-period Band header)."""
+    content = (
+        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== MA Distances ===\n"
+        "MA50: 73,200.00 (price vs MA: +2.7%)\n"
+        "MA100: 71,500.00 (price vs MA: +5.2%)\n"
+        "MA200: 68,800.00 (price vs MA: +9.3%)\n"
+        "\n"
+        "=== Range Position ===\n"
+        "100-period High: 78,500.00 (12 4h-bars ago)\n"
+        "100-period Low:  68,200.00 (45 4h-bars ago)\n"
+        "Current price within range: 68.1%\n"
+        "\n"
+        "=== 20-period Band ===\n"
+        "20-period High: 76,800.00\n"
+        "20-period Low:  74,100.00\n"
+        "20-period range width: 3.6%"
+    )
+    expected = (
+        "  ⚙ get_higher_timeframe_view\n"
+        "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === MA Distances ===\n"
+        "    MA50: 73,200.00 (price vs MA: +2.7%)\n"
+        "    MA100: 71,500.00 (price vs MA: +5.2%)\n"
+        "    MA200: 68,800.00 (price vs MA: +9.3%)\n"
+        "\n"
+        "    === Range Position ===\n"
+        "    100-period High: 78,500.00 (12 4h-bars ago)\n"
+        "    100-period Low:  68,200.00 (45 4h-bars ago)\n"
+        "    Current price within range: 68.1%\n"
+        "\n"
+        "    === 20-period Band ===\n"
+        "    20-period High: 76,800.00\n"
+        "    20-period Low:  74,100.00\n"
+        "    20-period range width: 3.6%"
+    )
+    _assert_perception_render("get_higher_timeframe_view", content, expected)
+
+
+def test_snapshot_get_higher_timeframe_view_unavailable():
+    """Snapshot — get_higher_timeframe_view L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "Error: Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_higher_timeframe_view\n"
+        "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "    Error: Temporarily unavailable."
+    )
+    _assert_perception_render("get_higher_timeframe_view", content, expected)
+
+
+def test_snapshot_get_multi_timeframe_snapshot_happy_path():
+    """Snapshot — get_multi_timeframe_snapshot single-section flat row layout."""
+    content = (
+        "=== Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "Current price: 75212.00\n"
+        "Columns: Momentum (price vs primary MA) | Structure (MA alignment) | "
+        "Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, "
+        "0%=low / 100%=high)\n"
+        "\n"
+        "5m:  +0.5% vs MA20    | MA20 above MA50                          | "
+        "ATR 0.29%   | range pos 60%\n"
+        "1h:  +1.2% vs MA50    | MA50 above MA200                         | "
+        "ATR 0.78%   | range pos 72%"
+    )
+    expected = (
+        "  ⚙ get_multi_timeframe_snapshot\n"
+        "    === Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "    Current price: 75212.00\n"
+        "    Columns: Momentum (price vs primary MA) | Structure (MA alignment) | "
+        "Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, "
+        "0%=low / 100%=high)\n"
+        "\n"
+        "    5m:  +0.5% vs MA20    | MA20 above MA50                          | "
+        "ATR 0.29%   | range pos 60%\n"
+        "    1h:  +1.2% vs MA50    | MA50 above MA200                         | "
+        "ATR 0.78%   | range pos 72%"
+    )
+    _assert_perception_render("get_multi_timeframe_snapshot", content, expected)
+
+
+def test_snapshot_get_multi_timeframe_snapshot_unavailable():
+    """Snapshot — get_multi_timeframe_snapshot L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "Error: Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_multi_timeframe_snapshot\n"
+        "    === Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
+        "    Error: Temporarily unavailable."
+    )
+    _assert_perception_render("get_multi_timeframe_snapshot", content, expected)
+
+
+def test_snapshot_get_price_pivots_happy_path():
+    """Snapshot — get_price_pivots 3-section happy path render."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== Levels Above Current Price ===\n"
+        "Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "=== Levels Below Current Price ===\n"
+        "Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "Prior Daily L: 74,200.00 (-1.35%)"
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === Levels Above Current Price ===\n"
+        "    Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "    Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "    === Levels Below Current Price ===\n"
+        "    Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "    Prior Daily L: 74,200.00 (-1.35%)"
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
+def test_snapshot_get_price_pivots_unavailable():
+    """Snapshot — get_price_pivots L2 inline Error fallback (ticker fail, Option D)."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "Error: Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "    Error: Temporarily unavailable."
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
+def test_snapshot_get_price_pivots_with_swing_status_section():
+    """Snapshot — get_price_pivots conditional Swing Status section per spec §4.2.4."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== Levels Above Current Price ===\n"
+        "Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "=== Levels Below Current Price ===\n"
+        "Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "=== Swing Status ===\n"
+        "(No swing pivots in 100-bar window)"
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === Levels Above Current Price ===\n"
+        "    Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "    === Levels Below Current Price ===\n"
+        "    Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "    === Swing Status ===\n"
+        "    (No swing pivots in 100-bar window)"
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
+def test_snapshot_get_price_pivots_with_prior_period_section():
+    """Snapshot — get_price_pivots conditional Prior Period H/L section per spec §4.2.4."""
+    content = (
+        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "Current Price: 75,212.00\n"
+        "\n"
+        "=== Levels Above Current Price ===\n"
+        "Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "=== Levels Below Current Price ===\n"
+        "Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "=== Prior Period H/L ===\n"
+        "Prior Weekly H/L: temporarily unavailable\n"
+        "Prior Monthly H/L: temporarily unavailable"
+    )
+    expected = (
+        "  ⚙ get_price_pivots\n"
+        "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
+        "    Current Price: 75,212.00\n"
+        "\n"
+        "    === Levels Above Current Price ===\n"
+        "    Swing High: 75,820.00 (+0.81%, 12 bars ago)\n"
+        "    Prior Daily H: 76,400.00 (+1.58%)\n"
+        "\n"
+        "    === Levels Below Current Price ===\n"
+        "    Swing Low: 74,680.00 (-0.71%, 8 bars ago)\n"
+        "    Prior Daily L: 74,200.00 (-1.35%)\n"
+        "\n"
+        "    === Prior Period H/L ===\n"
+        "    Prior Weekly H/L: temporarily unavailable\n"
+        "    Prior Monthly H/L: temporarily unavailable"
+    )
+    _assert_perception_render("get_price_pivots", content, expected)
+
+
+def test_snapshot_get_recent_trades_happy_path():
+    """Snapshot — get_recent_trades single-section bucket+total layout."""
+    content = (
+        "=== Recent Trades (BTC/USDT:USDT, last 300s, 5 × 60s buckets) ===\n"
+        "  t-5min  buy 1.2300 / sell 0.4500  (net +0.7800)\n"
+        "  t-4min  buy 0.8000 / sell 1.1000  (net -0.3000)\n"
+        "  t-3min  buy 0.5500 / sell 0.6500  (net -0.1000)\n"
+        "  t-2min  buy 0.7800 / sell 0.7900  (net -0.0100)\n"
+        "  t-1min  buy 1.4500 / sell 0.6200  (net +0.8300)\n"
+        "Total: buy 4.8100 / sell 3.6100 (net +1.2000, 57% taker buy)\n"
+        "Trade count: 100 | Avg size: 0.0842 BTC"
+    )
+    # Body has 7 rows (< 10 clip threshold) → keep all rows verbatim.
+    expected = (
+        "  ⚙ get_recent_trades\n"
+        "    === Recent Trades (BTC/USDT:USDT, last 300s, 5 × 60s buckets) ===\n"
+        "      t-5min  buy 1.2300 / sell 0.4500  (net +0.7800)\n"
+        "      t-4min  buy 0.8000 / sell 1.1000  (net -0.3000)\n"
+        "      t-3min  buy 0.5500 / sell 0.6500  (net -0.1000)\n"
+        "      t-2min  buy 0.7800 / sell 0.7900  (net -0.0100)\n"
+        "      t-1min  buy 1.4500 / sell 0.6200  (net +0.8300)\n"
+        "    Total: buy 4.8100 / sell 3.6100 (net +1.2000, 57% taker buy)\n"
+        "    Trade count: 100 | Avg size: 0.0842 BTC"
+    )
+    _assert_perception_render("get_recent_trades", content, expected)
+
+
+def test_snapshot_get_recent_trades_no_trades():
+    """Snapshot — get_recent_trades L3 empty-state (single-section, NO Error: prefix)."""
+    content = (
+        "=== Recent Trades (BTC/USDT:USDT, last 300s) ===\n"
+        "No trades in last 300s."
+    )
+    expected = (
+        "  ⚙ get_recent_trades\n"
+        "    === Recent Trades (BTC/USDT:USDT, last 300s) ===\n"
+        "    No trades in last 300s."
+    )
+    _assert_perception_render("get_recent_trades", content, expected)
+
+
+def test_snapshot_get_recent_trades_unavailable():
+    """Snapshot — get_recent_trades L2 inline Error fallback (service exception, Option D)."""
+    content = (
+        "=== Recent Trades (BTC/USDT:USDT) ===\n"
+        "Error: Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_recent_trades\n"
+        "    === Recent Trades (BTC/USDT:USDT) ===\n"
+        "    Error: Temporarily unavailable."
+    )
+    _assert_perception_render("get_recent_trades", content, expected)
+
+
+def test_snapshot_get_derivatives_data_happy_path():
+    """Snapshot — get_derivatives_data single-section happy path (per §4.2.10)."""
+    content = (
+        "=== Derivatives Data (BTC/USDT:USDT) ===\n"
+        "Funding Rate: +0.0125% (next settlement in 3h 42m)\n"
+        "  Positive rate — longs pay shorts\n"
+        "Open Interest: $4.82B\n"
+        "Long/Short Ratio: 1.35 (57.4% long / 42.6% short)\n"
+        "Data as of: 2026-04-16 14:30 UTC"
+    )
+    expected = (
+        "  ⚙ get_derivatives_data\n"
+        "    === Derivatives Data (BTC/USDT:USDT) ===\n"
+        "    Funding Rate: +0.0125% (next settlement in 3h 42m)\n"
+        "      Positive rate — longs pay shorts\n"
+        "    Open Interest: $4.82B\n"
+        "    Long/Short Ratio: 1.35 (57.4% long / 42.6% short)\n"
+        "    Data as of: 2026-04-16 14:30 UTC"
+    )
+    _assert_perception_render("get_derivatives_data", content, expected)
+
+
+def test_snapshot_get_derivatives_data_partial_failure():
+    """Snapshot — get_derivatives_data per-field L3 fallback (1 ok, 2 fail)."""
+    content = (
+        "=== Derivatives Data (BTC/USDT:USDT) ===\n"
+        "Funding Rate: (unavailable)\n"
+        "Open Interest: $1.00B\n"
+        "Long/Short Ratio: (unavailable)"
+    )
+    expected = (
+        "  ⚙ get_derivatives_data\n"
+        "    === Derivatives Data (BTC/USDT:USDT) ===\n"
+        "    Funding Rate: (unavailable)\n"
+        "    Open Interest: $1.00B\n"
+        "    Long/Short Ratio: (unavailable)"
+    )
+    _assert_perception_render("get_derivatives_data", content, expected)
+
+
+def test_snapshot_get_derivatives_data_all_failed():
+    """Snapshot — get_derivatives_data L2 all-3-failed inline Error fallback (Option D)."""
+    content = (
+        "=== Derivatives Data (BTC/USDT:USDT) ===\n"
+        "Error: Temporarily unavailable (all 3 data sources failed)."
+    )
+    expected = (
+        "  ⚙ get_derivatives_data\n"
+        "    === Derivatives Data (BTC/USDT:USDT) ===\n"
+        "    Error: Temporarily unavailable (all 3 data sources failed)."
+    )
+    _assert_perception_render("get_derivatives_data", content, expected)
+
+
+# --- Batch B: mid-frequency + implicit→explicit snapshots ---
+
+
+def test_snapshot_get_account_balance_happy_path():
+    """Snapshot — get_account_balance single-section render (R2-8c §4.2.12)."""
+    content = (
+        "=== Account Balance ===\n"
+        "Total: 998.00 USDT (initial: 1000.00)\n"
+        "Return: -0.20% (-2.00 USDT) (incl. unrealized)\n"
+        "Free: 800.00 USDT\n"
+        "Used: 198.00 USDT"
+    )
+    expected = (
+        "  ⚙ get_account_balance\n"
+        "    === Account Balance ===\n"
+        "    Total: 998.00 USDT (initial: 1000.00)\n"
+        "    Return: -0.20% (-2.00 USDT) (incl. unrealized)\n"
+        "    Free: 800.00 USDT\n"
+        "    Used: 198.00 USDT"
+    )
+    _assert_perception_render("get_account_balance", content, expected)
+
+
+def test_snapshot_get_open_orders_empty():
+    """Snapshot — get_open_orders no-orders empty-state, sectioned (§4.2.14)."""
+    content = "=== Pending Orders ===\nNo pending orders."
+    expected = (
+        "  ⚙ get_open_orders\n"
+        "    === Pending Orders ===\n"
+        "    No pending orders."
+    )
+    _assert_perception_render("get_open_orders", content, expected)
+
+
+def test_snapshot_get_open_orders_with_orders():
+    """Snapshot — pending orders 1 OCO leg + 1 limit (§4.2.14)."""
+    content = (
+        "=== Pending Orders ===\n"
+        "  [OCO] sell 0.025 stop 74000.00 (-1.60% from current) / "
+        "tp 76500.00 (+1.73% from current) | algoId: oco-1 (cancel removes both legs)\n"
+        "  [LIMIT] buy 0.025 @ 74500.00 (-0.93% from current) | ID: lim-1"
+    )
+    expected = (
+        "  ⚙ get_open_orders\n"
+        "    === Pending Orders ===\n"
+        "      [OCO] sell 0.025 stop 74000.00 (-1.60% from current) / "
+        "tp 76500.00 (+1.73% from current) | algoId: oco-1 (cancel removes both legs)\n"
+        "      [LIMIT] buy 0.025 @ 74500.00 (-0.93% from current) | ID: lim-1"
+    )
+    _assert_perception_render("get_open_orders", content, expected)
+
+
+def test_snapshot_get_position_no_position():
+    """Snapshot — get_position no open positions empty-state, sectioned (§4.2.11)."""
+    content = "=== Position ===\nNo open positions."
+    expected = (
+        "  ⚙ get_position\n"
+        "    === Position ===\n"
+        "    No open positions."
+    )
+    _assert_perception_render("get_position", content, expected)
+
+
+def test_snapshot_get_position_with_stats():
+    """Snapshot — get_position 4 sections (Position / PnL / Risk Exposure / Exit Orders)."""
+    content = (
+        "=== Position (BTC/USDT:USDT) ===\n"
+        "Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "Leverage: 5x\n"
+        "Liquidation: 70,666.00\n"
+        "Unrealized: +0.20 USDT\n"
+        "\n"
+        "=== PnL ===\n"
+        "PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "Duration: 2h 30m\n"
+        "\n"
+        "=== Risk Exposure ===\n"
+        "Notional value: 1962.95 USDT (4.2% of equity 998.00)\n"
+        "Margin used: 392.59 USDT (39.3% of equity, from balance.used_usdt)\n"
+        "Liquidation: 70666.00 (10.0% away = 5.8× ATR(1h))\n"
+        "\n"
+        "=== Exit Orders ===\n"
+        "  Stop loss: not set\n"
+        "  Take profit: not set"
+    )
+    expected = (
+        "  ⚙ get_position\n"
+        "    === Position (BTC/USDT:USDT) ===\n"
+        "    Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "    Leverage: 5x\n"
+        "    Liquidation: 70,666.00\n"
+        "    Unrealized: +0.20 USDT\n"
+        "\n"
+        "    === PnL ===\n"
+        "    PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "    Duration: 2h 30m\n"
+        "\n"
+        "    === Risk Exposure ===\n"
+        "    Notional value: 1962.95 USDT (4.2% of equity 998.00)\n"
+        "    Margin used: 392.59 USDT (39.3% of equity, from balance.used_usdt)\n"
+        "    Liquidation: 70666.00 (10.0% away = 5.8× ATR(1h))\n"
+        "\n"
+        "    === Exit Orders ===\n"
+        "      Stop loss: not set\n"
+        "      Take profit: not set"
+    )
+    _assert_perception_render("get_position", content, expected)
+
+
+def test_snapshot_get_position_hard_failure_degradation():
+    """Snapshot — get_position hard-failure: Position + PnL preserved,
+    Risk Exposure + Exit Orders degraded to (unavailable) bodies (§4.2.11)."""
+    content = (
+        "=== Position (BTC/USDT:USDT) ===\n"
+        "Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "Leverage: 5x\n"
+        "Liquidation: 70,666.00\n"
+        "Unrealized: +0.20 USDT\n"
+        "\n"
+        "=== PnL ===\n"
+        "PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "Duration: 2h 30m\n"
+        "\n"
+        "=== Risk Exposure ===\n"
+        "(unavailable)\n"
+        "\n"
+        "=== Exit Orders ===\n"
+        "(unavailable)"
+    )
+    expected = (
+        "  ⚙ get_position\n"
+        "    === Position (BTC/USDT:USDT) ===\n"
+        "    Side: Long | Contracts: 0.025 | Entry: 78,518.00\n"
+        "    Leverage: 5x\n"
+        "    Liquidation: 70,666.00\n"
+        "    Unrealized: +0.20 USDT\n"
+        "\n"
+        "    === PnL ===\n"
+        "    PnL: +0.20 USDT (+0.02% of initial capital)\n"
+        "    Duration: 2h 30m\n"
+        "\n"
+        "    === Risk Exposure ===\n"
+        "    (unavailable)\n"
+        "\n"
+        "    === Exit Orders ===\n"
+        "    (unavailable)"
+    )
+    _assert_perception_render("get_position", content, expected)
+
+
+def test_snapshot_get_market_news_l2_not_configured():
+    """Snapshot — news service=None L2 inline Error fallback under === News === (Option D)."""
+    content = (
+        "=== News ===\n"
+        "Error: News service not configured."
+    )
+    expected = (
+        "  ⚙ get_market_news\n"
+        "    === News ===\n"
+        "    Error: News service not configured."
+    )
+    _assert_perception_render("get_market_news", content, expected)
+
+
+def test_snapshot_get_market_news_happy_short():
+    """Snapshot — news happy path with FGI + 2 symbol headlines (body < 10, keep all)."""
+    content = (
+        "=== Fear & Greed Index ===\n"
+        "Value: Fear (35)\n"
+        "(Updated: 2026-05-03)\n"
+        "\n"
+        "=== Symbol News (BTC, 2) ===\n"
+        "[2026-05-03 14:00] BTC tests $75k support\n"
+        "  Source: CoinDesk | Currencies: BTC\n"
+        "[2026-05-03 13:30] Funding rates flip negative\n"
+        "  Source: The Block | Currencies: BTC, ETH"
+    )
+    expected = (
+        "  ⚙ get_market_news\n"
+        "    === Fear & Greed Index ===\n"
+        "    Value: Fear (35)\n"
+        "    (Updated: 2026-05-03)\n"
+        "\n"
+        "    === Symbol News (BTC, 2) ===\n"
+        "    [2026-05-03 14:00] BTC tests $75k support\n"
+        "      Source: CoinDesk | Currencies: BTC\n"
+        "    [2026-05-03 13:30] Funding rates flip negative\n"
+        "      Source: The Block | Currencies: BTC, ETH"
+    )
+    _assert_perception_render("get_market_news", content, expected)
+
+
+def test_snapshot_get_market_news_dense_general_news_clipped():
+    """Snapshot — General Crypto News with 12 entries (each 2 lines = 24 body lines)
+    triggers head=2/tail=2 clipping. Multi-entry boundary trade-off (spec §4.3.2)
+    acknowledged: head/tail may split entries — trader sees first 2 + last 2 lines.
+    """
+    entries = []
+    for i in range(12):
+        entries.append(f"[2026-05-03 1{i:02d}:00] Headline {i}\n  Source: src{i} | Currencies: ALT{i}")
+    content = "=== General Crypto News (12) ===\n" + "\n".join(entries)
+    # Body: 12 × 2 = 24 lines, ≥ 10 → head=2 + omitted + tail=2
+    from src.cli.display import _render_perception_tool
+    out = _render_perception_tool("get_market_news", content)
+    assert "    === General Crypto News (12) ===" in out
+    assert "    [2026-05-03 100:00] Headline 0" in out  # head[0]
+    assert "      Source: src0 | Currencies: ALT0" in out  # head[1]
+    assert "    [... 20 rows omitted ...]" in out
+    # Last 2 lines of body — entry 11's two lines
+    assert "    [2026-05-03 111:00] Headline 11" in out  # tail[-2]
+    assert "      Source: src11 | Currencies: ALT11" in out  # tail[-1]
+
+
+def test_snapshot_get_order_book_happy_path():
+    """Snapshot — order book 2 sub-sections (Order Book + Depth) without concentrated."""
+    content = (
+        "=== Order Book (BTC/USDT:USDT) ===\n"
+        "Best bid: 75200.00 × 0.5000 BTC  |  Best ask: 75205.00 × 0.4500 BTC\n"
+        "Spread: 5.00 (0.007%)\n"
+        "\n"
+        "=== Depth (top 20 each side) ===\n"
+        "  Bids cumulative: 5.4500 BTC over 75200.00 - 75150.00 (0.07% deep)\n"
+        "  Asks cumulative: 6.2000 BTC over 75205.00 - 75260.00 (0.07% deep)\n"
+        "  Bid share: ~50% (balanced)"
+    )
+    expected = (
+        "  ⚙ get_order_book\n"
+        "    === Order Book (BTC/USDT:USDT) ===\n"
+        "    Best bid: 75200.00 × 0.5000 BTC  |  Best ask: 75205.00 × 0.4500 BTC\n"
+        "    Spread: 5.00 (0.007%)\n"
+        "\n"
+        "    === Depth (top 20 each side) ===\n"
+        "      Bids cumulative: 5.4500 BTC over 75200.00 - 75150.00 (0.07% deep)\n"
+        "      Asks cumulative: 6.2000 BTC over 75205.00 - 75260.00 (0.07% deep)\n"
+        "      Bid share: ~50% (balanced)"
+    )
+    _assert_perception_render("get_order_book", content, expected)
+
+
+def test_snapshot_get_order_book_l2_unavailable():
+    """Snapshot — order book L2 (service exception) inline Error fallback (Option D)."""
+    content = (
+        "=== Order Book (BTC/USDT:USDT) ===\n"
+        "Error: Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_order_book\n"
+        "    === Order Book (BTC/USDT:USDT) ===\n"
+        "    Error: Temporarily unavailable."
+    )
+    _assert_perception_render("get_order_book", content, expected)
+
+
+def test_snapshot_get_active_alerts_with_alerts():
+    """Snapshot — active alerts vol param + 2 price level alerts (§4.1.1 verified-no-change)."""
+    content = (
+        "=== Price Alert Settings ===\n"
+        "Volatility alert: 1.5% in 10min window\n"
+        "\n"
+        "=== Active Price Level Alerts (2/20) ===\n"
+        '  #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
+        '  #2 (id=alert-2) below 74000.00 — "support break"'
+    )
+    expected = (
+        "  ⚙ get_active_alerts\n"
+        "    === Price Alert Settings ===\n"
+        "    Volatility alert: 1.5% in 10min window\n"
+        "\n"
+        "    === Active Price Level Alerts (2/20) ===\n"
+        '      #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
+        '      #2 (id=alert-2) below 74000.00 — "support break"'
+    )
+    _assert_perception_render("get_active_alerts", content, expected)
+
+
+# --- Batch C: long-tail snapshots (T7) ---
+
+
+def test_snapshot_get_macro_context_l2_not_configured():
+    """Snapshot — macro service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Macro Context ===\n"
+        "Error: Macro service not configured."
+    )
+    expected = (
+        "  ⚙ get_macro_context\n"
+        "    === Macro Context ===\n"
+        "    Error: Macro service not configured."
+    )
+    _assert_perception_render("get_macro_context", content, expected)
+
+
+def test_snapshot_get_macro_context_happy_3_sections():
+    """Snapshot — macro_context happy path 3 sections (Crypto Market + FRED + AV)."""
+    content = (
+        "=== Crypto Market ===\n"
+        "BTC.D: 56.10% | ETH.D: 13.40% | Total Mcap: $2.45T (24h: +0.85%)\n"
+        "\n"
+        "=== US Macro (FRED) ===\n"
+        "USD Index (Broad TW): 128.55 (as of 2026-04-25)\n"
+        "VIX: 17.94 (as of 2026-04-30)\n"
+        "10Y Treasury: 4.21% (as of 2026-04-30)\n"
+        "2s10s Spread: +0.45% (as of 2026-04-30)\n"
+        "10Y Inflation Expectation: 2.43% (as of 2026-04-30)\n"
+        "\n"
+        "=== US Equities (Alpha Vantage) ===\n"
+        "SPY: $710.14 (+0.32%, as of 2026-04-30)\n"
+        "QQQ: $648.85 (+0.55%, as of 2026-04-30)"
+    )
+    expected = (
+        "  ⚙ get_macro_context\n"
+        "    === Crypto Market ===\n"
+        "    BTC.D: 56.10% | ETH.D: 13.40% | Total Mcap: $2.45T (24h: +0.85%)\n"
+        "\n"
+        "    === US Macro (FRED) ===\n"
+        "    USD Index (Broad TW): 128.55 (as of 2026-04-25)\n"
+        "    VIX: 17.94 (as of 2026-04-30)\n"
+        "    10Y Treasury: 4.21% (as of 2026-04-30)\n"
+        "    2s10s Spread: +0.45% (as of 2026-04-30)\n"
+        "    10Y Inflation Expectation: 2.43% (as of 2026-04-30)\n"
+        "\n"
+        "    === US Equities (Alpha Vantage) ===\n"
+        "    SPY: $710.14 (+0.32%, as of 2026-04-30)\n"
+        "    QQQ: $648.85 (+0.55%, as of 2026-04-30)"
+    )
+    _assert_perception_render("get_macro_context", content, expected)
+
+
+def test_snapshot_get_macro_context_partial_l3_fallback():
+    """Snapshot — get_macro_context partial L3 (FRED ok, Crypto + Equities unavailable).
+
+    Per spec §4.1.4 L3: per-source partial failure renders inline `Temporarily
+    unavailable.` short-description in the affected section without `Error:` prefix
+    (L2 error prefix reserved for whole-tool fallback).
+    """
+    content = (
+        "=== Crypto Market ===\n"
+        "Temporarily unavailable.\n"
+        "\n"
+        "=== US Macro (FRED) ===\n"
+        "USD Index (Broad TW): 105.20 (as of 2026-04-30)\n"
+        "VIX: 16.50 (as of 2026-05-02)\n"
+        "10Y Treasury: 4.25% (as of 2026-05-02)\n"
+        "\n"
+        "=== US Equities (Alpha Vantage) ===\n"
+        "Temporarily unavailable."
+    )
+    expected = (
+        "  ⚙ get_macro_context\n"
+        "    === Crypto Market ===\n"
+        "    Temporarily unavailable.\n"
+        "\n"
+        "    === US Macro (FRED) ===\n"
+        "    USD Index (Broad TW): 105.20 (as of 2026-04-30)\n"
+        "    VIX: 16.50 (as of 2026-05-02)\n"
+        "    10Y Treasury: 4.25% (as of 2026-05-02)\n"
+        "\n"
+        "    === US Equities (Alpha Vantage) ===\n"
+        "    Temporarily unavailable."
+    )
+    _assert_perception_render("get_macro_context", content, expected)
+
+
+def test_snapshot_get_macro_calendar_l2_not_configured():
+    """Snapshot — macro_calendar news service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Upcoming Macro Events ===\n"
+        "Error: News service not configured."
+    )
+    expected = (
+        "  ⚙ get_macro_calendar\n"
+        "    === Upcoming Macro Events ===\n"
+        "    Error: News service not configured."
+    )
+    _assert_perception_render("get_macro_calendar", content, expected)
+
+
+def test_snapshot_get_macro_calendar_happy_with_note():
+    """Snapshot — macro_calendar happy path: 1 event + === Note === footer."""
+    content = (
+        "=== Upcoming Macro Events (next 12h) ===\n"
+        "[2026-05-03 12:59] FOMC Meeting — Impact: High\n"
+        "  Previous: N/A | Forecast: N/A\n"
+        "\n"
+        "=== Note ===\n"
+        "Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    expected = (
+        "  ⚙ get_macro_calendar\n"
+        "    === Upcoming Macro Events (next 12h) ===\n"
+        "    [2026-05-03 12:59] FOMC Meeting — Impact: High\n"
+        "      Previous: N/A | Forecast: N/A\n"
+        "\n"
+        "    === Note ===\n"
+        "    Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    _assert_perception_render("get_macro_calendar", content, expected)
+
+
+def test_snapshot_get_macro_calendar_no_events_with_note():
+    """Snapshot — macro_calendar empty events list + === Note === footer."""
+    content = (
+        "=== Upcoming Macro Events (next 12h) ===\n"
+        "No upcoming macro events.\n"
+        "\n"
+        "=== Note ===\n"
+        "Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    expected = (
+        "  ⚙ get_macro_calendar\n"
+        "    === Upcoming Macro Events (next 12h) ===\n"
+        "    No upcoming macro events.\n"
+        "\n"
+        "    === Note ===\n"
+        "    Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    _assert_perception_render("get_macro_calendar", content, expected)
+
+
+def test_snapshot_get_etf_flows_l2_not_configured():
+    """Snapshot — etf_flows service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== BTC Spot ETF Flows (US) ===\n"
+        "Error: ETF flows service not configured."
+    )
+    expected = (
+        "  ⚙ get_etf_flows\n"
+        "    === BTC Spot ETF Flows (US) ===\n"
+        "    Error: ETF flows service not configured."
+    )
+    _assert_perception_render("get_etf_flows", content, expected)
+
+
+def test_snapshot_get_etf_flows_happy_with_note():
+    """Snapshot — etf_flows happy path: BTC + ETH sections + === Note === footer."""
+    content = (
+        "=== BTC Spot ETF Flows (US) ===\n"
+        "2026-04-17: +$100.00M  (cum: $57.70B, AUM: $100.00B)\n"
+        "2026-04-16: -$200.00M\n"
+        "2026-04-15: +$150.00M\n"
+        "3-day net: +$50.00M\n"
+        "\n"
+        "=== ETH Spot ETF Flows (US) ===\n"
+        "2026-04-17: +$25.00M  (cum: $9.80B, AUM: $12.00B)\n"
+        "2026-04-16: +$10.00M\n"
+        "2026-04-15: -$5.00M\n"
+        "3-day net: +$30.00M\n"
+        "\n"
+        "=== Note ===\n"
+        "Past 3 trading days (weekends/holidays excluded). "
+        "Issuer-reported; today's value may be revised T+1."
+    )
+    expected = (
+        "  ⚙ get_etf_flows\n"
+        "    === BTC Spot ETF Flows (US) ===\n"
+        "    2026-04-17: +$100.00M  (cum: $57.70B, AUM: $100.00B)\n"
+        "    2026-04-16: -$200.00M\n"
+        "    2026-04-15: +$150.00M\n"
+        "    3-day net: +$50.00M\n"
+        "\n"
+        "    === ETH Spot ETF Flows (US) ===\n"
+        "    2026-04-17: +$25.00M  (cum: $9.80B, AUM: $12.00B)\n"
+        "    2026-04-16: +$10.00M\n"
+        "    2026-04-15: -$5.00M\n"
+        "    3-day net: +$30.00M\n"
+        "\n"
+        "    === Note ===\n"
+        "    Past 3 trading days (weekends/holidays excluded). "
+        "Issuer-reported; today's value may be revised T+1."
+    )
+    _assert_perception_render("get_etf_flows", content, expected)
+
+
+def test_snapshot_get_stablecoin_supply_l2_not_configured():
+    """Snapshot — stablecoin onchain service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Stablecoin Supply ===\n"
+        "Error: Onchain service not configured."
+    )
+    expected = (
+        "  ⚙ get_stablecoin_supply\n"
+        "    === Stablecoin Supply ===\n"
+        "    Error: Onchain service not configured."
+    )
+    _assert_perception_render("get_stablecoin_supply", content, expected)
+
+
+def test_snapshot_get_stablecoin_supply_happy_path():
+    """Snapshot — stablecoin happy path: USDT + USDC + total Mcap (single section)."""
+    content = (
+        "=== Stablecoin Supply ===\n"
+        "USDT: $186.62B (7d: +$2.33B, +1.27%)\n"
+        "USDC: $42.18B (7d: +$0.51B, +1.22%)\n"
+        "Total Stablecoin Mcap: $228.80B (7d: +$2.84B, +1.26%)"
+    )
+    expected = (
+        "  ⚙ get_stablecoin_supply\n"
+        "    === Stablecoin Supply ===\n"
+        "    USDT: $186.62B (7d: +$2.33B, +1.27%)\n"
+        "    USDC: $42.18B (7d: +$0.51B, +1.22%)\n"
+        "    Total Stablecoin Mcap: $228.80B (7d: +$2.84B, +1.26%)"
+    )
+    _assert_perception_render("get_stablecoin_supply", content, expected)
+
+
+def test_snapshot_get_exchange_announcements_l2_not_configured():
+    """Snapshot — exchange_announcements service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Exchange Announcements ===\n"
+        "Error: News service not configured."
+    )
+    expected = (
+        "  ⚙ get_exchange_announcements\n"
+        "    === Exchange Announcements ===\n"
+        "    Error: News service not configured."
+    )
+    _assert_perception_render("get_exchange_announcements", content, expected)
+
+
+def test_snapshot_get_exchange_announcements_happy_short():
+    """Snapshot — exchange_announcements happy path with 2 announcements."""
+    content = (
+        "=== Exchange Announcements (past 24h) ===\n"
+        "[2026-05-03 12:00] Delisting XYZ\n"
+        "[2026-05-03 09:30] Maintenance scheduled for spot trading"
+    )
+    expected = (
+        "  ⚙ get_exchange_announcements\n"
+        "    === Exchange Announcements (past 24h) ===\n"
+        "    [2026-05-03 12:00] Delisting XYZ\n"
+        "    [2026-05-03 09:30] Maintenance scheduled for spot trading"
+    )
+    _assert_perception_render("get_exchange_announcements", content, expected)
+
+
+def test_snapshot_get_trade_journal_with_entries():
+    """Snapshot — trade_journal happy path: Performance Summary + Trade Journal."""
+    content = (
+        "=== Performance Summary ===\n"
+        "Total Trades: 2 | Win: 1 (50.0%) | Loss: 1\n"
+        "Avg Win: +30.00 USDT | Avg Loss: -10.00 USDT\n"
+        "Profit Factor: 3.00\n"
+        "\n"
+        "=== Trade Journal ===\n"
+        "[05-01 09:30] open_position (long)\n"
+        "  Reasoning: RSI oversold\n"
+        "[05-01 11:45] order_filled (long) @ 60200.00, fee=0.0300 [closed], pnl=30.00\n"
+        "  Reasoning: market exit"
+    )
+    # Rich markup escape: '[closed]' → '\[closed]' (display escape per §4.3.3).
+    expected = (
+        "  ⚙ get_trade_journal\n"
+        "    === Performance Summary ===\n"
+        "    Total Trades: 2 | Win: 1 (50.0%) | Loss: 1\n"
+        "    Avg Win: +30.00 USDT | Avg Loss: -10.00 USDT\n"
+        "    Profit Factor: 3.00\n"
+        "\n"
+        "    === Trade Journal ===\n"
+        "    [05-01 09:30] open_position (long)\n"
+        "      Reasoning: RSI oversold\n"
+        "    [05-01 11:45] order_filled (long) @ 60200.00, fee=0.0300 \\[closed], pnl=30.00\n"
+        "      Reasoning: market exit"
+    )
+    _assert_perception_render("get_trade_journal", content, expected)
+
+
+def test_snapshot_get_trade_journal_no_db_engine():
+    """Snapshot — trade_journal db_engine=None: sectioned empty-state (L3, NOT Error)."""
+    content = (
+        "=== Trade Journal ===\n"
+        "No trade journal entries yet."
+    )
+    expected = (
+        "  ⚙ get_trade_journal\n"
+        "    === Trade Journal ===\n"
+        "    No trade journal entries yet."
+    )
+    _assert_perception_render("get_trade_journal", content, expected)
+
+
+def test_snapshot_get_trade_journal_no_actions():
+    """Snapshot — trade_journal no actions returned: same sectioned empty-state."""
+    content = (
+        "=== Trade Journal ===\n"
+        "No trade journal entries yet."
+    )
+    expected = (
+        "  ⚙ get_trade_journal\n"
+        "    === Trade Journal ===\n"
+        "    No trade journal entries yet."
+    )
+    _assert_perception_render("get_trade_journal", content, expected)
+
+
+def test_snapshot_get_performance_no_metrics_service():
+    """Snapshot — performance metrics=None split: Trading Performance + empty Stats."""
+    content = (
+        "=== Trading Performance ===\n"
+        "Initial Balance: 10000.00 USDT\n"
+        "Current Balance: 10000.00 USDT\n"
+        "Return: +0.00% (+0.00 USDT)\n"
+        "\n"
+        "=== Trade Stats ===\n"
+        "No metrics service available."
+    )
+    expected = (
+        "  ⚙ get_performance\n"
+        "    === Trading Performance ===\n"
+        "    Initial Balance: 10000.00 USDT\n"
+        "    Current Balance: 10000.00 USDT\n"
+        "    Return: +0.00% (+0.00 USDT)\n"
+        "\n"
+        "    === Trade Stats ===\n"
+        "    No metrics service available."
+    )
+    _assert_perception_render("get_performance", content, expected)
+
+
+def test_snapshot_get_performance_happy_path():
+    """Snapshot — performance happy path with both Trading Performance + Trade Stats sections."""
+    content = (
+        "=== Trading Performance ===\n"
+        "Initial Balance: 10000.00 USDT\n"
+        "Current Balance: 10023.00 USDT\n"
+        "Total Return: +0.23% (+23.00 USDT) (incl. unrealized)\n"
+        "Realized PnL: +23.00 USDT (gross, before fees)\n"
+        "Total Fees: -0.80 USDT\n"
+        "\n"
+        "=== Trade Stats ===\n"
+        "Total Trades: 5 | Win: 3 (60.0%) | Loss: 2\n"
+        "Avg Win: +20.00 USDT | Avg Loss: -10.00 USDT\n"
+        "Profit Factor: 3.00\n"
+        "Max Drawdown: -2.5%\n"
+        "Best Trade: +50.00 USDT | Worst Trade: -15.00 USDT"
+    )
+    expected = (
+        "  ⚙ get_performance\n"
+        "    === Trading Performance ===\n"
+        "    Initial Balance: 10000.00 USDT\n"
+        "    Current Balance: 10023.00 USDT\n"
+        "    Total Return: +0.23% (+23.00 USDT) (incl. unrealized)\n"
+        "    Realized PnL: +23.00 USDT (gross, before fees)\n"
+        "    Total Fees: -0.80 USDT\n"
+        "\n"
+        "    === Trade Stats ===\n"
+        "    Total Trades: 5 | Win: 3 (60.0%) | Loss: 2\n"
+        "    Avg Win: +20.00 USDT | Avg Loss: -10.00 USDT\n"
+        "    Profit Factor: 3.00\n"
+        "    Max Drawdown: -2.5%\n"
+        "    Best Trade: +50.00 USDT | Worst Trade: -15.00 USDT"
+    )
+    _assert_perception_render("get_performance", content, expected)
+
+
+# === R2-8c edge cases (T-EC) ===
+
+
+def test_ec_1_no_section_header_fallback():
+    """T-EC-1: tool 输出无 === Section === → unnamed section render (legacy / get_memories)."""
+    from src.cli.display import _render_perception_tool
+    out = _render_perception_tool("get_memories", "Memory entry 1\nMemory entry 2")
+    assert "  ⚙ get_memories" in out
+    assert "    Memory entry 1" in out
+
+
+def test_ec_2_l1_failure_single_line_x_icon():
+    """T-EC-2: outcome != success → R2-8a single-line ✗ icon (不进 multi-line)."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(
+            tool_name="get_market_data", tool_call_id="c1",
+            content="ConnectionError: upstream timeout",
+            outcome="error",  # outcome != success → L1
+        ),
+    }
+    out = _render_action(calls, returns, cycle_id="abcd1234")
+    assert "  ✗ get_market_data" in out
+    # Multi-line markers should NOT appear (L1 不进 multi-line)
+    assert "    ===" not in out  # no section header indent line
+
+
+def test_ec_3_l2_error_inline_in_multi_line():
+    """T-EC-3: tool 内捕获异常 + success outcome 返回 Option D 'Error:' inline → 进 multi-line, body 显示。"""
+    from src.cli.display import _render_perception_tool
+    content = (
+        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "Error: Temporarily unavailable."
+    )
+    out = _render_perception_tool("get_higher_timeframe_view", content)
+    assert "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===" in out
+    assert "    Error: Temporarily unavailable." in out
+
+
+def test_ec_4_section_body_one_line():
+    """T-EC-4: section body 仅 1 行 → keep all (< 10)."""
+    from src.cli.display import _render_perception_tool
+    content = "=== Account Balance ===\nTotal: 998.00 USDT"
+    out = _render_perception_tool("get_account_balance", content)
+    assert out == (
+        "  ⚙ get_account_balance\n"
+        "    === Account Balance ===\n"
+        "    Total: 998.00 USDT"
+    )
+
+
+def test_ec_5_section_body_zero_lines_render_header_only():
+    """T-EC-5: section body 0 行 → header alone."""
+    from src.cli.display import _render_perception_tool
+    content = "=== Empty Section ===\n"
+    out = _render_perception_tool("get_market_data", content)
+    assert out == (
+        "  ⚙ get_market_data\n"
+        "    === Empty Section ==="
+    )
+
+
+def test_ec_6_section_header_markup_literal_escaped():
+    """T-EC-6: section header 含 markup 字面值 → escape 为 \\[red]Critical[/]."""
+    from src.cli.display import _render_perception_tool
+    content = "=== [red]Critical[/] ===\nbody"
+    out = _render_perception_tool("get_market_news", content)
+    assert r"\[red]" in out  # rich.markup.escape 转 \[red]
+
+
+def test_ec_7_section_body_markup_literal_escaped():
+    """T-EC-7: section body 含 markup 字面值（如新闻 [bold]）→ escape."""
+    from src.cli.display import _render_perception_tool
+    content = "=== Symbol News ===\nHeadline: [bold]BREAKING[/] something"
+    out = _render_perception_tool("get_market_news", content)
+    assert r"\[bold]" in out
+
+
+def test_ec_8_long_url_line_no_wrapping_in_helper():
+    """T-EC-8: 极长单行（如 URL ≥ terminal width）— helper 不主动 wrap, 由 Rich render 处理."""
+    from src.cli.display import _render_perception_tool
+    long_url = "https://example.com/" + "x" * 200
+    content = f"=== Symbol News ===\n{long_url}"
+    out = _render_perception_tool("get_market_news", content)
+    assert long_url in out
+
+
+def test_ec_9_orphan_tool_call_id_no_return_captured():
+    """T-EC-9: 无 tool_call_id 关联 → R2-8a [no return captured]."""
+    from pydantic_ai.messages import ToolCallPart
+    from src.cli.display import _render_action
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="orphan")]
+    out = _render_action(calls, returns_lookup={}, cycle_id="abcd1234")
+    assert "[no return captured]" in out
+
+
+# === R2-8c T-INT-2: failed tool ✗ icon regression guard ===
+
+
+def test_int_2_failed_tool_x_icon_regression_guard():
+    """T-INT-2: failed perception tool → R2-8a single-line ✗ icon, no multi-line break."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(
+            tool_name="get_market_data", tool_call_id="c1",
+            content="ConnectionError to upstream", outcome="error",
+        ),
+    }
+    out = _render_action(calls, returns, cycle_id="abcd1234")
+    assert "  ✗ get_market_data" in out
+    assert "ConnectionError" in out  # fallback summary kept
+
+
+# === R2-8c T-BE-1: byte-equal Section model invariant ===
+
+
+def test_be_1_byte_equal_section_model_invariant():
+    """T-BE-1: parsed_display Section model == [Section(escape(h), tuple(escape(l) for l in clip(body)))]
+    per spec §4.6 P1.2 校准 (Section model 比较, 非 raw bytes)."""
+    from src.cli.display import (
+        Section,
+        _parse_sections,
+        _clip_body,
+        _render_perception_tool,
+    )
+    from rich.markup import escape
+
+    content = (
+        "=== Sec A ===\n"
+        + "\n".join(f"row {i}" for i in range(15))  # 15 rows → triggers clipping
+        + "\n\n=== Sec B ===\nshort body"
+    )
+
+    # Re-parse the rendered output (strip 4-space indent + tool_name line)
+    rendered = _render_perception_tool("get_market_data", content)
+    rendered_lines = rendered.split("\n")
+    assert rendered_lines[0] == "  ⚙ get_market_data"
+    # Strip 4-space indent from all subsequent lines, then re-parse
+    body_lines = [l[4:] if l.startswith("    ") else l for l in rendered_lines[1:]]
+    rendered_content = "\n".join(body_lines)
+    parsed_display = _parse_sections(rendered_content)
+
+    expected = [
+        Section(
+            header=escape(s.header) if s.header else None,
+            body=tuple(escape(line) for line in _clip_body(s.body)),
+        )
+        for s in _parse_sections(content)
+    ]
+
+    assert parsed_display == expected, (
+        f"Byte-equal Section model mismatch:\n"
+        f"--- expected ---\n{expected}\n"
+        f"--- parsed_display ---\n{parsed_display}"
+    )
+
+
+# === R2-8c T-DG-1: sectioning convention lint (Path A + Path B real tool invocation) ===
+#
+# T-DG-1 必须真实 invoke 每个 perception tool（不能只 lint 静态 fixture）——参考既有
+# tests/test_perception_tools_n3.py 的 MockDeps + AsyncMock 模式。
+import re as _re_dg
+from dataclasses import dataclass as _dataclass_dg
+from unittest.mock import AsyncMock as _AsyncMock_dg, MagicMock as _MagicMock_dg
+
+import pytest
+
+
+# Reuse MockDeps shape from tests/test_perception_tools_n3.py — duplicated here
+# rather than imported because per-test minimal customization differs (review F5 校准:
+# inline copy keeps T-DG-1 isolated from cross-test-file fixture survival).
+@_dataclass_dg
+class _MockDeps:
+    symbol: str = "BTC/USDT:USDT"
+    timeframe: str = "5m"
+    market_data: object = None
+    exchange: object = None
+    technical: object = None
+    memory: object = None
+    session_id: str = "test"
+    db_engine: object = None
+    initial_balance: float = 1000.0
+    metrics: object = None
+    news: object = None
+    macro: object = None
+    crypto_etf: object = None
+    onchain: object = None
+    approval_gate: object = None
+    approval_enabled: bool = False
+    wake_min_minutes: int = 1
+    wake_max_minutes: int = 60
+    set_next_wake_fn: object = None
+
+
+def _mock_exchange_minimal(positions=None, balance_total=998.0,
+                           open_orders=None, alert_params=None,
+                           price_level_alerts=None):
+    """Build a MagicMock+AsyncMock exchange covering the methods Path-A/B tools call."""
+    exchange = _MagicMock_dg()
+    exchange.fetch_positions = _AsyncMock_dg(return_value=positions or [])
+    exchange.fetch_open_orders = _AsyncMock_dg(return_value=open_orders or [])
+    balance = _MagicMock_dg()
+    balance.total_usdt = balance_total
+    balance.free_usdt = balance_total * 0.8
+    balance.used_usdt = balance_total * 0.2
+    exchange.fetch_balance = _AsyncMock_dg(return_value=balance)
+    exchange.get_alert_params = _MagicMock_dg(return_value=alert_params)
+    exchange.get_price_level_alerts = _MagicMock_dg(return_value=price_level_alerts or [])
+    return exchange
+
+
+# Path A — service=None / empty-state L2 path (no market_data/exchange mocks needed beyond minimal)
+PATH_A_TOOLS = [
+    "get_market_news", "get_exchange_announcements", "get_macro_calendar",
+    "get_macro_context", "get_etf_flows", "get_stablecoin_supply",
+    "get_trade_journal", "get_performance", "get_active_alerts",
+    "get_position",
+]
+
+
+@pytest.mark.parametrize("tool_name", PATH_A_TOOLS)
+async def test_dg_1_path_a_service_none_or_empty_state(tool_name):
+    """T-DG-1 Path A: service=None / empty-state path → returns starts with `=== `.
+
+    Tools rely on tool-internal early return when service dep is None or
+    primary state is empty (no positions / no metrics service / etc.).
+    After T5-T7 refactor these paths emit === Section === / Option D inline `Error:`.
+    """
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    deps = _MockDeps(
+        # Path-A tools that rely on exchange even when their own service=None
+        exchange=_mock_exchange_minimal(),  # for get_active_alerts / get_position
+    )
+    out = await fn(deps)
+    assert out.startswith("=== "), (
+        f"{tool_name} (Path A) did not start with section header: {out[:120]!r}"
+    )
+
+
+# Path B — minimum mock for tools that must hit market_data / exchange happy path
+
+
+def _make_ohlcv_df_local(n_rows: int, last_close: float = 75_234.50):
+    """Local copy of tests/test_perception_tools_n3.py:_make_ohlcv_df — inline
+    duplicated to avoid cross-test-file import coupling (review F5 校准).
+    """
+    import pandas as pd
+    base = last_close - (n_rows - 1) * 50
+    rows = []
+    for i in range(n_rows):
+        close = base + i * 50
+        rows.append({
+            "timestamp": 1_776_000_000 + i * 86_400_000,
+            "open": close - 10, "high": close + 500, "low": close - 500,
+            "close": close, "volume": 1000.0,
+        })
+    return pd.DataFrame(rows)
+
+
+async def _invoke_path_b(tool_name: str) -> str:
+    """Build minimum mocks per tool and invoke. Each branch sets up only what
+    the tool calls — keeps mock surface area small + readable per tool."""
+    import src.agent.tools_perception as tp
+
+    fn = getattr(tp, tool_name)
+
+    if tool_name == "get_market_data":
+        market_data = _AsyncMock_dg()
+        ticker = _MagicMock_dg()
+        ticker.last = 75200.0
+        ticker.bid = 75195.0
+        ticker.ask = 75205.0
+        ticker.high = 76000.0
+        ticker.low = 74800.0
+        ticker.base_volume = 1000.0
+        market_data.get_ticker.return_value = ticker
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(150)
+        technical = _MagicMock_dg()
+        technical.compute_indicators.return_value = {"atr_14": 100.0, "volume_ratio": 1.0}
+        technical.format_for_llm.return_value = "RSI(14): 50.0\nMACD: bullish"
+        deps = _MockDeps(market_data=market_data, technical=technical)
+        return await fn(deps)
+
+    if tool_name == "get_higher_timeframe_view":
+        market_data = _AsyncMock_dg()
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(250)
+        return await fn(_MockDeps(market_data=market_data), timeframe="4h")
+
+    if tool_name == "get_multi_timeframe_snapshot":
+        market_data = _AsyncMock_dg()
+        ticker = _MagicMock_dg()
+        ticker.last = 75200.0
+        market_data.get_ticker.return_value = ticker
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(250)
+        technical = _MagicMock_dg()
+        technical.compute_indicators.return_value = {"atr_14": 100.0}
+        deps = _MockDeps(market_data=market_data, technical=technical)
+        return await fn(deps)
+
+    if tool_name == "get_price_pivots":
+        market_data = _AsyncMock_dg()
+        ticker = _MagicMock_dg()
+        ticker.last = 75200.0
+        market_data.get_ticker.return_value = ticker
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(100)
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_recent_trades":
+        market_data = _AsyncMock_dg()
+        market_data.get_recent_trades.return_value = []  # no-trades L3 path → still sectioned
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_order_book":
+        market_data = _AsyncMock_dg()
+        market_data.get_order_book.side_effect = Exception("upstream")  # L2 unavailable
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_derivatives_data":
+        # Force all-3-failure → L2 inline `Error:` form (Option D)
+        market_data = _AsyncMock_dg()
+        market_data.get_funding_rate.side_effect = Exception()
+        market_data.get_open_interest.side_effect = Exception()
+        market_data.get_long_short_ratio.side_effect = Exception()
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_account_balance":
+        return await fn(_MockDeps(exchange=_mock_exchange_minimal()))
+
+    if tool_name == "get_open_orders":
+        return await fn(_MockDeps(exchange=_mock_exchange_minimal(open_orders=[])))
+
+    raise AssertionError(f"unhandled Path-B tool {tool_name}")
+
+
+PATH_B_TOOLS = [
+    "get_market_data", "get_higher_timeframe_view",
+    "get_multi_timeframe_snapshot", "get_price_pivots",
+    "get_recent_trades", "get_order_book", "get_derivatives_data",
+    "get_account_balance", "get_open_orders",
+]
+# Note: get_market_news is NOT in PATH_B_TOOLS — its happy-path multi-source
+# (FGI + Symbol/General News) requires more elaborate mocking than other tools.
+# Coverage: inline snapshot tests (test_snapshot_get_market_news_*) cover happy
+# + L2 + L3 + dense-clip; PATH_A test (service=None / news=None early return)
+# covers the L2 fallback path.
+
+
+@pytest.mark.parametrize("tool_name", PATH_B_TOOLS)
+async def test_dg_1_path_b_minimum_mock_happy_or_l2(tool_name):
+    """T-DG-1 Path B: minimum-mock invocation (happy path or L2 unavailable) →
+    returns starts with `=== `.
+    """
+    out = await _invoke_path_b(tool_name)
+    assert out.startswith("=== "), (
+        f"{tool_name} (Path B) did not start with section header: {out[:120]!r}"
+    )
+
+
+# === T-DG-1b: 结构性 sectioning lint (every === ... === line is canonical) ===
+
+
+_TDG1B_SECTION_LINE_RE = _re_dg.compile(r"^=== (.+) ===$")
+
+
+def _assert_no_half_sectioned(tool_name: str, out: str):
+    """Every line that looks like a section header (starts with '=== ') must
+    close with ' ===' (canonical pattern). Catches half-sectioned drift like
+    'Pending Orders:' appearing after a proper === Section === header.
+    """
+    for i, line in enumerate(out.split("\n")):
+        if line.startswith("=== "):
+            assert _TDG1B_SECTION_LINE_RE.match(line), (
+                f"{tool_name} line {i} not canonical section header: {line!r}"
+            )
+
+
+@pytest.mark.parametrize("tool_name", PATH_A_TOOLS)
+async def test_dg_1b_path_a_canonical_section_lines(tool_name):
+    """T-DG-1b Path A: every === ...-prefixed line must be canonical."""
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    deps = _MockDeps(exchange=_mock_exchange_minimal())
+    out = await fn(deps)
+    _assert_no_half_sectioned(tool_name, out)
+
+
+@pytest.mark.parametrize("tool_name", PATH_B_TOOLS)
+async def test_dg_1b_path_b_canonical_section_lines(tool_name):
+    """T-DG-1b Path B: every === ...-prefixed line must be canonical."""
+    out = await _invoke_path_b(tool_name)
+    _assert_no_half_sectioned(tool_name, out)
+
+
+# === T-DG-1c: 关键字段白名单 (spec §11 risk mitigation) ===
+#
+# Per spec §11 风险表: "T-DG-1 lint 检查无关键字段消失（白名单校验 RSI / MACD / MA20 /
+# Bollinger / Funding / OI / L/S / FGI 等核心字段在重构后仍存在）". 仅 Path B
+# happy path 需此白名单（Path A 是 service=None / empty-state，没有数据字段）。
+#
+# Option D adopted (commit 99ad60e): L2 fallback uses inline 'Error:' prefix
+# instead of '=== Error ===' section, so whitelist uses 'Error:' for L2 paths.
+_CRITICAL_FIELDS_PATH_B: dict[str, list[str]] = {
+    "get_market_data": ["Ticker", "Technical Indicators", "Market Context",
+                        "Recent Candles", "RSI", "MACD", "ATR"],
+    "get_higher_timeframe_view": ["Higher Timeframe View", "MA Distances",
+                                  "MA50", "MA100", "MA200"],
+    "get_multi_timeframe_snapshot": ["Multi-TF Snapshot", "Current price",
+                                     "Momentum", "Structure", "Volatility"],
+    # get_price_pivots: Swing Status / Prior Period H/L are conditional sections —
+    # tested via dedicated snapshots, not Path B happy-fixture lint.
+    "get_price_pivots": ["Price Pivots", "Current Price",
+                         "Levels Above Current Price",
+                         "Levels Below Current Price"],
+    # Path-B tools that exercise L2 path (Option D inline 'Error:'):
+    "get_recent_trades": ["Recent Trades"],
+    "get_order_book": ["Order Book", "Error:"],  # forced L2 in _invoke_path_b
+    "get_derivatives_data": ["Derivatives Data", "Error:"],  # forced all-fail L2
+    "get_account_balance": ["Account Balance", "Total", "Return", "Free", "Used"],
+    "get_open_orders": ["Pending Orders"],
+}
+
+# Path A 也有少量必现字段（service=None / empty-state 默认文案 + section header）:
+_CRITICAL_FIELDS_PATH_A: dict[str, list[str]] = {
+    "get_market_news": ["News", "Error:", "not configured"],
+    "get_exchange_announcements": ["Exchange Announcements", "Error:", "not configured"],
+    "get_macro_calendar": ["Upcoming Macro Events", "Error:", "not configured"],
+    "get_macro_context": ["Macro Context", "Error:", "not configured"],
+    "get_etf_flows": ["BTC Spot ETF Flows", "Error:", "not configured"],
+    "get_stablecoin_supply": ["Stablecoin Supply", "Error:", "not configured"],
+    "get_trade_journal": ["Trade Journal", "No trade journal entries yet"],
+    "get_performance": ["Trading Performance", "Initial Balance", "Current Balance"],
+    "get_active_alerts": ["Price Alert Settings", "Volatility alert"],
+    "get_position": ["Position", "No open positions"],
+}
+
+
+@pytest.mark.parametrize("tool_name", PATH_A_TOOLS)
+async def test_dg_1c_path_a_critical_fields_present(tool_name):
+    """T-DG-1c Path A: critical default-state fields/headers present in output."""
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    deps = _MockDeps(exchange=_mock_exchange_minimal())
+    out = await fn(deps)
+    for field in _CRITICAL_FIELDS_PATH_A[tool_name]:
+        assert field in out, (
+            f"{tool_name} missing critical field {field!r} in Path A output:\n"
+            f"{out[:400]!r}"
+        )
+
+
+@pytest.mark.parametrize("tool_name", PATH_B_TOOLS)
+async def test_dg_1c_path_b_critical_fields_present(tool_name):
+    """T-DG-1c Path B: critical happy-path / L2 fields/headers present in output."""
+    out = await _invoke_path_b(tool_name)
+    for field in _CRITICAL_FIELDS_PATH_B[tool_name]:
+        assert field in out, (
+            f"{tool_name} missing critical field {field!r} in Path B output:\n"
+            f"{out[:400]!r}"
+        )
+
+
+# === T-DG-1d: 参数顺序 lint (spec §4.1.1) ===
+@pytest.mark.parametrize("tool_name,expected_pattern", [
+    ("get_higher_timeframe_view", r"=== Higher Timeframe View \(BTC/USDT:USDT, 4h\) ==="),
+    ("get_price_pivots", r"=== Price Pivots \(BTC/USDT:USDT, main TF: \w+\) ==="),
+])
+async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
+    """T-DG-1d: §4.1.1 multi-arg header param order — symbol-first convention."""
+    out = await _invoke_path_b(tool_name)
+    assert _re_dg.search(expected_pattern, out), (
+        f"{tool_name} header param order violates §4.1.1: pattern {expected_pattern!r} "
+        f"not found in:\n{out[:400]!r}"
+    )

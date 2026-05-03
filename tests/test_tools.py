@@ -85,8 +85,9 @@ async def test_get_position(deps):
     from src.agent.tools_perception import get_position
 
     result = await get_position(deps, "BTC/USDT:USDT")
-    assert "LONG" in result
-    assert "64000" in result
+    assert "=== Position (BTC/USDT:USDT) ===" in result
+    assert "Side: Long" in result
+    assert "64,000" in result or "64000" in result
 
 
 async def test_get_account_balance(deps):

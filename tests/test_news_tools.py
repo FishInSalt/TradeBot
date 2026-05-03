@@ -192,7 +192,7 @@ async def test_exchange_announcements_format():
     assert "Exchange Announcements" in result
     assert "Delisting XYZ" in result
     # Footer is macro-calendar specific — must NOT appear in announcements tool
-    assert "macro calendar covers current week only" not in result
+    assert "calendar covers current week only" not in result.lower()
     # macro section should NOT appear (this tool is announcements-only)
     assert "Upcoming Macro Events" not in result
 
@@ -230,7 +230,9 @@ async def test_exchange_announcements_unavailable():
     deps = _make_deps(news=news_svc)
     result = await get_exchange_announcements(deps)
 
-    assert "Exchange announcements service temporarily unavailable" in result
+    # New L2 form (Option D): tool-conceptual section header + inline Error: prefix
+    assert "=== Exchange Announcements" in result
+    assert "Error: Exchange announcements service temporarily unavailable" in result
 
 
 # ===== get_macro_calendar (Iter 4 split from get_critical_alerts) =====
@@ -259,7 +261,7 @@ async def test_macro_calendar_format():
     assert "Impact: High" in result
     assert "Previous: N/A | Forecast: N/A" in result
     # Footer shows when macro_events is a list (success, even if empty)
-    assert "macro calendar covers current week only" in result
+    assert "calendar covers current week only" in result.lower()
     # announcements section should NOT appear
     assert "Exchange Announcements" not in result
 
@@ -276,7 +278,7 @@ async def test_macro_calendar_empty():
 
     assert "No upcoming macro events" in result
     # Footer must appear: list (incl. []) is a valid result the scope qualifies
-    assert "macro calendar covers current week only" in result
+    assert "calendar covers current week only" in result.lower()
 
 
 async def test_macro_calendar_passes_lookahead_hours():
@@ -300,9 +302,11 @@ async def test_macro_calendar_unavailable():
     deps = _make_deps(news=news_svc)
     result = await get_macro_calendar(deps)
 
-    assert "Macro events service temporarily unavailable" in result
+    # New L2 form (Option D): tool-conceptual section header + inline Error: prefix
+    assert "=== Upcoming Macro Events" in result
+    assert "Error: Temporarily unavailable" in result
     # Footer must be suppressed when macro source is unavailable
-    assert "macro calendar covers current week only" not in result
+    assert "calendar covers current week only" not in result.lower()
 
 
 # ===== get_derivatives_data =====
@@ -380,7 +384,9 @@ async def test_derivatives_data_partial_failure():
 
     assert "Open Interest" in result
     assert "$1.00B" in result
-    assert "unavailable" in result.lower()  # degradation messages
+    # R2-8c §4.2.10: per-field L3 fallback emits "(unavailable)" inline.
+    assert "Funding Rate: (unavailable)" in result
+    assert "Long/Short Ratio: (unavailable)" in result
 
 
 async def test_derivatives_data_custom_symbol():

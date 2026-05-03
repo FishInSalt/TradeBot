@@ -153,7 +153,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     # Phase 1: positions only — early return if empty
     positions = await deps.exchange.fetch_positions(symbol)
     if not positions:
-        return "No open positions."
+        return "=== Position ===\nNo open positions."
 
     p = positions[0]
 
@@ -176,19 +176,29 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             return None
 
     def _render_position_core() -> list[str]:
-        """Render position header + PnL + Duration — the lines that depend ONLY on
-        Phase-1 fetch_positions data (no Phase-2 IO required). Shared between the
-        happy path and the hard-failure degradation branch so Duration is preserved
-        when ticker/balance/orders/contract_size fail (it would otherwise be lost
-        even though `p.created_at` is fully available).
+        """Render Position + PnL sections (Phase-1 fields only).
+
+        Returns a list of 2 fully-formed sections (each "=== Header ===\\n<body>"
+        joined string) so callers can append further sections via "\\n\\n".join.
+        Shared between happy path and hard-failure degradation branch so PnL +
+        Duration are preserved when ticker/balance/orders/contract_size fail
+        (would otherwise be lost even though `p.created_at` is fully available).
         """
-        out = ["Current Position:"]
-        out.append(f"  {p.side.upper()} {p.contracts} contracts @ {p.entry_price:.2f} | {p.leverage}x leverage")
+        pos_lines = [f"=== Position ({symbol}) ===",
+                     f"Side: {p.side.capitalize()} | Contracts: {p.contracts} | Entry: {p.entry_price:,.2f}",
+                     f"Leverage: {p.leverage}x"]
+        if p.liquidation_price is not None:
+            pos_lines.append(f"Liquidation: {p.liquidation_price:,.2f}")
+        pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT")
+
+        pnl_lines = ["=== PnL ==="]
         if deps.initial_balance > 0:
             pnl_pct_inner = (p.unrealized_pnl / deps.initial_balance) * 100
-            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)")
+            pnl_lines.append(
+                f"PnL: {p.unrealized_pnl:+.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)"
+            )
         else:
-            out.append(f"  PnL: {p.unrealized_pnl:.2f} USDT")
+            pnl_lines.append(f"PnL: {p.unrealized_pnl:+.2f} USDT")
         if p.created_at is not None:
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
@@ -200,10 +210,10 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
                 dur_str = f"{total_minutes // 60}h {total_minutes % 60}m"
             else:
                 dur_str = f"{total_minutes // 1440}d {(total_minutes % 1440) // 60}h"
-            out.append(f"  Duration: {dur_str}")
+            pnl_lines.append(f"Duration: {dur_str}")
         else:
-            out.append("  Duration: N/A")
-        return out
+            pnl_lines.append("Duration: N/A")
+        return ["\n".join(pos_lines), "\n".join(pnl_lines)]
 
     try:
         ticker, balance, ohlcv_df, open_orders, contract_size = await asyncio.gather(
@@ -216,10 +226,10 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         )
     except Exception:
         logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
-        lines = _render_position_core()
-        lines.append("")
-        lines.append("Risk exposure + Exit orders: temporarily unavailable")
-        return "\n".join(lines)
+        sections = _render_position_core()
+        sections.append("=== Risk Exposure ===\n(unavailable)")
+        sections.append("=== Exit Orders ===\n(unavailable)")
+        return "\n\n".join(sections)
 
     # ATR(1h) — may be None if OHLCV failed
     atr_1h = None
@@ -228,9 +238,9 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         atr_1h = indicators.get("atr_14")
     current_price = ticker.last
 
-    lines = _render_position_core()
+    sections = _render_position_core()
 
-    # === Risk exposure ===
+    # === Risk Exposure ===
     notional = p.contracts * p.entry_price * contract_size
     equity = balance.total_usdt
     exp_pct = notional / equity * 100 if equity > 0 else 0.0
@@ -238,19 +248,19 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     margin_pct = margin_used / equity * 100 if equity > 0 else 0.0
     atr_pct_1h = atr_1h / current_price * 100 if atr_1h is not None and current_price > 0 else None
 
-    lines.append("")
-    lines.append("Risk exposure:")
-    lines.append(f"  Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
-    lines.append(f"  Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
+    risk_lines = ["=== Risk Exposure ==="]
+    risk_lines.append(f"Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
+    risk_lines.append(f"Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
     if p.liquidation_price is not None and current_price > 0:
         liq_dist_pct = abs(current_price - p.liquidation_price) / current_price * 100
         if atr_pct_1h is not None and atr_pct_1h > 0:
             atr_mult = liq_dist_pct / atr_pct_1h
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
+            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
         else:
-            lines.append(f"  Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+    sections.append("\n".join(risk_lines))
 
-    # === Exit orders ===
+    # === Exit Orders ===
     # Filter out None-price orders defensively. Iter 2b OKX algo-order normalization
     # is expected to always populate `price` from slTriggerPx/tpTriggerPx, but guarding
     # here keeps _fmt_exit free of None-handling branches and crashes explicitly if the
@@ -266,8 +276,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
          if o.order_type == "take_profit" and o.symbol == symbol and o.price is not None],
         key=lambda o: o.price,
     )
-    lines.append("")
-    lines.append("Exit orders:")
+    exit_lines = ["=== Exit Orders ==="]
 
     def _fmt_exit(o, kind: str) -> str:
         dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100
@@ -282,17 +291,18 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
 
     if sl_orders:
         for o in sl_orders:
-            lines.append(_fmt_exit(o, "Stop loss"))
+            exit_lines.append(_fmt_exit(o, "Stop loss"))
     else:
-        lines.append("  Stop loss: not set")
+        exit_lines.append("  Stop loss: not set")
 
     if tp_orders:
         for o in tp_orders:
-            lines.append(_fmt_exit(o, "Take profit"))
+            exit_lines.append(_fmt_exit(o, "Take profit"))
     else:
-        lines.append("  Take profit: not set")
+        exit_lines.append("  Take profit: not set")
+    sections.append("\n".join(exit_lines))
 
-    return "\n".join(lines)
+    return "\n\n".join(sections)
 
 
 async def get_account_balance(deps: TradingDeps) -> str:
@@ -301,11 +311,11 @@ async def get_account_balance(deps: TradingDeps) -> str:
     ret_usdt = balance.total_usdt - deps.initial_balance
     ret_pct = (ret_usdt / deps.initial_balance) * 100 if deps.initial_balance > 0 else 0.0
     return (
-        f"Account Balance:\n"
-        f"  Total: {balance.total_usdt:.2f} USDT (initial: {deps.initial_balance:.2f})\n"
-        f"  Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
-        f"  Free: {balance.free_usdt:.2f} USDT\n"
-        f"  Used: {balance.used_usdt:.2f} USDT"
+        f"=== Account Balance ===\n"
+        f"Total: {balance.total_usdt:.2f} USDT (initial: {deps.initial_balance:.2f})\n"
+        f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
+        f"Free: {balance.free_usdt:.2f} USDT\n"
+        f"Used: {balance.used_usdt:.2f} USDT"
     )
 
 
@@ -341,7 +351,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
     """Get all pending orders with distance from current price."""
     orders = await deps.exchange.fetch_open_orders(deps.symbol)
     if not orders:
-        return "No pending orders."
+        return "=== Pending Orders ===\nNo pending orders."
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     current = ticker.last
@@ -351,7 +361,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
     for o in orders:
         by_id.setdefault(o.id, []).append(o)
 
-    lines = ["Pending Orders:"]
+    lines = ["=== Pending Orders ==="]
     for order_id, group in by_id.items():
         is_oco = (
             len(group) == 2
@@ -384,7 +394,10 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
     """Get trade journal — decision timeline with quick stats summary.
     Use for reviewing recent decisions and their outcomes."""
     if deps.db_engine is None:
-        return "No trade journal entries yet."
+        return (
+            "=== Trade Journal ===\n"
+            "No trade journal entries yet."
+        )
     from sqlalchemy import select, desc
     from src.storage.database import get_session
     from src.storage.models import TradeAction
@@ -399,7 +412,10 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
         actions = list(result.scalars().all())
 
     if not actions:
-        return "No trade journal entries yet."
+        return (
+            "=== Trade Journal ===\n"
+            "No trade journal entries yet."
+        )
 
     sections: list[str] = []
 
@@ -484,34 +500,54 @@ async def get_performance(deps: TradingDeps) -> str:
     ret_pct = (ret_usdt / deps.initial_balance) * 100 if deps.initial_balance > 0 else 0.0
 
     if deps.metrics is None:
-        return (
+        # L3 by-design empty state (NOT an error): no metrics service available.
+        # Trading Performance section still renders balance fields; Trade Stats
+        # section emitted as placeholder so the schema is consistent.
+        perf_section = (
             f"=== Trading Performance ===\n"
             f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
             f"Current Balance: {balance.total_usdt:.2f} USDT\n"
-            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)\n\n"
-            f"No metrics service available."
+            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)"
         )
+        stats_section = (
+            "=== Trade Stats ===\n"
+            "No metrics service available."
+        )
+        return f"{perf_section}\n\n{stats_section}"
 
     metrics = await deps.metrics.compute()
 
     if metrics.total_trades == 0:
-        return (
+        # L3 by-design empty state (NOT an error): no completed trades yet.
+        perf_section = (
             f"=== Trading Performance ===\n"
             f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
             f"Current Balance: {balance.total_usdt:.2f} USDT\n"
-            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)\n\n"
-            f"No completed trades yet."
+            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)"
         )
+        stats_section = (
+            "=== Trade Stats ===\n"
+            "No completed trades yet."
+        )
+        return f"{perf_section}\n\n{stats_section}"
 
-    fees_line = f"Total Fees: -{metrics.total_fees:.2f} USDT\n\n" if metrics.total_fees > 0 else "Total Fees: 0.00 USDT\n\n"
+    fees_line = (
+        f"Total Fees: -{metrics.total_fees:.2f} USDT"
+        if metrics.total_fees > 0
+        else "Total Fees: 0.00 USDT"
+    )
 
-    return (
+    perf_section = (
         f"=== Trading Performance ===\n"
         f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
         f"Current Balance: {balance.total_usdt:.2f} USDT\n"
         f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
         f"Realized PnL: {metrics.total_pnl:+.2f} USDT (gross, before fees)\n"
         f"{fees_line}"
+    )
+
+    stats_section = (
+        f"=== Trade Stats ===\n"
         f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
         f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
@@ -519,6 +555,8 @@ async def get_performance(deps: TradingDeps) -> str:
         f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}%\n"
         f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT"
     )
+
+    return f"{perf_section}\n\n{stats_section}"
 
 
 # Display-layer filter for CoinDesk CATEGORY_DATA — strips thematic tags
@@ -544,7 +582,10 @@ async def get_market_news(
     import asyncio
 
     if deps.news is None:
-        return "News service not configured."
+        return (
+            "=== News ===\n"
+            "Error: News service not configured."
+        )
 
     from src.integrations.news.models import extract_base_currency
 
@@ -617,7 +658,10 @@ async def get_exchange_announcements(
 ) -> str:
     """Get recent exchange announcements (maintenance, delistings, parameter changes)."""
     if deps.news is None:
-        return "News service not configured."
+        return (
+            "=== Exchange Announcements ===\n"
+            "Error: News service not configured."
+        )
 
     try:
         announcements = await deps.news.get_announcements(lookback_hours)
@@ -627,7 +671,7 @@ async def get_exchange_announcements(
     if announcements is None:
         return (
             f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
-            "Exchange announcements service temporarily unavailable."
+            "Error: Exchange announcements service temporarily unavailable."
         )
     if announcements:
         lines = [e.timestamp.strftime("[%Y-%m-%d %H:%M] ") + e.title for e in announcements]
@@ -652,7 +696,10 @@ async def get_macro_calendar(
     (no result to qualify, per spec §3.4).
     """
     if deps.news is None:
-        return "News service not configured."
+        return (
+            "=== Upcoming Macro Events ===\n"
+            "Error: News service not configured."
+        )
 
     try:
         macro_events = await deps.news.get_macro_events(lookahead_hours)
@@ -664,7 +711,7 @@ async def get_macro_calendar(
     if macro_events is None:
         sections.append(
             f"=== Upcoming Macro Events (next {lookahead_hours}h) ===\n"
-            "Macro events service temporarily unavailable."
+            "Error: Temporarily unavailable."
         )
     elif macro_events:
         lines = []
@@ -688,7 +735,8 @@ async def get_macro_calendar(
     # Footer: shown when macro_events is a list; suppressed when None.
     if macro_events is not None:
         sections.append(
-            "Note: macro calendar covers current week only; "
+            "=== Note ===\n"
+            "Macro calendar covers current week only; "
             "Friday evening / weekend calls may miss next week's early events."
         )
 
@@ -704,8 +752,7 @@ async def get_derivatives_data(
     from datetime import datetime, timezone
 
     symbol = symbol or deps.symbol
-    sections = [f"=== Derivatives Data ({symbol}) ==="]
-    errors: list[str] = []
+    field_lines: list[str] = []
     timestamps_ms: list[int] = []
 
     # Fetch all three concurrently — each has independent cache + upstream.
@@ -717,9 +764,20 @@ async def get_derivatives_data(
         return_exceptions=True,
     )
 
-    # Funding rate
+    # All-3-failed L2: emit single Error section.
+    if (
+        isinstance(funding, Exception)
+        and isinstance(oi, Exception)
+        and isinstance(lsr, Exception)
+    ):
+        return (
+            f"=== Derivatives Data ({symbol}) ===\n"
+            f"Error: Temporarily unavailable (all 3 data sources failed)."
+        )
+
+    # Funding rate (per-field L3 fallback for partial failure)
     if isinstance(funding, Exception):
-        errors.append("Funding rate temporarily unavailable")
+        field_lines.append("Funding Rate: (unavailable)")
     else:
         direction = "longs pay shorts" if funding.rate >= 0 else "shorts pay longs"
         sign = "Positive rate" if funding.rate >= 0 else "Negative rate"
@@ -727,16 +785,16 @@ async def get_derivatives_data(
         remaining_ms = max(0, funding.next_funding_time - now_ms)
         hours = remaining_ms // (3600 * 1000)
         minutes = (remaining_ms % (3600 * 1000)) // (60 * 1000)
-        sections.append(
-            f"Funding Rate: {funding.rate:+.4%} (next settlement in {hours}h {minutes}m)\n"
-            f"  {sign} — {direction}"
+        field_lines.append(
+            f"Funding Rate: {funding.rate:+.4%} (next settlement in {hours}h {minutes}m)"
         )
+        field_lines.append(f"  {sign} — {direction}")
         if funding.timestamp:
             timestamps_ms.append(funding.timestamp)
 
     # Open interest
     if isinstance(oi, Exception):
-        errors.append("Open interest temporarily unavailable")
+        field_lines.append("Open Interest: (unavailable)")
     else:
         if oi.open_interest_value >= 1e9:
             oi_str = f"${oi.open_interest_value / 1e9:.2f}B"
@@ -744,22 +802,20 @@ async def get_derivatives_data(
             oi_str = f"${oi.open_interest_value / 1e6:.2f}M"
         else:
             oi_str = f"${oi.open_interest_value:,.0f}"
-        sections.append(f"Open Interest: {oi_str}")
+        field_lines.append(f"Open Interest: {oi_str}")
         if oi.timestamp:
             timestamps_ms.append(oi.timestamp)
 
     # Long/short ratio
     if isinstance(lsr, Exception):
-        errors.append("Long/short ratio temporarily unavailable")
+        field_lines.append("Long/Short Ratio: (unavailable)")
     else:
-        sections.append(
+        field_lines.append(
             f"Long/Short Ratio: {lsr.long_short_ratio:.2f} "
             f"({lsr.long_ratio:.1%} long / {lsr.short_ratio:.1%} short)"
         )
         if lsr.timestamp:
             timestamps_ms.append(lsr.timestamp)
-
-    sections.extend(errors)
 
     # Show the oldest upstream timestamp across the 3 fetches — this is the
     # lower bound of data age (i.e. "at least one slice is this old"), giving
@@ -767,9 +823,9 @@ async def get_derivatives_data(
     # age, not whether TTLCache served an extended stale-fallback entry.
     if timestamps_ms:
         oldest_dt = datetime.fromtimestamp(min(timestamps_ms) / 1000, tz=timezone.utc)
-        sections.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
+        field_lines.append(f"Data as of: {oldest_dt.strftime('%Y-%m-%d %H:%M')} UTC")
 
-    return "\n".join(sections)
+    return f"=== Derivatives Data ({symbol}) ===\n" + "\n".join(field_lines)
 
 
 # Unit labels for "N periods ago" rendered below range highs/lows.
@@ -806,15 +862,21 @@ async def get_higher_timeframe_view(
         df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=250)
     except Exception:
         logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
-        return f"Higher timeframe view ({timeframe}, {symbol}): temporarily unavailable"
+        return (
+            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
+            f"Error: Temporarily unavailable."
+        )
 
     if df.empty:
-        return f"Higher timeframe view ({timeframe}, {symbol}): insufficient data"
+        return (
+            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
+            f"Error: Insufficient data."
+        )
 
     last_close = float(df["close"].iloc[-1])
 
     sections: list[str] = [
-        f"=== Higher Timeframe View ({timeframe}, {symbol}) ===",
+        f"=== Higher Timeframe View ({symbol}, {timeframe}) ===",
         f"Current Price: {last_close:,.2f}",
         "",
         "=== MA Distances ===",
@@ -863,6 +925,7 @@ async def get_higher_timeframe_view(
         width_pct = 0.0 if lo20 == 0 else (hi20 - lo20) / lo20 * 100.0
         sections.extend([
             "",
+            "=== 20-period Band ===",
             f"20-period High: {hi20:,.2f}",
             f"20-period Low:  {lo20:,.2f}",
             f"20-period range width: {width_pct:.1f}%",
@@ -914,13 +977,19 @@ async def get_macro_context(deps: TradingDeps) -> str:
     real observation date (DTWEXBGS has ~1-week report delay).
     """
     if deps.macro is None:
-        return "Macro service not configured."
+        return (
+            "=== Macro Context ===\n"
+            "Error: Macro service not configured."
+        )
 
     try:
         snap = await deps.macro.get_snapshot()
     except Exception:
         logger.warning("Macro snapshot fetch failed", exc_info=True)
-        return "Macro context: temporarily unavailable"
+        return (
+            "=== Macro Context ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     sections: list[str] = []
     any_available = False
@@ -989,7 +1058,10 @@ async def get_macro_context(deps: TradingDeps) -> str:
         sections.append("\n".join(lines))
 
     if not any_available:
-        return "Macro context: all sources temporarily unavailable"
+        return (
+            "=== Macro Context ===\n"
+            "Error: All sources temporarily unavailable."
+        )
 
     return "\n\n".join(sections)
 
@@ -1002,7 +1074,10 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     to avoid misreading same-day values.
     """
     if deps.crypto_etf is None:
-        return "ETF flows service not configured."
+        return (
+            "=== BTC Spot ETF Flows (US) ===\n"
+            "Error: ETF flows service not configured."
+        )
 
     # `days` parameter is clamped in CryptoEtfService.get_etf_flows
     # (src/integrations/crypto_etf/service.py:47) — single source of truth.
@@ -1056,7 +1131,10 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     ]
 
     if btc is None and eth is None:
-        return "ETF flows: temporarily unavailable"
+        return (
+            "=== BTC Spot ETF Flows (US) ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     # Footer: operational facts the Agent needs in-context (spec §3.6).
     # The trading-day count is derived from the service's actual result
@@ -1073,8 +1151,9 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     if btc or eth:
         days_rendered = len(next((f for f in (btc, eth) if f), []))
         sections.append(
-            f"Note: Past {days_rendered} trading days (weekends/holidays excluded).\n"
-            "Note: Issuer-reported; today's value may be revised T+1."
+            "=== Note ===\n"
+            f"Past {days_rendered} trading days (weekends/holidays excluded). "
+            "Issuer-reported; today's value may be revised T+1."
         )
 
     return "\n\n".join(sections)
@@ -1086,24 +1165,33 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
     Output is fact-only (spec §3.4): no 'dry powder' / 'capital entering'.
     """
     if deps.onchain is None:
-        return "Onchain service not configured."
+        return (
+            "=== Stablecoin Supply ===\n"
+            "Error: Onchain service not configured."
+        )
 
     try:
         result = await deps.onchain.get_stablecoin_snapshot()
     except Exception:
         logger.warning("Stablecoin snapshot fetch failed", exc_info=True)
-        return "Stablecoin supply: temporarily unavailable"
+        return (
+            "=== Stablecoin Supply ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     if result is None:
-        return "Stablecoin supply: temporarily unavailable"
+        return (
+            "=== Stablecoin Supply ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     if not result["coins"]:
         # Guard against upstream schema drift (e.g. DefiLlama renaming USDT →
         # USDT0): neither tracked symbol matched, so totals would render as
         # $0.00 — misleading. Signal "data unavailable" instead.
         return (
-            "Stablecoin supply: data unavailable "
-            "(no tracked symbols found in response)"
+            "=== Stablecoin Supply ===\n"
+            "Error: Data unavailable (no tracked symbols found in response)."
         )
 
     lines = ["=== Stablecoin Supply ==="]
@@ -1143,11 +1231,17 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         ob = await deps.market_data.get_order_book(symbol, depth=depth)
     except Exception:
         logger.exception("get_order_book failed for %s", symbol)
-        return f"Order book ({symbol}): temporarily unavailable"
+        return (
+            f"=== Order Book ({symbol}) ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     actual = min(len(ob.bids), len(ob.asks))
     if not ob.bids or not ob.asks or actual < depth:
-        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
+        return (
+            f"=== Order Book ({symbol}) ===\n"
+            f"Error: Insufficient data (requested depth {depth}, got {actual})."
+        )
 
     best_bid = ob.bids[0]
     best_ask = ob.asks[0]
@@ -1161,7 +1255,10 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     # Spec §2.1 — all-zero amounts across both sides: degrade to insufficient data
     # (real OKX / Sim cannot produce this, but spec mandates explicit guard)
     if total_sum == 0:
-        return f"Order book ({symbol}): insufficient data (requested depth {depth}, got {actual})"
+        return (
+            f"=== Order Book ({symbol}) ===\n"
+            f"Error: Insufficient data (requested depth {depth}, got {actual})."
+        )
     bid_deep_pct = (ob.bids[0].price - ob.bids[depth - 1].price) / ob.bids[0].price * 100
     ask_deep_pct = (ob.asks[depth - 1].price - ob.asks[0].price) / ob.asks[0].price * 100
 
@@ -1181,15 +1278,18 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
             bid_ratio = total_bid / total_ask if total_ask > 0 else float("inf")
             share_line = f"Bid share: {bid_share:.1f}% (bid : ask = {bid_ratio:.2f} : 1)"
 
-    lines = [
-        f"=== Order Book ({symbol}) ===",
-        f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} {base_currency}  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} {base_currency}",
-        f"Spread: {spread:.2f} ({spread_pct:.3f}%)",
-        "",
-        f"Depth (top {depth} each side):",
-        f"  Bids cumulative: {total_bid:.4f} {base_currency} over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)",
-        f"  Asks cumulative: {total_ask:.4f} {base_currency} over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)",
-        f"  {share_line}",
+    sections = [
+        (
+            f"=== Order Book ({symbol}) ===\n"
+            f"Best bid: {best_bid.price:.2f} × {best_bid.amount:.4f} {base_currency}  |  Best ask: {best_ask.price:.2f} × {best_ask.amount:.4f} {base_currency}\n"
+            f"Spread: {spread:.2f} ({spread_pct:.3f}%)"
+        ),
+        (
+            f"=== Depth (top {depth} each side) ===\n"
+            f"  Bids cumulative: {total_bid:.4f} {base_currency} over {best_bid.price:.2f} - {ob.bids[depth-1].price:.2f} ({bid_deep_pct:.2f}% deep)\n"
+            f"  Asks cumulative: {total_ask:.4f} {base_currency} over {best_ask.price:.2f} - {ob.asks[depth-1].price:.2f} ({ask_deep_pct:.2f}% deep)\n"
+            f"  {share_line}"
+        ),
     ]
 
     # Concentrated levels (per-side median)
@@ -1215,13 +1315,17 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         concentrated = concentrated[:ORDER_BOOK_MAX_CONCENTRATED_LEVELS]
         bids_conc = sorted([c for c in concentrated if c[0] == "Bid"], key=lambda c: -c[1])  # price desc
         asks_conc = sorted([c for c in concentrated if c[0] == "Ask"], key=lambda c: c[1])   # price asc
-        lines.append("")
-        lines.append(f"Concentrated levels (size > {ORDER_BOOK_CONCENTRATION_MULTIPLIER:.0f}× median of top {depth}):")
+        conc_header = (
+            f"=== Concentrated Levels "
+            f"(size > {ORDER_BOOK_CONCENTRATION_MULTIPLIER:.0f}× median of top {depth}) ==="
+        )
+        conc_rows = []
         for side, price, amount, dist_pct, is_bid in bids_conc + asks_conc:
             direction = "below mid" if is_bid else "above mid"
-            lines.append(f"  {side}  {price:.2f}  {amount:.4f} {base_currency}  ({dist_pct:.2f}% {direction})")
+            conc_rows.append(f"  {side}  {price:.2f}  {amount:.4f} {base_currency}  ({dist_pct:.2f}% {direction})")
+        sections.append(conc_header + "\n" + "\n".join(conc_rows))
 
-    return "\n".join(lines)
+    return "\n\n".join(sections)
 
 
 async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRADES_WINDOW_DEFAULT) -> str:
@@ -1242,10 +1346,16 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
         trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
     except Exception:
         logger.exception("get_recent_trades failed for %s", symbol)
-        return f"Recent trades ({symbol}): temporarily unavailable"
+        return (
+            f"=== Recent Trades ({symbol}) ===\n"
+            f"Error: Temporarily unavailable."
+        )
 
     if not trades:
-        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+        return (
+            f"=== Recent Trades ({symbol}, last {window_seconds}s) ===\n"
+            f"No trades in last {window_seconds}s."
+        )
 
     now_ms = int(time.time() * 1000)
     window_ms = window_seconds * 1000
@@ -1270,7 +1380,10 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
         in_window.append(t)
 
     if not in_window:
-        return f"Recent trades ({symbol}): no trades in last {window_seconds}s"
+        return (
+            f"=== Recent Trades ({symbol}, last {window_seconds}s) ===\n"
+            f"No trades in last {window_seconds}s."
+        )
 
     lines = [f"=== Recent Trades ({symbol}, last {window_seconds}s, {RECENT_TRADES_BUCKET_COUNT} × {bucket_duration_ms // 1000}s buckets) ==="]
     total_buy = 0.0
@@ -1334,7 +1447,10 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         current_price = ticker.last
     except Exception:
         logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
-        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+        return (
+            f"=== Multi-TF Snapshot ({symbol}) ===\n"
+            f"Error: Temporarily unavailable."
+        )
 
     async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
         try:
@@ -1347,7 +1463,10 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
 
     # All failed?
     if all(isinstance(r[1], Exception) for r in results):
-        return f"Multi-TF snapshot ({symbol}): temporarily unavailable"
+        return (
+            f"=== Multi-TF Snapshot ({symbol}) ===\n"
+            f"Error: Temporarily unavailable (all timeframes failed)."
+        )
 
     rows: list[str] = []
     for tf, df_or_err in results:
@@ -1539,7 +1658,10 @@ async def get_price_pivots(deps: TradingDeps) -> str:
         current_price = ticker.last
     except Exception:
         logger.exception("get_price_pivots ticker fetch failed for %s", symbol)
-        return f"Price pivots ({symbol}, main TF: {main_tf}): temporarily unavailable"
+        return (
+            f"=== Price Pivots ({symbol}, main TF: {main_tf}) ===\n"
+            f"Error: Temporarily unavailable."
+        )
 
     async def _fetch(tf: str, limit: int):
         try:
@@ -1594,9 +1716,10 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     ]
     if swing_status:
         sections.append("")
+        sections.append("=== Swing Status ===")
         sections.append(swing_status)
     if prior_footer:
-        if not swing_status:
-            sections.append("")
+        sections.append("")
+        sections.append("=== Prior Period H/L ===")
         sections.extend(prior_footer)
     return "\n".join(sections)
