@@ -794,9 +794,9 @@ Plan 阶段建议拆 ~9 task TDD：
 | **Drift guard** | T-DG-1 | **19 工具**（`_SECTIONED_PERCEPTION_TOOL_NAMES`，含 get_memories 例外）按 sectioning convention 输出验证 — **happy path + 各工具 enum 标注的 existing L2 paths**（不一刀切要求 L2 — review P1.1 校准）+ 参数顺序符合 §4.1.1 convention；plan 阶段按 §4.2 enum 表逐工具填 existing L2 list | 1 |
 |  | T-DG-2 | 三层集合 + save_memory branch 互斥 + 完整覆盖：所有 32 registered tools（20 perception + 11 execution + save_memory）必须属其中一类，无重叠无遗漏 | 1 |
 | **Tool snapshot** | (per-tool) | 19 sectioned + 1 get_memories backend-dependent + execution single-line snapshots（含 conditional / edge）| ~50-60 |
-| **新增小计** | | | **~75-85** |
+| **新增小计** | | | **~125** (plan-stage round-2 校准: T-DG-1 拆 a/b/c/d 4 子 lint，parametrized cases 从 19 升至 59) |
 
-预期: 当前 **1048 测试**（verified `pytest --collect-only`, 2026-05-03）+ 新增 ~75 = **~1123 tests pass**。
+预期: 当前 **1048 测试**（verified `pytest --collect-only`, 2026-05-03）+ 新增 ~125 = **~1173 tests pass**。
 
 ## 8. Out-of-scope
 
@@ -920,7 +920,7 @@ R2-8c impl 完成的判定条件：
 ### 9.3 Drift guards
 
 - [ ] AC20: **19 工具**（`_SECTIONED_PERCEPTION_TOOL_NAMES`）sectioning convention 一致性测试 (T-DG-1) + 三层集合互斥+覆盖测试 (T-DG-2)
-- [ ] AC21: Test 总数 **1048 baseline**（verified 2026-05-03）+ 新增 ~75-85（含 T-EC-10/11 + T-DG-2）= **~1123-1133 全部 pass**
+- [ ] AC21: Test 总数 **1048 baseline**（verified 2026-05-03）+ 新增 ~125（含 T-EC-10/11 + T-DG-2 + T-DG-1a/b/c/d 4 子 lint × parametrized 19+19+19+2 = 59 cases）= **~1173 全部 pass** (plan-stage round-2 校准)
 - [ ] AC22: R2-8a 现有 cycle log 5 段架构测试不破（regression）
 - [ ] AC23: Tool 输出 snapshot 测试全部更新且通过（snapshot 落地路径 plan 阶段决议，§5.2）
 
@@ -994,7 +994,7 @@ R2-8c impl 完成的判定条件：
 | **改动文件主体** | `src/cli/display.py` + `src/cli/app.py` (CycleRenderContext) + `src/cli/session_state.py` (SessionStats) | `src/agent/tools_perception.py` + `src/cli/display.py` |
 | **forensic / retry-exhausted** | 完整 contract（D8/D13/D16）| 不动（R2-8a 已 cover，R2-8c tool 行不参与 forensic 路径）|
 | **Schema** | 不动 R2-7 已铺好 | 不动 |
-| **Test 增量** | +58 (988 baseline) | +75-85 (1048 baseline → ~1123-1133 total) |
+| **Test 增量** | +58 (988 baseline) | +125 (1048 baseline → ~1173 total, plan-stage round-2 校准 — T-DG-1 4 子 lint) |
 | **scope 关联** | "完整决策报告"框架 | "完整决策报告"内容完整度补全 |
 
 R2-8c 是 R2-8a 的内容完整度补全，不是替代或并行——R2-8a 已 landed 是 R2-8c 的必要前置（`▾ Action` 段必须存在才能改其内 tool 行渲染）。
