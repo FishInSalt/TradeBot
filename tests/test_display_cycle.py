@@ -2484,3 +2484,478 @@ def test_snapshot_get_performance_happy_path():
         "    Best Trade: +50.00 USDT | Worst Trade: -15.00 USDT"
     )
     _assert_perception_render("get_performance", content, expected)
+
+
+# === R2-8c edge cases (T-EC) ===
+
+
+def test_ec_1_no_section_header_fallback():
+    """T-EC-1: tool 输出无 === Section === → unnamed section render (legacy / get_memories)."""
+    from src.cli.display import _render_perception_tool
+    out = _render_perception_tool("get_memories", "Memory entry 1\nMemory entry 2")
+    assert "  ⚙ get_memories" in out
+    assert "    Memory entry 1" in out
+
+
+def test_ec_2_l1_failure_single_line_x_icon():
+    """T-EC-2: outcome != success → R2-8a single-line ✗ icon (不进 multi-line)."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(
+            tool_name="get_market_data", tool_call_id="c1",
+            content="ConnectionError: upstream timeout",
+            outcome="error",  # outcome != success → L1
+        ),
+    }
+    out = _render_action(calls, returns, cycle_id="abcd1234")
+    assert "  ✗ get_market_data" in out
+    # Multi-line markers should NOT appear (L1 不进 multi-line)
+    assert "    ===" not in out  # no section header indent line
+
+
+def test_ec_3_l2_error_inline_in_multi_line():
+    """T-EC-3: tool 内捕获异常 + success outcome 返回 Option D 'Error:' inline → 进 multi-line, body 显示。"""
+    from src.cli.display import _render_perception_tool
+    content = (
+        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "Error: Temporarily unavailable."
+    )
+    out = _render_perception_tool("get_higher_timeframe_view", content)
+    assert "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===" in out
+    assert "    Error: Temporarily unavailable." in out
+
+
+def test_ec_4_section_body_one_line():
+    """T-EC-4: section body 仅 1 行 → keep all (< 10)."""
+    from src.cli.display import _render_perception_tool
+    content = "=== Account Balance ===\nTotal: 998.00 USDT"
+    out = _render_perception_tool("get_account_balance", content)
+    assert out == (
+        "  ⚙ get_account_balance\n"
+        "    === Account Balance ===\n"
+        "    Total: 998.00 USDT"
+    )
+
+
+def test_ec_5_section_body_zero_lines_render_header_only():
+    """T-EC-5: section body 0 行 → header alone."""
+    from src.cli.display import _render_perception_tool
+    content = "=== Empty Section ===\n"
+    out = _render_perception_tool("get_market_data", content)
+    assert out == (
+        "  ⚙ get_market_data\n"
+        "    === Empty Section ==="
+    )
+
+
+def test_ec_6_section_header_markup_literal_escaped():
+    """T-EC-6: section header 含 markup 字面值 → escape 为 \\[red]Critical[/]."""
+    from src.cli.display import _render_perception_tool
+    content = "=== [red]Critical[/] ===\nbody"
+    out = _render_perception_tool("get_market_news", content)
+    assert r"\[red]" in out  # rich.markup.escape 转 \[red]
+
+
+def test_ec_7_section_body_markup_literal_escaped():
+    """T-EC-7: section body 含 markup 字面值（如新闻 [bold]）→ escape."""
+    from src.cli.display import _render_perception_tool
+    content = "=== Symbol News ===\nHeadline: [bold]BREAKING[/] something"
+    out = _render_perception_tool("get_market_news", content)
+    assert r"\[bold]" in out
+
+
+def test_ec_8_long_url_line_no_wrapping_in_helper():
+    """T-EC-8: 极长单行（如 URL ≥ terminal width）— helper 不主动 wrap, 由 Rich render 处理."""
+    from src.cli.display import _render_perception_tool
+    long_url = "https://example.com/" + "x" * 200
+    content = f"=== Symbol News ===\n{long_url}"
+    out = _render_perception_tool("get_market_news", content)
+    assert long_url in out
+
+
+def test_ec_9_orphan_tool_call_id_no_return_captured():
+    """T-EC-9: 无 tool_call_id 关联 → R2-8a [no return captured]."""
+    from pydantic_ai.messages import ToolCallPart
+    from src.cli.display import _render_action
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="orphan")]
+    out = _render_action(calls, returns_lookup={}, cycle_id="abcd1234")
+    assert "[no return captured]" in out
+
+
+# === R2-8c T-INT-2: failed tool ✗ icon regression guard ===
+
+
+def test_int_2_failed_tool_x_icon_regression_guard():
+    """T-INT-2: failed perception tool → R2-8a single-line ✗ icon, no multi-line break."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [ToolCallPart(tool_name="get_market_data", args={}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(
+            tool_name="get_market_data", tool_call_id="c1",
+            content="ConnectionError to upstream", outcome="error",
+        ),
+    }
+    out = _render_action(calls, returns, cycle_id="abcd1234")
+    assert "  ✗ get_market_data" in out
+    assert "ConnectionError" in out  # fallback summary kept
+
+
+# === R2-8c T-BE-1: byte-equal Section model invariant ===
+
+
+def test_be_1_byte_equal_section_model_invariant():
+    """T-BE-1: parsed_display Section model == [Section(escape(h), tuple(escape(l) for l in clip(body)))]
+    per spec §4.6 P1.2 校准 (Section model 比较, 非 raw bytes)."""
+    from src.cli.display import (
+        Section,
+        _parse_sections,
+        _clip_body,
+        _render_perception_tool,
+    )
+    from rich.markup import escape
+
+    content = (
+        "=== Sec A ===\n"
+        + "\n".join(f"row {i}" for i in range(15))  # 15 rows → triggers clipping
+        + "\n\n=== Sec B ===\nshort body"
+    )
+
+    # Re-parse the rendered output (strip 4-space indent + tool_name line)
+    rendered = _render_perception_tool("get_market_data", content)
+    rendered_lines = rendered.split("\n")
+    assert rendered_lines[0] == "  ⚙ get_market_data"
+    # Strip 4-space indent from all subsequent lines, then re-parse
+    body_lines = [l[4:] if l.startswith("    ") else l for l in rendered_lines[1:]]
+    rendered_content = "\n".join(body_lines)
+    parsed_display = _parse_sections(rendered_content)
+
+    expected = [
+        Section(
+            header=escape(s.header) if s.header else None,
+            body=tuple(escape(line) for line in _clip_body(s.body)),
+        )
+        for s in _parse_sections(content)
+    ]
+
+    assert parsed_display == expected, (
+        f"Byte-equal Section model mismatch:\n"
+        f"--- expected ---\n{expected}\n"
+        f"--- parsed_display ---\n{parsed_display}"
+    )
+
+
+# === R2-8c T-DG-1: sectioning convention lint (Path A + Path B real tool invocation) ===
+#
+# T-DG-1 必须真实 invoke 每个 perception tool（不能只 lint 静态 fixture）——参考既有
+# tests/test_perception_tools_n3.py 的 MockDeps + AsyncMock 模式。
+import re as _re_dg
+from dataclasses import dataclass as _dataclass_dg
+from unittest.mock import AsyncMock as _AsyncMock_dg, MagicMock as _MagicMock_dg
+
+import pytest
+
+
+# Reuse MockDeps shape from tests/test_perception_tools_n3.py — duplicated here
+# rather than imported because per-test minimal customization differs (review F5 校准:
+# inline copy keeps T-DG-1 isolated from cross-test-file fixture survival).
+@_dataclass_dg
+class _MockDeps:
+    symbol: str = "BTC/USDT:USDT"
+    timeframe: str = "5m"
+    market_data: object = None
+    exchange: object = None
+    technical: object = None
+    memory: object = None
+    session_id: str = "test"
+    db_engine: object = None
+    initial_balance: float = 1000.0
+    metrics: object = None
+    news: object = None
+    macro: object = None
+    crypto_etf: object = None
+    onchain: object = None
+    approval_gate: object = None
+    approval_enabled: bool = False
+    wake_min_minutes: int = 1
+    wake_max_minutes: int = 60
+    set_next_wake_fn: object = None
+
+
+def _mock_exchange_minimal(positions=None, balance_total=998.0,
+                           open_orders=None, alert_params=None,
+                           price_level_alerts=None):
+    """Build a MagicMock+AsyncMock exchange covering the methods Path-A/B tools call."""
+    exchange = _MagicMock_dg()
+    exchange.fetch_positions = _AsyncMock_dg(return_value=positions or [])
+    exchange.fetch_open_orders = _AsyncMock_dg(return_value=open_orders or [])
+    balance = _MagicMock_dg()
+    balance.total_usdt = balance_total
+    balance.free_usdt = balance_total * 0.8
+    balance.used_usdt = balance_total * 0.2
+    exchange.fetch_balance = _AsyncMock_dg(return_value=balance)
+    exchange.get_alert_params = _MagicMock_dg(return_value=alert_params)
+    exchange.get_price_level_alerts = _MagicMock_dg(return_value=price_level_alerts or [])
+    return exchange
+
+
+# Path A — service=None / empty-state L2 path (no market_data/exchange mocks needed beyond minimal)
+PATH_A_TOOLS = [
+    "get_market_news", "get_exchange_announcements", "get_macro_calendar",
+    "get_macro_context", "get_etf_flows", "get_stablecoin_supply",
+    "get_trade_journal", "get_performance", "get_active_alerts",
+    "get_position",
+]
+
+
+@pytest.mark.parametrize("tool_name", PATH_A_TOOLS)
+async def test_dg_1_path_a_service_none_or_empty_state(tool_name):
+    """T-DG-1 Path A: service=None / empty-state path → returns starts with `=== `.
+
+    Tools rely on tool-internal early return when service dep is None or
+    primary state is empty (no positions / no metrics service / etc.).
+    After T5-T7 refactor these paths emit === Section === / Option D inline `Error:`.
+    """
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    deps = _MockDeps(
+        # Path-A tools that rely on exchange even when their own service=None
+        exchange=_mock_exchange_minimal(),  # for get_active_alerts / get_position
+    )
+    out = await fn(deps)
+    assert out.startswith("=== "), (
+        f"{tool_name} (Path A) did not start with section header: {out[:120]!r}"
+    )
+
+
+# Path B — minimum mock for tools that must hit market_data / exchange happy path
+
+
+def _make_ohlcv_df_local(n_rows: int, last_close: float = 75_234.50):
+    """Local copy of tests/test_perception_tools_n3.py:_make_ohlcv_df — inline
+    duplicated to avoid cross-test-file import coupling (review F5 校准).
+    """
+    import pandas as pd
+    base = last_close - (n_rows - 1) * 50
+    rows = []
+    for i in range(n_rows):
+        close = base + i * 50
+        rows.append({
+            "timestamp": 1_776_000_000 + i * 86_400_000,
+            "open": close - 10, "high": close + 500, "low": close - 500,
+            "close": close, "volume": 1000.0,
+        })
+    return pd.DataFrame(rows)
+
+
+async def _invoke_path_b(tool_name: str) -> str:
+    """Build minimum mocks per tool and invoke. Each branch sets up only what
+    the tool calls — keeps mock surface area small + readable per tool."""
+    import src.agent.tools_perception as tp
+
+    fn = getattr(tp, tool_name)
+
+    if tool_name == "get_market_data":
+        market_data = _AsyncMock_dg()
+        ticker = _MagicMock_dg()
+        ticker.last = 75200.0
+        ticker.bid = 75195.0
+        ticker.ask = 75205.0
+        ticker.high = 76000.0
+        ticker.low = 74800.0
+        ticker.base_volume = 1000.0
+        market_data.get_ticker.return_value = ticker
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(150)
+        technical = _MagicMock_dg()
+        technical.compute_indicators.return_value = {"atr_14": 100.0, "volume_ratio": 1.0}
+        technical.format_for_llm.return_value = "RSI(14): 50.0\nMACD: bullish"
+        deps = _MockDeps(market_data=market_data, technical=technical)
+        return await fn(deps)
+
+    if tool_name == "get_higher_timeframe_view":
+        market_data = _AsyncMock_dg()
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(250)
+        return await fn(_MockDeps(market_data=market_data), timeframe="4h")
+
+    if tool_name == "get_multi_timeframe_snapshot":
+        market_data = _AsyncMock_dg()
+        ticker = _MagicMock_dg()
+        ticker.last = 75200.0
+        market_data.get_ticker.return_value = ticker
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(250)
+        technical = _MagicMock_dg()
+        technical.compute_indicators.return_value = {"atr_14": 100.0}
+        deps = _MockDeps(market_data=market_data, technical=technical)
+        return await fn(deps)
+
+    if tool_name == "get_price_pivots":
+        market_data = _AsyncMock_dg()
+        ticker = _MagicMock_dg()
+        ticker.last = 75200.0
+        market_data.get_ticker.return_value = ticker
+        market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(100)
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_recent_trades":
+        market_data = _AsyncMock_dg()
+        market_data.get_recent_trades.return_value = []  # no-trades L3 path → still sectioned
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_order_book":
+        market_data = _AsyncMock_dg()
+        market_data.get_order_book.side_effect = Exception("upstream")  # L2 unavailable
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_derivatives_data":
+        # Force all-3-failure → L2 inline `Error:` form (Option D)
+        market_data = _AsyncMock_dg()
+        market_data.get_funding_rate.side_effect = Exception()
+        market_data.get_open_interest.side_effect = Exception()
+        market_data.get_long_short_ratio.side_effect = Exception()
+        return await fn(_MockDeps(market_data=market_data))
+
+    if tool_name == "get_account_balance":
+        return await fn(_MockDeps(exchange=_mock_exchange_minimal()))
+
+    if tool_name == "get_open_orders":
+        return await fn(_MockDeps(exchange=_mock_exchange_minimal(open_orders=[])))
+
+    raise AssertionError(f"unhandled Path-B tool {tool_name}")
+
+
+PATH_B_TOOLS = [
+    "get_market_data", "get_higher_timeframe_view",
+    "get_multi_timeframe_snapshot", "get_price_pivots",
+    "get_recent_trades", "get_order_book", "get_derivatives_data",
+    "get_account_balance", "get_open_orders",
+]
+
+
+@pytest.mark.parametrize("tool_name", PATH_B_TOOLS)
+async def test_dg_1_path_b_minimum_mock_happy_or_l2(tool_name):
+    """T-DG-1 Path B: minimum-mock invocation (happy path or L2 unavailable) →
+    returns starts with `=== `.
+    """
+    out = await _invoke_path_b(tool_name)
+    assert out.startswith("=== "), (
+        f"{tool_name} (Path B) did not start with section header: {out[:120]!r}"
+    )
+
+
+# === T-DG-1b: 结构性 sectioning lint (every === ... === line is canonical) ===
+
+
+_TDG1B_SECTION_LINE_RE = _re_dg.compile(r"^=== (.+) ===$")
+
+
+def _assert_no_half_sectioned(tool_name: str, out: str):
+    """Every line that looks like a section header (starts with '=== ') must
+    close with ' ===' (canonical pattern). Catches half-sectioned drift like
+    'Pending Orders:' appearing after a proper === Section === header.
+    """
+    for i, line in enumerate(out.split("\n")):
+        if line.startswith("=== "):
+            assert _TDG1B_SECTION_LINE_RE.match(line), (
+                f"{tool_name} line {i} not canonical section header: {line!r}"
+            )
+
+
+@pytest.mark.parametrize("tool_name", PATH_A_TOOLS)
+async def test_dg_1b_path_a_canonical_section_lines(tool_name):
+    """T-DG-1b Path A: every === ...-prefixed line must be canonical."""
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    deps = _MockDeps(exchange=_mock_exchange_minimal())
+    out = await fn(deps)
+    _assert_no_half_sectioned(tool_name, out)
+
+
+@pytest.mark.parametrize("tool_name", PATH_B_TOOLS)
+async def test_dg_1b_path_b_canonical_section_lines(tool_name):
+    """T-DG-1b Path B: every === ...-prefixed line must be canonical."""
+    out = await _invoke_path_b(tool_name)
+    _assert_no_half_sectioned(tool_name, out)
+
+
+# === T-DG-1c: 关键字段白名单 (spec §11 risk mitigation) ===
+#
+# Per spec §11 风险表: "T-DG-1 lint 检查无关键字段消失（白名单校验 RSI / MACD / MA20 /
+# Bollinger / Funding / OI / L/S / FGI 等核心字段在重构后仍存在）". 仅 Path B
+# happy path 需此白名单（Path A 是 service=None / empty-state，没有数据字段）。
+#
+# Option D adopted (commit 99ad60e): L2 fallback uses inline 'Error:' prefix
+# instead of '=== Error ===' section, so whitelist uses 'Error:' for L2 paths.
+_CRITICAL_FIELDS_PATH_B: dict[str, list[str]] = {
+    "get_market_data": ["Ticker", "Technical Indicators", "Market Context",
+                        "Recent Candles", "RSI", "MACD", "ATR"],
+    "get_higher_timeframe_view": ["Higher Timeframe View", "MA Distances",
+                                  "MA50", "MA100", "MA200"],
+    "get_multi_timeframe_snapshot": ["Multi-TF Snapshot", "Current price",
+                                     "Momentum", "Structure", "Volatility"],
+    "get_price_pivots": ["Price Pivots", "Current Price",
+                         "Levels Above Current Price",
+                         "Levels Below Current Price"],
+    # Path-B tools that exercise L2 path (Option D inline 'Error:'):
+    "get_recent_trades": ["Recent Trades"],
+    "get_order_book": ["Order Book", "Error:"],  # forced L2 in _invoke_path_b
+    "get_derivatives_data": ["Derivatives Data", "Error:"],  # forced all-fail L2
+    "get_account_balance": ["Account Balance", "Total", "Return", "Free", "Used"],
+    "get_open_orders": ["Pending Orders"],
+}
+
+# Path A 也有少量必现字段（service=None / empty-state 默认文案 + section header）:
+_CRITICAL_FIELDS_PATH_A: dict[str, list[str]] = {
+    "get_market_news": ["News", "Error:", "not configured"],
+    "get_exchange_announcements": ["Exchange Announcements", "Error:", "not configured"],
+    "get_macro_calendar": ["Upcoming Macro Events", "Error:", "not configured"],
+    "get_macro_context": ["Macro Context", "Error:", "not configured"],
+    "get_etf_flows": ["BTC Spot ETF Flows", "Error:", "not configured"],
+    "get_stablecoin_supply": ["Stablecoin Supply", "Error:", "not configured"],
+    "get_trade_journal": ["Trade Journal", "No trade journal entries yet"],
+    "get_performance": ["Trading Performance", "Initial Balance", "Current Balance"],
+    "get_active_alerts": ["Price Alert Settings", "Volatility alert"],
+    "get_position": ["Position", "No open positions"],
+}
+
+
+@pytest.mark.parametrize("tool_name", PATH_A_TOOLS)
+async def test_dg_1c_path_a_critical_fields_present(tool_name):
+    """T-DG-1c Path A: critical default-state fields/headers present in output."""
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    deps = _MockDeps(exchange=_mock_exchange_minimal())
+    out = await fn(deps)
+    for field in _CRITICAL_FIELDS_PATH_A[tool_name]:
+        assert field in out, (
+            f"{tool_name} missing critical field {field!r} in Path A output:\n"
+            f"{out[:400]!r}"
+        )
+
+
+@pytest.mark.parametrize("tool_name", PATH_B_TOOLS)
+async def test_dg_1c_path_b_critical_fields_present(tool_name):
+    """T-DG-1c Path B: critical happy-path / L2 fields/headers present in output."""
+    out = await _invoke_path_b(tool_name)
+    for field in _CRITICAL_FIELDS_PATH_B[tool_name]:
+        assert field in out, (
+            f"{tool_name} missing critical field {field!r} in Path B output:\n"
+            f"{out[:400]!r}"
+        )
+
+
+# === T-DG-1d: 参数顺序 lint (spec §4.1.1) ===
+@pytest.mark.parametrize("tool_name,expected_pattern", [
+    ("get_higher_timeframe_view", r"=== Higher Timeframe View \(BTC/USDT:USDT, 4h\) ==="),
+    ("get_price_pivots", r"=== Price Pivots \(BTC/USDT:USDT, main TF: \w+\) ==="),
+])
+async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
+    """T-DG-1d: §4.1.1 multi-arg header param order — symbol-first convention."""
+    out = await _invoke_path_b(tool_name)
+    assert _re_dg.search(expected_pattern, out), (
+        f"{tool_name} header param order violates §4.1.1: pattern {expected_pattern!r} "
+        f"not found in:\n{out[:400]!r}"
+    )
