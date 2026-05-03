@@ -210,7 +210,7 @@ R2-8c 后 cycle 内 `▾ Action` 段渲染示例（4-tool cycle，含 perception
 | 失败档 | 触发条件 | 处置 | 进 multi-line？ |
 |---|---|---|---|
 | **L1: pydantic-ai outcome 失败** | `is_tool_error(name, content, outcome) == True` (outcome != "success" 或 execution success prefix mismatch) | R2-8a 单行 `✗ {tool_name:<22} {fallback_summary}` 渲染 | **不进** multi-line（dispatch 前置 branch，§4.4）|
-| **L2: tool 内捕获异常 + success outcome 返回 whole-output degradation** | tool 实现内部 try/except → 仍 return success outcome 但内容是 fallback 描述 | tool 端可返回单 `=== Error ===` section + 错误描述 | **进** multi-line（走 perception render，section 显示 Error）|
+| **L2: tool 内捕获异常 + success outcome 返回 whole-output degradation** | tool 实现内部 try/except → 仍 return success outcome 但内容是 fallback 描述 | tool 端保留 tool-conceptual section header + body 内 `Error: {message}` inline 字段（与 L3 inline fallback 同形态，避 §4.1.3 single-field section 反模式）| **进** multi-line（走 perception render，section 显示 Error）|
 | **L3: per-source / per-field degradation** | tool 部分数据源失败但其余数据可用 | 保留在对应 section 内字段 fallback (`(unavailable)` / `Temporarily unavailable.` 等短描述) | **进** multi-line（section 完整 render，字段级 fallback）|
 
 **其他边界**:
@@ -222,7 +222,7 @@ R2-8c 后 cycle 内 `▾ Action` 段渲染示例（4-tool cycle，含 perception
 | Tool 输出无 sections | Display universal rule 视为"1 个无名 section"（fallback 路径，§4.3.1）|
 | Section header 含 markup 字面值 | Display 端 `escape()` 处理（§4.3.3）|
 
-**AC 覆盖**: AC1 / T-DG-1 仅检查 happy path + **各工具 enum 标注的 existing L2 paths**（tool 已有内部 try/except + success outcome 返回 `=== Error ===` section）的 sectioning 一致性 — **不一刀切要求每工具有 L2**（review P1.1 — L1 hard raise 不强制重构）；L1 走 R2-8a 单行不参与 lint；L3 在 §4.2.* enum 各工具内列举具体字面（不 lint level），plan 阶段 enum table 时显式列。
+**AC 覆盖**: AC1 / T-DG-1 仅检查 happy path + **各工具 enum 标注的 existing L2 paths**（tool 已有内部 try/except + success outcome 返回 tool-section + `Error:` inline 字段）的 sectioning 一致性 — **不一刀切要求每工具有 L2**（review P1.1 — L1 hard raise 不强制重构）；L1 走 R2-8a 单行不参与 lint；L3 在 §4.2.* enum 各工具内列举具体字面（不 lint level），plan 阶段 enum table 时显式列。
 
 ### 4.2 20 perception 工具 sections 设计 enum
 
@@ -232,7 +232,7 @@ R2-8c 后 cycle 内 `▾ Action` 段渲染示例（4-tool cycle，含 perception
 
 **L1 vs L2 区分原则**（review 校准 — 不为 lint 改变 error semantics）:
 - **L1 = 当前 hard raise / outcome != success 路径**: 保持 raise，pydantic-ai catch；R2-8c **不为满足 lint 重构为 try/except**（重构会破坏 outcome != success 信号、error_type 结构化错误、is_tool_error() 识别、metrics/retry/observability 层）。Display 走 R2-8a 单行 ✗ 路径，不进 multi-line render，不进 lint。
-- **L2 = tool 当前已有内部 try/except + success outcome 返回 fallback**: 这类 fallback **必须 sectioned**（如 `News service not configured.` → `=== Error ===\nNews service not configured.`），按 `=== Error ===` section 输出。包括：
+- **L2 = tool 当前已有内部 try/except + success outcome 返回 fallback**: 这类 fallback **必须 sectioned in tool-conceptual section + body 内 `Error:` prefix**（如 `News service not configured.` → `=== News ===\nError: News service not configured.`），与 L3 per-source fallback 同 inline 形态。包括：
   - 已有 try/except 包裹的 service unavailable / not configured fallback
   - 设计明确选择 success outcome 的 degradation path（plan 阶段 enum 标注）
 - **L3 = per-source / per-field 部分失败**: 保留在对应 section 内字段 fallback（`(unavailable)` / `Temporarily unavailable.` 短描述）
@@ -311,7 +311,7 @@ R2-8c 后 cycle 内 `▾ Action` 段渲染示例（4-tool cycle，含 perception
 | `=== Upcoming Macro Events (next {hours}h) ===` | per-event: timestamp, title, impact, content (optional) | always present |
 | `=== Note ===` | footer caveat (e.g. "macro calendar covers current week only; Friday evening / weekend calls may miss next week's early events.") | optional — 仅在 events list 非 None 时显示 |
 
-边界: 服务不可用 → 单 `=== Error ===` section (L2)；no events → `No upcoming macro events.` 在 Events section 内 (L3 描述)。
+边界: 服务不可用 → tool-section + `Error:` inline body 字段 (L2)；no events → `No upcoming macro events.` 在 Events section 内 (L3 描述)。
 
 #### 4.2.8 get_etf_flows (`tools_perception.py:997`)
 
@@ -343,7 +343,7 @@ R2-8c 后 cycle 内 `▾ Action` 段渲染示例（4-tool cycle，含 perception
 | `=== Derivatives Data ({symbol}) ===` | Funding Rate (rate %, settlement time, sign + direction) / Open Interest (USD value) / Long/Short Ratio (ratio + %) / Data as of (oldest timestamp UTC) |
 
 字段级 fallback (per-source 失败): `Funding Rate: (unavailable)` / `Open Interest: (unavailable)` / `Long/Short Ratio: (unavailable)`。
-若全 3 数据源都失败: 整 tool 走 §4.1.4 L2 — 单 `=== Error ===` section。
+若全 3 数据源都失败: 整 tool 走 §4.1.4 L2 — tool-section + `Error:` inline body 字段。
 单 section 行数 ≤ 5，keep all。
 
 #### 4.2.11 get_position (`tools_perception.py:139`)
@@ -769,7 +769,7 @@ Plan 阶段建议拆 ~9 task TDD：
 |---|---|---|
 | **T-EC-1** | Tool 输出无 `=== Section ===` header（legacy / 兼容性 / parse 失败）| `_parse_sections` 返回 `[Section(header=None, body=lines)]` → multi-line render 仍 work（含 get_memories backend-dependent fallback path）|
 | **T-EC-2** | L1 失败档 — `is_tool_error=True`（outcome != success 或 execution prefix mismatch）| R2-8a 现有单行 ✗ 渲染（不进 multi-line） |
-| **T-EC-3** | L2 失败档 — tool 内捕获异常 + success outcome 返回 `=== Error ===` section | 走 perception multi-line render；section 显示错误描述 |
+| **T-EC-3** | L2 失败档 — tool 内捕获异常 + success outcome 返回 tool-section + `Error:` inline body 字段 | 走 perception multi-line render；section 显示错误描述 |
 | **T-EC-4** | Section body 仅 1 行 | `_clip_body` keep all（< 10）→ 单行 body 直接输出 |
 | **T-EC-5** | Section body 0 行（空 section）| 仍渲染 header，body 为空 → 视觉是单 header 行 |
 | **T-EC-6** | Section header 含 markup 字面值（如 `=== [red]Critical[/] ===`）| `escape()` 处理；display 渲染为字面 `[red]Critical[/]` 不被解释为 markup |
