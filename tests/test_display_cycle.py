@@ -621,10 +621,14 @@ def test_render_reasoning_at_800_exact():
 
 
 def test_render_reasoning_over_800_truncated():
-    """T-RR-3: thinking > 800 chars → truncate to 800 + '... [+N chars]' marker."""
+    """T-RR-3: thinking > 800 chars → truncate to 800 + '... [+N chars]' marker.
+
+    Note (R2-8c D10): default max_chars 800 → 2000; this test preserves the
+    original 800 boundary intent by passing explicit max_chars=800.
+    """
     from src.cli.display import _render_reasoning
     text = "y" * 1547
-    out = _render_reasoning(text)
+    out = _render_reasoning(text, max_chars=800)
     assert "(1547 chars total)" in out
     assert "... [+747 chars]" in out
     # body length 800 chars + marker
@@ -1521,3 +1525,24 @@ def test_int_1_render_action_mixed_perception_execution():
     assert "    Total: 998.00 USDT" in out
     # Execution single-line + <22 padding (R2-8a 维持)
     assert "  ⚙ set_next_wake          5min" in out  # <22 padding 长度 22
+
+
+# --- T-INT-3: thinking 截断升级 800→2000 (D10) ---
+
+
+def test_int_3_thinking_1500_chars_keep_all():
+    """T-INT-3a: 1500-char thinking < 2000 → keep all (no truncation suffix)."""
+    from src.cli.display import _render_reasoning
+    text = "x" * 1500
+    out = _render_reasoning(text)
+    assert "[+" not in out  # no truncation marker
+    assert "1500 chars total" in out
+
+
+def test_int_3_thinking_2500_chars_truncated_to_2000():
+    """T-INT-3b: 2500-char thinking → truncate at 2000 + ' ... [+500 chars]' suffix."""
+    from src.cli.display import _render_reasoning
+    text = "y" * 2500
+    out = _render_reasoning(text)
+    assert "[+500 chars]" in out
+    assert "2500 chars total" in out

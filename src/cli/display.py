@@ -736,12 +736,15 @@ def _render_header(
     )
 
 
-def _render_reasoning(thinking_text: str, max_chars: int = 800) -> str:
-    """Render Reasoning section per spec §4.2.1-§4.2.2.
+def _render_reasoning(thinking_text: str, max_chars: int = 2000) -> str:
+    """Render Reasoning section per spec §4.2.1-§4.2.2 (R2-8c D10: 800 → 2000).
 
     Hard-truncate body to max_chars + ' ... [+N chars]' marker. Body must be
     rich.markup.escape()'d — thinking content is LLM output, attack surface
     of same shape as Decision body.
+
+    R2-8c D10 raises max_chars 800 → 2000 (smoke #6 B3 截断率 47/80 = 58.8%
+    @ 800; 2000 预计降到 ~25%).
     """
     total = len(thinking_text)
     if total <= max_chars:
