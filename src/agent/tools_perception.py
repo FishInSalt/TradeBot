@@ -556,8 +556,7 @@ async def get_market_news(
     if deps.news is None:
         return (
             "=== News ===\n"
-            "=== Error ===\n"
-            "News service not configured."
+            "Error: News service not configured."
         )
 
     from src.integrations.news.models import extract_base_currency
@@ -738,8 +737,7 @@ async def get_derivatives_data(
     ):
         return (
             f"=== Derivatives Data ({symbol}) ===\n"
-            f"=== Error ===\n"
-            f"Temporarily unavailable (all 3 data sources failed)."
+            f"Error: Temporarily unavailable (all 3 data sources failed)."
         )
 
     # Funding rate (per-field L3 fallback for partial failure)
@@ -831,15 +829,13 @@ async def get_higher_timeframe_view(
         logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
         return (
             f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
-            f"=== Error ===\n"
-            f"Temporarily unavailable."
+            f"Error: Temporarily unavailable."
         )
 
     if df.empty:
         return (
             f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
-            f"=== Error ===\n"
-            f"Insufficient data."
+            f"Error: Insufficient data."
         )
 
     last_close = float(df["close"].iloc[-1])
@@ -1177,16 +1173,14 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         logger.exception("get_order_book failed for %s", symbol)
         return (
             f"=== Order Book ({symbol}) ===\n"
-            "=== Error ===\n"
-            "Temporarily unavailable."
+            "Error: Temporarily unavailable."
         )
 
     actual = min(len(ob.bids), len(ob.asks))
     if not ob.bids or not ob.asks or actual < depth:
         return (
             f"=== Order Book ({symbol}) ===\n"
-            "=== Error ===\n"
-            f"Insufficient data (requested depth {depth}, got {actual})."
+            f"Error: Insufficient data (requested depth {depth}, got {actual})."
         )
 
     best_bid = ob.bids[0]
@@ -1203,8 +1197,7 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     if total_sum == 0:
         return (
             f"=== Order Book ({symbol}) ===\n"
-            "=== Error ===\n"
-            f"Insufficient data (requested depth {depth}, got {actual})."
+            f"Error: Insufficient data (requested depth {depth}, got {actual})."
         )
     bid_deep_pct = (ob.bids[0].price - ob.bids[depth - 1].price) / ob.bids[0].price * 100
     ask_deep_pct = (ob.asks[depth - 1].price - ob.asks[0].price) / ob.asks[0].price * 100
@@ -1295,8 +1288,7 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
         logger.exception("get_recent_trades failed for %s", symbol)
         return (
             f"=== Recent Trades ({symbol}) ===\n"
-            f"=== Error ===\n"
-            f"Temporarily unavailable."
+            f"Error: Temporarily unavailable."
         )
 
     if not trades:
@@ -1397,8 +1389,7 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
         return (
             f"=== Multi-TF Snapshot ({symbol}) ===\n"
-            f"=== Error ===\n"
-            f"Temporarily unavailable."
+            f"Error: Temporarily unavailable."
         )
 
     async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
@@ -1414,8 +1405,7 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
     if all(isinstance(r[1], Exception) for r in results):
         return (
             f"=== Multi-TF Snapshot ({symbol}) ===\n"
-            f"=== Error ===\n"
-            f"Temporarily unavailable (all timeframes failed)."
+            f"Error: Temporarily unavailable (all timeframes failed)."
         )
 
     rows: list[str] = []
@@ -1610,8 +1600,7 @@ async def get_price_pivots(deps: TradingDeps) -> str:
         logger.exception("get_price_pivots ticker fetch failed for %s", symbol)
         return (
             f"=== Price Pivots ({symbol}, main TF: {main_tf}) ===\n"
-            f"=== Error ===\n"
-            f"Temporarily unavailable."
+            f"Error: Temporarily unavailable."
         )
 
     async def _fetch(tf: str, limit: int):

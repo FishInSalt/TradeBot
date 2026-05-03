@@ -1653,18 +1653,15 @@ def test_snapshot_get_higher_timeframe_view_happy_path():
 
 
 def test_snapshot_get_higher_timeframe_view_unavailable():
-    """Snapshot — get_higher_timeframe_view L2 sectioned Error fallback."""
+    """Snapshot — get_higher_timeframe_view L2 inline Error fallback (Option D)."""
     content = (
         "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
-        "=== Error ===\n"
-        "Temporarily unavailable."
+        "Error: Temporarily unavailable."
     )
     expected = (
         "  ⚙ get_higher_timeframe_view\n"
         "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
-        "\n"
-        "    === Error ===\n"
-        "    Temporarily unavailable."
+        "    Error: Temporarily unavailable."
     )
     _assert_perception_render("get_higher_timeframe_view", content, expected)
 
@@ -1700,18 +1697,15 @@ def test_snapshot_get_multi_timeframe_snapshot_happy_path():
 
 
 def test_snapshot_get_multi_timeframe_snapshot_unavailable():
-    """Snapshot — get_multi_timeframe_snapshot L2 sectioned Error fallback."""
+    """Snapshot — get_multi_timeframe_snapshot L2 inline Error fallback (Option D)."""
     content = (
         "=== Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
-        "=== Error ===\n"
-        "Temporarily unavailable."
+        "Error: Temporarily unavailable."
     )
     expected = (
         "  ⚙ get_multi_timeframe_snapshot\n"
         "    === Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
-        "\n"
-        "    === Error ===\n"
-        "    Temporarily unavailable."
+        "    Error: Temporarily unavailable."
     )
     _assert_perception_render("get_multi_timeframe_snapshot", content, expected)
 
@@ -1747,18 +1741,15 @@ def test_snapshot_get_price_pivots_happy_path():
 
 
 def test_snapshot_get_price_pivots_unavailable():
-    """Snapshot — get_price_pivots L2 sectioned Error fallback (ticker fail)."""
+    """Snapshot — get_price_pivots L2 inline Error fallback (ticker fail, Option D)."""
     content = (
         "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
-        "=== Error ===\n"
-        "Temporarily unavailable."
+        "Error: Temporarily unavailable."
     )
     expected = (
         "  ⚙ get_price_pivots\n"
         "    === Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
-        "\n"
-        "    === Error ===\n"
-        "    Temporarily unavailable."
+        "    Error: Temporarily unavailable."
     )
     _assert_perception_render("get_price_pivots", content, expected)
 
@@ -1791,7 +1782,7 @@ def test_snapshot_get_recent_trades_happy_path():
 
 
 def test_snapshot_get_recent_trades_no_trades():
-    """Snapshot — get_recent_trades L3 empty-state (single-section, NO === Error ===)."""
+    """Snapshot — get_recent_trades L3 empty-state (single-section, NO Error: prefix)."""
     content = (
         "=== Recent Trades (BTC/USDT:USDT, last 300s) ===\n"
         "No trades in last 300s."
@@ -1805,18 +1796,15 @@ def test_snapshot_get_recent_trades_no_trades():
 
 
 def test_snapshot_get_recent_trades_unavailable():
-    """Snapshot — get_recent_trades L2 sectioned Error fallback (service exception)."""
+    """Snapshot — get_recent_trades L2 inline Error fallback (service exception, Option D)."""
     content = (
         "=== Recent Trades (BTC/USDT:USDT) ===\n"
-        "=== Error ===\n"
-        "Temporarily unavailable."
+        "Error: Temporarily unavailable."
     )
     expected = (
         "  ⚙ get_recent_trades\n"
         "    === Recent Trades (BTC/USDT:USDT) ===\n"
-        "\n"
-        "    === Error ===\n"
-        "    Temporarily unavailable."
+        "    Error: Temporarily unavailable."
     )
     _assert_perception_render("get_recent_trades", content, expected)
 
@@ -1862,18 +1850,15 @@ def test_snapshot_get_derivatives_data_partial_failure():
 
 
 def test_snapshot_get_derivatives_data_all_failed():
-    """Snapshot — get_derivatives_data L2 all-3-failed sectioned Error fallback."""
+    """Snapshot — get_derivatives_data L2 all-3-failed inline Error fallback (Option D)."""
     content = (
         "=== Derivatives Data (BTC/USDT:USDT) ===\n"
-        "=== Error ===\n"
-        "Temporarily unavailable (all 3 data sources failed)."
+        "Error: Temporarily unavailable (all 3 data sources failed)."
     )
     expected = (
         "  ⚙ get_derivatives_data\n"
         "    === Derivatives Data (BTC/USDT:USDT) ===\n"
-        "\n"
-        "    === Error ===\n"
-        "    Temporarily unavailable (all 3 data sources failed)."
+        "    Error: Temporarily unavailable (all 3 data sources failed)."
     )
     _assert_perception_render("get_derivatives_data", content, expected)
 
@@ -2029,18 +2014,15 @@ def test_snapshot_get_position_hard_failure_degradation():
 
 
 def test_snapshot_get_market_news_l2_not_configured():
-    """Snapshot — news service=None L2 emits === News === + === Error === sub-section."""
+    """Snapshot — news service=None L2 inline Error fallback under === News === (Option D)."""
     content = (
         "=== News ===\n"
-        "=== Error ===\n"
-        "News service not configured."
+        "Error: News service not configured."
     )
     expected = (
         "  ⚙ get_market_news\n"
         "    === News ===\n"
-        "\n"
-        "    === Error ===\n"
-        "    News service not configured."
+        "    Error: News service not configured."
     )
     _assert_perception_render("get_market_news", content, expected)
 
@@ -2121,18 +2103,15 @@ def test_snapshot_get_order_book_happy_path():
 
 
 def test_snapshot_get_order_book_l2_unavailable():
-    """Snapshot — order book L2 (service exception) emits === Error === section."""
+    """Snapshot — order book L2 (service exception) inline Error fallback (Option D)."""
     content = (
         "=== Order Book (BTC/USDT:USDT) ===\n"
-        "=== Error ===\n"
-        "Temporarily unavailable."
+        "Error: Temporarily unavailable."
     )
     expected = (
         "  ⚙ get_order_book\n"
         "    === Order Book (BTC/USDT:USDT) ===\n"
-        "\n"
-        "    === Error ===\n"
-        "    Temporarily unavailable."
+        "    Error: Temporarily unavailable."
     )
     _assert_perception_render("get_order_book", content, expected)
 

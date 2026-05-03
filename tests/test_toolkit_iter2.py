@@ -50,10 +50,9 @@ async def test_order_book_empty_insufficient():
         symbol="BTC/USDT:USDT", bids=[], asks=[], timestamp=0,
     )
     result = await get_order_book(deps, depth=20)
-    # R2-8c §4.2.20 — L2 sectioned form
+    # R2-8c §4.2.20 — L2 Option D form (inline Error: prefix)
     assert "=== Order Book (BTC/USDT:USDT) ===" in result
-    assert "=== Error ===" in result
-    assert "Insufficient data" in result
+    assert "Error: Insufficient data" in result
     assert "requested depth 20" in result
     assert "got 0" in result
 
@@ -65,10 +64,9 @@ async def test_order_book_service_failure():
     deps = MockDeps()
     deps.market_data.get_order_book.side_effect = Exception("connection reset")
     result = await get_order_book(deps)
-    # R2-8c §4.2.20 — L2 sectioned form
+    # R2-8c §4.2.20 — L2 Option D form (inline Error: prefix)
     assert "=== Order Book (BTC/USDT:USDT) ===" in result
-    assert "=== Error ===" in result
-    assert "Temporarily unavailable." in result
+    assert "Error: Temporarily unavailable." in result
 
 
 @pytest.mark.asyncio
@@ -160,22 +158,21 @@ async def test_recent_trades_empty_cold_market():
     deps = MockDeps()
     deps.market_data.get_recent_trades.return_value = []
     result = await get_recent_trades(deps, window_seconds=300)
-    # R2-8c §4.2.9: single-section empty-state (NOT === Error ===).
+    # R2-8c §4.2.9: single-section empty-state (NOT Error: prefix).
     assert "=== Recent Trades (BTC/USDT:USDT, last 300s) ===" in result
     assert "No trades in last 300s." in result
-    assert "=== Error ===" not in result
+    assert "Error:" not in result
 
 
 @pytest.mark.asyncio
 async def test_recent_trades_service_failure():
-    """Service failure → === Error === section (R2-8c §4.2.9)."""
+    """Service failure → inline Error: prefix under tool section (R2-8c §4.2.9 Option D)."""
     from src.agent.tools_perception import get_recent_trades
     deps = MockDeps()
     deps.market_data.get_recent_trades.side_effect = Exception("timeout")
     result = await get_recent_trades(deps)
     assert "=== Recent Trades (BTC/USDT:USDT) ===" in result
-    assert "=== Error ===" in result
-    assert "Temporarily unavailable." in result
+    assert "Error: Temporarily unavailable." in result
 
 
 @pytest.mark.asyncio
@@ -339,8 +336,7 @@ async def test_multi_tf_snapshot_all_fail(mocker):
     ))
     result = await get_multi_timeframe_snapshot(deps)
     assert "=== Multi-TF Snapshot (BTC/USDT:USDT) ===" in result
-    assert "=== Error ===" in result
-    assert "Temporarily unavailable" in result
+    assert "Error: Temporarily unavailable" in result
 
 
 @pytest.mark.asyncio
@@ -668,8 +664,7 @@ async def test_order_book_all_zero_amounts_insufficient(mocker):
         timestamp=0,
     )
     result = await get_order_book(deps, depth=20)
-    # Should degrade, not raise ZeroDivisionError (R2-8c §4.2.20 sectioned form)
-    assert "Insufficient data" in result
-    assert "=== Error ===" in result
+    # Should degrade, not raise ZeroDivisionError (R2-8c §4.2.20 Option D form)
+    assert "Error: Insufficient data" in result
     # Should not contain Bid share (didn't reach that branch)
     assert "Bid share:" not in result
