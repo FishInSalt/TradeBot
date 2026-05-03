@@ -394,7 +394,10 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
     """Get trade journal — decision timeline with quick stats summary.
     Use for reviewing recent decisions and their outcomes."""
     if deps.db_engine is None:
-        return "No trade journal entries yet."
+        return (
+            "=== Trade Journal ===\n"
+            "No trade journal entries yet."
+        )
     from sqlalchemy import select, desc
     from src.storage.database import get_session
     from src.storage.models import TradeAction
@@ -409,7 +412,10 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
         actions = list(result.scalars().all())
 
     if not actions:
-        return "No trade journal entries yet."
+        return (
+            "=== Trade Journal ===\n"
+            "No trade journal entries yet."
+        )
 
     sections: list[str] = []
 
@@ -494,34 +500,54 @@ async def get_performance(deps: TradingDeps) -> str:
     ret_pct = (ret_usdt / deps.initial_balance) * 100 if deps.initial_balance > 0 else 0.0
 
     if deps.metrics is None:
-        return (
+        # L3 by-design empty state (NOT an error): no metrics service available.
+        # Trading Performance section still renders balance fields; Trade Stats
+        # section emitted as placeholder so the schema is consistent.
+        perf_section = (
             f"=== Trading Performance ===\n"
             f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
             f"Current Balance: {balance.total_usdt:.2f} USDT\n"
-            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)\n\n"
-            f"No metrics service available."
+            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)"
         )
+        stats_section = (
+            "=== Trade Stats ===\n"
+            "No metrics service available."
+        )
+        return f"{perf_section}\n\n{stats_section}"
 
     metrics = await deps.metrics.compute()
 
     if metrics.total_trades == 0:
-        return (
+        # L3 by-design empty state (NOT an error): no completed trades yet.
+        perf_section = (
             f"=== Trading Performance ===\n"
             f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
             f"Current Balance: {balance.total_usdt:.2f} USDT\n"
-            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)\n\n"
-            f"No completed trades yet."
+            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)"
         )
+        stats_section = (
+            "=== Trade Stats ===\n"
+            "No completed trades yet."
+        )
+        return f"{perf_section}\n\n{stats_section}"
 
-    fees_line = f"Total Fees: -{metrics.total_fees:.2f} USDT\n\n" if metrics.total_fees > 0 else "Total Fees: 0.00 USDT\n\n"
+    fees_line = (
+        f"Total Fees: -{metrics.total_fees:.2f} USDT"
+        if metrics.total_fees > 0
+        else "Total Fees: 0.00 USDT"
+    )
 
-    return (
+    perf_section = (
         f"=== Trading Performance ===\n"
         f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
         f"Current Balance: {balance.total_usdt:.2f} USDT\n"
         f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
         f"Realized PnL: {metrics.total_pnl:+.2f} USDT (gross, before fees)\n"
         f"{fees_line}"
+    )
+
+    stats_section = (
+        f"=== Trade Stats ===\n"
         f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
         f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
@@ -529,6 +555,8 @@ async def get_performance(deps: TradingDeps) -> str:
         f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}%\n"
         f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT"
     )
+
+    return f"{perf_section}\n\n{stats_section}"
 
 
 # Display-layer filter for CoinDesk CATEGORY_DATA — strips thematic tags
@@ -630,7 +658,10 @@ async def get_exchange_announcements(
 ) -> str:
     """Get recent exchange announcements (maintenance, delistings, parameter changes)."""
     if deps.news is None:
-        return "News service not configured."
+        return (
+            "=== Exchange Announcements ===\n"
+            "Error: News service not configured."
+        )
 
     try:
         announcements = await deps.news.get_announcements(lookback_hours)
@@ -640,7 +671,7 @@ async def get_exchange_announcements(
     if announcements is None:
         return (
             f"=== Exchange Announcements (past {lookback_hours}h) ===\n"
-            "Exchange announcements service temporarily unavailable."
+            "Error: Exchange announcements service temporarily unavailable."
         )
     if announcements:
         lines = [e.timestamp.strftime("[%Y-%m-%d %H:%M] ") + e.title for e in announcements]
@@ -665,7 +696,10 @@ async def get_macro_calendar(
     (no result to qualify, per spec §3.4).
     """
     if deps.news is None:
-        return "News service not configured."
+        return (
+            "=== Upcoming Macro Events ===\n"
+            "Error: News service not configured."
+        )
 
     try:
         macro_events = await deps.news.get_macro_events(lookahead_hours)
@@ -677,7 +711,7 @@ async def get_macro_calendar(
     if macro_events is None:
         sections.append(
             f"=== Upcoming Macro Events (next {lookahead_hours}h) ===\n"
-            "Macro events service temporarily unavailable."
+            "Error: Temporarily unavailable."
         )
     elif macro_events:
         lines = []
@@ -701,7 +735,8 @@ async def get_macro_calendar(
     # Footer: shown when macro_events is a list; suppressed when None.
     if macro_events is not None:
         sections.append(
-            "Note: macro calendar covers current week only; "
+            "=== Note ===\n"
+            "Macro calendar covers current week only; "
             "Friday evening / weekend calls may miss next week's early events."
         )
 
@@ -942,13 +977,19 @@ async def get_macro_context(deps: TradingDeps) -> str:
     real observation date (DTWEXBGS has ~1-week report delay).
     """
     if deps.macro is None:
-        return "Macro service not configured."
+        return (
+            "=== Macro Context ===\n"
+            "Error: Macro service not configured."
+        )
 
     try:
         snap = await deps.macro.get_snapshot()
     except Exception:
         logger.warning("Macro snapshot fetch failed", exc_info=True)
-        return "Macro context: temporarily unavailable"
+        return (
+            "=== Macro Context ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     sections: list[str] = []
     any_available = False
@@ -1017,7 +1058,10 @@ async def get_macro_context(deps: TradingDeps) -> str:
         sections.append("\n".join(lines))
 
     if not any_available:
-        return "Macro context: all sources temporarily unavailable"
+        return (
+            "=== Macro Context ===\n"
+            "Error: All sources temporarily unavailable."
+        )
 
     return "\n\n".join(sections)
 
@@ -1030,7 +1074,10 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     to avoid misreading same-day values.
     """
     if deps.crypto_etf is None:
-        return "ETF flows service not configured."
+        return (
+            "=== BTC Spot ETF Flows (US) ===\n"
+            "Error: ETF flows service not configured."
+        )
 
     # `days` parameter is clamped in CryptoEtfService.get_etf_flows
     # (src/integrations/crypto_etf/service.py:47) — single source of truth.
@@ -1084,7 +1131,10 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     ]
 
     if btc is None and eth is None:
-        return "ETF flows: temporarily unavailable"
+        return (
+            "=== BTC Spot ETF Flows (US) ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     # Footer: operational facts the Agent needs in-context (spec §3.6).
     # The trading-day count is derived from the service's actual result
@@ -1101,8 +1151,9 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     if btc or eth:
         days_rendered = len(next((f for f in (btc, eth) if f), []))
         sections.append(
-            f"Note: Past {days_rendered} trading days (weekends/holidays excluded).\n"
-            "Note: Issuer-reported; today's value may be revised T+1."
+            "=== Note ===\n"
+            f"Past {days_rendered} trading days (weekends/holidays excluded). "
+            "Issuer-reported; today's value may be revised T+1."
         )
 
     return "\n\n".join(sections)
@@ -1114,24 +1165,33 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
     Output is fact-only (spec §3.4): no 'dry powder' / 'capital entering'.
     """
     if deps.onchain is None:
-        return "Onchain service not configured."
+        return (
+            "=== Stablecoin Supply ===\n"
+            "Error: Onchain service not configured."
+        )
 
     try:
         result = await deps.onchain.get_stablecoin_snapshot()
     except Exception:
         logger.warning("Stablecoin snapshot fetch failed", exc_info=True)
-        return "Stablecoin supply: temporarily unavailable"
+        return (
+            "=== Stablecoin Supply ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     if result is None:
-        return "Stablecoin supply: temporarily unavailable"
+        return (
+            "=== Stablecoin Supply ===\n"
+            "Error: Temporarily unavailable."
+        )
 
     if not result["coins"]:
         # Guard against upstream schema drift (e.g. DefiLlama renaming USDT →
         # USDT0): neither tracked symbol matched, so totals would render as
         # $0.00 — misleading. Signal "data unavailable" instead.
         return (
-            "Stablecoin supply: data unavailable "
-            "(no tracked symbols found in response)"
+            "=== Stablecoin Supply ===\n"
+            "Error: Data unavailable (no tracked symbols found in response)."
         )
 
     lines = ["=== Stablecoin Supply ==="]

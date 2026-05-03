@@ -2136,3 +2136,351 @@ def test_snapshot_get_active_alerts_with_alerts():
         '      #2 (id=alert-2) below 74000.00 — "support break"'
     )
     _assert_perception_render("get_active_alerts", content, expected)
+
+
+# --- Batch C: long-tail snapshots (T7) ---
+
+
+def test_snapshot_get_macro_context_l2_not_configured():
+    """Snapshot — macro service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Macro Context ===\n"
+        "Error: Macro service not configured."
+    )
+    expected = (
+        "  ⚙ get_macro_context\n"
+        "    === Macro Context ===\n"
+        "    Error: Macro service not configured."
+    )
+    _assert_perception_render("get_macro_context", content, expected)
+
+
+def test_snapshot_get_macro_context_happy_3_sections():
+    """Snapshot — macro_context happy path 3 sections (Crypto Market + FRED + AV)."""
+    content = (
+        "=== Crypto Market ===\n"
+        "BTC.D: 56.10% | ETH.D: 13.40% | Total Mcap: $2.45T (24h: +0.85%)\n"
+        "\n"
+        "=== US Macro (FRED) ===\n"
+        "USD Index (Broad TW): 128.55 (as of 2026-04-25)\n"
+        "VIX: 17.94 (as of 2026-04-30)\n"
+        "10Y Treasury: 4.21% (as of 2026-04-30)\n"
+        "2s10s Spread: +0.45% (as of 2026-04-30)\n"
+        "10Y Inflation Expectation: 2.43% (as of 2026-04-30)\n"
+        "\n"
+        "=== US Equities (Alpha Vantage) ===\n"
+        "SPY: $710.14 (+0.32%, as of 2026-04-30)\n"
+        "QQQ: $648.85 (+0.55%, as of 2026-04-30)"
+    )
+    expected = (
+        "  ⚙ get_macro_context\n"
+        "    === Crypto Market ===\n"
+        "    BTC.D: 56.10% | ETH.D: 13.40% | Total Mcap: $2.45T (24h: +0.85%)\n"
+        "\n"
+        "    === US Macro (FRED) ===\n"
+        "    USD Index (Broad TW): 128.55 (as of 2026-04-25)\n"
+        "    VIX: 17.94 (as of 2026-04-30)\n"
+        "    10Y Treasury: 4.21% (as of 2026-04-30)\n"
+        "    2s10s Spread: +0.45% (as of 2026-04-30)\n"
+        "    10Y Inflation Expectation: 2.43% (as of 2026-04-30)\n"
+        "\n"
+        "    === US Equities (Alpha Vantage) ===\n"
+        "    SPY: $710.14 (+0.32%, as of 2026-04-30)\n"
+        "    QQQ: $648.85 (+0.55%, as of 2026-04-30)"
+    )
+    _assert_perception_render("get_macro_context", content, expected)
+
+
+def test_snapshot_get_macro_calendar_l2_not_configured():
+    """Snapshot — macro_calendar news service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Upcoming Macro Events ===\n"
+        "Error: News service not configured."
+    )
+    expected = (
+        "  ⚙ get_macro_calendar\n"
+        "    === Upcoming Macro Events ===\n"
+        "    Error: News service not configured."
+    )
+    _assert_perception_render("get_macro_calendar", content, expected)
+
+
+def test_snapshot_get_macro_calendar_happy_with_note():
+    """Snapshot — macro_calendar happy path: 1 event + === Note === footer."""
+    content = (
+        "=== Upcoming Macro Events (next 12h) ===\n"
+        "[2026-05-03 12:59] FOMC Meeting — Impact: High\n"
+        "  Previous: N/A | Forecast: N/A\n"
+        "\n"
+        "=== Note ===\n"
+        "Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    expected = (
+        "  ⚙ get_macro_calendar\n"
+        "    === Upcoming Macro Events (next 12h) ===\n"
+        "    [2026-05-03 12:59] FOMC Meeting — Impact: High\n"
+        "      Previous: N/A | Forecast: N/A\n"
+        "\n"
+        "    === Note ===\n"
+        "    Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    _assert_perception_render("get_macro_calendar", content, expected)
+
+
+def test_snapshot_get_macro_calendar_no_events_with_note():
+    """Snapshot — macro_calendar empty events list + === Note === footer."""
+    content = (
+        "=== Upcoming Macro Events (next 12h) ===\n"
+        "No upcoming macro events.\n"
+        "\n"
+        "=== Note ===\n"
+        "Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    expected = (
+        "  ⚙ get_macro_calendar\n"
+        "    === Upcoming Macro Events (next 12h) ===\n"
+        "    No upcoming macro events.\n"
+        "\n"
+        "    === Note ===\n"
+        "    Macro calendar covers current week only; "
+        "Friday evening / weekend calls may miss next week's early events."
+    )
+    _assert_perception_render("get_macro_calendar", content, expected)
+
+
+def test_snapshot_get_etf_flows_l2_not_configured():
+    """Snapshot — etf_flows service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== BTC Spot ETF Flows (US) ===\n"
+        "Error: ETF flows service not configured."
+    )
+    expected = (
+        "  ⚙ get_etf_flows\n"
+        "    === BTC Spot ETF Flows (US) ===\n"
+        "    Error: ETF flows service not configured."
+    )
+    _assert_perception_render("get_etf_flows", content, expected)
+
+
+def test_snapshot_get_etf_flows_happy_with_note():
+    """Snapshot — etf_flows happy path: BTC + ETH sections + === Note === footer."""
+    content = (
+        "=== BTC Spot ETF Flows (US) ===\n"
+        "2026-04-17: +$100.00M  (cum: $57.70B, AUM: $100.00B)\n"
+        "2026-04-16: -$200.00M\n"
+        "2026-04-15: +$150.00M\n"
+        "3-day net: +$50.00M\n"
+        "\n"
+        "=== ETH Spot ETF Flows (US) ===\n"
+        "2026-04-17: +$25.00M  (cum: $9.80B, AUM: $12.00B)\n"
+        "2026-04-16: +$10.00M\n"
+        "2026-04-15: -$5.00M\n"
+        "3-day net: +$30.00M\n"
+        "\n"
+        "=== Note ===\n"
+        "Past 3 trading days (weekends/holidays excluded). "
+        "Issuer-reported; today's value may be revised T+1."
+    )
+    expected = (
+        "  ⚙ get_etf_flows\n"
+        "    === BTC Spot ETF Flows (US) ===\n"
+        "    2026-04-17: +$100.00M  (cum: $57.70B, AUM: $100.00B)\n"
+        "    2026-04-16: -$200.00M\n"
+        "    2026-04-15: +$150.00M\n"
+        "    3-day net: +$50.00M\n"
+        "\n"
+        "    === ETH Spot ETF Flows (US) ===\n"
+        "    2026-04-17: +$25.00M  (cum: $9.80B, AUM: $12.00B)\n"
+        "    2026-04-16: +$10.00M\n"
+        "    2026-04-15: -$5.00M\n"
+        "    3-day net: +$30.00M\n"
+        "\n"
+        "    === Note ===\n"
+        "    Past 3 trading days (weekends/holidays excluded). "
+        "Issuer-reported; today's value may be revised T+1."
+    )
+    _assert_perception_render("get_etf_flows", content, expected)
+
+
+def test_snapshot_get_stablecoin_supply_l2_not_configured():
+    """Snapshot — stablecoin onchain service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Stablecoin Supply ===\n"
+        "Error: Onchain service not configured."
+    )
+    expected = (
+        "  ⚙ get_stablecoin_supply\n"
+        "    === Stablecoin Supply ===\n"
+        "    Error: Onchain service not configured."
+    )
+    _assert_perception_render("get_stablecoin_supply", content, expected)
+
+
+def test_snapshot_get_stablecoin_supply_happy_path():
+    """Snapshot — stablecoin happy path: USDT + USDC + total Mcap (single section)."""
+    content = (
+        "=== Stablecoin Supply ===\n"
+        "USDT: $186.62B (7d: +$2.33B, +1.27%)\n"
+        "USDC: $42.18B (7d: +$0.51B, +1.22%)\n"
+        "Total Stablecoin Mcap: $228.80B (7d: +$2.84B, +1.26%)"
+    )
+    expected = (
+        "  ⚙ get_stablecoin_supply\n"
+        "    === Stablecoin Supply ===\n"
+        "    USDT: $186.62B (7d: +$2.33B, +1.27%)\n"
+        "    USDC: $42.18B (7d: +$0.51B, +1.22%)\n"
+        "    Total Stablecoin Mcap: $228.80B (7d: +$2.84B, +1.26%)"
+    )
+    _assert_perception_render("get_stablecoin_supply", content, expected)
+
+
+def test_snapshot_get_exchange_announcements_l2_not_configured():
+    """Snapshot — exchange_announcements service=None L2 inline Error fallback (Option D)."""
+    content = (
+        "=== Exchange Announcements ===\n"
+        "Error: News service not configured."
+    )
+    expected = (
+        "  ⚙ get_exchange_announcements\n"
+        "    === Exchange Announcements ===\n"
+        "    Error: News service not configured."
+    )
+    _assert_perception_render("get_exchange_announcements", content, expected)
+
+
+def test_snapshot_get_exchange_announcements_happy_short():
+    """Snapshot — exchange_announcements happy path with 2 announcements."""
+    content = (
+        "=== Exchange Announcements (past 24h) ===\n"
+        "[2026-05-03 12:00] Delisting XYZ\n"
+        "[2026-05-03 09:30] Maintenance scheduled for spot trading"
+    )
+    expected = (
+        "  ⚙ get_exchange_announcements\n"
+        "    === Exchange Announcements (past 24h) ===\n"
+        "    [2026-05-03 12:00] Delisting XYZ\n"
+        "    [2026-05-03 09:30] Maintenance scheduled for spot trading"
+    )
+    _assert_perception_render("get_exchange_announcements", content, expected)
+
+
+def test_snapshot_get_trade_journal_with_entries():
+    """Snapshot — trade_journal happy path: Performance Summary + Trade Journal."""
+    content = (
+        "=== Performance Summary ===\n"
+        "Total Trades: 2 | Win: 1 (50.0%) | Loss: 1\n"
+        "Avg Win: +30.00 USDT | Avg Loss: -10.00 USDT\n"
+        "Profit Factor: 3.00\n"
+        "\n"
+        "=== Trade Journal ===\n"
+        "[05-01 09:30] open_position (long)\n"
+        "  Reasoning: RSI oversold\n"
+        "[05-01 11:45] order_filled (long) @ 60200.00, fee=0.0300 [closed], pnl=30.00\n"
+        "  Reasoning: market exit"
+    )
+    # Rich markup escape: '[closed]' → '\[closed]' (display escape per §4.3.3).
+    expected = (
+        "  ⚙ get_trade_journal\n"
+        "    === Performance Summary ===\n"
+        "    Total Trades: 2 | Win: 1 (50.0%) | Loss: 1\n"
+        "    Avg Win: +30.00 USDT | Avg Loss: -10.00 USDT\n"
+        "    Profit Factor: 3.00\n"
+        "\n"
+        "    === Trade Journal ===\n"
+        "    [05-01 09:30] open_position (long)\n"
+        "      Reasoning: RSI oversold\n"
+        "    [05-01 11:45] order_filled (long) @ 60200.00, fee=0.0300 \\[closed], pnl=30.00\n"
+        "      Reasoning: market exit"
+    )
+    _assert_perception_render("get_trade_journal", content, expected)
+
+
+def test_snapshot_get_trade_journal_no_db_engine():
+    """Snapshot — trade_journal db_engine=None: sectioned empty-state (L3, NOT Error)."""
+    content = (
+        "=== Trade Journal ===\n"
+        "No trade journal entries yet."
+    )
+    expected = (
+        "  ⚙ get_trade_journal\n"
+        "    === Trade Journal ===\n"
+        "    No trade journal entries yet."
+    )
+    _assert_perception_render("get_trade_journal", content, expected)
+
+
+def test_snapshot_get_trade_journal_no_actions():
+    """Snapshot — trade_journal no actions returned: same sectioned empty-state."""
+    content = (
+        "=== Trade Journal ===\n"
+        "No trade journal entries yet."
+    )
+    expected = (
+        "  ⚙ get_trade_journal\n"
+        "    === Trade Journal ===\n"
+        "    No trade journal entries yet."
+    )
+    _assert_perception_render("get_trade_journal", content, expected)
+
+
+def test_snapshot_get_performance_no_metrics_service():
+    """Snapshot — performance metrics=None split: Trading Performance + empty Stats."""
+    content = (
+        "=== Trading Performance ===\n"
+        "Initial Balance: 10000.00 USDT\n"
+        "Current Balance: 10000.00 USDT\n"
+        "Return: +0.00% (+0.00 USDT)\n"
+        "\n"
+        "=== Trade Stats ===\n"
+        "No metrics service available."
+    )
+    expected = (
+        "  ⚙ get_performance\n"
+        "    === Trading Performance ===\n"
+        "    Initial Balance: 10000.00 USDT\n"
+        "    Current Balance: 10000.00 USDT\n"
+        "    Return: +0.00% (+0.00 USDT)\n"
+        "\n"
+        "    === Trade Stats ===\n"
+        "    No metrics service available."
+    )
+    _assert_perception_render("get_performance", content, expected)
+
+
+def test_snapshot_get_performance_happy_path():
+    """Snapshot — performance happy path with both Trading Performance + Trade Stats sections."""
+    content = (
+        "=== Trading Performance ===\n"
+        "Initial Balance: 10000.00 USDT\n"
+        "Current Balance: 10023.00 USDT\n"
+        "Total Return: +0.23% (+23.00 USDT) (incl. unrealized)\n"
+        "Realized PnL: +23.00 USDT (gross, before fees)\n"
+        "Total Fees: -0.80 USDT\n"
+        "\n"
+        "=== Trade Stats ===\n"
+        "Total Trades: 5 | Win: 3 (60.0%) | Loss: 2\n"
+        "Avg Win: +20.00 USDT | Avg Loss: -10.00 USDT\n"
+        "Profit Factor: 3.00\n"
+        "Max Drawdown: -2.5%\n"
+        "Best Trade: +50.00 USDT | Worst Trade: -15.00 USDT"
+    )
+    expected = (
+        "  ⚙ get_performance\n"
+        "    === Trading Performance ===\n"
+        "    Initial Balance: 10000.00 USDT\n"
+        "    Current Balance: 10023.00 USDT\n"
+        "    Total Return: +0.23% (+23.00 USDT) (incl. unrealized)\n"
+        "    Realized PnL: +23.00 USDT (gross, before fees)\n"
+        "    Total Fees: -0.80 USDT\n"
+        "\n"
+        "    === Trade Stats ===\n"
+        "    Total Trades: 5 | Win: 3 (60.0%) | Loss: 2\n"
+        "    Avg Win: +20.00 USDT | Avg Loss: -10.00 USDT\n"
+        "    Profit Factor: 3.00\n"
+        "    Max Drawdown: -2.5%\n"
+        "    Best Trade: +50.00 USDT | Worst Trade: -15.00 USDT"
+    )
+    _assert_perception_render("get_performance", content, expected)

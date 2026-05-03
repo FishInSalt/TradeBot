@@ -449,7 +449,8 @@ async def test_etf_btc_and_eth_format():
     assert "=== ETH Spot ETF Flows (US) ===" in result
     assert "2026-04-17:" in result
     assert "7-day net:" in result
-    assert "Note:" in result
+    # Footer is now its own === Note === section (R2-8c sectioning convention)
+    assert "=== Note ===" in result
     # Footer should include the T+1 caveat (spec §3.3)
     assert "may be revised t+1" in result.lower()
 
