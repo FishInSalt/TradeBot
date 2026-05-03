@@ -442,6 +442,55 @@ def _render_perception_tool(tool_name: str, content: str) -> str:
     return "\n".join(lines)
 
 
+# === R2-8c: dispatch sets (spec §4.4) ===
+
+_PERCEPTION_TOOL_NAMES: frozenset[str] = frozenset({
+    # Tier-1 high frequency (B2 ≥ 70%)
+    "get_market_data",
+    "get_higher_timeframe_view",
+    "get_multi_timeframe_snapshot",
+    "get_price_pivots",
+    "get_recent_trades",
+    "get_derivatives_data",
+    # Mid (B2 50-70%)
+    "get_market_news",
+    "get_order_book",
+    # Long-tail
+    "get_macro_context",
+    "get_position",
+    "get_account_balance",
+    "get_memories",
+    "get_open_orders",
+    "get_trade_journal",
+    "get_active_alerts",
+    "get_performance",
+    "get_exchange_announcements",
+    "get_macro_calendar",
+    "get_etf_flows",
+    "get_stablecoin_supply",
+})
+
+_SECTIONED_PERCEPTION_TOOL_NAMES: frozenset[str] = (
+    _PERCEPTION_TOOL_NAMES - frozenset({"get_memories"})
+)
+# get_memories 是 backend-dependent format 例外（spec §4.2.13 / §8.8）;
+# T-DG-1 sectioning lint 跳过此工具。
+
+_EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
+    "open_position",
+    "close_position",
+    "set_stop_loss",
+    "set_take_profit",
+    "adjust_leverage",
+    "place_limit_order",
+    "cancel_order",
+    "set_price_alert",
+    "add_price_level_alert",
+    "cancel_price_level_alert",
+    "set_next_wake",
+})
+
+
 def resolve_tool_display(
     tool_name: str,
     content: str,
@@ -698,36 +747,79 @@ def _render_action(
     returns_lookup: dict,
     cycle_id: str,
 ) -> str:
-    """Render Action section per spec §4.3.
+    """Render Action section per spec §4.3 + §4.4 dispatch.
 
-    `tool_calls` is list[ToolCallPart], `returns_lookup` is dict[tool_call_id, ToolReturnPart].
-    Tool summary line uses existing resolve_tool_display() (parser layer is R2-8c scope).
+    Dispatch (mutually exclusive, full coverage of 32 registered tools per T-DG-2):
+      1. ret None → R2-8a `[no return captured]` line (orphan tool_call_id)
+      2. is_tool_error → R2-8a `✗` single-line (L1 failure path)
+      3. tool_name == 'save_memory' → R2-8a `✎` single-line + summarize_save_memory
+      4. tool_name in _EXECUTION_TOOL_NAMES → R2-8a `⚙` single-line + <22 padding
+      5. tool_name in _PERCEPTION_TOOL_NAMES → multi-line _render_perception_tool
+      6. else → R2-8a single-line + warning log (drift signal, T-EC-11)
     """
     n = len(tool_calls)
     plural = "tool" if n == 1 else "tools"
     lines = [f"\n▾ Action ({n} {plural})"]
 
     for tcp in tool_calls:
-        try:
-            args = tcp.args_as_dict()
-        except Exception:
-            args = None
-
         ret = returns_lookup.get(tcp.tool_call_id)
         if ret is None:
             logger.warning(
                 "tool_call_id mismatch for %s in cycle %s",
                 tcp.tool_name, cycle_id,
             )
-            line = f"  ⚙ {tcp.tool_name:<22} [no return captured]"
-        else:
-            content_str = str(ret.content)
-            outcome = getattr(ret, "outcome", "success")
-            icon, summary = resolve_tool_display(tcp.tool_name, content_str, outcome, args)
-            # body escape 防 markup attack（summary 来自 tool return content；
-            # 框架 markup icon / column padding 在 prefix 部分不动）
-            line = f"  {icon} {tcp.tool_name:<22} {escape(summary)}"
-        lines.append(line)
+            lines.append(f"  ⚙ {tcp.tool_name:<22} [no return captured]")
+            continue
+
+        content_str = str(ret.content)
+        outcome = getattr(ret, "outcome", "success")
+
+        # Branch 2: L1 failure (R2-8a single-line + ✗) — does not enter multi-line
+        if is_tool_error(tcp.tool_name, content_str, outcome):
+            lines.append(
+                f"  ✗ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+            )
+            continue
+
+        # Branch 3: save_memory (R2-8a single-line + ✎)
+        if tcp.tool_name == "save_memory":
+            try:
+                args = tcp.args_as_dict()
+            except Exception:
+                args = None
+            icon, summary = resolve_tool_display(
+                tcp.tool_name, content_str, outcome, args,
+            )
+            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
+            continue
+
+        # Branch 4: execution (R2-8a single-line + <22 padding)
+        if tcp.tool_name in _EXECUTION_TOOL_NAMES:
+            try:
+                args = tcp.args_as_dict()
+            except Exception:
+                args = None
+            icon, summary = resolve_tool_display(
+                tcp.tool_name, content_str, outcome, args,
+            )
+            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
+            continue
+
+        # Branch 5: perception (multi-line section render, includes get_memories
+        # backend-dependent fallback path via _parse_sections)
+        if tcp.tool_name in _PERCEPTION_TOOL_NAMES:
+            lines.append(_render_perception_tool(tcp.tool_name, content_str))
+            continue
+
+        # Branch 6: drift — unregistered tool name (T-EC-11)
+        logger.warning(
+            "tool_name %s not in _PERCEPTION_TOOL_NAMES / _EXECUTION_TOOL_NAMES / save_memory "
+            "— falling back to R2-8a single-line",
+            tcp.tool_name,
+        )
+        lines.append(
+            f"  ⚙ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+        )
 
     return "\n".join(lines)
 

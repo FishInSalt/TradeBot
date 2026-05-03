@@ -1421,3 +1421,103 @@ def test_render_perception_tool_fallback_no_header():
         "    Memory entry 1\n"
         "    Memory entry 2"
     )
+
+
+# --- T-DG: drift guards ---
+
+
+def test_dg_2_dispatch_sets_partition_all_registered_tools():
+    """T-DG-2: 三层集合 + save_memory branch 互斥 + 完整覆盖 32 registered tools.
+
+    Spec §4.4: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (11) ∪ {save_memory}
+    必须等于 REGISTERED_TOOL_NAMES (32)，且互不重叠。
+    _SECTIONED_PERCEPTION_TOOL_NAMES (19) ⊂ _PERCEPTION_TOOL_NAMES（仅 get_memories 例外）。
+    """
+    from src.cli.display import (
+        _PERCEPTION_TOOL_NAMES,
+        _SECTIONED_PERCEPTION_TOOL_NAMES,
+        _EXECUTION_TOOL_NAMES,
+    )
+    from src.agent.trader import REGISTERED_TOOL_NAMES
+
+    perception = _PERCEPTION_TOOL_NAMES
+    sectioned = _SECTIONED_PERCEPTION_TOOL_NAMES
+    execution = _EXECUTION_TOOL_NAMES
+    save = frozenset({"save_memory"})
+
+    # Sectioned ⊂ perception, only get_memories excluded
+    assert sectioned <= perception
+    assert perception - sectioned == frozenset({"get_memories"})
+
+    # 三层 + save_memory 互斥
+    assert perception.isdisjoint(execution)
+    assert perception.isdisjoint(save)
+    assert execution.isdisjoint(save)
+
+    # 完整覆盖 32 registered
+    union = perception | execution | save
+    declared = set(REGISTERED_TOOL_NAMES)
+    assert union == declared, (
+        f"Dispatch sets ≠ REGISTERED_TOOL_NAMES:\n"
+        f"  Missing from dispatch: {declared - union}\n"
+        f"  Extra in dispatch: {union - declared}"
+    )
+
+    # Counts per spec §4.4
+    assert len(perception) == 20
+    assert len(sectioned) == 19
+    assert len(execution) == 11
+
+
+def test_ec_11_unregistered_tool_falls_back_with_warning(caplog):
+    """T-EC-11: 未注册 tool name → R2-8a single-line + warning log."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [ToolCallPart(tool_name="get_unknown_drift", args={}, tool_call_id="c1")]
+    returns = {
+        "c1": ToolReturnPart(tool_name="get_unknown_drift", tool_call_id="c1",
+                              content="some content"),
+    }
+    with caplog.at_level("WARNING", logger="src.cli.display"):
+        out = _render_action(calls, returns, cycle_id="abcd1234")
+
+    assert "get_unknown_drift" in out
+    assert "some content" in out  # _fallback_summary kept
+    assert any("not in" in r.getMessage() and "get_unknown_drift" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_int_1_render_action_mixed_perception_execution():
+    """T-INT-1: 完整 cycle render — perception 走 multi-line + execution 走 R2-8a single-line."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [
+        ToolCallPart(
+            tool_name="get_account_balance", args={}, tool_call_id="c1",
+        ),
+        ToolCallPart(
+            tool_name="set_next_wake", args={"minutes": 5}, tool_call_id="c2",
+        ),
+    ]
+    returns = {
+        "c1": ToolReturnPart(
+            tool_name="get_account_balance", tool_call_id="c1",
+            content="=== Account Balance ===\nTotal: 998.00 USDT",
+        ),
+        "c2": ToolReturnPart(
+            tool_name="set_next_wake", tool_call_id="c2",
+            content="Next wake set to 5 min",
+        ),
+    }
+    out = _render_action(calls, returns, cycle_id="abcd1234")
+
+    # Header
+    assert "▾ Action (2 tools)" in out
+    # Perception multi-line: 4-space indent + section
+    assert "  ⚙ get_account_balance" in out
+    assert "    === Account Balance ===" in out
+    assert "    Total: 998.00 USDT" in out
+    # Execution single-line + <22 padding (R2-8a 维持)
+    assert "  ⚙ set_next_wake          5min" in out  # <22 padding 长度 22
