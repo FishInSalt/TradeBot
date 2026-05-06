@@ -13,7 +13,9 @@ from sqlalchemy import select, update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
-from src.agent.persona import RuntimeConfig
+from src.agent.persona import (
+    CYCLE_DECISION_HARD_CAP, CYCLE_DECISION_SOFT_CAP, RuntimeConfig,
+)
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse, ThinkingPart,
@@ -90,7 +92,9 @@ def _format_relative_time(now: datetime, then: datetime) -> str:
 
 
 def _truncate_decision(
-    text: str, hard_cap: int = 1200, soft_cap: int = 800,
+    text: str,
+    hard_cap: int = CYCLE_DECISION_HARD_CAP,
+    soft_cap: int = CYCLE_DECISION_SOFT_CAP,
 ) -> str:
     """Hard-truncate at hard_cap; INFO log at soft_cap; WARNING log at hard_cap.
 

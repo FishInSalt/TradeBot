@@ -3,6 +3,12 @@ from dataclasses import dataclass
 
 from src.config import PersonaConfig
 
+# R2-8b cycle decision caps — single source of truth shared between
+# producer (persona §Cycle Closing Summary text below) and consumer
+# (cli/app.py _truncate_decision defaults). Changing one updates both.
+CYCLE_DECISION_SOFT_CAP = 800
+CYCLE_DECISION_HARD_CAP = 1200
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -91,7 +97,7 @@ Your final response must be a concise cycle summary covering five elements (do n
 
 (5) Watch list (optional) — non-action observations needing attention: pattern formation, divergence, macro events in the queue, regime shifts, lessons from this cycle. Skip if no relevant observations beyond fields 1-4.
 
-Aim for ~600 chars (up to ~800 for critical events; the system hard-truncates beyond ~1200). Critical events include: just opened or closed position, alert triggered with action taken, SL trail with multiple history points, thesis transition (conviction level change), or macro event proximity.
+Aim for ~600 chars (up to ~{CYCLE_DECISION_SOFT_CAP} for critical events; the system hard-truncates beyond ~{CYCLE_DECISION_HARD_CAP}). Critical events include: just opened or closed position, alert triggered with action taken, SL trail with multiple history points, thesis transition (conviction level change), or macro event proximity.
 
 The summary should be observational and descriptive — not prescriptive. Do not include instructions or recommendations for future actions; for price-conditional plans, prefer setting an alert or limit order rather than writing it as text intent. Do not re-paste market data or full thinking — those will be fresh-fetched."""
 

@@ -213,3 +213,48 @@ async def test_any_injection_error_does_not_abort_cycle(caplog, monkeypatch):
         and r.levelno == logging.WARNING
         for r in caplog.records
     )
+
+
+async def test_subsequent_cycle_with_alert_trigger_injects_after_price_alert():
+    """T4.6 (PR #38 review follow-up): the volatility-alert branch (the
+    `else` arm at cli/app.py inside the `elif trigger_type == "alert"`
+    block) also gets injection. Spec §3.6 mockup uses alert as canonical
+    case; T4.1-T4.5 only exercised scheduled trigger. This locks the
+    byte-identical alert branch + injection wiring against future regression.
+    """
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from src.services.price_alert import AlertInfo
+
+    deps, engine = await _make_deps_engine_with_capture_mocks("sess-t4-6")
+    await _seed_prior_cycles(engine, "sess-t4-6", count=2)
+    budget = TokenBudget(daily_max=500_000)
+    agent, captured = _make_capturing_agent()
+
+    # Real AlertInfo instance (mock-fidelity lesson: critical paths use
+    # real fixtures, not MagicMock — _capture_trigger_context isinstance
+    # check would silently return None on a MagicMock and skip the
+    # percentage_alert capture path).
+    alert_ctx = AlertInfo(
+        symbol="BTC/USDT:USDT",
+        current_price=74587.5,
+        reference_price=76500.0,
+        change_pct=-2.5,
+        window_minutes=15,
+        timestamp=1746098096000,
+    )
+
+    await run_agent_cycle(
+        agent=agent, deps=deps, trigger_type="alert", context=alert_ctx,
+        budget=budget, engine=engine,
+    )
+
+    prompt = captured["prompt"]
+    # Volatility alert text rendered (the `else` sub-branch)
+    assert "PRICE ALERT: BTC/USDT:USDT dropped 2.5%" in prompt
+    # Recent block injected after the alert content
+    assert "Your prior cycle summaries (most recent N=3, from this session):" in prompt
+    pos_alert = prompt.index("PRICE ALERT")
+    pos_recent = prompt.index("Your prior cycle summaries")
+    assert pos_alert < pos_recent, (
+        f"Order broken: alert={pos_alert} recent={pos_recent}\nprompt:\n{prompt}"
+    )
