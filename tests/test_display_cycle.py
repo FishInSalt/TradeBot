@@ -625,6 +625,8 @@ def test_render_reasoning_over_800_truncated():
 
     Note (R2-8c D10): default max_chars 800 → 2000; this test preserves the
     original 800 boundary intent by passing explicit max_chars=800.
+    R2-8d D6: 2000 → 15000 default (this test still pins R2-8c boundary
+    via explicit max_chars=800).
     """
     from src.cli.display import _render_reasoning
     text = "y" * 1547
@@ -1527,11 +1529,14 @@ def test_int_1_render_action_mixed_perception_execution():
     assert "  ⚙ set_next_wake          5min" in out  # <22 padding 长度 22
 
 
-# --- T-INT-3: thinking 截断升级 800→2000 (D10) ---
+# --- T-INT-3: _render_reasoning thinking 截断 (R2-8c D10 / R2-8d D6) ---
 
 
 def test_int_3_thinking_1500_chars_keep_all():
-    """T-INT-3a: 1500-char thinking < 2000 → keep all (no truncation suffix)."""
+    """T-INT-3a: 1500-char thinking < 2000 → keep all (no truncation suffix).
+
+    R2-8d D6: default cap 2000→15000; this test still valid as 1500 < both.
+    """
     from src.cli.display import _render_reasoning
     text = "x" * 1500
     out = _render_reasoning(text)
@@ -1539,13 +1544,16 @@ def test_int_3_thinking_1500_chars_keep_all():
     assert "1500 chars total" in out
 
 
-def test_int_3_thinking_2500_chars_truncated_to_2000():
-    """T-INT-3b: 2500-char thinking → truncate at 2000 + ' ... [+500 chars]' suffix."""
+def test_int_3_thinking_above_default_cap_truncated():
+    """T-INT-3b (R2-8d D6): thinking > default cap → truncate + ' ... [+N chars]' suffix.
+
+    Default cap 15000 (R2-8d); test 18000 chars input → 15000 kept + 3000 truncated.
+    """
     from src.cli.display import _render_reasoning
-    text = "y" * 2500
+    text = "y" * 18000
     out = _render_reasoning(text)
-    assert "[+500 chars]" in out
-    assert "2500 chars total" in out
+    assert "[+3000 chars]" in out
+    assert "18000 chars total" in out
 
 
 # === R2-8c per-tool snapshot fixtures ===

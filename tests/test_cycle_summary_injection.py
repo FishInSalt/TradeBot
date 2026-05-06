@@ -2,7 +2,7 @@
 
 Helpers under test live in `src/cli/app.py`:
   - _format_relative_time(now, then) -> "N min ago" etc.
-  - _truncate_decision(text, hard_cap, soft_cap) -> str (with drift logs)
+  - _truncate_decision(text, hard_cap) -> str (WARNING log on truncation)
   - _fetch_recent_summaries(engine, session_id, n) -> list[CycleSummary]
   - _render_recent_summaries(summaries, now) -> str
 """
@@ -65,48 +65,34 @@ def test_format_relative_time_handles_naive_datetime_from_sqlite():
     assert _format_relative_time(now, naive_then) == "8 min ago"
 
 
-def test_truncate_decision_below_soft_cap_returns_unchanged():
-    """T2.4-pre: text ≤ soft_cap (800) returns unchanged, no log."""
+def test_truncate_decision_below_hard_cap_returns_unchanged():
+    """T2.4-pre (R2-8d): text ≤ hard_cap (4000) returns unchanged, no log."""
     from src.cli.app import _truncate_decision
 
     text = "x" * 500
     assert _truncate_decision(text) == text
 
 
-def test_truncate_decision_in_soft_to_hard_band_keeps_full_with_info_log(caplog):
-    """soft_cap < n ≤ hard_cap: keep full text + INFO drift log."""
-    from src.cli.app import _truncate_decision
-
-    text = "x" * 1000  # in (800, 1200] band
-    with caplog.at_level(logging.INFO, logger="src.cli.app"):
-        result = _truncate_decision(text)
-    assert result == text  # full preserved
-    assert any(
-        "exceeded soft cap 800" in r.message and r.levelno == logging.INFO
-        for r in caplog.records
-    ), f"Expected INFO drift log; got: {[r.message for r in caplog.records]}"
-
-
 def test_truncate_decision_above_hard_cap_truncates_with_marker_and_warning(caplog):
-    """T2.3 + T2.5: n > hard_cap → text[:1200] + ' ... [truncated]' + WARNING."""
+    """T2.3 + T2.5 (R2-8d): n > hard_cap → text[:4000] + ' ... [truncated]' + WARNING."""
     from src.cli.app import _truncate_decision
 
-    text = "x" * 1500
+    text = "x" * 4500
     with caplog.at_level(logging.WARNING, logger="src.cli.app"):
         result = _truncate_decision(text)
     assert result.endswith(" ... [truncated]")
-    assert result.startswith("x" * 1200)  # exactly hard_cap chars before marker
+    assert result.startswith("x" * 4000)  # exactly hard_cap chars before marker
     assert any(
-        "exceeded hard cap 1200" in r.message and r.levelno == logging.WARNING
+        "exceeded hard cap 4000" in r.message and r.levelno == logging.WARNING
         for r in caplog.records
     )
 
 
 def test_truncate_decision_does_not_truncate_at_exactly_hard_cap():
-    """Boundary: n == hard_cap → no truncation."""
+    """Boundary: n == hard_cap (4000) → no truncation."""
     from src.cli.app import _truncate_decision
 
-    text = "x" * 1200
+    text = "x" * 4000
     result = _truncate_decision(text)
     assert result == text
     assert not result.endswith("[truncated]")
@@ -354,11 +340,11 @@ def test_render_uses_absolute_and_relative_time():
 
 
 def test_render_truncates_decision_above_hard_cap_via_truncate_decision(caplog):
-    """T2.3 + T2.5: decisions > 1200 chars are hard-truncated in the block."""
+    """T2.3 + T2.5 (R2-8d): decisions > 4000 chars are hard-truncated in the block."""
     from src.cli.app import _render_recent_summaries
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
-    huge = "y" * 1500
+    huge = "y" * 4500
     s = _make_summary(
         "abcdef01", "scheduled", huge,
         datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
@@ -371,7 +357,7 @@ def test_render_truncates_decision_above_hard_cap_via_truncate_decision(caplog):
 
 
 def test_render_keeps_full_decision_below_cap():
-    """T2.4: ≤ 1200 chars, no truncation marker."""
+    """T2.4 (R2-8d): ≤ HARD_CAP (4000) chars, no truncation marker."""
     from src.cli.app import _render_recent_summaries
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)

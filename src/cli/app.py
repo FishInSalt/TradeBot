@@ -13,9 +13,7 @@ from sqlalchemy import select, update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
-from src.agent.persona import (
-    CYCLE_DECISION_HARD_CAP, CYCLE_DECISION_SOFT_CAP, RuntimeConfig,
-)
+from src.agent.persona import CYCLE_DECISION_HARD_CAP, RuntimeConfig
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse, ThinkingPart,
@@ -92,14 +90,14 @@ def _format_relative_time(now: datetime, then: datetime) -> str:
 
 
 def _truncate_decision(
-    text: str,
-    hard_cap: int = CYCLE_DECISION_HARD_CAP,
-    soft_cap: int = CYCLE_DECISION_SOFT_CAP,
+    text: str, hard_cap: int = CYCLE_DECISION_HARD_CAP,
 ) -> str:
-    """Hard-truncate at hard_cap; INFO log at soft_cap; WARNING log at hard_cap.
+    """Hard-truncate at hard_cap with WARNING log.
 
-    Caps exposed to agent via persona.py `## Cycle Closing Summary` section
-    (D-Q-A: fact-only philosophy — agent knows the limit and self-controls).
+    Word ceiling (≤400/≤600 words) exposed to agent via persona §Cycle
+    Closing Summary; this char cap is a silent system safety net — NOT
+    exposed to agent (R2-8d D5: agent obeys word ceiling, char hard_cap
+    kicks in only on misbehavior).
     """
     n = len(text)
     if n > hard_cap:
@@ -108,11 +106,6 @@ def _truncate_decision(
             hard_cap, n,
         )
         return text[:hard_cap] + " ... [truncated]"
-    if n > soft_cap:
-        logger.info(
-            "Cycle decision exceeded soft cap %d (got %d), keeping full",
-            soft_cap, n,
-        )
     return text
 
 
