@@ -217,6 +217,36 @@ def _render_recent_summaries(
     return f"{header}\n\n" + "\n\n".join(blocks)
 
 
+async def _build_recent_summaries_block(
+    engine, session_id: str, n: int = 3,
+) -> str:
+    """Fetch + render summaries with a fail-isolated boundary.
+
+    Returns "" on:
+      - empty fetch (first cycle / forensic-only history / NULL decision filter)
+      - any exception during fetch OR render OR format (logged at WARNING)
+
+    Review F3: this outer wrap covers the entire injection pipeline, not just
+    the DB query layer. _fetch_recent_summaries keeps its own try/except as
+    layered defense. Rationale: a render/format exception would otherwise
+    bubble before agent.run() and abort the cycle — violating the R2-8b
+    "any error never blocks a cycle" promise.
+    """
+    try:
+        summaries = await _fetch_recent_summaries(engine, session_id, n)
+        if not summaries:
+            return ""
+        return _render_recent_summaries(
+            summaries, now=datetime.now(timezone.utc),
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to build recent summaries block for injection: %s", e,
+            exc_info=True,
+        )
+        return ""
+
+
 class TokenBudget:
     def __init__(self, daily_max: int):
         self._daily_max = daily_max
@@ -341,6 +371,16 @@ async def run_agent_cycle(
                 f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
                 f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
             )
+
+    # R2-8b: inject most recent N=3 cycle summaries from this session
+    # (D-D-E injection position: trigger context → recent → memory).
+    # _build_recent_summaries_block is fail-isolated (review F3) — any
+    # error returns "" and lets the cycle proceed.
+    recent_block = await _build_recent_summaries_block(
+        engine, deps.session_id, n=3,
+    )
+    if recent_block:
+        prompt += f"\n\n{recent_block}"
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":
