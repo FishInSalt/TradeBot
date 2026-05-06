@@ -65,6 +65,52 @@ def _extract_thinking_text(messages) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
+def _format_relative_time(now: datetime, then: datetime) -> str:
+    """Format a delta as '8 min ago' / '2 hours ago' / '1 day ago'.
+
+    SQLite returns naive datetime even when schema is DateTime(timezone=True);
+    normalize to UTC-aware before subtraction (same pattern as
+    session_manager.py:294-295).
+    """
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    delta = now - then
+    secs = int(delta.total_seconds())
+    if secs < 60:
+        return f"{secs} sec ago"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins} min ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours > 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days > 1 else ''} ago"
+
+
+def _truncate_decision(
+    text: str, hard_cap: int = 1200, soft_cap: int = 800,
+) -> str:
+    """Hard-truncate at hard_cap; INFO log at soft_cap; WARNING log at hard_cap.
+
+    Caps exposed to agent via persona.py `## Cycle Closing Summary` section
+    (D-Q-A: fact-only philosophy — agent knows the limit and self-controls).
+    """
+    n = len(text)
+    if n > hard_cap:
+        logger.warning(
+            "Cycle decision exceeded hard cap %d (got %d), truncating",
+            hard_cap, n,
+        )
+        return text[:hard_cap] + " ... [truncated]"
+    if n > soft_cap:
+        logger.info(
+            "Cycle decision exceeded soft cap %d (got %d), keeping full",
+            soft_cap, n,
+        )
+    return text
+
+
 class TokenBudget:
     def __init__(self, daily_max: int):
         self._daily_max = daily_max
