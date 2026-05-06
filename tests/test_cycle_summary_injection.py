@@ -2,7 +2,7 @@
 
 Helpers under test live in `src/cli/app.py`:
   - _format_relative_time(now, then) -> "N min ago" etc.
-  - _truncate_decision(text, hard_cap, soft_cap) -> str (with drift logs)
+  - _truncate_decision(text, hard_cap) -> str (WARNING log on truncation)
   - _fetch_recent_summaries(engine, session_id, n) -> list[CycleSummary]
   - _render_recent_summaries(summaries, now) -> str
 """

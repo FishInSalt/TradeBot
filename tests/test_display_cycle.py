@@ -1529,7 +1529,7 @@ def test_int_1_render_action_mixed_perception_execution():
     assert "  ⚙ set_next_wake          5min" in out  # <22 padding 长度 22
 
 
-# --- T-INT-3: thinking 截断升级 800→2000 (D10) ---
+# --- T-INT-3: _render_reasoning thinking 截断 (R2-8c D10 / R2-8d D6) ---
 
 
 def test_int_3_thinking_1500_chars_keep_all():
