@@ -442,13 +442,13 @@ def test_cycle_closing_summary_contains_5_field_anchors():
 
 
 def test_cycle_closing_summary_exposes_cap_numbers():
-    """T3.3: 600 / 800 / 1200 are visible to the agent (D-Q-A fact-only)."""
+    """T3.3: cap numbers ~600 / ~800 / ~1200 are visible to the agent (D-Q-A fact-only). Phrases anchor to the cap paragraph (not other Layer 1 numerics like wake_max_minutes)."""
     from src.agent.persona import _build_layer1, RuntimeConfig
 
     layer1 = _build_layer1(RuntimeConfig())
-    assert "600" in layer1
-    assert "800" in layer1
-    assert "1200" in layer1
+    assert "~600 chars" in layer1
+    assert "~800 for critical" in layer1
+    assert "~1200" in layer1
 
 
 def test_cycle_closing_summary_lists_critical_events():
