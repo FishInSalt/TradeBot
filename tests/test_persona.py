@@ -434,37 +434,25 @@ def test_cycle_closing_summary_contains_5_field_anchors():
     for anchor in (
         "(1) Stance",
         "(2) Active commitments",
-        "(3) Thesis & invalidation",
-        "(4) This cycle delta",
+        "(3) This cycle delta",
+        "(4) Thesis & invalidation",
         "(5) Watch list (optional)",
     ):
         assert anchor in layer1, f"Missing field anchor: {anchor!r}"
 
 
-def test_cycle_closing_summary_exposes_cap_numbers():
-    """T3.3: cap numbers ~600 / ~800 / ~1200 are visible to the agent (D-Q-A fact-only). Phrases anchor to the cap paragraph (not other Layer 1 numerics like wake_max_minutes)."""
-    from src.agent.persona import _build_layer1, RuntimeConfig
-
-    layer1 = _build_layer1(RuntimeConfig())
-    assert "~600 chars" in layer1
-    assert "~800 for critical" in layer1
-    assert "~1200" in layer1
-
-
 def test_cycle_closing_summary_lists_critical_events():
-    """T3.4: critical-events list is enumerated so the agent knows when the
-    upper soft band (~800) is OK to exceed."""
+    """T3.4 (R2-8d D5): critical-events enum 仍在长度 ceiling 段内括号形式列出。"""
     from src.agent.persona import _build_layer1, RuntimeConfig
 
     layer1 = _build_layer1(RuntimeConfig())
-    assert "Critical events include:" in layer1
     layer1_lower = layer1.lower()
-    # spec §4.1.1 enumerates: just opened/closed, alert triggered with action,
-    # SL trail with multiple history points, thesis transition, macro proximity
-    assert "just opened" in layer1_lower or "just closed" in layer1_lower
-    assert "trail" in layer1_lower
+    # D5 重写后 critical events 在词数 ceiling 段内以括号形式 enum
+    assert "critical events" in layer1_lower
+    assert "open/close" in layer1_lower
+    assert "alert with action" in layer1_lower
     assert "thesis transition" in layer1_lower
-    assert "macro" in layer1_lower
+    assert "macro event proximity" in layer1_lower
 
 
 def test_cycle_closing_summary_contains_anti_instruction_guard():
@@ -491,3 +479,53 @@ def test_cycle_closing_summary_does_not_mention_future_self_or_past_self():
     layer1_lower = _build_layer1(RuntimeConfig()).lower()
     assert "future self" not in layer1_lower
     assert "past self" not in layer1_lower
+
+
+def test_cycle_closing_summary_lead_uses_cognitive_flow_framing():
+    """T-D1: lead 必须用 cognitive flow framing (After your reasoning... record),
+    防回滚 summary-centric "The summary IS the final response" 措辞。"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1 = _build_layer1(RuntimeConfig())
+    assert "After your reasoning and any tool calls, record" in layer1
+
+
+def test_cycle_closing_summary_field_order_delta_before_thesis():
+    """T-D2: D2 序互换 - (3) This cycle delta 必须在 (4) Thesis & invalidation 之前。
+    truncation 兜底序保护反思段。"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1 = _build_layer1(RuntimeConfig())
+    pos_delta = layer1.find("(3) This cycle delta")
+    pos_thesis = layer1.find("(4) Thesis & invalidation")
+    assert pos_delta > 0 and pos_thesis > 0, "anchors missing"
+    assert pos_delta < pos_thesis, f"D2 序错: delta@{pos_delta} >= thesis@{pos_thesis}"
+
+
+def test_cycle_closing_summary_length_guidance_phrases_present():
+    """T-D5: length guidance 4 phrases (词数 ceiling + 内容驱动省略快捷方式)。"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1 = _build_layer1(RuntimeConfig())
+    assert "400 words" in layer1
+    assert "never exceeding 600 words" in layer1
+    assert "single sentence is sufficient" in layer1
+    assert "Skip if no relevant observations" in layer1
+
+
+def test_cycle_closing_summary_no_legacy_fiction_or_system_aware_phrases():
+    """T-D4+D5: persona NOT 含 legacy fiction 数字 + 系统机制揭示短语。
+    防全部回滚到 PR #38 形态。"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1 = _build_layer1(RuntimeConfig())
+    forbidden = [
+        "~600 chars",  # D4 撤
+        "~800",        # D4 撤
+        "~1200",       # D4 撤
+        "Aim for",     # D4 撤 wishful target framing
+        "is typically 1-3 sentences",  # D5 撤 per-field cap fiction
+        "hard-truncates",              # D5 撤系统机制揭示
+        "## SKIP",                     # D1 不引入 SKIP fallback
+        "The summary IS the final response",  # D1 撤 summary-centric priming
+        "~4000",       # D5 HARD_CAP 不暴露 (用 "~4000" anchor 而非 bare "4000"
+                       # 避免与未来 RuntimeConfig 大数值字段 false-positive 冲突)
+    ]
+    for phrase in forbidden:
+        assert phrase not in layer1, f"forbidden phrase leaked: {phrase!r}"
