@@ -407,3 +407,87 @@ def test_set_next_wake_wrapper_layer1_reference_intact():
         f"wrapper Args.minutes lost reference to {bullet_name!r}: {minutes_desc!r}"
     assert bullet_name in layer1, \
         f"Layer 1 missing {bullet_name!r} bullet that wrapper points to"
+
+
+# ─────────── R2-8b: Cycle Closing Summary section drift guards ───────────
+
+
+def test_layer1_contains_cycle_closing_summary_section():
+    """T3.1: section header `## Cycle Closing Summary` is present in Layer 1.
+    The new section is independent of `## Cross-Tool Behavior` (different
+    semantic dimension; see spec §3.4)."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+
+    layer1 = _build_layer1(RuntimeConfig())
+    assert "## Cycle Closing Summary" in layer1, \
+        "R2-8b section header missing from Layer 1"
+
+
+def test_cycle_closing_summary_contains_5_field_anchors():
+    """T3.2: all 5 anchor phrases for the trader-native fields are present.
+    Anchor wording is the contract — wrappers may reword surroundings, but
+    these phrases pin the field identity (see spec §3.2 D2)."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+
+    layer1 = _build_layer1(RuntimeConfig())
+    # 5 anchor phrases (case-sensitive; lifted from spec §4.1.1)
+    for anchor in (
+        "(1) Stance",
+        "(2) Active commitments",
+        "(3) Thesis & invalidation",
+        "(4) This cycle delta",
+        "(5) Watch list (optional)",
+    ):
+        assert anchor in layer1, f"Missing field anchor: {anchor!r}"
+
+
+def test_cycle_closing_summary_exposes_cap_numbers():
+    """T3.3: 600 / 800 / 1200 are visible to the agent (D-Q-A fact-only)."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+
+    layer1 = _build_layer1(RuntimeConfig())
+    assert "600" in layer1
+    assert "800" in layer1
+    assert "1200" in layer1
+
+
+def test_cycle_closing_summary_lists_critical_events():
+    """T3.4: critical-events list is enumerated so the agent knows when the
+    upper soft band (~800) is OK to exceed."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+
+    layer1 = _build_layer1(RuntimeConfig())
+    assert "Critical events include:" in layer1
+    layer1_lower = layer1.lower()
+    # spec §4.1.1 enumerates: just opened/closed, alert triggered with action,
+    # SL trail with multiple history points, thesis transition, macro proximity
+    assert "just opened" in layer1_lower or "just closed" in layer1_lower
+    assert "trail" in layer1_lower
+    assert "thesis transition" in layer1_lower
+    assert "macro" in layer1_lower
+
+
+def test_cycle_closing_summary_contains_anti_instruction_guard():
+    """T3.5 (review round 2 F1+F3): three key phrases lock the
+    observational-not-prescriptive frame in place. Removing any is a drift
+    that would re-open the perform-for-audience risk (§3.5)."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+
+    layer1 = _build_layer1(RuntimeConfig())
+    assert "observational and descriptive — not prescriptive" in layer1
+    assert "Do not include instructions or recommendations for future actions" in layer1
+    assert "prefer setting an alert or limit order" in layer1
+
+
+def test_cycle_closing_summary_does_not_mention_future_self_or_past_self():
+    """T3.6 (review round 2 F1): the section must NOT reveal the audience.
+    Past wording like "your future self will see this" was deliberately
+    deleted to defuse perform-for-audience confirmation bias. This drift
+    guard locks against a future PR re-introducing audience-revealing
+    framing.
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig
+
+    layer1_lower = _build_layer1(RuntimeConfig()).lower()
+    assert "future self" not in layer1_lower
+    assert "past self" not in layer1_lower
