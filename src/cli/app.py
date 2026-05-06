@@ -189,6 +189,34 @@ async def _fetch_recent_summaries(
         return []
 
 
+def _render_recent_summaries(
+    summaries: list[CycleSummary], now: datetime,
+) -> str:
+    """Render summaries as a user-message-ready prefix block.
+
+    Returns "" if list is empty (caller skips header append on first cycle).
+    Sorts by (created_at, id) ASC so the reader sees oldest → newest naturally
+    (review F4: id tie-breaker keeps same-timestamp ordering stable).
+    Each block is `[cycle <8char> · <trigger> · <UTC> (<ago>)]\n<body>` joined
+    by blank lines under one header.
+    """
+    if not summaries:
+        return ""
+
+    blocks = []
+    for s in sorted(summaries, key=lambda x: (x.created_at, x.id)):
+        cycle_id_short = s.cycle_id[:8]
+        utc_str = s.created_at.strftime("%Y-%m-%d %H:%M UTC")
+        ago = _format_relative_time(now, s.created_at)
+        body = _truncate_decision(s.decision)
+        blocks.append(
+            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} ({ago})]\n{body}"
+        )
+
+    header = "Your prior cycle summaries (most recent N=3, from this session):"
+    return f"{header}\n\n" + "\n\n".join(blocks)
+
+
 class TokenBudget:
     def __init__(self, daily_max: int):
         self._daily_max = daily_max

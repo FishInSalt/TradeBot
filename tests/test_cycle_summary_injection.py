@@ -287,3 +287,126 @@ async def test_fetch_excludes_cycles_with_null_decision():
 
     rows = await _fetch_recent_summaries(engine, "sess-t1-8", n=3)
     assert [r.cycle_id for r in rows] == ["aa11"]
+
+
+# ─────────────────────────── L2 render tests ───────────────────────────
+
+def _make_summary(cycle_id, triggered_by, decision, created_at, sid=1):
+    """Test-only CycleSummary builder."""
+    from src.cli.app import CycleSummary
+    return CycleSummary(
+        id=sid, cycle_id=cycle_id, triggered_by=triggered_by,
+        decision=decision, created_at=created_at,
+    )
+
+
+def test_render_returns_empty_string_for_empty_list():
+    """Empty input → empty string (caller skips header append)."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    assert _render_recent_summaries([], now) == ""
+
+
+def test_render_includes_header_and_one_block():
+    """Single summary → header + one block formatted per spec §3.6."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s = _make_summary(
+        "a3f2c1d8b", "scheduled", "Stance: Holding long, thesis intact.",
+        datetime(2026, 5, 6, 11, 52, 0, tzinfo=timezone.utc),
+    )
+
+    out = _render_recent_summaries([s], now)
+    assert out.startswith(
+        "Your prior cycle summaries (most recent N=3, from this session):"
+    )
+    assert "[cycle a3f2c1d8 · scheduled · 2026-05-06 11:52 UTC (8 min ago)]" in out
+    assert "Stance: Holding long, thesis intact." in out
+
+
+def test_render_truncates_cycle_id_to_8_chars():
+    """T2.1: cycle_id is sliced to [:8] in the block header (full UUIDs are long)."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s = _make_summary(
+        "a3f2c1d8b9c0d1e2", "alert", "body",
+        datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
+    )
+    out = _render_recent_summaries([s], now)
+    assert "[cycle a3f2c1d8 ·" in out
+    assert "a3f2c1d8b9" not in out  # only first 8
+
+
+def test_render_uses_absolute_and_relative_time():
+    """T2.2: header line is '<UTC> (<ago>)' format."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s = _make_summary(
+        "abcdef01", "scheduled", "body",
+        datetime(2026, 5, 6, 11, 0, 0, tzinfo=timezone.utc),
+    )
+    out = _render_recent_summaries([s], now)
+    assert "2026-05-06 11:00 UTC (1 hour ago)" in out
+
+
+def test_render_truncates_decision_above_hard_cap_via_truncate_decision(caplog):
+    """T2.3 + T2.5: decisions > 1200 chars are hard-truncated in the block."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    huge = "y" * 1500
+    s = _make_summary(
+        "abcdef01", "scheduled", huge,
+        datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
+    )
+    with caplog.at_level(logging.WARNING, logger="src.cli.app"):
+        out = _render_recent_summaries([s], now)
+    assert " ... [truncated]" in out
+    # WARNING raised by _truncate_decision should be visible
+    assert any("exceeded hard cap" in r.message for r in caplog.records)
+
+
+def test_render_keeps_full_decision_below_cap():
+    """T2.4: ≤ 1200 chars, no truncation marker."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    body = "z" * 800
+    s = _make_summary(
+        "abcdef01", "scheduled", body,
+        datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
+    )
+    out = _render_recent_summaries([s], now)
+    assert "[truncated]" not in out
+    assert body in out
+
+
+def test_render_orders_chronologically_oldest_first():
+    """T2.6: input may arrive DESC; render must emit ASC for natural reading.
+    Tie-breaker: same created_at → id ASC after the (created_at, id) sort."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s1 = _make_summary(
+        "newest11", "alert", "n",
+        datetime(2026, 5, 6, 11, 58, 0, tzinfo=timezone.utc),
+    )
+    s2 = _make_summary(
+        "middle22", "scheduled", "m",
+        datetime(2026, 5, 6, 11, 50, 0, tzinfo=timezone.utc),
+    )
+    s3 = _make_summary(
+        "oldest33", "conditional", "o",
+        datetime(2026, 5, 6, 11, 45, 0, tzinfo=timezone.utc),
+    )
+    # Pass DESC (as fetch returns) → render should reorder ASC
+    out = _render_recent_summaries([s1, s2, s3], now)
+
+    pos_old = out.index("oldest33")
+    pos_mid = out.index("middle22")
+    pos_new = out.index("newest11")
+    assert pos_old < pos_mid < pos_new
