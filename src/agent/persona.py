@@ -3,11 +3,11 @@ from dataclasses import dataclass
 
 from src.config import PersonaConfig
 
-# R2-8b cycle decision caps — single source of truth shared between
-# producer (persona §Cycle Closing Summary text below) and consumer
-# (cli/app.py _truncate_decision defaults). Changing one updates both.
-CYCLE_DECISION_SOFT_CAP = 800
-CYCLE_DECISION_HARD_CAP = 1200
+# R2-8d cycle decision hard cap — silent system safety net. NOT
+# interpolated into persona text (D5: agent reads "never exceeding 600
+# words" ceiling and self-controls; char cap protects against
+# misbehavior). Used only by cli/app.py:_truncate_decision.
+CYCLE_DECISION_HARD_CAP = 4000
 
 
 @dataclass(frozen=True)
