@@ -5,10 +5,11 @@ import json
 import logging
 import signal
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import update as sql_update
+from sqlalchemy import select, update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
@@ -109,6 +110,83 @@ def _truncate_decision(
             soft_cap, n,
         )
     return text
+
+
+@dataclass(frozen=True)
+class CycleSummary:
+    """Snapshot of an AgentCycle row used for cross-cycle context injection.
+
+    `id` is included as a tie-breaker for same-timestamp ordering stability
+    (review F4): fast in-memory tests / rapid sequential inserts can produce
+    multiple rows with identical created_at, and SQLite ORDER BY only on
+    created_at would be non-deterministic.
+    """
+    id: int
+    cycle_id: str
+    triggered_by: str
+    decision: str
+    created_at: datetime
+
+
+async def _fetch_recent_summaries(
+    engine, session_id: str, n: int = 3,
+) -> list[CycleSummary]:
+    """Fetch the N most recent ok cycles (with non-NULL decision) for a session.
+
+    Filters:
+      - session_id matches (D-U1-a: session-bound, no cross-session leak)
+      - execution_status='ok' (forensic cycles have decision=NULL anyway, but
+        explicit filter makes intent clear)
+      - decision IS NOT NULL (review F2 defensive: physically eliminate any
+        future code path that lands ok+NULL into the injection list)
+
+    Returns [] on:
+      - First cycle in session (no prior rows)
+      - Forensic-only history (all cycles non-ok)
+      - DB error (any exception logged at WARNING + empty list — D-U4-a
+        fail-isolated; cycle must continue)
+
+    Ordering: created_at DESC, id DESC (review F4 tie-breaker for stability).
+    Caller (`_render_recent_summaries`) re-sorts ASC for chronological reading.
+    """
+    try:
+        async with get_session(engine) as session:
+            result = await session.execute(
+                select(
+                    AgentCycle.id,
+                    AgentCycle.cycle_id,
+                    AgentCycle.triggered_by,
+                    AgentCycle.decision,
+                    AgentCycle.created_at,
+                )
+                .where(
+                    AgentCycle.session_id == session_id,
+                    AgentCycle.execution_status == "ok",
+                    AgentCycle.decision.is_not(None),
+                )
+                .order_by(
+                    AgentCycle.created_at.desc(),
+                    AgentCycle.id.desc(),
+                )
+                .limit(n)
+            )
+            rows = result.all()
+        return [
+            CycleSummary(
+                id=r.id,
+                cycle_id=r.cycle_id,
+                triggered_by=r.triggered_by,
+                decision=r.decision or "",
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch prior cycle summaries for injection: %s", e,
+            exc_info=True,
+        )
+        return []
 
 
 class TokenBudget:

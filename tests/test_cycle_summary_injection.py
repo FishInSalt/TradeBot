@@ -110,3 +110,180 @@ def test_truncate_decision_does_not_truncate_at_exactly_hard_cap():
     result = _truncate_decision(text)
     assert result == text
     assert not result.endswith("[truncated]")
+
+
+# ─────────────────────────── L1 fetch tests ───────────────────────────
+
+async def _make_engine_with_session(session_id: str = "sess-r2-8b"):
+    """Engine + session row (no exchange/market_data — fetch helper does
+    not touch them)."""
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session as SessionModel
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with get_session(engine) as db:
+        db.add(SessionModel(id=session_id, name="r2-8b"))
+        await db.commit()
+    return engine
+
+
+async def _add_cycle(
+    engine, session_id, cycle_id, *,
+    decision="x", execution_status="ok",
+    triggered_by="scheduled", created_at=None,
+):
+    """Insert one AgentCycle row; created_at defaults to utcnow()."""
+    from datetime import datetime, timezone
+    from src.storage.database import get_session
+    from src.storage.models import AgentCycle
+
+    async with get_session(engine) as db:
+        db.add(AgentCycle(
+            session_id=session_id,
+            cycle_id=cycle_id,
+            triggered_by=triggered_by,
+            decision=decision,
+            execution_status=execution_status,
+            created_at=created_at or datetime.now(timezone.utc),
+        ))
+        await db.commit()
+
+
+async def test_fetch_returns_n_most_recent_ok_cycles():
+    """T1.1: happy path — N=3 from a session with 4 cycles, returns the
+    3 most recent in created_at DESC order."""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-t1-1")
+    base = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    for i, cid in enumerate(["aa11", "bb22", "cc33", "dd44"]):
+        await _add_cycle(
+            engine, "sess-t1-1", cid,
+            decision=f"summary-{cid}",
+            created_at=base + timedelta(minutes=i),
+        )
+
+    rows = await _fetch_recent_summaries(engine, "sess-t1-1", n=3)
+    assert [r.cycle_id for r in rows] == ["dd44", "cc33", "bb22"]
+    assert all(r.decision.startswith("summary-") for r in rows)
+
+
+async def test_fetch_returns_empty_for_first_cycle_in_session():
+    """T1.2: session with 0 prior cycles → empty list."""
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-t1-2")
+    assert await _fetch_recent_summaries(engine, "sess-t1-2", n=3) == []
+
+
+async def test_fetch_returns_partial_when_session_has_fewer_than_n():
+    """T1.3: session with 2 cycles, n=3 → list of 2 (not padded)."""
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-t1-3")
+    await _add_cycle(engine, "sess-t1-3", "aa11", decision="s1")
+    await _add_cycle(engine, "sess-t1-3", "bb22", decision="s2")
+
+    rows = await _fetch_recent_summaries(engine, "sess-t1-3", n=3)
+    assert len(rows) == 2
+
+
+async def test_fetch_excludes_forensic_cycles():
+    """T1.4: cycles with execution_status != 'ok' (forensic) are skipped;
+    fetch returns the adjacent ok cycles."""
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-t1-4")
+    await _add_cycle(engine, "sess-t1-4", "aa11", decision="ok-1", execution_status="ok")
+    # decision=None for forensic per cli/app.py:223,266
+    await _add_cycle(
+        engine, "sess-t1-4", "bb22", decision=None,
+        execution_status="usage_limit_exceeded",
+    )
+    await _add_cycle(engine, "sess-t1-4", "cc33", decision="ok-2", execution_status="ok")
+    await _add_cycle(
+        engine, "sess-t1-4", "dd44", decision=None,
+        execution_status="retry_exhausted",
+    )
+
+    rows = await _fetch_recent_summaries(engine, "sess-t1-4", n=3)
+    assert {r.cycle_id for r in rows} == {"aa11", "cc33"}
+
+
+async def test_fetch_respects_session_boundary():
+    """T1.5: cycles in other sessions must not leak in (D-U1-a session-bound)."""
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-t1-5a")
+    # Add a separate session row for "sess-t1-5b"
+    from src.storage.database import get_session
+    from src.storage.models import Session as SessionModel
+
+    async with get_session(engine) as db:
+        db.add(SessionModel(id="sess-t1-5b", name="other"))
+        await db.commit()
+
+    await _add_cycle(engine, "sess-t1-5a", "aa11", decision="mine")
+    await _add_cycle(engine, "sess-t1-5b", "bb22", decision="theirs")
+
+    rows = await _fetch_recent_summaries(engine, "sess-t1-5a", n=3)
+    assert [r.cycle_id for r in rows] == ["aa11"]
+
+
+async def test_fetch_orders_descending_by_created_at_then_id():
+    """T1.6 (review F4): same created_at tie-broken by id DESC for stability."""
+    from datetime import datetime, timezone
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-t1-6")
+    same_ts = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    # Insert 3 with identical created_at; sqlite assigns auto-increment id 1..3
+    await _add_cycle(engine, "sess-t1-6", "aa11", decision="a", created_at=same_ts)
+    await _add_cycle(engine, "sess-t1-6", "bb22", decision="b", created_at=same_ts)
+    await _add_cycle(engine, "sess-t1-6", "cc33", decision="c", created_at=same_ts)
+
+    rows = await _fetch_recent_summaries(engine, "sess-t1-6", n=3)
+    # id DESC tie-breaker → cc33 (id=3) first, then bb22 (id=2), aa11 (id=1)
+    assert [r.cycle_id for r in rows] == ["cc33", "bb22", "aa11"]
+
+
+async def test_fetch_returns_empty_on_db_error(caplog, monkeypatch):
+    """T1.7: any exception in fetch → log WARNING + return [] (D-U4-a)."""
+    from src.cli.app import _fetch_recent_summaries
+    import src.cli.app as app_mod
+
+    class BoomEngine:
+        pass
+
+    # Force an exception via a get_session monkey-patch that raises
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated DB outage")
+
+    monkeypatch.setattr(app_mod, "get_session", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="src.cli.app"):
+        rows = await _fetch_recent_summaries(BoomEngine(), "any-sess", n=3)
+    assert rows == []
+    assert any(
+        "Failed to fetch prior cycle summaries" in r.message
+        and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
+
+
+async def test_fetch_excludes_cycles_with_null_decision():
+    """T1.8 (review F2): a cycle with execution_status='ok' but decision=None
+    should be physically filtered by `WHERE decision IS NOT NULL`. This is
+    a defensive guard — the ok-path always writes decision=result.output, but
+    if a future code path produces an ok cycle with NULL decision, the render
+    block must not crash on `decision or ""` truncation downstream.
+    """
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-t1-8")
+    await _add_cycle(engine, "sess-t1-8", "aa11", decision="real-summary")
+    await _add_cycle(engine, "sess-t1-8", "bb22", decision=None)  # defensive case
+
+    rows = await _fetch_recent_summaries(engine, "sess-t1-8", n=3)
+    assert [r.cycle_id for r in rows] == ["aa11"]
