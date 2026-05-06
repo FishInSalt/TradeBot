@@ -5,14 +5,17 @@ import json
 import logging
 import signal
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import update as sql_update
+from sqlalchemy import select, update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
-from src.agent.persona import RuntimeConfig
+from src.agent.persona import (
+    CYCLE_DECISION_HARD_CAP, CYCLE_DECISION_SOFT_CAP, RuntimeConfig,
+)
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse, ThinkingPart,
@@ -63,6 +66,189 @@ def _extract_thinking_text(messages) -> str | None:
                 if isinstance(part, ThinkingPart):
                     parts.append(part.content)
     return "\n\n".join(parts) if parts else None
+
+
+def _format_relative_time(now: datetime, then: datetime) -> str:
+    """Format a delta as '8 min ago' / '2 hours ago' / '1 day ago'.
+
+    SQLite returns naive datetime even when schema is DateTime(timezone=True);
+    normalize to UTC-aware before subtraction (same pattern as
+    session_manager.py:294-295).
+    """
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    delta = now - then
+    secs = int(delta.total_seconds())
+    if secs < 60:
+        return f"{secs} sec ago"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins} min ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours > 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days > 1 else ''} ago"
+
+
+def _truncate_decision(
+    text: str,
+    hard_cap: int = CYCLE_DECISION_HARD_CAP,
+    soft_cap: int = CYCLE_DECISION_SOFT_CAP,
+) -> str:
+    """Hard-truncate at hard_cap; INFO log at soft_cap; WARNING log at hard_cap.
+
+    Caps exposed to agent via persona.py `## Cycle Closing Summary` section
+    (D-Q-A: fact-only philosophy — agent knows the limit and self-controls).
+    """
+    n = len(text)
+    if n > hard_cap:
+        logger.warning(
+            "Cycle decision exceeded hard cap %d (got %d), truncating",
+            hard_cap, n,
+        )
+        return text[:hard_cap] + " ... [truncated]"
+    if n > soft_cap:
+        logger.info(
+            "Cycle decision exceeded soft cap %d (got %d), keeping full",
+            soft_cap, n,
+        )
+    return text
+
+
+@dataclass(frozen=True)
+class CycleSummary:
+    """Snapshot of an AgentCycle row used for cross-cycle context injection.
+
+    `id` is included as a tie-breaker for same-timestamp ordering stability
+    (review F4): fast in-memory tests / rapid sequential inserts can produce
+    multiple rows with identical created_at, and SQLite ORDER BY only on
+    created_at would be non-deterministic.
+    """
+    id: int
+    cycle_id: str
+    triggered_by: str
+    decision: str
+    created_at: datetime
+
+
+async def _fetch_recent_summaries(
+    engine, session_id: str, n: int = 3,
+) -> list[CycleSummary]:
+    """Fetch the N most recent ok cycles (with non-NULL decision) for a session.
+
+    Filters:
+      - session_id matches (D-U1-a: session-bound, no cross-session leak)
+      - execution_status='ok' (forensic cycles have decision=NULL anyway, but
+        explicit filter makes intent clear)
+      - decision IS NOT NULL (review F2 defensive: physically eliminate any
+        future code path that lands ok+NULL into the injection list)
+
+    Returns [] on:
+      - First cycle in session (no prior rows)
+      - Forensic-only history (all cycles non-ok)
+      - DB error (any exception logged at WARNING + empty list — D-U4-a
+        fail-isolated; cycle must continue)
+
+    Ordering: created_at DESC, id DESC (review F4 tie-breaker for stability).
+    Caller (`_render_recent_summaries`) re-sorts ASC for chronological reading.
+    """
+    try:
+        async with get_session(engine) as session:
+            result = await session.execute(
+                select(
+                    AgentCycle.id,
+                    AgentCycle.cycle_id,
+                    AgentCycle.triggered_by,
+                    AgentCycle.decision,
+                    AgentCycle.created_at,
+                )
+                .where(
+                    AgentCycle.session_id == session_id,
+                    AgentCycle.execution_status == "ok",
+                    AgentCycle.decision.is_not(None),
+                )
+                .order_by(
+                    AgentCycle.created_at.desc(),
+                    AgentCycle.id.desc(),
+                )
+                .limit(n)
+            )
+            rows = result.all()
+        return [
+            CycleSummary(
+                id=r.id,
+                cycle_id=r.cycle_id,
+                triggered_by=r.triggered_by,
+                decision=r.decision or "",
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch prior cycle summaries for injection: %s", e,
+            exc_info=True,
+        )
+        return []
+
+
+def _render_recent_summaries(
+    summaries: list[CycleSummary], now: datetime,
+) -> str:
+    """Render summaries as a user-message-ready prefix block.
+
+    Returns "" if list is empty (caller skips header append on first cycle).
+    Sorts by (created_at, id) ASC so the reader sees oldest → newest naturally
+    (review F4: id tie-breaker keeps same-timestamp ordering stable).
+    Each block is `[cycle <8char> · <trigger> · <UTC> (<ago>)]\n<body>` joined
+    by blank lines under one header.
+    """
+    if not summaries:
+        return ""
+
+    blocks = []
+    for s in sorted(summaries, key=lambda x: (x.created_at, x.id)):
+        cycle_id_short = s.cycle_id[:8]
+        utc_str = s.created_at.strftime("%Y-%m-%d %H:%M UTC")
+        ago = _format_relative_time(now, s.created_at)
+        body = _truncate_decision(s.decision)
+        blocks.append(
+            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} ({ago})]\n{body}"
+        )
+
+    header = "Your prior cycle summaries (most recent N=3, from this session):"
+    return f"{header}\n\n" + "\n\n".join(blocks)
+
+
+async def _build_recent_summaries_block(
+    engine, session_id: str, n: int = 3,
+) -> str:
+    """Fetch + render summaries with a fail-isolated boundary.
+
+    Returns "" on:
+      - empty fetch (first cycle / forensic-only history / NULL decision filter)
+      - any exception during fetch OR render OR format (logged at WARNING)
+
+    Review F3: this outer wrap covers the entire injection pipeline, not just
+    the DB query layer. _fetch_recent_summaries keeps its own try/except as
+    layered defense. Rationale: a render/format exception would otherwise
+    bubble before agent.run() and abort the cycle — violating the R2-8b
+    "any error never blocks a cycle" promise.
+    """
+    try:
+        summaries = await _fetch_recent_summaries(engine, session_id, n)
+        if not summaries:
+            return ""
+        return _render_recent_summaries(
+            summaries, now=datetime.now(timezone.utc),
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to build recent summaries block for injection: %s", e,
+            exc_info=True,
+        )
+        return ""
 
 
 class TokenBudget:
@@ -189,6 +375,16 @@ async def run_agent_cycle(
                 f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
                 f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
             )
+
+    # R2-8b: inject most recent N=3 cycle summaries from this session
+    # (D-D-E injection position: trigger context → recent → memory).
+    # _build_recent_summaries_block is fail-isolated (review F3) — any
+    # error returns "" and lets the cycle proceed.
+    recent_block = await _build_recent_summaries_block(
+        engine, deps.session_id, n=3,
+    )
+    if recent_block:
+        prompt += f"\n\n{recent_block}"
 
     memory_context = await deps.memory.format_for_prompt()
     if memory_context != "No relevant memories.":

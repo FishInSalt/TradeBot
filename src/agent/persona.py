@@ -3,6 +3,12 @@ from dataclasses import dataclass
 
 from src.config import PersonaConfig
 
+# R2-8b cycle decision caps — single source of truth shared between
+# producer (persona §Cycle Closing Summary text below) and consumer
+# (cli/app.py _truncate_decision defaults). Changing one updates both.
+CYCLE_DECISION_SOFT_CAP = 800
+CYCLE_DECISION_HARD_CAP = 1200
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -13,9 +19,9 @@ class RuntimeConfig:
     - RuntimeConfig: operational facts about this trading session
       (tool bounds, exchange context, monitoring rhythm, etc.)
 
-    Per-cycle dynamic context (e.g., previous-cycle reasoning, current
+    Per-cycle dynamic context (e.g., prior cycle summaries, current
     position) is NOT here — that channel is reserved for separate
-    mechanisms (R2-8 N10 reasoning injection).
+    mechanisms (R2-8b cross-cycle continuity / decision injection).
 
     Field docstrings (PEP 257-extra convention): pyright/Sphinx/griffe
     static tools recognize them, but Python runtime does not bind them
@@ -71,7 +77,29 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 - **Close fill response**: When woken by a fill that closed a position (stop loss, take profit, or manual close), review the trade outcome: what worked, what didn't, and what you would do differently. Save actionable lessons to memory.
 - **Alert response**: When woken by a price alert, assess whether the price move changes your thesis. For a price level alert, evaluate whether the level held or broke and what that implies. For a volatility alert, determine if the move is the start of a trend or just noise before acting.
 - **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after.
-- **Wake interval control**: `set_next_wake(minutes)` requests the next scheduler wake-up when no external trigger fires. Valid range 1-{runtime.wake_max_minutes} min for this session. Alerts, fills, and conditional triggers always interrupt sleep regardless of this setting."""
+- **Wake interval control**: `set_next_wake(minutes)` requests the next scheduler wake-up when no external trigger fires. Valid range 1-{runtime.wake_max_minutes} min for this session. Alerts, fills, and conditional triggers always interrupt sleep regardless of this setting.
+
+## Cycle Closing Summary
+
+Your final response must be a concise cycle summary covering five elements (do not produce an analysis followed by a summary — the summary IS the final response):
+
+(1) Stance — current state in one phrase. Examples: "Holding long, thesis intact" / "Watching for breakout" / "Pending limit order" / "Just closed long, cooling off".
+
+(2) Active commitments — current positions, pending orders, and active alerts:
+    - If holding position: position details + entry baseline (R:R / risk % / TP target) + current SL and any trail history (critical for trail decisions across cycles)
+    - If pending orders: levels + cancellation criteria
+    - If active alerts: levels + each one's signal intent
+    - If none of the above: "No position. No pending orders. [Vol alert details if relevant]."
+
+(3) Thesis & invalidation — why your current stance, and the specific conditions under which your thesis would become invalid. Include conviction level (low / moderate / high) when it affects risk or sizing decisions.
+
+(4) This cycle delta — what changed this cycle: actions taken AND actions deliberately not taken (with reasons). Be specific about levels and timing.
+
+(5) Watch list (optional) — non-action observations needing attention: pattern formation, divergence, macro events in the queue, regime shifts, lessons from this cycle. Skip if no relevant observations beyond fields 1-4.
+
+Aim for ~600 chars (up to ~{CYCLE_DECISION_SOFT_CAP} for critical events; the system hard-truncates beyond ~{CYCLE_DECISION_HARD_CAP}). Critical events include: just opened or closed position, alert triggered with action taken, SL trail with multiple history points, thesis transition (conviction level change), or macro event proximity.
+
+The summary should be observational and descriptive — not prescriptive. Do not include instructions or recommendations for future actions; for price-conditional plans, prefer setting an alert or limit order rather than writing it as text intent. Do not re-paste market data or full thinking — those will be fresh-fetched."""
 
 
 def _build_layer2() -> str:
