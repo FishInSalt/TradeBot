@@ -728,3 +728,60 @@ async def test_save_memory_fact_only():
     output = await save_memory(deps, "lesson", "Reduced position size after observing slippage", 0.5)
     hits = _scan(output)
     assert hits == [], f"save_memory emitted banned words: {hits}"
+
+
+async def _invoke_place_limit_order_happy(deps, mocker):
+    """F-P13: happy path through create_order — covers new multi-line `Note:` return."""
+    from src.agent.tools_execution import place_limit_order
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    deps.exchange.set_leverage = AsyncMock(return_value=None)
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10000.0, free_usdt=8000.0, used_usdt=2000.0,
+    ))
+    deps.exchange.amount_to_precision = mocker.Mock(return_value=0.05)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="abc12345-6789-0123-4567-89abcdef0123",  # UUID-shaped
+        symbol="BTC/USDT:USDT", side="buy", order_type="limit",
+        amount=0.05, price=80000.0, status="open",
+    ))
+    return await place_limit_order(
+        deps, "long", 80000.0, 10.0, 5, reasoning="test entry",
+    )
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_return_format_unchanged(mocker):
+    """T-FP13.1 (AC-2): 'ID:' + UUID format strong assertion.
+
+    order.id = str(uuid.uuid4()) — assert head 8 hex + dash explicit
+    UUID shape so a simple 8-hex regex match doesn't pass weakly.
+    """
+    deps = MockDeps()
+    result = await _invoke_place_limit_order_happy(deps, mocker)
+    assert "ID: " in result
+    assert re.search(r"ID: [a-f0-9]{8}-", result), \
+        f"expected UUID format ID: xxxxxxxx-..., got: {result}"
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_return_includes_async_note(mocker):
+    """T-FP13.2 (AC-1): return string contains 'only submits' AND 'has been filled'.
+
+    sim #8 cycle 4de0585a 实证误读对齐：agent prose 用词 'limit not filled'，
+    提示用 'has been filled' 命中相同 mental concept。
+    """
+    deps = MockDeps()
+    result = await _invoke_place_limit_order_happy(deps, mocker)
+    assert "only submits" in result
+    assert "has been filled" in result
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_return_no_decision_label(mocker):
+    """T-FP13.3 (AC-3): fact-only regression — _scan(output) helper applies
+    full FACT_ONLY_BANNED_WORDS_RE + FACT_ONLY_BANNED_PHRASES_RE regex sets.
+    """
+    deps = MockDeps()
+    result = await _invoke_place_limit_order_happy(deps, mocker)
+    hits = _scan(result)
+    assert hits == [], f"banned regex hits: {hits}"
