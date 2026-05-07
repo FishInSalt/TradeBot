@@ -321,14 +321,16 @@ async def test_fetch_returns_partial_when_session_has_fewer_than_n():
     assert len(rows) == 2
 
 
-async def test_fetch_excludes_forensic_cycles():
-    """T1.4: cycles with execution_status != 'ok' (forensic) are skipped;
-    fetch returns the adjacent ok cycles."""
+async def test_fetch_includes_all_cycles_regardless_of_status():
+    """T1.4 (rewritten for F-P14): cycles of all execution_status values
+    (ok, usage_limit_exceeded, retry_exhausted) enter the priors list.
+    Render-layer dispatch differentiates them via _render_empty_decision_body.
+    """
     from src.cli.app import _fetch_recent_summaries
 
     engine = await _make_engine_with_session("sess-t1-4")
+    # 4 cycles inserted in order; auto-increment id 1..4 → DESC LIMIT 3 → dd44/cc33/bb22
     await _add_cycle(engine, "sess-t1-4", "aa11", decision="ok-1", execution_status="ok")
-    # decision=None for forensic per cli/app.py:223,266
     await _add_cycle(
         engine, "sess-t1-4", "bb22", decision=None,
         execution_status="usage_limit_exceeded",
@@ -340,7 +342,13 @@ async def test_fetch_excludes_forensic_cycles():
     )
 
     rows = await _fetch_recent_summaries(engine, "sess-t1-4", n=3)
-    assert {r.cycle_id for r in rows} == {"aa11", "cc33"}
+    # All 3 most-recent cycles included (filter deleted)
+    assert [r.cycle_id for r in rows] == ["dd44", "cc33", "bb22"]
+    # Forensic statuses propagate through; decision is None for them
+    assert rows[0].execution_status == "retry_exhausted"
+    assert rows[0].decision is None
+    assert rows[2].execution_status == "usage_limit_exceeded"
+    assert rows[2].decision is None
 
 
 async def test_fetch_respects_session_boundary():
@@ -404,21 +412,24 @@ async def test_fetch_returns_empty_on_db_error(caplog, monkeypatch):
     )
 
 
-async def test_fetch_excludes_cycles_with_null_decision():
-    """T1.8 (review F2): a cycle with execution_status='ok' but decision=None
-    should be physically filtered by `WHERE decision IS NOT NULL`. This is
-    a defensive guard — the ok-path always writes decision=result.output, but
-    if a future code path produces an ok cycle with NULL decision, the render
-    block must not crash on `decision or ""` truncation downstream.
+async def test_fetch_includes_ok_cycles_with_null_decision():
+    """T1.8 (rewritten for F-P14): an ok cycle with decision=None enters
+    the priors list — render layer dispatches to _render_empty_decision_body
+    with the 'ok' branch system body. Defensive case: pydantic-ai rarely
+    produces ok+empty result.output when agent emits only tool calls
+    without a final TextPart.
     """
     from src.cli.app import _fetch_recent_summaries
 
     engine = await _make_engine_with_session("sess-t1-8")
     await _add_cycle(engine, "sess-t1-8", "aa11", decision="real-summary")
-    await _add_cycle(engine, "sess-t1-8", "bb22", decision=None)  # defensive case
+    await _add_cycle(engine, "sess-t1-8", "bb22", decision=None)  # ok+NULL defensive case
 
     rows = await _fetch_recent_summaries(engine, "sess-t1-8", n=3)
-    assert [r.cycle_id for r in rows] == ["aa11"]
+    # both included; bb22 most recent
+    assert [r.cycle_id for r in rows] == ["bb22", "aa11"]
+    assert rows[0].decision is None
+    assert rows[0].execution_status == "ok"
 
 
 # ─────────────────────────── L2 render tests ───────────────────────────
@@ -682,3 +693,28 @@ async def test_cycle_summary_execution_status_populated():
     rows = await _fetch_recent_summaries(engine, "sess-fp14-2", n=3)
     assert len(rows) == 1
     assert rows[0].execution_status == "ok"
+
+
+async def test_fetch_recent_summaries_includes_retry_exhausted():
+    """T-FP14.1 (AC-4, F-P14): filter deletion → retry_exhausted cycle
+    enters priors. Most recent first (DESC ordering preserved)."""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-fp14-1")
+    base = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    await _add_cycle(
+        engine, "sess-fp14-1", "c-ok",
+        decision="real summary", execution_status="ok",
+        created_at=base,
+    )
+    await _add_cycle(
+        engine, "sess-fp14-1", "c-rx",
+        decision=None, execution_status="retry_exhausted",
+        created_at=base + timedelta(minutes=1),  # most recent
+    )
+    rows = await _fetch_recent_summaries(engine, "sess-fp14-1", n=3)
+    assert len(rows) == 2
+    assert rows[0].cycle_id == "c-rx"  # DESC: most recent first
+    assert rows[0].execution_status == "retry_exhausted"
+    assert rows[0].decision is None

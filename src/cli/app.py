@@ -224,23 +224,25 @@ class CycleSummary:
 async def _fetch_recent_summaries(
     engine, session_id: str, n: int = 3,
 ) -> list[CycleSummary]:
-    """Fetch the N most recent ok cycles (with non-NULL decision) for a session.
+    """Fetch the N most recent cycles for a session (all execution statuses).
+
+    F-P14 (R2-Next-B): no execution_status / decision filter — render layer
+    handles three-state branching (ok+valid / ok+NULL / forensic) via
+    `_render_empty_decision_body`. Filter removal is intentional: priors
+    must reflect actual cycle state including retry_exhausted /
+    usage_limit_exceeded so the next cycle sees forensic ⚠️ hints.
 
     Filters:
       - session_id matches (D-U1-a: session-bound, no cross-session leak)
-      - execution_status='ok' (forensic cycles have decision=NULL anyway, but
-        explicit filter makes intent clear)
-      - decision IS NOT NULL (review F2 defensive: physically eliminate any
-        future code path that lands ok+NULL into the injection list)
 
     Returns [] on:
       - First cycle in session (no prior rows)
-      - Forensic-only history (all cycles non-ok)
       - DB error (any exception logged at WARNING + empty list — D-U4-a
         fail-isolated; cycle must continue)
 
     Ordering: created_at DESC, id DESC (review F4 tie-breaker for stability).
-    Caller (`_render_recent_summaries`) re-sorts ASC for chronological reading.
+    Caller (`_render_recent_summaries`) re-sorts ASC for chronological reading
+    and dispatches per-row to the empty-body branch when decision is NULL.
     """
     try:
         async with get_session(engine) as session:
@@ -255,8 +257,6 @@ async def _fetch_recent_summaries(
                 )
                 .where(
                     AgentCycle.session_id == session_id,
-                    AgentCycle.execution_status == "ok",
-                    AgentCycle.decision.is_not(None),
                 )
                 .order_by(
                     AgentCycle.created_at.desc(),
