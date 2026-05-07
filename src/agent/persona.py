@@ -3,11 +3,23 @@ from dataclasses import dataclass
 
 from src.config import PersonaConfig
 
-# R2-8d cycle decision hard cap — silent system safety net. NOT
-# interpolated into persona text (D5: agent reads "never exceeding 600
-# words" ceiling and self-controls; char cap protects against
-# misbehavior). Used only by cli/app.py:_truncate_decision.
-CYCLE_DECISION_HARD_CAP = 4000
+# R2-Next-A: hard cap exposed to agent via three channels:
+#   D1 — _truncate_decision marker text (cli/app.py)
+#   D2 — _render_recent_summaries header word count (cli/app.py)
+#   A3 — persona §Cycle Closing Summary explicit "700 words" mention
+# F1 length-loop closure (vs prior R2-8d D5 silent guardrail).
+CYCLE_DECISION_WORD_CAP = 700
+
+# Silent secondary char floor — defensive against pathological cases
+# where a single `\S+` token is very large (long URL / JSON dump /
+# no-space CJK / `|---|---|` table separator with no internal
+# whitespace), which would bypass the word cap (counted as 1 word).
+# NOT exposed to agent (no 4th channel) — preserves the word-unit
+# primary signal of A3/D1/D2.
+# sim #8 longest single token = 50 chars; max decision = 6131 chars
+# → 8000 gives ~30% headroom over historical max; cap-bypass risk
+# in current behavior is empirically zero, this is future-proofing.
+CYCLE_DECISION_CHAR_HARD_FLOOR = 8000
 
 
 @dataclass(frozen=True)
@@ -97,7 +109,7 @@ After your reasoning and any tool calls, record what you decided and what you ob
 
 (5) Watch list (optional) — non-action observations needing attention: pattern formation, divergence, macro events in the queue, regime shifts, lessons from this cycle. Skip if no relevant observations beyond fields 1-4.
 
-Write directly using the field structure — no preamble or analysis prose. Length: at most 400 words in normal cycles, never exceeding 600 words even in critical events (open/close/alert with action/SL trail with multiple history points/thesis transition/macro event proximity). A single sentence is sufficient when nothing actionable happened (e.g., "Watching, no position, routine tick — no changes").
+Write directly using the field structure — no preamble or analysis prose. Length: at most 400 words in normal cycles, never exceeding 600 words even in critical events (open/close/alert with action/SL trail with multiple history points/thesis transition/macro event proximity). Beyond 700 words the system hard-truncates the summary as a safety net — when this happens, the truncated portion is lost from prior-cycle context. A single sentence is sufficient when nothing actionable happened (e.g., "Watching, no position, routine tick — no changes").
 
 The summary should be observational and descriptive — not prescriptive. Do not include instructions or recommendations for future actions; for price-conditional plans, prefer setting an alert or limit order rather than writing it as text intent. Do not re-paste market data or full thinking — those will be fresh-fetched."""
 

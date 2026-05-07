@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import signal
 import uuid
 from dataclasses import dataclass
@@ -13,7 +14,11 @@ from sqlalchemy import select, update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
-from src.agent.persona import CYCLE_DECISION_HARD_CAP, RuntimeConfig
+from src.agent.persona import (
+    CYCLE_DECISION_CHAR_HARD_FLOOR,
+    CYCLE_DECISION_WORD_CAP,
+    RuntimeConfig,
+)
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse, ThinkingPart,
@@ -66,6 +71,24 @@ def _extract_thinking_text(messages) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
+_WORD_RE = re.compile(r'\S+')
+
+
+def _count_words(text: str) -> int:
+    """Whitespace-split word count (wc -w convention).
+
+    Single source of truth across:
+      - _truncate_decision (D1: word-cap enforcement)
+      - _render_recent_summaries (D2: priors header signal)
+      - persona drift guards (A3: ceiling consistency)
+
+    Convention: any consecutive non-whitespace run = 1 word. Markdown
+    delimiters (`|`, `---`) count as words — naturally pressures agent
+    toward concise output by penalizing formatting noise.
+    """
+    return len(_WORD_RE.findall(text))
+
+
 def _format_relative_time(now: datetime, then: datetime) -> str:
     """Format a delta as '8 min ago' / '2 hours ago' / '1 day ago'.
 
@@ -90,22 +113,48 @@ def _format_relative_time(now: datetime, then: datetime) -> str:
 
 
 def _truncate_decision(
-    text: str, hard_cap: int = CYCLE_DECISION_HARD_CAP,
+    text: str,
+    hard_cap_words: int = CYCLE_DECISION_WORD_CAP,
+    hard_cap_chars: int = CYCLE_DECISION_CHAR_HARD_FLOOR,
 ) -> str:
-    """Hard-truncate at hard_cap with WARNING log.
+    """Hard-truncate at word boundary with WARNING log + visible marker.
 
-    Word ceiling (≤400/≤600 words) exposed to agent via persona §Cycle
-    Closing Summary; this char cap is a silent system safety net — NOT
-    exposed to agent (R2-8d D5: agent obeys word ceiling, char hard_cap
-    kicks in only on misbehavior).
+    R2-Next-A D1 (primary): word-unit aligned with persona ceiling.
+    Word-boundary slice preserves whitespace-delimited token boundaries
+    (no mid-word or mid-number cuts). Row-level integrity (markdown
+    table rows / bullets) is NOT guaranteed — if cap falls between
+    `|` cells of one row, that row will appear half-cut in the prior
+    body. Acceptable: agent reads truncated priors as prose, not as
+    rendered tables.
+
+    Marker exposes word cap to agent (vs prior R2-8d D5 silent
+    guardrail). Pairs with persona A3 explicit cap statement and D2
+    priors header word count to close F1 length-feedback loop.
+
+    Secondary defense (silent, NOT agent-facing): if word-cap path
+    doesn't fire but len(text) > hard_cap_chars, fall back to silent
+    char-slice with legacy `[truncated]` marker. Protects against
+    pathological cases (long URL / JSON / `|---|---|` separator)
+    where one `\\S+` token holds many chars.
     """
-    n = len(text)
-    if n > hard_cap:
+    matches = list(_WORD_RE.finditer(text))
+    if len(matches) > hard_cap_words:
+        cut_pos = matches[hard_cap_words].start()
         logger.warning(
-            "Cycle decision exceeded hard cap %d (got %d), truncating",
-            hard_cap, n,
+            "Cycle decision exceeded hard cap %d words (got %d), truncating",
+            hard_cap_words, len(matches),
         )
-        return text[:hard_cap] + " ... [truncated]"
+        return (
+            f"{text[:cut_pos].rstrip()}\n"
+            f"... [truncated by system, cut at {hard_cap_words} words]"
+        )
+    if len(text) > hard_cap_chars:  # P1 silent secondary safety net
+        logger.warning(
+            "Cycle decision exceeded char floor %d (got %d, words=%d), "
+            "silent truncating",
+            hard_cap_chars, len(text), len(matches),
+        )
+        return text[:hard_cap_chars] + " ... [truncated]"
     return text
 
 
@@ -194,8 +243,11 @@ def _render_recent_summaries(
     Returns "" if list is empty (caller skips header append on first cycle).
     Sorts by (created_at, id) ASC so the reader sees oldest → newest naturally
     (review F4: id tie-breaker keeps same-timestamp ordering stable).
-    Each block is `[cycle <8char> · <trigger> · <UTC> (<ago>)]\n<body>` joined
-    by blank lines under one header.
+
+    R2-Next-A D2: each per-prior header includes `· {N} words` showing the
+    ORIGINAL word count (pre-truncation). Pairs with D1 marker and A3
+    persona text — agent compares header N vs the 700-word cap to detect
+    over-budget priors and self-titrate.
     """
     if not summaries:
         return ""
@@ -205,9 +257,11 @@ def _render_recent_summaries(
         cycle_id_short = s.cycle_id[:8]
         utc_str = s.created_at.strftime("%Y-%m-%d %H:%M UTC")
         ago = _format_relative_time(now, s.created_at)
+        word_count = _count_words(s.decision or "")  # R2-Next-A D2
         body = _truncate_decision(s.decision)
         blocks.append(
-            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} ({ago})]\n{body}"
+            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} "
+            f"({ago}) · {word_count} words]\n{body}"
         )
 
     header = "Your prior cycle summaries (most recent N=3, from this session):"
