@@ -21,10 +21,6 @@ CYCLE_DECISION_WORD_CAP = 700
 # in current behavior is empirically zero, this is future-proofing.
 CYCLE_DECISION_CHAR_HARD_FLOOR = 8000
 
-# Legacy R2-8d constant — kept for one transitional task (T2 removes).
-# DO NOT add new references; use CYCLE_DECISION_WORD_CAP instead.
-CYCLE_DECISION_HARD_CAP = 4000
-
 
 @dataclass(frozen=True)
 class RuntimeConfig:

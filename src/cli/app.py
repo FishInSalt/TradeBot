@@ -14,7 +14,11 @@ from sqlalchemy import select, update as sql_update
 
 from src.agent.memory import MemoryService
 from src.agent.trader import TradingDeps, create_trader_agent
-from src.agent.persona import CYCLE_DECISION_HARD_CAP, RuntimeConfig
+from src.agent.persona import (
+    CYCLE_DECISION_CHAR_HARD_FLOOR,
+    CYCLE_DECISION_WORD_CAP,
+    RuntimeConfig,
+)
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
     ModelRequest, ModelResponse, ThinkingPart,
@@ -109,22 +113,48 @@ def _format_relative_time(now: datetime, then: datetime) -> str:
 
 
 def _truncate_decision(
-    text: str, hard_cap: int = CYCLE_DECISION_HARD_CAP,
+    text: str,
+    hard_cap_words: int = CYCLE_DECISION_WORD_CAP,
+    hard_cap_chars: int = CYCLE_DECISION_CHAR_HARD_FLOOR,
 ) -> str:
-    """Hard-truncate at hard_cap with WARNING log.
+    """Hard-truncate at word boundary with WARNING log + visible marker.
 
-    Word ceiling (≤400/≤600 words) exposed to agent via persona §Cycle
-    Closing Summary; this char cap is a silent system safety net — NOT
-    exposed to agent (R2-8d D5: agent obeys word ceiling, char hard_cap
-    kicks in only on misbehavior).
+    R2-Next-A D1 (primary): word-unit aligned with persona ceiling.
+    Word-boundary slice preserves whitespace-delimited token boundaries
+    (no mid-word or mid-number cuts). Row-level integrity (markdown
+    table rows / bullets) is NOT guaranteed — if cap falls between
+    `|` cells of one row, that row will appear half-cut in the prior
+    body. Acceptable: agent reads truncated priors as prose, not as
+    rendered tables.
+
+    Marker exposes word cap to agent (vs prior R2-8d D5 silent
+    guardrail). Pairs with persona A3 explicit cap statement and D2
+    priors header word count to close F1 length-feedback loop.
+
+    Secondary defense (silent, NOT agent-facing): if word-cap path
+    doesn't fire but len(text) > hard_cap_chars, fall back to silent
+    char-slice with legacy `[truncated]` marker. Protects against
+    pathological cases (long URL / JSON / `|---|---|` separator)
+    where one `\\S+` token holds many chars.
     """
-    n = len(text)
-    if n > hard_cap:
+    matches = list(_WORD_RE.finditer(text))
+    if len(matches) > hard_cap_words:
+        cut_pos = matches[hard_cap_words].start()
         logger.warning(
-            "Cycle decision exceeded hard cap %d (got %d), truncating",
-            hard_cap, n,
+            "Cycle decision exceeded hard cap %d words (got %d), truncating",
+            hard_cap_words, len(matches),
         )
-        return text[:hard_cap] + " ... [truncated]"
+        return (
+            f"{text[:cut_pos].rstrip()}\n"
+            f"... [truncated by system, cut at {hard_cap_words} words]"
+        )
+    if len(text) > hard_cap_chars:  # P1 silent secondary safety net
+        logger.warning(
+            "Cycle decision exceeded char floor %d (got %d, words=%d), "
+            "silent truncating",
+            hard_cap_chars, len(text), len(matches),
+        )
+        return text[:hard_cap_chars] + " ... [truncated]"
     return text
 
 

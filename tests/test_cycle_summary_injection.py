@@ -2,7 +2,8 @@
 
 Helpers under test live in `src/cli/app.py`:
   - _format_relative_time(now, then) -> "N min ago" etc.
-  - _truncate_decision(text, hard_cap) -> str (WARNING log on truncation)
+  - _count_words(text) -> int (whitespace-split, wc -w convention; T1)
+  - _truncate_decision(text, hard_cap_words, hard_cap_chars) -> str (T2 D1; word-aware + silent secondary char floor)
   - _fetch_recent_summaries(engine, session_id, n) -> list[CycleSummary]
   - _render_recent_summaries(summaries, now) -> str
 """
@@ -65,37 +66,129 @@ def test_format_relative_time_handles_naive_datetime_from_sqlite():
     assert _format_relative_time(now, naive_then) == "8 min ago"
 
 
-def test_truncate_decision_below_hard_cap_returns_unchanged():
-    """T2.4-pre (R2-8d): text ≤ hard_cap (4000) returns unchanged, no log."""
+def test_truncate_decision_below_word_cap_returns_unchanged():
+    """T2.1 (R2-Next-A): word count ≤ cap (700) returns unchanged, no log."""
     from src.cli.app import _truncate_decision
 
-    text = "x" * 500
+    text = " ".join(["word"] * 500)  # 500 words, well under 700
     assert _truncate_decision(text) == text
 
 
-def test_truncate_decision_above_hard_cap_truncates_with_marker_and_warning(caplog):
-    """T2.3 + T2.5 (R2-8d): n > hard_cap → text[:4000] + ' ... [truncated]' + WARNING."""
+def test_truncate_decision_above_word_cap_truncates_with_marker_and_warning(caplog):
+    """T2.2 (R2-Next-A): word count > cap → text cut at word boundary +
+    standalone-line marker + WARNING log."""
     from src.cli.app import _truncate_decision
 
-    text = "x" * 4500
+    text = " ".join(["word"] * 800)  # 800 words, over 700 cap
     with caplog.at_level(logging.WARNING, logger="src.cli.app"):
         result = _truncate_decision(text)
-    assert result.endswith(" ... [truncated]")
-    assert result.startswith("x" * 4000)  # exactly hard_cap chars before marker
+    # Marker on its own line, includes cap value
+    assert result.endswith("\n... [truncated by system, cut at 700 words]")
+    # Body before marker has exactly 700 words
+    body = result.rsplit("\n... [truncated", 1)[0]
+    assert len(body.split()) == 700
+    # Word-aware boundary preserves token integrity (no mid-word cut)
+    assert all(w == "word" for w in body.split())
+    # WARNING log mentions word units
     assert any(
-        "exceeded hard cap 4000" in r.message and r.levelno == logging.WARNING
+        "exceeded hard cap 700 words" in r.message and r.levelno == logging.WARNING
         for r in caplog.records
     )
 
 
-def test_truncate_decision_does_not_truncate_at_exactly_hard_cap():
-    """Boundary: n == hard_cap (4000) → no truncation."""
+def test_truncate_decision_does_not_truncate_at_exactly_word_cap():
+    """T2.3 (R2-Next-A): boundary — exactly 700 words → no truncation."""
     from src.cli.app import _truncate_decision
 
-    text = "x" * 4000
+    text = " ".join(["word"] * 700)
     result = _truncate_decision(text)
     assert result == text
-    assert not result.endswith("[truncated]")
+    assert "[truncated" not in result
+
+
+def test_truncate_marker_uses_constant_value():
+    """T2.4 (R2-Next-A drift guard): marker text contains the literal
+    `cut at {N} words` matching CYCLE_DECISION_WORD_CAP. Renaming or
+    re-valuing the constant must update the marker — this test catches
+    drift."""
+    from src.cli.app import _truncate_decision
+    from src.agent.persona import CYCLE_DECISION_WORD_CAP
+
+    text = " ".join(["word"] * (CYCLE_DECISION_WORD_CAP + 50))
+    result = _truncate_decision(text)
+    assert f"cut at {CYCLE_DECISION_WORD_CAP} words" in result
+
+
+def test_truncate_marker_on_standalone_newline():
+    """T2.5 (R2-Next-A): marker is on its own line (preceded by `\\n`),
+    not inline with truncated body. Visual standalone makes it obvious
+    to the agent that content was cut here."""
+    from src.cli.app import _truncate_decision
+
+    text = " ".join(["word"] * 800)
+    result = _truncate_decision(text)
+    assert "\n... [truncated" in result, \
+        "marker must be preceded by newline (standalone line)"
+
+
+def test_truncate_word_boundary_does_not_split_token():
+    """T2.6 (R2-Next-A): word-boundary slice preserves token integrity.
+    With 800 long tokens, cap at 700, body must contain exactly 700
+    intact tokens — never a partial word."""
+    from src.cli.app import _truncate_decision
+
+    long_word = "supercalifragilisticexpialidocious"  # 34 chars
+    text = " ".join([long_word] * 800)
+    result = _truncate_decision(text)
+    body = result.rsplit("\n... [truncated", 1)[0]
+    tokens = body.split()
+    assert len(tokens) == 700
+    assert all(t == long_word for t in tokens), \
+        "all tokens must be intact (no mid-word slice)"
+
+
+def test_truncate_pathological_single_token_falls_back_to_char_floor(caplog):
+    """T2.7 (R2-Next-A P1 secondary): when the input is a single
+    pathological token (no whitespace) far over the char floor, the
+    word-cap path does NOT fire (1 word < 700) and the silent secondary
+    char floor activates with legacy `[truncated]` marker.
+    Tests the P1 belt-and-suspenders for `\\S+`-bypass cases."""
+    from src.cli.app import _truncate_decision
+    from src.agent.persona import CYCLE_DECISION_CHAR_HARD_FLOOR
+
+    text = "x" * (CYCLE_DECISION_CHAR_HARD_FLOOR + 500)  # 8500 chars, 1 word
+    with caplog.at_level(logging.WARNING, logger="src.cli.app"):
+        result = _truncate_decision(text)
+    # Secondary path uses legacy marker (silent — not "truncated by system")
+    assert result.endswith(" ... [truncated]")
+    assert "by system" not in result, \
+        "secondary char floor must NOT use agent-facing word-cap marker"
+    # Body sliced at char floor exactly
+    body = result[:-len(" ... [truncated]")]
+    assert len(body) == CYCLE_DECISION_CHAR_HARD_FLOOR
+    # WARNING log mentions char path + words=1 diagnostic
+    assert any(
+        "exceeded char floor" in r.message and "words=1" in r.message
+        for r in caplog.records
+    )
+
+
+def test_truncate_word_path_takes_precedence_over_char_floor():
+    """T2.8 (R2-Next-A P1 secondary): when input exceeds BOTH word cap
+    AND char floor, word-cap path wins (it's checked first). Marker is
+    word-cap form, not legacy form."""
+    from src.cli.app import _truncate_decision
+
+    # 800 words, each "word" is 12 chars + 1 space = 800*13 = 10400 chars
+    # Both caps exceeded, but word path checked first
+    text = " ".join(["wordwordword"] * 800)
+    assert len(text) > 8000  # above char floor
+    assert len(text.split()) == 800  # above word cap
+    result = _truncate_decision(text)
+    # Word-cap marker, NOT legacy marker
+    assert "cut at 700 words" in result
+    assert not result.endswith(" ... [truncated]"), \
+        "word-cap path should win — not legacy marker"
 
 
 # ─── R2-Next-A: _count_words helper (T1) ───
@@ -392,25 +485,26 @@ def test_render_uses_absolute_and_relative_time():
     assert "2026-05-06 11:00 UTC (1 hour ago)" in out
 
 
-def test_render_truncates_decision_above_hard_cap_via_truncate_decision(caplog):
-    """T2.3 + T2.5 (R2-8d): decisions > 4000 chars are hard-truncated in the block."""
+def test_render_truncates_decision_above_word_cap_via_truncate_decision(caplog):
+    """T2.9 (R2-Next-A): decisions > 700 words are word-truncated in
+    the rendered block; marker on standalone line."""
     from src.cli.app import _render_recent_summaries
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
-    huge = "y" * 4500
+    huge = " ".join(["wordy"] * 800)  # 800 words
     s = _make_summary(
         "abcdef01", "scheduled", huge,
         datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
     )
     with caplog.at_level(logging.WARNING, logger="src.cli.app"):
         out = _render_recent_summaries([s], now)
-    assert " ... [truncated]" in out
-    # WARNING raised by _truncate_decision should be visible
-    assert any("exceeded hard cap" in r.message for r in caplog.records)
+    assert "\n... [truncated by system, cut at 700 words]" in out
+    assert any("exceeded hard cap 700 words" in r.message for r in caplog.records)
 
 
 def test_render_keeps_full_decision_below_cap():
-    """T2.4 (R2-8d): ≤ HARD_CAP (4000) chars, no truncation marker."""
+    """T2.10 (R2-Next-A): under both word cap (1 word ≤ 700) and char
+    floor (800 chars ≤ 8000), no truncation marker; body preserved."""
     from src.cli.app import _render_recent_summaries
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
