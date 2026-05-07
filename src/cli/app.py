@@ -243,8 +243,11 @@ def _render_recent_summaries(
     Returns "" if list is empty (caller skips header append on first cycle).
     Sorts by (created_at, id) ASC so the reader sees oldest → newest naturally
     (review F4: id tie-breaker keeps same-timestamp ordering stable).
-    Each block is `[cycle <8char> · <trigger> · <UTC> (<ago>)]\n<body>` joined
-    by blank lines under one header.
+
+    R2-Next-A D2: each per-prior header includes `· {N} words` showing the
+    ORIGINAL word count (pre-truncation). Pairs with D1 marker and A3
+    persona text — agent compares header N vs the 700-word cap to detect
+    over-budget priors and self-titrate.
     """
     if not summaries:
         return ""
@@ -254,9 +257,11 @@ def _render_recent_summaries(
         cycle_id_short = s.cycle_id[:8]
         utc_str = s.created_at.strftime("%Y-%m-%d %H:%M UTC")
         ago = _format_relative_time(now, s.created_at)
+        word_count = _count_words(s.decision or "")  # R2-Next-A D2
         body = _truncate_decision(s.decision)
         blocks.append(
-            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} ({ago})]\n{body}"
+            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} "
+            f"({ago}) · {word_count} words]\n{body}"
         )
 
     header = "Your prior cycle summaries (most recent N=3, from this session):"

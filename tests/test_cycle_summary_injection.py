@@ -441,12 +441,14 @@ def test_render_returns_empty_string_for_empty_list():
 
 
 def test_render_includes_header_and_one_block():
-    """Single summary → header + one block formatted per spec §3.6."""
+    """T3.1 (R2-Next-A): single summary → header + one block with
+    word count in the per-prior header (5-field format)."""
     from src.cli.app import _render_recent_summaries
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    body = "Stance: Holding long, thesis intact."
     s = _make_summary(
-        "a3f2c1d8b", "scheduled", "Stance: Holding long, thesis intact.",
+        "a3f2c1d8b", "scheduled", body,
         datetime(2026, 5, 6, 11, 52, 0, tzinfo=timezone.utc),
     )
 
@@ -454,35 +456,41 @@ def test_render_includes_header_and_one_block():
     assert out.startswith(
         "Your prior cycle summaries (most recent N=3, from this session):"
     )
-    assert "[cycle a3f2c1d8 · scheduled · 2026-05-06 11:52 UTC (8 min ago)]" in out
-    assert "Stance: Holding long, thesis intact." in out
+    # 5-field header: cycle · trigger · UTC (ago) · N words
+    assert (
+        "[cycle a3f2c1d8 · scheduled · 2026-05-06 11:52 UTC (8 min ago) "
+        "· 5 words]" in out
+    ), f"5-field header missing in output:\n{out}"
+    assert body in out
 
 
 def test_render_truncates_cycle_id_to_8_chars():
-    """T2.1: cycle_id is sliced to [:8] in the block header (full UUIDs are long)."""
+    """T3.2 (R2-Next-A): cycle_id sliced to [:8] in 5-field block header."""
     from src.cli.app import _render_recent_summaries
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
     s = _make_summary(
-        "a3f2c1d8b9c0d1e2", "alert", "body",
+        "a3f2c1d8b9c0d1e2", "alert", "body word",
         datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
     )
     out = _render_recent_summaries([s], now)
     assert "[cycle a3f2c1d8 ·" in out
     assert "a3f2c1d8b9" not in out  # only first 8
+    # 5-field header still well-formed
+    assert "· 2 words]" in out
 
 
 def test_render_uses_absolute_and_relative_time():
-    """T2.2: header line is '<UTC> (<ago>)' format."""
+    """T3.3 (R2-Next-A): header format `<UTC> (<ago>) · N words`."""
     from src.cli.app import _render_recent_summaries
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
     s = _make_summary(
-        "abcdef01", "scheduled", "body",
+        "abcdef01", "scheduled", "body single",  # 2 words
         datetime(2026, 5, 6, 11, 0, 0, tzinfo=timezone.utc),
     )
     out = _render_recent_summaries([s], now)
-    assert "2026-05-06 11:00 UTC (1 hour ago)" in out
+    assert "2026-05-06 11:00 UTC (1 hour ago) · 2 words]" in out
 
 
 def test_render_truncates_decision_above_word_cap_via_truncate_decision(caplog):
@@ -543,3 +551,60 @@ def test_render_orders_chronologically_oldest_first():
     pos_mid = out.index("middle22")
     pos_new = out.index("newest11")
     assert pos_old < pos_mid < pos_new
+
+
+def test_header_shows_original_word_count_for_truncated_prior(caplog):
+    """T3.4 (R2-Next-A D2): when a prior is over-cap, the header word
+    count is the ORIGINAL count (pre-truncation), not the truncated
+    body count. Agent compares header N vs cap to learn 'I exceeded
+    the cap by X words'."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    huge = " ".join(["word"] * 879)  # 879 words, will be cut to 700
+    s = _make_summary(
+        "abcdef01", "scheduled", huge,
+        datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
+    )
+    with caplog.at_level(logging.WARNING, logger="src.cli.app"):
+        out = _render_recent_summaries([s], now)
+    # Header shows ORIGINAL 879, not truncated 700
+    assert "· 879 words]" in out
+    # Body still has the word-cap marker
+    assert "\n... [truncated by system, cut at 700 words]" in out
+
+
+def test_header_word_count_matches_count_words_helper():
+    """T3.5 (R2-Next-A D2 drift guard): header word count must equal
+    `_count_words(s.decision)` exactly. Defends against future changes
+    that compute count via a different convention."""
+    from src.cli.app import _render_recent_summaries, _count_words
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    body = "| - Position | Entry: 81,985 | SL: 81,550 |"
+    expected_count = _count_words(body)
+    s = _make_summary(
+        "abcdef01", "scheduled", body,
+        datetime(2026, 5, 6, 11, 55, 0, tzinfo=timezone.utc),
+    )
+    out = _render_recent_summaries([s], now)
+    assert f"· {expected_count} words]" in out
+
+
+def test_header_word_count_present_for_each_of_three_priors():
+    """T3.6 (R2-Next-A D2): in N=3 priors, every prior block has a
+    word count in its 5-field header."""
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    summaries = [
+        _make_summary(
+            f"cycle{i:03d}", "scheduled", f"body {i} body",
+            datetime(2026, 5, 6, 11, 50 + i, 0, tzinfo=timezone.utc),
+            sid=i,
+        )
+        for i in range(3)
+    ]
+    out = _render_recent_summaries(summaries, now)
+    # Each block has `· 3 words]` (each body has 3 tokens)
+    assert out.count("· 3 words]") == 3
