@@ -158,6 +158,47 @@ def _truncate_decision(
     return text
 
 
+def _render_empty_decision_body(execution_status: str) -> str:
+    """Render system-generated body for cycles that left no decision summary.
+
+    Three known statuses (internal branching, but agent-facing text exposes
+    NO schema field names — agent reads natural language only):
+      - 'ok' + NULL/empty decision: defensive branch — cycle ran successfully
+        but agent emitted no final message text (rare; pydantic-ai
+        `result.output` can be "" or None when agent only emits tool calls
+        without a final TextPart)
+      - 'retry_exhausted': all retry attempts failed; partial trade_actions
+        may have committed before abort
+      - 'usage_limit_exceeded': UsageLimitExceeded raised mid-cycle; partial
+        trade_actions may have committed
+
+    `retry_exhausted` and `usage_limit_exceeded` share identical agent-facing
+    text (D9): the agent's response to either is the same — re-verify state.
+    Status differentiation is a developer-layer concern (DB / cycle log).
+
+    Unknown statuses fall through to a fixed fallback string for forward
+    compatibility with future execution_status enum extensions; the status
+    value is NOT interpolated into the agent-facing text (would expose schema
+    artifact + open prompt-injection surface).
+
+    Note: this function returns a system-generated body inserted into the
+    priors block in place of agent-authored decision content. Length-budget
+    accounting (R2-Next-A D2) tracks agent decision length only; system
+    bodies are not counted in the per-prior word_count header (header is
+    shortened to omit the `· N words` segment when decision is NULL).
+    """
+    if execution_status == "ok":
+        return "(This cycle did not leave a summary.)"
+    if execution_status in ("retry_exhausted", "usage_limit_exceeded"):
+        return (
+            "⚠️ The previous cycle did not complete normally. Some actions "
+            "may have already taken effect. Please verify the current state "
+            "of your position, pending orders, and alerts before deciding "
+            "what to do."
+        )
+    return "(The previous cycle ended in an unexpected state.)"
+
+
 @dataclass(frozen=True)
 class CycleSummary:
     """Snapshot of an AgentCycle row used for cross-cycle context injection.

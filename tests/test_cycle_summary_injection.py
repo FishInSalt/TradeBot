@@ -608,3 +608,55 @@ def test_header_word_count_present_for_each_of_three_priors():
     out = _render_recent_summaries(summaries, now)
     # Each block has `· 3 words]` (each body has 3 tokens)
     assert out.count("· 3 words]") == 3
+
+
+def test_render_empty_decision_body_ok():
+    """T-FP14.4 (AC-7, F-P14 D9): ok+NULL → `(This cycle did not leave a summary.)`.
+
+    Defensive branch: pydantic-ai `result.output` can rarely be empty when
+    agent emits only tool calls without a final TextPart.
+    """
+    from src.cli.app import _render_empty_decision_body
+    assert _render_empty_decision_body("ok") == \
+        "(This cycle did not leave a summary.)"
+
+
+def test_render_empty_decision_body_retry_exhausted():
+    """T-FP14.5 (AC-8, F-P14 D9.a/D9.b): retry_exhausted →
+    ⚠️ + agent-native verify hint (functional dim, no schema/tool name leak).
+    """
+    from src.cli.app import _render_empty_decision_body
+    body = _render_empty_decision_body("retry_exhausted")
+    # positive: agent-facing functional content
+    assert "⚠️" in body
+    assert "did not complete normally" in body
+    assert "position" in body
+    assert "pending orders" in body
+    assert "alerts" in body
+    assert "verify" in body
+    # negative: schema artifact must NOT leak into agent prompt
+    assert "retry_exhausted" not in body
+    assert "get_position" not in body
+    assert "get_open_orders" not in body
+    assert "get_active_alerts" not in body
+
+
+def test_render_empty_decision_body_usage_limit_exceeded():
+    """T-FP14.6 (AC-9, F-P14 D9): usage_limit_exceeded → identical body
+    as retry_exhausted (agent's response to either is the same).
+    """
+    from src.cli.app import _render_empty_decision_body
+    body_retry = _render_empty_decision_body("retry_exhausted")
+    body_ulx = _render_empty_decision_body("usage_limit_exceeded")
+    assert body_retry == body_ulx  # exact equality (D9)
+    assert "usage_limit_exceeded" not in body_ulx  # negative: no schema leak
+
+
+def test_render_empty_decision_body_unknown_fallback():
+    """T-FP14.7 (AC-10, F-P14 D10): forward compat — unknown status →
+    fixed fallback string, value NOT interpolated (防 prompt 污染)."""
+    from src.cli.app import _render_empty_decision_body
+    body = _render_empty_decision_body("future_unknown_status")
+    assert body == "(The previous cycle ended in an unexpected state.)"
+    # negative: status value must NOT be interpolated
+    assert "future_unknown_status" not in body
