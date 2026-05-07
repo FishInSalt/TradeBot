@@ -767,3 +767,83 @@ def test_render_recent_summaries_null_decision_header_no_word_count():
     # Sanity: body contains the system-generated forensic hint
     assert "⚠️" in output
     assert "did not complete normally" in output
+
+
+async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mocker):
+    """T-FP14.9 (AC-12, F-P14 drift guard): retry_exhausted write path
+    must keep `reasoning=None`. Single-responsibility regression guard:
+    agent_cycles.reasoning is reserved for agent-authored thinking
+    content; system never injects derivative summaries (e.g., a trade_actions
+    rollup) into this column. Anchored on function `run_agent_cycle` retry-
+    exhausted branch (write coordinates: execution_status='retry_exhausted'
+    + decision=None + reasoning=None) — not on a fixed source line number.
+
+    Mocks `agent.run` to raise RuntimeError 3 times → triggers the
+    retry-exhausted branch → DB writes AgentCycle(reasoning=None,
+    decision=None, execution_status='retry_exhausted'). Test reads
+    back the row and asserts reasoning IS None.
+    """
+    from unittest.mock import AsyncMock
+    from sqlalchemy import select
+    from src.cli.app import run_agent_cycle, TokenBudget
+    from src.storage.database import get_session
+    from src.storage.models import AgentCycle
+
+    # Patch asyncio.sleep to no-op so 3 retries don't take ~7 seconds
+    monkeypatch.setattr("src.cli.app.asyncio.sleep", AsyncMock(return_value=None))
+
+    engine = await _make_engine_with_session("sess-fp14-9")
+
+    # Mock agent — agent.run raises RuntimeError every attempt
+    agent = mocker.Mock()
+    agent.run = AsyncMock(side_effect=RuntimeError("synthetic LLM failure"))
+
+    # Mock deps — must cover everything read BEFORE retry loop, not just
+    # the retry-exhausted DB write. Prompt build (cli/app.py:399-438) reads
+    # deps.symbol, deps.timeframe; deps.memory.format_for_prompt() is awaited.
+    deps = mocker.Mock()
+    deps.session_id = "sess-fp14-9"
+    deps.symbol = "BTC/USDT:USDT"
+    deps.timeframe = "5m"
+    deps.memory = mocker.Mock()
+    deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+
+    budget = TokenBudget(daily_max=1_000_000)
+
+    # Patch capture helpers. Note: _capture_trigger_context is SYNC (def, not
+    # async def — see src/services/cycle_capture.py:24); call site cli/app.py:393
+    # has no await. AsyncMock here would yield a coroutine assigned to
+    # trigger_context_var, then `json.dumps(coroutine)` at the retry-exhausted
+    # write would TypeError. _capture_state_snapshot IS async (line 394 awaits).
+    monkeypatch.setattr(
+        "src.cli.app._capture_state_snapshot",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        "src.cli.app._capture_trigger_context",
+        mocker.Mock(return_value=None),  # sync — must NOT be AsyncMock
+    )
+
+    # _build_recent_summaries_block runs real SQL but the empty sess-fp14-9
+    # session produces [] → returns "" → no extra patch needed.
+
+    # Run the cycle — should hit retry_exhausted branch (3 RuntimeError → DB write)
+    result = await run_agent_cycle(
+        agent, deps, "scheduled", budget, engine,
+        context=None, model=None, console=None, stats=None,
+    )
+    assert result is None  # retry_exhausted returns None
+
+    # Read back the AgentCycle row
+    async with get_session(engine) as db:
+        rows = (await db.execute(
+            select(AgentCycle).where(AgentCycle.session_id == "sess-fp14-9")
+        )).scalars().all()
+    assert len(rows) == 1, "expected exactly one retry-exhausted forensic row"
+    row = rows[0]
+    assert row.execution_status == "retry_exhausted"
+    assert row.decision is None
+    # The drift guard assertion — write-path single responsibility:
+    assert row.reasoning is None, \
+        "retry_exhausted write path must keep reasoning=None " \
+        "(do NOT inject trade_actions summaries — write-path single responsibility)"
