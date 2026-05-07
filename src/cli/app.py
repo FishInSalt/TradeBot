@@ -207,11 +207,17 @@ class CycleSummary:
     (review F4): fast in-memory tests / rapid sequential inserts can produce
     multiple rows with identical created_at, and SQLite ORDER BY only on
     created_at would be non-deterministic.
+
+    F-P14: `decision` is now Optional — retry_exhausted / usage_limit_exceeded
+    cycles enter the priors list with decision=None and are rendered via
+    `_render_empty_decision_body`. `execution_status` carries the cycle
+    state for render-layer dispatch.
     """
     id: int
     cycle_id: str
     triggered_by: str
-    decision: str
+    decision: str | None
+    execution_status: str
     created_at: datetime
 
 
@@ -244,6 +250,7 @@ async def _fetch_recent_summaries(
                     AgentCycle.cycle_id,
                     AgentCycle.triggered_by,
                     AgentCycle.decision,
+                    AgentCycle.execution_status,
                     AgentCycle.created_at,
                 )
                 .where(
@@ -263,7 +270,8 @@ async def _fetch_recent_summaries(
                 id=r.id,
                 cycle_id=r.cycle_id,
                 triggered_by=r.triggered_by,
-                decision=r.decision or "",
+                decision=r.decision,
+                execution_status=r.execution_status,
                 created_at=r.created_at,
             )
             for r in rows

@@ -423,12 +423,18 @@ async def test_fetch_excludes_cycles_with_null_decision():
 
 # ─────────────────────────── L2 render tests ───────────────────────────
 
-def _make_summary(cycle_id, triggered_by, decision, created_at, sid=1):
-    """Test-only CycleSummary builder."""
+def _make_summary(cycle_id, triggered_by, decision, created_at,
+                  sid=1, execution_status="ok"):
+    """Test-only CycleSummary builder.
+
+    F-P14: execution_status defaults to 'ok' so existing call sites
+    (~10 in this file) remain compatible without per-callsite changes.
+    """
     from src.cli.app import CycleSummary
     return CycleSummary(
         id=sid, cycle_id=cycle_id, triggered_by=triggered_by,
-        decision=decision, created_at=created_at,
+        decision=decision, execution_status=execution_status,
+        created_at=created_at,
     )
 
 
@@ -660,3 +666,19 @@ def test_render_empty_decision_body_unknown_fallback():
     assert body == "(The previous cycle ended in an unexpected state.)"
     # negative: status value must NOT be interpolated
     assert "future_unknown_status" not in body
+
+
+async def test_cycle_summary_execution_status_populated():
+    """T-FP14.2 (AC-5, F-P14): CycleSummary.execution_status filled from query."""
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-fp14-2")
+    # forensic cycle: filter still active in this task — use ok-only;
+    # we'll add a retry_exhausted assertion in Task 5 once filter is removed.
+    await _add_cycle(
+        engine, "sess-fp14-2", "c1",
+        decision="real summary", execution_status="ok",
+    )
+    rows = await _fetch_recent_summaries(engine, "sess-fp14-2", n=3)
+    assert len(rows) == 1
+    assert rows[0].execution_status == "ok"
