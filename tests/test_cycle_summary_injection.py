@@ -718,3 +718,52 @@ async def test_fetch_recent_summaries_includes_retry_exhausted():
     assert rows[0].cycle_id == "c-rx"  # DESC: most recent first
     assert rows[0].execution_status == "retry_exhausted"
     assert rows[0].decision is None
+
+
+def test_render_recent_summaries_ok_cycle_unchanged():
+    """T-FP14.3 (AC-6, F-P14 regression): ok cycle with valid decision
+    renders original 5-field header (· N words) + truncated body. R2-Next-A
+    D2 word count header preserved on the non-NULL branch."""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s = _make_summary(
+        "abc12345", "scheduled", "Some decision body.",
+        now - timedelta(minutes=5), execution_status="ok",
+    )
+    output = _render_recent_summaries([s], now)
+    assert "· 3 words]" in output  # R2-Next-A D2 word count header maintained
+    assert "Some decision body." in output
+
+
+def test_render_recent_summaries_null_decision_header_no_word_count():
+    """T-FP14.8 (AC-11, F-P14): NULL decision row's per-prior header
+    SHORTENS — no `· N words` segment. Visual signal that this row
+    differs from agent-authored priors."""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s = _make_summary(
+        "abc12345", "conditional", None,
+        now - timedelta(minutes=5),
+        execution_status="retry_exhausted",
+    )
+    output = _render_recent_summaries([s], now)
+    # Find the per-prior header line (skip top-level header + blank line)
+    # output structure:
+    #   line 0: "Your prior cycle summaries (most recent N=3, from this session):"
+    #   line 1: ""
+    #   line 2: "[cycle abc12345 · conditional · 2026-... (5 min ago)]"
+    #   line 3: "⚠️ The previous cycle ..."
+    lines = output.split("\n")
+    header_line = lines[2]
+    # NULL decision row: header MUST NOT contain `words]` or `· N words`
+    assert "words]" not in header_line, \
+        f"NULL-decision header should omit word count, got: {header_line!r}"
+    # Sanity: header still has the cycle prefix
+    assert header_line.startswith("[cycle abc12345 · conditional · ")
+    # Sanity: body contains the system-generated forensic hint
+    assert "⚠️" in output
+    assert "did not complete normally" in output

@@ -293,10 +293,14 @@ def _render_recent_summaries(
     Sorts by (created_at, id) ASC so the reader sees oldest → newest naturally
     (review F4: id tie-breaker keeps same-timestamp ordering stable).
 
-    R2-Next-A D2: each per-prior header includes `· {N} words` showing the
-    ORIGINAL word count (pre-truncation). Pairs with D1 marker and A3
-    persona text — agent compares header N vs the 700-word cap to detect
-    over-budget priors and self-titrate.
+    Tri-state per-prior rendering (F-P14):
+      - decision non-NULL (ok cycle, agent-authored): R2-Next-A D2 header
+        includes `· {N} words` with ORIGINAL word count (pre-truncation);
+        body is `_truncate_decision(decision)`.
+      - decision NULL (forensic / ok+empty): header SHORTENS (no word count
+        segment); body is system-generated via `_render_empty_decision_body`
+        keyed on `execution_status`. Length-budget accounting tracks
+        agent-authored content only — system bodies are not counted.
     """
     if not summaries:
         return ""
@@ -306,15 +310,27 @@ def _render_recent_summaries(
         cycle_id_short = s.cycle_id[:8]
         utc_str = s.created_at.strftime("%Y-%m-%d %H:%M UTC")
         ago = _format_relative_time(now, s.created_at)
-        word_count = _count_words(s.decision or "")  # R2-Next-A D2
-        body = _truncate_decision(s.decision)
-        blocks.append(
-            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} "
-            f"({ago}) · {word_count} words]\n{body}"
-        )
 
-    header = "Your prior cycle summaries (most recent N=3, from this session):"
-    return f"{header}\n\n" + "\n\n".join(blocks)
+        if not s.decision:
+            # F-P14 tri-state: NULL decision → shortened header + system body
+            header = (
+                f"[cycle {cycle_id_short} · {s.triggered_by} · "
+                f"{utc_str} ({ago})]"
+            )
+            body = _render_empty_decision_body(s.execution_status)
+        else:
+            # R2-Next-A D2: ok cycle with valid decision — original 5-field header
+            word_count = _count_words(s.decision)
+            header = (
+                f"[cycle {cycle_id_short} · {s.triggered_by} · "
+                f"{utc_str} ({ago}) · {word_count} words]"
+            )
+            body = _truncate_decision(s.decision)
+
+        blocks.append(f"{header}\n{body}")
+
+    header_top = "Your prior cycle summaries (most recent N=3, from this session):"
+    return f"{header_top}\n\n" + "\n\n".join(blocks)
 
 
 async def _build_recent_summaries_block(
