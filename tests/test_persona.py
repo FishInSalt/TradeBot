@@ -567,10 +567,49 @@ def test_cycle_closing_summary_word_cap_matches_constant():
     persona Layer 1 must match CYCLE_DECISION_WORD_CAP. Renaming or
     re-valuing the constant must update the persona text — this test
     catches drift between persona / D1 marker / D2 helper."""
-    import re
     from src.agent.persona import _build_layer1, RuntimeConfig, CYCLE_DECISION_WORD_CAP
 
     layer1 = _build_layer1(RuntimeConfig())
     expected = f"{CYCLE_DECISION_WORD_CAP} words"
     assert expected in layer1, \
         f"persona must mention '{expected}' (matching constant)"
+
+
+def test_word_cap_value_consistent_across_three_channels():
+    """T5.1 (R2-Next-A cross-channel drift guard): the literal value of
+    CYCLE_DECISION_WORD_CAP must propagate to:
+      - persona Layer 1 text "700 words" (A3 channel)
+      - _truncate_decision marker "cut at 700 words" (D1 channel)
+      - D2 channel: _count_words helper uses the same \\S+ convention
+        (asserted indirectly via the helper's behavior; D2 doesn't bake
+        the constant value, it just calls _count_words)
+
+    Renaming or re-valuing the constant must keep all three in sync.
+    This is the final defense against partial migrations.
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig, CYCLE_DECISION_WORD_CAP
+    from src.cli.app import _truncate_decision, _count_words
+
+    cap = CYCLE_DECISION_WORD_CAP
+    expected_phrase = f"{cap} words"
+
+    # A3 channel
+    layer1 = _build_layer1(RuntimeConfig())
+    assert expected_phrase in layer1, \
+        f"persona missing '{expected_phrase}' — A3 channel out of sync"
+
+    # D1 channel: marker must contain "cut at {cap} words"
+    over_cap_text = " ".join(["w"] * (cap + 50))
+    truncated = _truncate_decision(over_cap_text)
+    assert f"cut at {expected_phrase}" in truncated, \
+        f"_truncate_decision marker missing 'cut at {expected_phrase}' " \
+        "— D1 channel out of sync"
+
+    # D2 channel: _count_words convention is \\S+ whitespace runs;
+    # asserted by checking the helper agrees with the marker's measured
+    # count. If the helper used a different convention, the body would
+    # have a different word count than the cap.
+    body = truncated.rsplit("\n... [truncated", 1)[0]
+    assert _count_words(body) == cap, \
+        f"_count_words convention diverged: expected exactly {cap} " \
+        f"words in truncated body, got {_count_words(body)}"
