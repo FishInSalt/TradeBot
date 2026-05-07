@@ -501,18 +501,27 @@ def test_cycle_closing_summary_field_order_delta_before_thesis():
 
 
 def test_cycle_closing_summary_length_guidance_phrases_present():
-    """T-D5: length guidance 4 phrases (词数 ceiling + 内容驱动省略快捷方式)。"""
+    """T-D5 (extended R2-Next-A): length guidance phrases include word
+    ceilings (400/600) AND the new 700-word system cap (A3)."""
     from src.agent.persona import _build_layer1, RuntimeConfig
     layer1 = _build_layer1(RuntimeConfig())
     assert "400 words" in layer1
     assert "never exceeding 600 words" in layer1
+    assert "700 words" in layer1                            # R2-Next-A A3
     assert "single sentence is sufficient" in layer1
     assert "Skip if no relevant observations" in layer1
 
 
 def test_cycle_closing_summary_no_legacy_fiction_or_system_aware_phrases():
-    """T-D4+D5: persona NOT 含 legacy fiction 数字 + 系统机制揭示短语。
-    防全部回滚到 PR #38 形态。"""
+    """T-D4+D5 (R2-Next-A calibrated): persona NOT 含 legacy fiction
+    数字 + retired R2-8d-era system-aware phrases that still apply.
+
+    Note (R2-Next-A): "hard-truncates" was removed from this list — A3
+    deliberately surfaces system mechanic (3-channel feedback signal
+    closes F1 length-loop). Remaining forbidden phrases still defend
+    against R2-8d/PR #38 fiction (chars-based ceilings, target framing,
+    SKIP fallback, summary-centric priming).
+    """
     from src.agent.persona import _build_layer1, RuntimeConfig
     layer1 = _build_layer1(RuntimeConfig())
     forbidden = [
@@ -521,7 +530,7 @@ def test_cycle_closing_summary_no_legacy_fiction_or_system_aware_phrases():
         "~1200",       # D4 撤
         "Aim for",     # D4 撤 wishful target framing
         "is typically 1-3 sentences",  # D5 撤 per-field cap fiction
-        "hard-truncates",              # D5 撤系统机制揭示
+        # "hard-truncates" — retired in R2-Next-A (A3 surfaces system mechanic)
         "## SKIP",                     # D1 不引入 SKIP fallback
         "The summary IS the final response",  # D1 撤 summary-centric priming
         "~4000",       # D5 HARD_CAP 不暴露 (用 "~4000" anchor 而非 bare "4000"
@@ -529,3 +538,39 @@ def test_cycle_closing_summary_no_legacy_fiction_or_system_aware_phrases():
     ]
     for phrase in forbidden:
         assert phrase not in layer1, f"forbidden phrase leaked: {phrase!r}"
+
+
+def test_cycle_closing_summary_explicit_word_cap_anchor():
+    """T-A3.1 (R2-Next-A): persona Layer 1 contains the literal "700
+    words" anchor — the explicit-cap channel of the 3-channel signal
+    stack (paired with D1 marker + D2 header)."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1 = _build_layer1(RuntimeConfig())
+    assert "700 words" in layer1
+
+
+def test_cycle_closing_summary_truncation_consequence_phrase():
+    """T-A3.2 (R2-Next-A): persona Layer 1 explicitly states the
+    consequence of overflow — "lost from prior-cycle context" or
+    similar. The consequence phrase triggers D11 self-reference
+    awareness (priors are read 3.07x/cycle, sim #8). Anti-revert
+    guard against future drift to mechanism-only wording."""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    layer1_lower = _build_layer1(RuntimeConfig()).lower()
+    assert "truncated" in layer1_lower or "lost" in layer1_lower, \
+        "A3 consequence phrase missing — agent must see that overflow " \
+        "loses context to trigger self-correction"
+
+
+def test_cycle_closing_summary_word_cap_matches_constant():
+    """T-A3.3 (R2-Next-A drift guard): the literal "700 words" in
+    persona Layer 1 must match CYCLE_DECISION_WORD_CAP. Renaming or
+    re-valuing the constant must update the persona text — this test
+    catches drift between persona / D1 marker / D2 helper."""
+    import re
+    from src.agent.persona import _build_layer1, RuntimeConfig, CYCLE_DECISION_WORD_CAP
+
+    layer1 = _build_layer1(RuntimeConfig())
+    expected = f"{CYCLE_DECISION_WORD_CAP} words"
+    assert expected in layer1, \
+        f"persona must mention '{expected}' (matching constant)"

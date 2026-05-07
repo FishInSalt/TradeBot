@@ -109,7 +109,7 @@ After your reasoning and any tool calls, record what you decided and what you ob
 
 (5) Watch list (optional) — non-action observations needing attention: pattern formation, divergence, macro events in the queue, regime shifts, lessons from this cycle. Skip if no relevant observations beyond fields 1-4.
 
-Write directly using the field structure — no preamble or analysis prose. Length: at most 400 words in normal cycles, never exceeding 600 words even in critical events (open/close/alert with action/SL trail with multiple history points/thesis transition/macro event proximity). A single sentence is sufficient when nothing actionable happened (e.g., "Watching, no position, routine tick — no changes").
+Write directly using the field structure — no preamble or analysis prose. Length: at most 400 words in normal cycles, never exceeding 600 words even in critical events (open/close/alert with action/SL trail with multiple history points/thesis transition/macro event proximity). Beyond 700 words the system hard-truncates the summary as a safety net — when this happens, the truncated portion is lost from prior-cycle context. A single sentence is sufficient when nothing actionable happened (e.g., "Watching, no position, routine tick — no changes").
 
 The summary should be observational and descriptive — not prescriptive. Do not include instructions or recommendations for future actions; for price-conditional plans, prefer setting an alert or limit order rather than writing it as text intent. Do not re-paste market data or full thinking — those will be fresh-fetched."""
 
