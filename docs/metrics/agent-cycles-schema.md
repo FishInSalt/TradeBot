@@ -78,3 +78,36 @@ R2-7 spec §8 已为 R2-8 (P1-7 展示 MVP + N10 reasoning 注入) 提供完整 
 
 R2-7 PR 内 display.py 不改 param 名（保留 trigger_type / agent_output / tokens_used 为渲染层标签）；
 param rename 由 R2-8 PR 决定。
+
+## SQL pattern for 5-field anchor detection (R2-Next-A A2)
+
+5-field summary anchors may appear in markdown variants. SQLite default
+没有 `REGEXP` operator（需 UDF 注册），所以用 multi-LIKE union 覆盖 4
+个常见 markdown variants：
+
+```sql
+-- Multi-LIKE pattern (executable on default SQLite)
+SELECT * FROM agent_cycles
+WHERE decision LIKE '%(4) Thesis%'        -- plain or bold-wrap-whole `**(4) Thesis & ...**`
+   OR decision LIKE '%(4) **Thesis%'      -- bold-inner-only `(4) **Thesis**`
+   OR decision LIKE '%**(4) Thesis%'      -- bold-prefix `**(4) Thesis`
+   OR decision LIKE '%**(4)** Thesis%';   -- bold-tag-only `**(4)** Thesis`
+
+-- Narrow (legacy R2-8b/R2-8d, do not use): misses bold-inner variant
+SELECT * FROM agent_cycles
+WHERE decision LIKE '%(4) Thesis%';
+```
+
+复杂正则需求（如 case-insensitive / 任意空白匹配）建议走 Python helper：
+
+```python
+import re, sqlite3
+PATTERN = re.compile(r'\(4\)\s*\*?\*?\s*Thesis', re.IGNORECASE)
+con = sqlite3.connect('data/tradebot.db')
+cycles = con.execute("SELECT cycle_id, decision FROM agent_cycles").fetchall()
+matched = [c for c in cycles if c[1] and PATTERN.search(c[1])]
+```
+
+W2 sim #8 实测（177 ok cycles，其中含 5-field anchor 的 171 cycles）：
+narrow LIKE 命中 100 / 171 = 58.5%（漏 41.5%，71/171 是 bold-inner-only 等变体）；
+multi-LIKE 4-variant union 命中 171 / 171（0 missing / 0 extra vs Python regex baseline）。
