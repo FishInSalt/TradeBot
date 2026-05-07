@@ -719,17 +719,6 @@ async def _invoke_place_limit_order(deps, mocker):
     return await place_limit_order(deps, "neutral", 64000.0, 10.0, 5, reasoning="test")
 
 
-@pytest.mark.asyncio
-async def test_save_memory_fact_only():
-    """save_memory output (typical save + neutral content) must not emit banned subjective words."""
-    from src.agent.tools_memory import save_memory
-    deps = MockDeps()
-    deps.memory.save_long_term = AsyncMock(return_value=None)
-    output = await save_memory(deps, "lesson", "Reduced position size after observing slippage", 0.5)
-    hits = _scan(output)
-    assert hits == [], f"save_memory emitted banned words: {hits}"
-
-
 async def _invoke_place_limit_order_happy(deps, mocker):
     """F-P13: happy path through create_order — covers new multi-line `Note:` return."""
     from src.agent.tools_execution import place_limit_order
@@ -747,6 +736,17 @@ async def _invoke_place_limit_order_happy(deps, mocker):
     return await place_limit_order(
         deps, "long", 80000.0, 10.0, 5, reasoning="test entry",
     )
+
+
+@pytest.mark.asyncio
+async def test_save_memory_fact_only():
+    """save_memory output (typical save + neutral content) must not emit banned subjective words."""
+    from src.agent.tools_memory import save_memory
+    deps = MockDeps()
+    deps.memory.save_long_term = AsyncMock(return_value=None)
+    output = await save_memory(deps, "lesson", "Reduced position size after observing slippage", 0.5)
+    hits = _scan(output)
+    assert hits == [], f"save_memory emitted banned words: {hits}"
 
 
 @pytest.mark.asyncio

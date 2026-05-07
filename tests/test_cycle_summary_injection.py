@@ -751,14 +751,16 @@ def test_render_recent_summaries_null_decision_header_no_word_count():
         execution_status="retry_exhausted",
     )
     output = _render_recent_summaries([s], now)
-    # Find the per-prior header line (skip top-level header + blank line)
-    # output structure:
-    #   line 0: "Your prior cycle summaries (most recent N=3, from this session):"
-    #   line 1: ""
-    #   line 2: "[cycle abc12345 · conditional · 2026-... (5 min ago)]"
-    #   line 3: "⚠️ The previous cycle ..."
+    # Find the per-prior header line by content match (robust to top-level
+    # header / blank-line layout drift; reviewer note: hard `lines[2]` index
+    # would break if N=3 priors render adds a separator line in the future).
     lines = output.split("\n")
-    header_line = lines[2]
+    header_line = next(
+        (l for l in lines if l.startswith("[cycle abc12345 ")),
+        None,
+    )
+    assert header_line is not None, \
+        f"per-prior header line not found in output:\n{output!r}"
     # NULL decision row: header MUST NOT contain `words]` or `· N words`
     assert "words]" not in header_line, \
         f"NULL-decision header should omit word count, got: {header_line!r}"
@@ -846,4 +848,75 @@ async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mock
     # The drift guard assertion — write-path single responsibility:
     assert row.reasoning is None, \
         "retry_exhausted write path must keep reasoning=None " \
+        "(do NOT inject trade_actions summaries — write-path single responsibility)"
+
+
+async def test_usage_limit_exceeded_writes_null_reasoning_unchanged(monkeypatch, mocker):
+    """T-FP14.10 (sibling of T-FP14.9 per ultrareview Important #2): the
+    usage_limit_exceeded write path is the second forensic branch in
+    `run_agent_cycle` — both branches share spec D8 invariant
+    (agent_cycles.reasoning is reserved for agent-authored thinking content;
+    system never injects derivative summaries). T-FP14.9 covers the
+    retry_exhausted branch; this test covers the parallel UsageLimitExceeded
+    branch. Same anchoring philosophy: write coordinates
+    (execution_status='usage_limit_exceeded' + decision=None + reasoning=None),
+    not source line numbers.
+    """
+    from unittest.mock import AsyncMock
+    from sqlalchemy import select
+    from pydantic_ai.exceptions import UsageLimitExceeded
+    from src.cli.app import run_agent_cycle, TokenBudget
+    from src.storage.database import get_session
+    from src.storage.models import AgentCycle
+
+    # asyncio.sleep no-op (defensive — UsageLimitExceeded path has no retry
+    # delay so this is mostly belt-and-braces)
+    monkeypatch.setattr("src.cli.app.asyncio.sleep", AsyncMock(return_value=None))
+
+    engine = await _make_engine_with_session("sess-fp14-10")
+
+    # Mock agent — agent.run raises UsageLimitExceeded once → first-attempt
+    # exception is NOT retried (caught by `except UsageLimitExceeded` at
+    # cli/app.py:519, which writes forensic AgentCycle and returns None)
+    agent = mocker.Mock()
+    agent.run = AsyncMock(side_effect=UsageLimitExceeded("synthetic ULX"))
+
+    # Mock deps — same shape as T-FP14.9 (deps.memory.format_for_prompt
+    # awaited before retry loop; deps.symbol/timeframe in prompt f-string).
+    deps = mocker.Mock()
+    deps.session_id = "sess-fp14-10"
+    deps.symbol = "BTC/USDT:USDT"
+    deps.timeframe = "5m"
+    deps.memory = mocker.Mock()
+    deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+
+    budget = TokenBudget(daily_max=1_000_000)
+
+    # Capture helpers — same sync/async pitfall guards as T-FP14.9.
+    monkeypatch.setattr(
+        "src.cli.app._capture_state_snapshot",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        "src.cli.app._capture_trigger_context",
+        mocker.Mock(return_value=None),  # sync — must NOT be AsyncMock
+    )
+
+    result = await run_agent_cycle(
+        agent, deps, "scheduled", budget, engine,
+        context=None, model=None, console=None, stats=None,
+    )
+    assert result is None  # usage_limit_exceeded returns None
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(
+            select(AgentCycle).where(AgentCycle.session_id == "sess-fp14-10")
+        )).scalars().all()
+    assert len(rows) == 1, "expected exactly one usage_limit_exceeded forensic row"
+    row = rows[0]
+    assert row.execution_status == "usage_limit_exceeded"
+    assert row.decision is None
+    # The drift guard assertion — write-path single responsibility:
+    assert row.reasoning is None, \
+        "usage_limit_exceeded write path must keep reasoning=None " \
         "(do NOT inject trade_actions summaries — write-path single responsibility)"

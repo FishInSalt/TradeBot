@@ -237,8 +237,8 @@ async def _fetch_recent_summaries(
 
     Returns [] on:
       - First cycle in session (no prior rows)
-      - DB error (any exception logged at WARNING + empty list — D-U4-a
-        fail-isolated; cycle must continue)
+      - DB error (any exception logged at WARNING + stack trace via
+        exc_info=True + empty list — D-U4-a fail-isolated; cycle must continue)
 
     Ordering: created_at DESC, id DESC (review F4 tie-breaker for stability).
     Caller (`_render_recent_summaries`) re-sorts ASC for chronological reading
@@ -339,8 +339,10 @@ async def _build_recent_summaries_block(
     """Fetch + render summaries with a fail-isolated boundary.
 
     Returns "" on:
-      - empty fetch (first cycle / forensic-only history / NULL decision filter)
-      - any exception during fetch OR render OR format (logged at WARNING)
+      - empty fetch (first cycle in session — F-P14: forensic / NULL decision
+        cycles are no longer filtered out, they render via _render_empty_decision_body)
+      - any exception during fetch OR render OR format (logged at WARNING with
+        stack trace via exc_info=True)
 
     Review F3: this outer wrap covers the entire injection pipeline, not just
     the DB query layer. _fetch_recent_summaries keeps its own try/except as
