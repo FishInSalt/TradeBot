@@ -98,6 +98,59 @@ def test_truncate_decision_does_not_truncate_at_exactly_hard_cap():
     assert not result.endswith("[truncated]")
 
 
+# ─── R2-Next-A: _count_words helper (T1) ───
+
+def test_count_words_empty():
+    """T1.1 (R2-Next-A): empty string → 0."""
+    from src.cli.app import _count_words
+    assert _count_words("") == 0
+
+
+def test_count_words_whitespace_only():
+    """T1.2 (R2-Next-A): whitespace-only string → 0 (no \\S+ runs)."""
+    from src.cli.app import _count_words
+    assert _count_words("   \t\n  ") == 0
+
+
+def test_count_words_single_token():
+    """T1.3 (R2-Next-A): single token → 1, regardless of internal punct."""
+    from src.cli.app import _count_words
+    assert _count_words("hello") == 1
+    assert _count_words("hello-world") == 1  # hyphen NOT split (matches wc -w)
+    assert _count_words("81,985.40") == 1    # comma/dot NOT split
+    assert _count_words("don't") == 1        # apostrophe NOT split
+
+
+def test_count_words_mixed_whitespace():
+    """T1.4 (R2-Next-A): tabs, newlines, multi-space all delimit tokens."""
+    from src.cli.app import _count_words
+    assert _count_words("a\tb\nc d") == 4
+    assert _count_words("  hello   world  ") == 2
+
+
+def test_count_words_markdown_delimiters_count_as_words():
+    """T1.5 (R2-Next-A): markdown `|`, `---`, `—` count as words.
+    Naturally penalizes table-format inflation in agent's word budget
+    without forcing a format change. See spec §4.3 + §3 Q1 (38.4% of
+    cycles use markdown table delimiters)."""
+    from src.cli.app import _count_words
+    assert _count_words("| - Position |") == 4    # |, -, Position, |
+    assert _count_words("|---|---|") == 1          # one continuous run
+
+
+def test_count_words_unicode_handling():
+    """T1.6 (R2-Next-A spec §9 risk mitigation): Unicode boundaries —
+    emoji and CJK. `\\S+` is Unicode-aware in Python re; emoji and
+    Chinese chars without whitespace count as one token. Matches helper
+    design — Unicode-dense content is penalized the same way markdown
+    noise is (no special handling, deterministic by whitespace only)."""
+    from src.cli.app import _count_words
+    assert _count_words("hello 😀 world") == 3
+    assert _count_words("中文") == 1                    # no whitespace = 1 word
+    assert _count_words("中文 测试") == 2               # space-delimited = 2 words
+    assert _count_words("hello 中文 😀") == 3
+
+
 # ─────────────────────────── L1 fetch tests ───────────────────────────
 
 async def _make_engine_with_session(session_id: str = "sess-r2-8b"):

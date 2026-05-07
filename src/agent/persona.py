@@ -3,10 +3,26 @@ from dataclasses import dataclass
 
 from src.config import PersonaConfig
 
-# R2-8d cycle decision hard cap — silent system safety net. NOT
-# interpolated into persona text (D5: agent reads "never exceeding 600
-# words" ceiling and self-controls; char cap protects against
-# misbehavior). Used only by cli/app.py:_truncate_decision.
+# R2-Next-A: hard cap exposed to agent via three channels:
+#   D1 — _truncate_decision marker text (cli/app.py)
+#   D2 — _render_recent_summaries header word count (cli/app.py)
+#   A3 — persona §Cycle Closing Summary explicit "700 words" mention
+# F1 length-loop closure (vs prior R2-8d D5 silent guardrail).
+CYCLE_DECISION_WORD_CAP = 700
+
+# Silent secondary char floor — defensive against pathological cases
+# where a single `\S+` token is very large (long URL / JSON dump /
+# no-space CJK / `|---|---|` table separator with no internal
+# whitespace), which would bypass the word cap (counted as 1 word).
+# NOT exposed to agent (no 4th channel) — preserves the word-unit
+# primary signal of A3/D1/D2.
+# sim #8 longest single token = 50 chars; max decision = 6131 chars
+# → 8000 gives ~30% headroom over historical max; cap-bypass risk
+# in current behavior is empirically zero, this is future-proofing.
+CYCLE_DECISION_CHAR_HARD_FLOOR = 8000
+
+# Legacy R2-8d constant — kept for one transitional task (T2 removes).
+# DO NOT add new references; use CYCLE_DECISION_WORD_CAP instead.
 CYCLE_DECISION_HARD_CAP = 4000
 
 

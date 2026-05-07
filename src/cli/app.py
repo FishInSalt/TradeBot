@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import signal
 import uuid
 from dataclasses import dataclass
@@ -64,6 +65,24 @@ def _extract_thinking_text(messages) -> str | None:
                 if isinstance(part, ThinkingPart):
                     parts.append(part.content)
     return "\n\n".join(parts) if parts else None
+
+
+_WORD_RE = re.compile(r'\S+')
+
+
+def _count_words(text: str) -> int:
+    """Whitespace-split word count (wc -w convention).
+
+    Single source of truth across:
+      - _truncate_decision (D1: word-cap enforcement)
+      - _render_recent_summaries (D2: priors header signal)
+      - persona drift guards (A3: ceiling consistency)
+
+    Convention: any consecutive non-whitespace run = 1 word. Markdown
+    delimiters (`|`, `---`) count as words — naturally pressures agent
+    toward concise output by penalizing formatting noise.
+    """
+    return len(_WORD_RE.findall(text))
 
 
 def _format_relative_time(now: datetime, then: datetime) -> str:
