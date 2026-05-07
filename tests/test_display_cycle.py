@@ -278,8 +278,14 @@ def test_summarize_adjust_leverage():
 
 
 def test_summarize_place_limit_order():
+    """F-P13: tool return is now multi-line (Note: line appended).
+    summarize_tool regex on display.py:214 matches only first line, so
+    existing single-line summary still extracts correctly."""
     from src.cli.display import summarize_tool
-    content = "Limit order placed: long 0.050000 @ 83000.00, 3x | ID: lmt-789"
+    content = (
+        "Limit order placed: long 0.050000 @ 83000.00, 3x | ID: lmt-789\n"
+        "Note: This tool only submits the order — it does not mean the order has been filled."
+    )
     result = summarize_tool("place_limit_order", content)
     assert "Limit" in result or "limit" in result
     assert "long" in result.lower()

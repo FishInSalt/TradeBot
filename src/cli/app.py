@@ -158,6 +158,47 @@ def _truncate_decision(
     return text
 
 
+def _render_empty_decision_body(execution_status: str) -> str:
+    """Render system-generated body for cycles that left no decision summary.
+
+    Three known statuses (internal branching, but agent-facing text exposes
+    NO schema field names — agent reads natural language only):
+      - 'ok' + NULL/empty decision: defensive branch — cycle ran successfully
+        but agent emitted no final message text (rare; pydantic-ai
+        `result.output` can be "" or None when agent only emits tool calls
+        without a final TextPart)
+      - 'retry_exhausted': all retry attempts failed; partial trade_actions
+        may have committed before abort
+      - 'usage_limit_exceeded': UsageLimitExceeded raised mid-cycle; partial
+        trade_actions may have committed
+
+    `retry_exhausted` and `usage_limit_exceeded` share identical agent-facing
+    text (D9): the agent's response to either is the same — re-verify state.
+    Status differentiation is a developer-layer concern (DB / cycle log).
+
+    Unknown statuses fall through to a fixed fallback string for forward
+    compatibility with future execution_status enum extensions; the status
+    value is NOT interpolated into the agent-facing text (would expose schema
+    artifact + open prompt-injection surface).
+
+    Note: this function returns a system-generated body inserted into the
+    priors block in place of agent-authored decision content. Length-budget
+    accounting (R2-Next-A D2) tracks agent decision length only; system
+    bodies are not counted in the per-prior word_count header (header is
+    shortened to omit the `· N words` segment when decision is NULL).
+    """
+    if execution_status == "ok":
+        return "(This cycle did not leave a summary.)"
+    if execution_status in ("retry_exhausted", "usage_limit_exceeded"):
+        return (
+            "⚠️ The previous cycle did not complete normally. Some actions "
+            "may have already taken effect. Please verify the current state "
+            "of your position, pending orders, and alerts before deciding "
+            "what to do."
+        )
+    return "(The previous cycle ended in an unexpected state.)"
+
+
 @dataclass(frozen=True)
 class CycleSummary:
     """Snapshot of an AgentCycle row used for cross-cycle context injection.
@@ -166,34 +207,42 @@ class CycleSummary:
     (review F4): fast in-memory tests / rapid sequential inserts can produce
     multiple rows with identical created_at, and SQLite ORDER BY only on
     created_at would be non-deterministic.
+
+    F-P14: `decision` is now Optional — retry_exhausted / usage_limit_exceeded
+    cycles enter the priors list with decision=None and are rendered via
+    `_render_empty_decision_body`. `execution_status` carries the cycle
+    state for render-layer dispatch.
     """
     id: int
     cycle_id: str
     triggered_by: str
-    decision: str
+    decision: str | None
+    execution_status: str
     created_at: datetime
 
 
 async def _fetch_recent_summaries(
     engine, session_id: str, n: int = 3,
 ) -> list[CycleSummary]:
-    """Fetch the N most recent ok cycles (with non-NULL decision) for a session.
+    """Fetch the N most recent cycles for a session (all execution statuses).
+
+    F-P14 (R2-Next-B): no execution_status / decision filter — render layer
+    handles three-state branching (ok+valid / ok+NULL / forensic) via
+    `_render_empty_decision_body`. Filter removal is intentional: priors
+    must reflect actual cycle state including retry_exhausted /
+    usage_limit_exceeded so the next cycle sees forensic ⚠️ hints.
 
     Filters:
       - session_id matches (D-U1-a: session-bound, no cross-session leak)
-      - execution_status='ok' (forensic cycles have decision=NULL anyway, but
-        explicit filter makes intent clear)
-      - decision IS NOT NULL (review F2 defensive: physically eliminate any
-        future code path that lands ok+NULL into the injection list)
 
     Returns [] on:
       - First cycle in session (no prior rows)
-      - Forensic-only history (all cycles non-ok)
-      - DB error (any exception logged at WARNING + empty list — D-U4-a
-        fail-isolated; cycle must continue)
+      - DB error (any exception logged at WARNING + stack trace via
+        exc_info=True + empty list — D-U4-a fail-isolated; cycle must continue)
 
     Ordering: created_at DESC, id DESC (review F4 tie-breaker for stability).
-    Caller (`_render_recent_summaries`) re-sorts ASC for chronological reading.
+    Caller (`_render_recent_summaries`) re-sorts ASC for chronological reading
+    and dispatches per-row to the empty-body branch when decision is NULL.
     """
     try:
         async with get_session(engine) as session:
@@ -203,12 +252,11 @@ async def _fetch_recent_summaries(
                     AgentCycle.cycle_id,
                     AgentCycle.triggered_by,
                     AgentCycle.decision,
+                    AgentCycle.execution_status,
                     AgentCycle.created_at,
                 )
                 .where(
                     AgentCycle.session_id == session_id,
-                    AgentCycle.execution_status == "ok",
-                    AgentCycle.decision.is_not(None),
                 )
                 .order_by(
                     AgentCycle.created_at.desc(),
@@ -222,7 +270,8 @@ async def _fetch_recent_summaries(
                 id=r.id,
                 cycle_id=r.cycle_id,
                 triggered_by=r.triggered_by,
-                decision=r.decision or "",
+                decision=r.decision,
+                execution_status=r.execution_status,
                 created_at=r.created_at,
             )
             for r in rows
@@ -244,10 +293,14 @@ def _render_recent_summaries(
     Sorts by (created_at, id) ASC so the reader sees oldest → newest naturally
     (review F4: id tie-breaker keeps same-timestamp ordering stable).
 
-    R2-Next-A D2: each per-prior header includes `· {N} words` showing the
-    ORIGINAL word count (pre-truncation). Pairs with D1 marker and A3
-    persona text — agent compares header N vs the 700-word cap to detect
-    over-budget priors and self-titrate.
+    Tri-state per-prior rendering (F-P14):
+      - decision non-NULL (ok cycle, agent-authored): R2-Next-A D2 header
+        includes `· {N} words` with ORIGINAL word count (pre-truncation);
+        body is `_truncate_decision(decision)`.
+      - decision NULL (forensic / ok+empty): header SHORTENS (no word count
+        segment); body is system-generated via `_render_empty_decision_body`
+        keyed on `execution_status`. Length-budget accounting tracks
+        agent-authored content only — system bodies are not counted.
     """
     if not summaries:
         return ""
@@ -257,15 +310,27 @@ def _render_recent_summaries(
         cycle_id_short = s.cycle_id[:8]
         utc_str = s.created_at.strftime("%Y-%m-%d %H:%M UTC")
         ago = _format_relative_time(now, s.created_at)
-        word_count = _count_words(s.decision or "")  # R2-Next-A D2
-        body = _truncate_decision(s.decision)
-        blocks.append(
-            f"[cycle {cycle_id_short} · {s.triggered_by} · {utc_str} "
-            f"({ago}) · {word_count} words]\n{body}"
-        )
 
-    header = "Your prior cycle summaries (most recent N=3, from this session):"
-    return f"{header}\n\n" + "\n\n".join(blocks)
+        if not s.decision:
+            # F-P14 tri-state: NULL decision → shortened header + system body
+            header = (
+                f"[cycle {cycle_id_short} · {s.triggered_by} · "
+                f"{utc_str} ({ago})]"
+            )
+            body = _render_empty_decision_body(s.execution_status)
+        else:
+            # R2-Next-A D2: ok cycle with valid decision — original 5-field header
+            word_count = _count_words(s.decision)
+            header = (
+                f"[cycle {cycle_id_short} · {s.triggered_by} · "
+                f"{utc_str} ({ago}) · {word_count} words]"
+            )
+            body = _truncate_decision(s.decision)
+
+        blocks.append(f"{header}\n{body}")
+
+    header_top = "Your prior cycle summaries (most recent N=3, from this session):"
+    return f"{header_top}\n\n" + "\n\n".join(blocks)
 
 
 async def _build_recent_summaries_block(
@@ -274,8 +339,10 @@ async def _build_recent_summaries_block(
     """Fetch + render summaries with a fail-isolated boundary.
 
     Returns "" on:
-      - empty fetch (first cycle / forensic-only history / NULL decision filter)
-      - any exception during fetch OR render OR format (logged at WARNING)
+      - empty fetch (first cycle in session — F-P14: forensic / NULL decision
+        cycles are no longer filtered out, they render via _render_empty_decision_body)
+      - any exception during fetch OR render OR format (logged at WARNING with
+        stack trace via exc_info=True)
 
     Review F3: this outer wrap covers the entire injection pipeline, not just
     the DB query layer. _fetch_recent_summaries keeps its own try/except as

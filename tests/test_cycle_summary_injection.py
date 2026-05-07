@@ -321,14 +321,16 @@ async def test_fetch_returns_partial_when_session_has_fewer_than_n():
     assert len(rows) == 2
 
 
-async def test_fetch_excludes_forensic_cycles():
-    """T1.4: cycles with execution_status != 'ok' (forensic) are skipped;
-    fetch returns the adjacent ok cycles."""
+async def test_fetch_includes_all_cycles_regardless_of_status():
+    """T1.4 (rewritten for F-P14): cycles of all execution_status values
+    (ok, usage_limit_exceeded, retry_exhausted) enter the priors list.
+    Render-layer dispatch differentiates them via _render_empty_decision_body.
+    """
     from src.cli.app import _fetch_recent_summaries
 
     engine = await _make_engine_with_session("sess-t1-4")
+    # 4 cycles inserted in order; auto-increment id 1..4 → DESC LIMIT 3 → dd44/cc33/bb22
     await _add_cycle(engine, "sess-t1-4", "aa11", decision="ok-1", execution_status="ok")
-    # decision=None for forensic per cli/app.py:223,266
     await _add_cycle(
         engine, "sess-t1-4", "bb22", decision=None,
         execution_status="usage_limit_exceeded",
@@ -340,7 +342,13 @@ async def test_fetch_excludes_forensic_cycles():
     )
 
     rows = await _fetch_recent_summaries(engine, "sess-t1-4", n=3)
-    assert {r.cycle_id for r in rows} == {"aa11", "cc33"}
+    # All 3 most-recent cycles included (filter deleted)
+    assert [r.cycle_id for r in rows] == ["dd44", "cc33", "bb22"]
+    # Forensic statuses propagate through; decision is None for them
+    assert rows[0].execution_status == "retry_exhausted"
+    assert rows[0].decision is None
+    assert rows[2].execution_status == "usage_limit_exceeded"
+    assert rows[2].decision is None
 
 
 async def test_fetch_respects_session_boundary():
@@ -404,31 +412,40 @@ async def test_fetch_returns_empty_on_db_error(caplog, monkeypatch):
     )
 
 
-async def test_fetch_excludes_cycles_with_null_decision():
-    """T1.8 (review F2): a cycle with execution_status='ok' but decision=None
-    should be physically filtered by `WHERE decision IS NOT NULL`. This is
-    a defensive guard — the ok-path always writes decision=result.output, but
-    if a future code path produces an ok cycle with NULL decision, the render
-    block must not crash on `decision or ""` truncation downstream.
+async def test_fetch_includes_ok_cycles_with_null_decision():
+    """T1.8 (rewritten for F-P14): an ok cycle with decision=None enters
+    the priors list — render layer dispatches to _render_empty_decision_body
+    with the 'ok' branch system body. Defensive case: pydantic-ai rarely
+    produces ok+empty result.output when agent emits only tool calls
+    without a final TextPart.
     """
     from src.cli.app import _fetch_recent_summaries
 
     engine = await _make_engine_with_session("sess-t1-8")
     await _add_cycle(engine, "sess-t1-8", "aa11", decision="real-summary")
-    await _add_cycle(engine, "sess-t1-8", "bb22", decision=None)  # defensive case
+    await _add_cycle(engine, "sess-t1-8", "bb22", decision=None)  # ok+NULL defensive case
 
     rows = await _fetch_recent_summaries(engine, "sess-t1-8", n=3)
-    assert [r.cycle_id for r in rows] == ["aa11"]
+    # both included; bb22 most recent
+    assert [r.cycle_id for r in rows] == ["bb22", "aa11"]
+    assert rows[0].decision is None
+    assert rows[0].execution_status == "ok"
 
 
 # ─────────────────────────── L2 render tests ───────────────────────────
 
-def _make_summary(cycle_id, triggered_by, decision, created_at, sid=1):
-    """Test-only CycleSummary builder."""
+def _make_summary(cycle_id, triggered_by, decision, created_at,
+                  sid=1, execution_status="ok"):
+    """Test-only CycleSummary builder.
+
+    F-P14: execution_status defaults to 'ok' so existing call sites
+    (~10 in this file) remain compatible without per-callsite changes.
+    """
     from src.cli.app import CycleSummary
     return CycleSummary(
         id=sid, cycle_id=cycle_id, triggered_by=triggered_by,
-        decision=decision, created_at=created_at,
+        decision=decision, execution_status=execution_status,
+        created_at=created_at,
     )
 
 
@@ -608,3 +625,298 @@ def test_header_word_count_present_for_each_of_three_priors():
     out = _render_recent_summaries(summaries, now)
     # Each block has `· 3 words]` (each body has 3 tokens)
     assert out.count("· 3 words]") == 3
+
+
+def test_render_empty_decision_body_ok():
+    """T-FP14.4 (AC-7, F-P14 D9): ok+NULL → `(This cycle did not leave a summary.)`.
+
+    Defensive branch: pydantic-ai `result.output` can rarely be empty when
+    agent emits only tool calls without a final TextPart.
+    """
+    from src.cli.app import _render_empty_decision_body
+    assert _render_empty_decision_body("ok") == \
+        "(This cycle did not leave a summary.)"
+
+
+def test_render_empty_decision_body_retry_exhausted():
+    """T-FP14.5 (AC-8, F-P14 D9.a/D9.b): retry_exhausted →
+    ⚠️ + agent-native verify hint (functional dim, no schema/tool name leak).
+    """
+    from src.cli.app import _render_empty_decision_body
+    body = _render_empty_decision_body("retry_exhausted")
+    # positive: agent-facing functional content
+    assert "⚠️" in body
+    assert "did not complete normally" in body
+    assert "position" in body
+    assert "pending orders" in body
+    assert "alerts" in body
+    assert "verify" in body
+    # negative: schema artifact must NOT leak into agent prompt
+    assert "retry_exhausted" not in body
+    assert "get_position" not in body
+    assert "get_open_orders" not in body
+    assert "get_active_alerts" not in body
+
+
+def test_render_empty_decision_body_usage_limit_exceeded():
+    """T-FP14.6 (AC-9, F-P14 D9): usage_limit_exceeded → identical body
+    as retry_exhausted (agent's response to either is the same).
+    """
+    from src.cli.app import _render_empty_decision_body
+    body_retry = _render_empty_decision_body("retry_exhausted")
+    body_ulx = _render_empty_decision_body("usage_limit_exceeded")
+    assert body_retry == body_ulx  # exact equality (D9)
+    assert "usage_limit_exceeded" not in body_ulx  # negative: no schema leak
+
+
+def test_render_empty_decision_body_unknown_fallback():
+    """T-FP14.7 (AC-10, F-P14 D10): forward compat — unknown status →
+    fixed fallback string, value NOT interpolated (防 prompt 污染)."""
+    from src.cli.app import _render_empty_decision_body
+    body = _render_empty_decision_body("future_unknown_status")
+    assert body == "(The previous cycle ended in an unexpected state.)"
+    # negative: status value must NOT be interpolated
+    assert "future_unknown_status" not in body
+
+
+async def test_cycle_summary_execution_status_populated():
+    """T-FP14.2 (AC-5, F-P14): CycleSummary.execution_status filled from query."""
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-fp14-2")
+    # forensic cycle: filter still active in this task — use ok-only;
+    # we'll add a retry_exhausted assertion in Task 5 once filter is removed.
+    await _add_cycle(
+        engine, "sess-fp14-2", "c1",
+        decision="real summary", execution_status="ok",
+    )
+    rows = await _fetch_recent_summaries(engine, "sess-fp14-2", n=3)
+    assert len(rows) == 1
+    assert rows[0].execution_status == "ok"
+
+
+async def test_fetch_recent_summaries_includes_retry_exhausted():
+    """T-FP14.1 (AC-4, F-P14): filter deletion → retry_exhausted cycle
+    enters priors. Most recent first (DESC ordering preserved)."""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _fetch_recent_summaries
+
+    engine = await _make_engine_with_session("sess-fp14-1")
+    base = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    await _add_cycle(
+        engine, "sess-fp14-1", "c-ok",
+        decision="real summary", execution_status="ok",
+        created_at=base,
+    )
+    await _add_cycle(
+        engine, "sess-fp14-1", "c-rx",
+        decision=None, execution_status="retry_exhausted",
+        created_at=base + timedelta(minutes=1),  # most recent
+    )
+    rows = await _fetch_recent_summaries(engine, "sess-fp14-1", n=3)
+    assert len(rows) == 2
+    assert rows[0].cycle_id == "c-rx"  # DESC: most recent first
+    assert rows[0].execution_status == "retry_exhausted"
+    assert rows[0].decision is None
+
+
+def test_render_recent_summaries_ok_cycle_unchanged():
+    """T-FP14.3 (AC-6, F-P14 regression): ok cycle with valid decision
+    renders original 5-field header (· N words) + truncated body. R2-Next-A
+    D2 word count header preserved on the non-NULL branch."""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s = _make_summary(
+        "abc12345", "scheduled", "Some decision body.",
+        now - timedelta(minutes=5), execution_status="ok",
+    )
+    output = _render_recent_summaries([s], now)
+    assert "· 3 words]" in output  # R2-Next-A D2 word count header maintained
+    assert "Some decision body." in output
+
+
+def test_render_recent_summaries_null_decision_header_no_word_count():
+    """T-FP14.8 (AC-11, F-P14): NULL decision row's per-prior header
+    SHORTENS — no `· N words` segment. Visual signal that this row
+    differs from agent-authored priors."""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _render_recent_summaries
+
+    now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
+    s = _make_summary(
+        "abc12345", "conditional", None,
+        now - timedelta(minutes=5),
+        execution_status="retry_exhausted",
+    )
+    output = _render_recent_summaries([s], now)
+    # Find the per-prior header line by content match (robust to top-level
+    # header / blank-line layout drift; reviewer note: hard `lines[2]` index
+    # would break if N=3 priors render adds a separator line in the future).
+    lines = output.split("\n")
+    header_line = next(
+        (l for l in lines if l.startswith("[cycle abc12345 ")),
+        None,
+    )
+    assert header_line is not None, \
+        f"per-prior header line not found in output:\n{output!r}"
+    # NULL decision row: header MUST NOT contain `words]` or `· N words`
+    assert "words]" not in header_line, \
+        f"NULL-decision header should omit word count, got: {header_line!r}"
+    # Sanity: header still has the cycle prefix
+    assert header_line.startswith("[cycle abc12345 · conditional · ")
+    # Sanity: body contains the system-generated forensic hint
+    assert "⚠️" in output
+    assert "did not complete normally" in output
+
+
+async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mocker):
+    """T-FP14.9 (AC-12, F-P14 drift guard): retry_exhausted write path
+    must keep `reasoning=None`. Single-responsibility regression guard:
+    agent_cycles.reasoning is reserved for agent-authored thinking
+    content; system never injects derivative summaries (e.g., a trade_actions
+    rollup) into this column. Anchored on function `run_agent_cycle` retry-
+    exhausted branch (write coordinates: execution_status='retry_exhausted'
+    + decision=None + reasoning=None) — not on a fixed source line number.
+
+    Mocks `agent.run` to raise RuntimeError 3 times → triggers the
+    retry-exhausted branch → DB writes AgentCycle(reasoning=None,
+    decision=None, execution_status='retry_exhausted'). Test reads
+    back the row and asserts reasoning IS None.
+    """
+    from unittest.mock import AsyncMock
+    from sqlalchemy import select
+    from src.cli.app import run_agent_cycle, TokenBudget
+    from src.storage.database import get_session
+    from src.storage.models import AgentCycle
+
+    # Patch asyncio.sleep to no-op so 3 retries don't take ~7 seconds
+    monkeypatch.setattr("src.cli.app.asyncio.sleep", AsyncMock(return_value=None))
+
+    engine = await _make_engine_with_session("sess-fp14-9")
+
+    # Mock agent — agent.run raises RuntimeError every attempt
+    agent = mocker.Mock()
+    agent.run = AsyncMock(side_effect=RuntimeError("synthetic LLM failure"))
+
+    # Mock deps — must cover everything read BEFORE retry loop, not just
+    # the retry-exhausted DB write. Prompt build (cli/app.py:399-438) reads
+    # deps.symbol, deps.timeframe; deps.memory.format_for_prompt() is awaited.
+    deps = mocker.Mock()
+    deps.session_id = "sess-fp14-9"
+    deps.symbol = "BTC/USDT:USDT"
+    deps.timeframe = "5m"
+    deps.memory = mocker.Mock()
+    deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+
+    budget = TokenBudget(daily_max=1_000_000)
+
+    # Patch capture helpers. Note: _capture_trigger_context is SYNC (def, not
+    # async def — see src/services/cycle_capture.py:24); call site cli/app.py:393
+    # has no await. AsyncMock here would yield a coroutine assigned to
+    # trigger_context_var, then `json.dumps(coroutine)` at the retry-exhausted
+    # write would TypeError. _capture_state_snapshot IS async (line 394 awaits).
+    monkeypatch.setattr(
+        "src.cli.app._capture_state_snapshot",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        "src.cli.app._capture_trigger_context",
+        mocker.Mock(return_value=None),  # sync — must NOT be AsyncMock
+    )
+
+    # _build_recent_summaries_block runs real SQL but the empty sess-fp14-9
+    # session produces [] → returns "" → no extra patch needed.
+
+    # Run the cycle — should hit retry_exhausted branch (3 RuntimeError → DB write)
+    result = await run_agent_cycle(
+        agent, deps, "scheduled", budget, engine,
+        context=None, model=None, console=None, stats=None,
+    )
+    assert result is None  # retry_exhausted returns None
+
+    # Read back the AgentCycle row
+    async with get_session(engine) as db:
+        rows = (await db.execute(
+            select(AgentCycle).where(AgentCycle.session_id == "sess-fp14-9")
+        )).scalars().all()
+    assert len(rows) == 1, "expected exactly one retry-exhausted forensic row"
+    row = rows[0]
+    assert row.execution_status == "retry_exhausted"
+    assert row.decision is None
+    # The drift guard assertion — write-path single responsibility:
+    assert row.reasoning is None, \
+        "retry_exhausted write path must keep reasoning=None " \
+        "(do NOT inject trade_actions summaries — write-path single responsibility)"
+
+
+async def test_usage_limit_exceeded_writes_null_reasoning_unchanged(monkeypatch, mocker):
+    """T-FP14.10 (sibling of T-FP14.9 per ultrareview Important #2): the
+    usage_limit_exceeded write path is the second forensic branch in
+    `run_agent_cycle` — both branches share spec D8 invariant
+    (agent_cycles.reasoning is reserved for agent-authored thinking content;
+    system never injects derivative summaries). T-FP14.9 covers the
+    retry_exhausted branch; this test covers the parallel UsageLimitExceeded
+    branch. Same anchoring philosophy: write coordinates
+    (execution_status='usage_limit_exceeded' + decision=None + reasoning=None),
+    not source line numbers.
+    """
+    from unittest.mock import AsyncMock
+    from sqlalchemy import select
+    from pydantic_ai.exceptions import UsageLimitExceeded
+    from src.cli.app import run_agent_cycle, TokenBudget
+    from src.storage.database import get_session
+    from src.storage.models import AgentCycle
+
+    # asyncio.sleep no-op (defensive — UsageLimitExceeded path has no retry
+    # delay so this is mostly belt-and-braces)
+    monkeypatch.setattr("src.cli.app.asyncio.sleep", AsyncMock(return_value=None))
+
+    engine = await _make_engine_with_session("sess-fp14-10")
+
+    # Mock agent — agent.run raises UsageLimitExceeded once → first-attempt
+    # exception is NOT retried (caught by `except UsageLimitExceeded` at
+    # cli/app.py:519, which writes forensic AgentCycle and returns None)
+    agent = mocker.Mock()
+    agent.run = AsyncMock(side_effect=UsageLimitExceeded("synthetic ULX"))
+
+    # Mock deps — same shape as T-FP14.9 (deps.memory.format_for_prompt
+    # awaited before retry loop; deps.symbol/timeframe in prompt f-string).
+    deps = mocker.Mock()
+    deps.session_id = "sess-fp14-10"
+    deps.symbol = "BTC/USDT:USDT"
+    deps.timeframe = "5m"
+    deps.memory = mocker.Mock()
+    deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+
+    budget = TokenBudget(daily_max=1_000_000)
+
+    # Capture helpers — same sync/async pitfall guards as T-FP14.9.
+    monkeypatch.setattr(
+        "src.cli.app._capture_state_snapshot",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        "src.cli.app._capture_trigger_context",
+        mocker.Mock(return_value=None),  # sync — must NOT be AsyncMock
+    )
+
+    result = await run_agent_cycle(
+        agent, deps, "scheduled", budget, engine,
+        context=None, model=None, console=None, stats=None,
+    )
+    assert result is None  # usage_limit_exceeded returns None
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(
+            select(AgentCycle).where(AgentCycle.session_id == "sess-fp14-10")
+        )).scalars().all()
+    assert len(rows) == 1, "expected exactly one usage_limit_exceeded forensic row"
+    row = rows[0]
+    assert row.execution_status == "usage_limit_exceeded"
+    assert row.decision is None
+    # The drift guard assertion — write-path single responsibility:
+    assert row.reasoning is None, \
+        "usage_limit_exceeded write path must keep reasoning=None " \
+        "(do NOT inject trade_actions summaries — write-path single responsibility)"

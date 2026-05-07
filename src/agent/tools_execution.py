@@ -353,7 +353,11 @@ async def place_limit_order(
         side=side, price=price, reasoning=reasoning,
     )
 
-    return f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, {actual_leverage}x | ID: {order.id}"
+    return (
+        f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, "
+        f"{actual_leverage}x | ID: {order.id}\n"
+        "Note: This tool only submits the order — it does not mean the order has been filled."
+    )
 
 
 async def cancel_order(
