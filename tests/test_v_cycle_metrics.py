@@ -111,6 +111,29 @@ async def test_v_cycle_metrics_cache_hit_rate_derived(db_session):
 
 
 @pytest.mark.asyncio
+async def test_v_cycle_metrics_tool_total_ms_zero_when_no_tools(db_session):
+    """T14.5 (PR #42 fix): tool_total_ms COALESCE 让无 tool 调用 cycle = 0 不是 NULL,
+    使下游 AVG/SUM 聚合不需特殊处理 NULL。"""
+    fixture_cycle = AgentCycle(
+        session_id="test-no-tools",
+        cycle_id="notool01",
+        triggered_by="scheduled",
+        execution_status="ok",
+        decision="hold without tool calls",
+        state_snapshot=json.dumps({"position": None}),
+        tokens_consumed=100,
+    )
+    db_session.add(fixture_cycle)
+    await db_session.commit()
+
+    row = (await db_session.execute(text(
+        "SELECT tool_total_ms FROM v_cycle_metrics WHERE session_id='test-no-tools'"
+    ))).mappings().one()
+
+    assert row["tool_total_ms"] == 0    # COALESCE 把 SUM 的 NULL 转 0
+
+
+@pytest.mark.asyncio
 async def test_v_cycle_metrics_is_ok_excludes_empty_decision(db_session):
     """T14.4: is_ok_cycle 排除 empty-string decision（防 R2-7 result.output='' 边界）。"""
     fixture_cycle = AgentCycle(
