@@ -35,7 +35,7 @@ async def test_happy_path_fills_all_8_fields(make_usage, deps_factory, db_engine
     )).scalar_one()
 
     assert row.execution_status == "ok"
-    assert row.wall_time_ms is not None and row.wall_time_ms > 0
+    assert row.wall_time_ms is not None and row.wall_time_ms >= 0  # >=0: forensic 亚毫秒可能为 0
     assert row.llm_call_ms is not None and row.llm_call_ms >= 0
     assert row.input_tokens == 1500
     assert row.output_tokens == 300
@@ -65,7 +65,7 @@ async def test_usage_limit_exceeded_only_wall_time_filled(deps_factory, db_engin
     )).scalar_one()
 
     assert row.execution_status == "usage_limit_exceeded"
-    assert row.wall_time_ms is not None and row.wall_time_ms > 0
+    assert row.wall_time_ms is not None and row.wall_time_ms >= 0  # >=0: forensic 亚毫秒可能为 0
     assert row.llm_call_ms is None
     assert row.input_tokens is None
     assert row.output_tokens is None
@@ -95,7 +95,7 @@ async def test_retry_exhausted_only_wall_time_filled(deps_factory, db_engine, db
     )).scalar_one()
 
     assert row.execution_status == "retry_exhausted"
-    assert row.wall_time_ms is not None and row.wall_time_ms > 0
+    assert row.wall_time_ms is not None and row.wall_time_ms >= 0  # >=0: forensic 亚毫秒可能为 0
     assert row.llm_call_ms is None
     for col in ("input_tokens", "output_tokens", "cache_read_tokens",
                 "cache_write_tokens", "reasoning_tokens", "cache_hit_rate"):

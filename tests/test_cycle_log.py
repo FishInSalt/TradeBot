@@ -77,15 +77,18 @@ def _make_agent_with_usage(usage_obj):
     return mock_agent
 
 
-async def test_cycle_log_includes_cache_fields_when_present(caplog):
+async def test_cycle_log_includes_cache_fields_when_present(caplog, make_usage):
     """T1: usage.details 含 DeepSeek cache 字段时，cycle log 输出 cache_hit/miss/rate。"""
     from src.cli.app import TokenBudget, run_agent_cycle
 
     deps, engine = await _make_deps_and_engine("sess-cache-1")
     budget = TokenBudget(daily_max=500_000)
 
-    usage = MagicMock(
-        total_tokens=10_500,
+    # T23 migration: factory 提供 input/output/cache_read 三轨标准属性 + 自定义 details
+    # (input_total = cache_hit + cache_miss = 10000; total = 10500 → output 500)
+    usage = make_usage(
+        input_tokens=10_000, output_tokens=500,
+        cache_read_tokens=8_000,
         details={
             "reasoning_tokens": 500,
             "prompt_cache_hit_tokens": 8_000,
@@ -112,16 +115,17 @@ async def test_cycle_log_includes_cache_fields_when_present(caplog):
     assert "total=10500" in cycle_log
 
 
-async def test_cycle_log_hit_rate_zero_when_no_cache_data(caplog):
+async def test_cycle_log_hit_rate_zero_when_no_cache_data(caplog, make_usage):
     """T2: 非 DeepSeek model（details 无 cache 字段），输出全 0 不报错。"""
     from src.cli.app import TokenBudget, run_agent_cycle
 
     deps, engine = await _make_deps_and_engine("sess-cache-2")
     budget = TokenBudget(daily_max=500_000)
 
-    usage = MagicMock(
-        total_tokens=5_000,
-        details={"reasoning_tokens": 0},  # 无 prompt_cache_* 字段
+    # T23 migration: cache_read=0 + details 无 prompt_cache_* → hit_rate=0 path
+    usage = make_usage(
+        input_tokens=5_000, output_tokens=0, cache_read_tokens=0,
+        details={"reasoning_tokens": 0},
     )
     agent = _make_agent_with_usage(usage)
 
@@ -141,14 +145,16 @@ async def test_cycle_log_hit_rate_zero_when_no_cache_data(caplog):
     assert "rate=0.0%" in cycle_log
 
 
-async def test_cycle_log_hit_rate_zero_division_safe(caplog):
+async def test_cycle_log_hit_rate_zero_division_safe(caplog, make_usage):
     """T3: details=None（usage 无 details）— 除零保护，不抛异常，rate=0.0%。"""
     from src.cli.app import TokenBudget, run_agent_cycle
 
     deps, engine = await _make_deps_and_engine("sess-cache-3")
     budget = TokenBudget(daily_max=500_000)
 
-    usage = MagicMock(total_tokens=1_000, details=None)
+    # T23 migration: factory + post-construction details=None to test 除零保护
+    usage = make_usage(input_tokens=1_000, output_tokens=0, cache_read_tokens=0)
+    usage.details = None
     agent = _make_agent_with_usage(usage)
 
     with caplog.at_level(logging.INFO, logger="src.cli.app"):

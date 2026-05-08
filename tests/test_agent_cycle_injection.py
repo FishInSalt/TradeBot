@@ -66,7 +66,15 @@ def _make_capturing_agent():
     async def mock_run(prompt, **kwargs):
         captured["prompt"] = prompt
         result = MagicMock()
-        result.usage = lambda: MagicMock(total_tokens=100, details=None)
+        # T23: inline MagicMock 替换为完整 attrs (Phase 1 cli/app.py 写 8 字段)
+        _u = MagicMock()
+        _u.total_tokens = 100
+        _u.input_tokens = 100
+        _u.output_tokens = 0
+        _u.cache_read_tokens = 0
+        _u.cache_write_tokens = 0
+        _u.details = None
+        result.usage = lambda: _u
         result.new_messages = lambda: []
         result.output = "auto-generated cycle summary"
         return result
