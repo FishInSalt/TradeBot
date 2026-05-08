@@ -84,7 +84,64 @@ SELECT
        THEN 1 ELSE 0 END AS is_forensic_cycle
 FROM ac_with_anchors ac
 """
-_V_ALERT_LIFECYCLE_SQL = ""    # T15 填充
+_V_ALERT_LIFECYCLE_SQL = """
+CREATE VIEW v_alert_lifecycle AS
+WITH registers AS (
+  SELECT session_id, alert_id,
+         created_at AS registered_at,
+         price AS target_price,
+         reasoning AS register_reasoning
+  FROM trade_actions
+  WHERE action='add_price_level_alert' AND alert_id IS NOT NULL
+),
+triggers AS (
+  SELECT session_id,
+         json_extract(trigger_context, '$.alert_id') AS alert_id,
+         created_at AS triggered_at,
+         CAST(json_extract(trigger_context, '$.current_price') AS REAL) AS triggered_price
+  FROM agent_cycles
+  WHERE triggered_by='alert'
+    AND json_extract(trigger_context, '$.type')='price_level_alert'
+    AND json_extract(trigger_context, '$.alert_id') IS NOT NULL
+),
+cancels AS (
+  SELECT session_id, alert_id,
+         created_at AS cancelled_at,
+         reasoning AS cancel_reasoning
+  FROM trade_actions
+  WHERE action='cancel_price_level_alert' AND alert_id IS NOT NULL
+),
+cancel_attempts AS (
+  SELECT session_id,
+         json_extract(args, '$.alert_id') AS alert_id,
+         COUNT(*) AS attempt_count,
+         SUM(CASE WHEN status='biz_error' THEN 1 ELSE 0 END) AS attempt_failures
+  FROM tool_calls
+  WHERE tool_name='cancel_price_level_alert'
+  GROUP BY session_id, json_extract(args, '$.alert_id')
+)
+SELECT
+  r.session_id,
+  r.alert_id,
+  r.registered_at,
+  r.target_price,
+  r.register_reasoning,
+  t.triggered_at,
+  t.triggered_price,
+  c.cancelled_at,
+  c.cancel_reasoning,
+  COALESCE(ca.attempt_count, 0)    AS cancel_attempt_count,
+  COALESCE(ca.attempt_failures, 0) AS cancel_attempt_failures,
+  CASE
+    WHEN t.triggered_at IS NOT NULL THEN 'triggered'
+    WHEN c.cancelled_at IS NOT NULL THEN 'cancelled'
+    ELSE 'active'
+  END AS final_status
+FROM registers r
+LEFT JOIN triggers       t  ON t.session_id=r.session_id  AND t.alert_id=r.alert_id
+LEFT JOIN cancels        c  ON c.session_id=r.session_id  AND c.alert_id=r.alert_id
+LEFT JOIN cancel_attempts ca ON ca.session_id=r.session_id AND ca.alert_id=r.alert_id
+"""
 _V_ORDER_LIFECYCLE_SQL = ""    # T17 填充
 
 
