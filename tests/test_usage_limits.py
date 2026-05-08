@@ -18,6 +18,22 @@ from src.storage.models import Session as SessionModel, AgentCycle
 models.ALLOW_MODEL_REQUESTS = False
 
 
+def _mock_usage_legacy(total_tokens: int = 100):
+    """T23: legacy `MagicMock(total_tokens=N, details=None)` 替换 helper.
+
+    Phase 1 起 cli/app.py 写 8 字段需 input/output/cache_read/cache_write_tokens
+    具体 int 值；inline MagicMock 会让 cli/app.py 取到 auto-MagicMock 写入失败.
+    """
+    u = MagicMock()
+    u.total_tokens = total_tokens
+    u.input_tokens = total_tokens
+    u.output_tokens = 0
+    u.cache_read_tokens = 0
+    u.cache_write_tokens = 0
+    u.details = None
+    return u
+
+
 async def _make_deps_engine_with_capture_mocks(session_id: str = "sess-wp"):
     """Helper: TradingDeps + engine wired so cycle_capture helpers don't blow up.
 
@@ -74,7 +90,7 @@ async def test_usage_limits_passed_to_agent_run(monkeypatch):
     async def mock_run(prompt, **kwargs):
         captured_kwargs.update(kwargs)
         result = MagicMock()
-        result.usage = lambda: MagicMock(total_tokens=100, details=None)
+        result.usage = lambda: _mock_usage_legacy(100)
         result.new_messages = lambda: []
         result.output = "test output"
         return result
@@ -192,7 +208,7 @@ async def test_generic_exception_still_retries_3_times(monkeypatch):
         if call_count["n"] < 3:
             raise RuntimeError("transient network error")
         result = MagicMock()
-        result.usage = lambda: MagicMock(total_tokens=100, details=None)
+        result.usage = lambda: _mock_usage_legacy(100)
         result.new_messages = lambda: []
         result.output = "recovered"
         return result
@@ -226,7 +242,7 @@ async def test_t9_success_path_writes_execution_status_ok_and_full_decision():
 
     async def mock_run(prompt, **kwargs):
         result = MagicMock()
-        result.usage = lambda: MagicMock(total_tokens=100, details=None)
+        result.usage = lambda: _mock_usage_legacy(100)
         result.new_messages = lambda: []
         result.output = long_output
         return result
@@ -309,7 +325,7 @@ async def test_wp_1_success_path_writes_thinking_and_full_decision():
 
     async def mock_run(prompt, **kwargs):
         result = MagicMock()
-        result.usage = lambda: MagicMock(total_tokens=123, details=None)
+        result.usage = lambda: _mock_usage_legacy(123)
         result.new_messages = lambda: [
             ModelResponse(parts=[
                 ThinkingPart(content=thinking_content),

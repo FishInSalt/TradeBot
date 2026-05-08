@@ -64,6 +64,7 @@ class TradeAction(Base):
     cycle_id: Mapped[str | None] = mapped_column(String(50), nullable=True)        # Iter 3: §G3 — cycle correlation; nullable per §4.5 (历史数据约束); positioned next to session_id (mirrors ToolCall.cycle_id at line 162)
     action: Mapped[str] = mapped_column(String(30))
     order_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    alert_id: Mapped[str | None] = mapped_column(String(50), nullable=True)        # Phase 1 (T3): 8-char hex alert id; enables v_alert_lifecycle join
     symbol: Mapped[str] = mapped_column(String(50))
     side: Mapped[str | None] = mapped_column(String(10), nullable=True)
     trigger_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -95,6 +96,16 @@ class AgentCycle(Base):
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)        # thinking content (R2-7: was result.output message)
     model_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     tokens_consumed: Mapped[int] = mapped_column(Integer, default=0)
+    # === Phase 1 (T3): timing 2 + tokens 6 ===
+    wall_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_call_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # === END Phase 1 ===
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

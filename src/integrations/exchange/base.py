@@ -207,6 +207,7 @@ class BaseExchange(ABC):
                     symbol=alert["symbol"], target_price=alert["price"],
                     direction=alert["direction"], current_price=current_price,
                     reasoning=alert["reasoning"], timestamp=timestamp,
+                    alert_id=alert["id"],
                 ))
             else:
                 remaining.append(alert)
@@ -290,6 +291,7 @@ class PriceLevelAlertInfo:
     current_price: float
     reasoning: str
     timestamp: int
+    alert_id: str           # 8-char hex id (uuid4()[:8]); enables alert lifecycle join
 
 
 @dataclass

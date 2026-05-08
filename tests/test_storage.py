@@ -89,6 +89,11 @@ def test_g1_agent_cycle_field_sot_drift_guard():
         "state_snapshot",
         "decision", "execution_status", "reasoning",
         "model_id", "tokens_consumed",
+        # Phase 1: timing 2 + tokens 6
+        "wall_time_ms", "llm_call_ms",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_write_tokens",
+        "reasoning_tokens", "cache_hit_rate",
         "created_at",
     }
 

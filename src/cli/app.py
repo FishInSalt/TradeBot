@@ -510,13 +510,17 @@ async def run_agent_cycle(
         run_kwargs["model"] = model
 
     result = None
+    llm_call_ms = None      # Phase 1 (T10): default None; happy 路径覆写为实际值；forensic 路径保 None
     for attempt in range(3):
         try:
+            llm_start = datetime.now(timezone.utc)
             result = await agent.run(
                 prompt,
                 usage_limits=USAGE_LIMITS_PER_CYCLE,
                 **run_kwargs,
             )
+            llm_end = datetime.now(timezone.utc)
+            llm_call_ms = int((llm_end - llm_start).total_seconds() * 1000)
             break
         except UsageLimitExceeded as e:
             # 病理状态（LLM 死循环 / runaway tools），不重试，写 forensic trace。
@@ -535,6 +539,15 @@ async def run_agent_cycle(
                     execution_status="usage_limit_exceeded",
                     model_id=model_id_var,
                     tokens_consumed=0,                            # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
+                    # === Phase 1 (T11 forensic) — 仅 wall_time_ms 填，其余 NULL ===
+                    wall_time_ms=int((datetime.now(timezone.utc) - cycle_started_at).total_seconds() * 1000),
+                    llm_call_ms=llm_call_ms,    # default None (T10 retry-loop pre-init)
+                    input_tokens=None,
+                    output_tokens=None,
+                    cache_read_tokens=None,
+                    cache_write_tokens=None,
+                    reasoning_tokens=None,
+                    cache_hit_rate=None,
                 ))
                 await session.commit()
             # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
@@ -577,6 +590,15 @@ async def run_agent_cycle(
                         execution_status="retry_exhausted",
                         model_id=model_id_var,
                         tokens_consumed=0,
+                        # === Phase 1 (T11 forensic) — 仅 wall_time_ms 填，其余 NULL ===
+                        wall_time_ms=int((datetime.now(timezone.utc) - cycle_started_at).total_seconds() * 1000),
+                        llm_call_ms=llm_call_ms,    # default None
+                        input_tokens=None,
+                        output_tokens=None,
+                        cache_read_tokens=None,
+                        cache_write_tokens=None,
+                        reasoning_tokens=None,
+                        cache_hit_rate=None,
                     ))
                     await session.commit()
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
@@ -600,15 +622,22 @@ async def run_agent_cycle(
     tokens = usage.total_tokens if usage else 0
     details = (usage.details or {}) if usage else {}
 
+    # === 旧变量名保留（cli/app.py:613-616 logger.info + sim log 解析脚本兼容）===
     # reasoning_tokens 由 DeepSeek/OpenAI o-series 等 thinking 模型返回；
     # > 0 即可验证 thinking mode 在本 cycle 真实生效。
     reasoning_tokens = details.get("reasoning_tokens", 0)
-    # DeepSeek prompt-cache 命中观测（pre-next-observation §B3 Step 1）：
-    # cycle 2+ hit_rate > 0 表明前缀 cache 工作，是 input token 削减最大杠杆。
+    # DeepSeek prompt-cache 命中观测：cycle 2+ hit_rate > 0 表明前缀 cache 工作。
     cache_hit = details.get("prompt_cache_hit_tokens", 0)
     cache_miss = details.get("prompt_cache_miss_tokens", 0)
     input_total = cache_hit + cache_miss
     hit_rate = (cache_hit / input_total * 100) if input_total > 0 else 0.0
+
+    # === 新变量 — pydantic-ai 标准属性给 DB 写入（更 portable + AC-11 验证一致）===
+    # T0 实测验证 0.0% 误差; spec §5.5.1 Note 1.
+    cache_read  = usage.cache_read_tokens  if usage else 0
+    cache_write = usage.cache_write_tokens if usage else 0
+    input_tok   = usage.input_tokens       if usage else 0
+    output_tok  = usage.output_tokens      if usage else 0
 
     logger.info(
         f"cycle {cycle_id} tokens: total={tokens} reasoning={reasoning_tokens} "
@@ -663,6 +692,19 @@ async def run_agent_cycle(
                 execution_status="ok",
                 model_id=model_id_var,
                 tokens_consumed=tokens,
+                # === Phase 1 (T10) ===
+                # spec §5.5.1 Note 2: wall_time_ms 在 commit 之前 capture，
+                # 比 footer Duration (commit 之后) 少 ~5-50ms（DB write 时间）。
+                # 分析者比对二者时勿误认为 bug；R2-Next-J cycle state machine
+                # refactor 是消除此差的 follow-up.
+                wall_time_ms=int((datetime.now(timezone.utc) - cycle_started_at).total_seconds() * 1000),
+                llm_call_ms=llm_call_ms,
+                input_tokens=input_tok,
+                output_tokens=output_tok,
+                cache_read_tokens=cache_read,
+                cache_write_tokens=cache_write,
+                reasoning_tokens=reasoning_tokens,
+                cache_hit_rate=hit_rate,
             )
         )
         await session.commit()

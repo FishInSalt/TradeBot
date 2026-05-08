@@ -47,6 +47,7 @@ def test_price_level_alert_info_fields():
         symbol="BTC/USDT:USDT", target_price=58000.0,
         direction="below", current_price=57900.0,
         reasoning="Key support level", timestamp=1712534400000,
+        alert_id="testid01",
     )
     assert info.direction == "below"
     assert info.target_price == 58000.0

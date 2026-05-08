@@ -203,6 +203,11 @@ async def test_init_db_path_3_for_empty_db(tmp_path: Path) -> None:
         "state_snapshot",
         "decision", "execution_status", "reasoning",
         "model_id", "tokens_consumed",
+        # Phase 1: timing 2 + tokens 6
+        "wall_time_ms", "llm_call_ms",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_write_tokens",
+        "reasoning_tokens", "cache_hit_rate",
         "created_at",
     }
     assert set(cols.keys()) == expected_cols, \
@@ -463,6 +468,11 @@ def test_t_mig_2_columns_renamed(tmp_path: Path, alembic_cfg_factory):
         "id", "session_id", "cycle_id", "triggered_by", "trigger_context",
         "state_snapshot", "decision", "execution_status", "reasoning",
         "model_id", "tokens_consumed", "created_at",
+        # Phase 1: timing 2 + tokens 6
+        "wall_time_ms", "llm_call_ms",
+        "input_tokens", "output_tokens",
+        "cache_read_tokens", "cache_write_tokens",
+        "reasoning_tokens", "cache_hit_rate",
     }
     assert cols == expected, f"agent_cycles 列集合不匹配，差异={cols ^ expected}"
     conn.close()
@@ -579,12 +589,18 @@ def test_t_mig_6_historical_data_compat(tmp_path: Path, alembic_cfg_factory):
 
 
 def test_t_mig_7_downgrade_no_null_decision(tmp_path: Path, alembic_cfg_factory):
-    """T-MIG-7: downgrade 路径在无 NULL decision 行时应成功（escape hatch 注释场景）。"""
+    """T-MIG-7: downgrade 路径在无 NULL decision 行时应成功（escape hatch 注释场景）。
+
+    Pin upgrade target to R2-7 head (eeeee565cb36) so downgrade -1 lands at R2-4
+    boundary regardless of future migrations. After Phase 1 lands, "head" advanced
+    to 61ac4841a55d so plain "head" + "-1" would only drop Phase 1 cols, not test
+    the R2-7 → R2-4 rename downgrade this test targets.
+    """
     db_path = tmp_path / "t_mig_7.db"
     _create_pre_alembic_schema(db_path)
     cfg = alembic_cfg_factory(db_path)
-    # 先升到 R2-7 head
-    command.upgrade(cfg, "head")
+    # 先升到 R2-7 head（pin to revision; "head" 已不再是 R2-7 after Phase 1）
+    command.upgrade(cfg, "eeeee565cb36")
 
     # 插一行非 NULL decision（plan 设计：downgrade 必须在无 NULL 行下跑）
     conn = sqlite3.connect(db_path)

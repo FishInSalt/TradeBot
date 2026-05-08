@@ -39,6 +39,10 @@ async def init_db(url: str) -> AsyncEngine:
         else:
             # 路径 3: 空库 / 测试 fixture → create_all + stamp head（快路径，跳过 migration 链）
             await conn.run_sync(Base.metadata.create_all)
+            # Phase 1 view 不在 ORM metadata 内（CREATE VIEW 不走 SQLAlchemy）；
+            # stamp head 跳过 migration upgrade()，必须在此显式应用 view SQL
+            # 否则 fresh DB 含列但缺 v_cycle_metrics/v_alert_lifecycle/v_order_lifecycle.
+            await conn.run_sync(_apply_views)
             await conn.run_sync(_alembic_stamp_head)
     # WAL pragma 仍在外层（与原行为一致）
     async with engine.connect() as conn:
@@ -113,3 +117,12 @@ def _alembic_stamp_base(sync_conn) -> None:
     """
     from alembic import command
     command.stamp(_alembic_config(sync_conn), "base")
+
+
+def _apply_views(sync_conn) -> None:
+    """Apply Phase 1 view SQL on fresh DB (Path 3) — Base.metadata.create_all 不
+    覆盖 CREATE VIEW，且 stamp head 跳过 migration upgrade()，必须在此手动应用。
+    """
+    from src.storage.views import ALL_VIEW_SQLS
+    for sql in ALL_VIEW_SQLS:
+        sync_conn.execute(text(sql))
