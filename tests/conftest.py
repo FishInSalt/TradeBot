@@ -89,21 +89,35 @@ def pytest_addoption(parser):
 
 @pytest_asyncio.fixture
 async def db_engine(tmp_path):
-    """Async engine on a fresh tmp DB at Phase 1 head.
+    """Async engine on a fresh tmp DB at Phase 1 head + 3 views applied.
 
     Bootstrap 用 init_db Path 3（Base.metadata.create_all + stamp head），避开
-    第一 migration 假设 W1-like fixture 的限制（fresh DB 跑 alembic upgrade
-    会因 "no such index ix_sim_orders_session_status" 失败）。
-
-    **3 view 派生层** (T13/T15/T17) 在 Phase 1 head 由 alembic CLI 应用，但
-    init_db Path 3 只 stamp 不 run migration —— view 不存在；T14/T16/T18 用
-    text() SELECT v_xxx 时需 fallback 在 fixture 内手动 op.execute view SQL。
-    本 task (T8) 不依赖 view，可直接用。
+    第一 migration 假设 W1-like fixture 的限制。然后手动执行 3 view SQL
+    constants (v_cycle_metrics / v_alert_lifecycle / v_order_lifecycle) 因为
+    init_db Path 3 只 stamp 不 run migration upgrade()，view 不会被创建。
     """
+    import importlib.util
+    from pathlib import Path
+    from sqlalchemy import text
     from src.storage.database import init_db
+
     db_path = tmp_path / "phase1_test.db"
     db_url = f"sqlite+aiosqlite:///{db_path}"
     engine = await init_db(db_url)
+
+    # Apply 3 view SQLs from migration file (init_db Path 3 不 run migration upgrade()，
+    # view 需手动应用)。Module name 以数字开头, importlib.import_module 无法解析,
+    # 改用 importlib.util.spec_from_file_location 直接按文件路径载入.
+    repo_root = Path(__file__).resolve().parent.parent
+    mig_path = repo_root / "alembic" / "versions" / "61ac4841a55d_phase1_observability.py"
+    spec = importlib.util.spec_from_file_location("phase1_obs_migration", mig_path)
+    mig = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mig)
+    async with engine.begin() as conn:
+        for sql in (mig._V_CYCLE_METRICS_SQL, mig._V_ALERT_LIFECYCLE_SQL, mig._V_ORDER_LIFECYCLE_SQL):
+            if sql:
+                await conn.execute(text(sql))
+
     yield engine
     await engine.dispose()
 
