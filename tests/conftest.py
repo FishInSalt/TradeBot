@@ -1,6 +1,6 @@
 import os
 import shutil
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -157,7 +157,7 @@ def deps_factory(db_engine):
             timeframe="15m", exchange=exchange,
             market_data=MarketDataService(exchange),
             technical=MagicMock(spec=TechnicalAnalysisService),
-            memory=MagicMock(format_for_prompt=MagicMock(return_value="No relevant memories.")),
+            memory=MagicMock(format_for_prompt=AsyncMock(return_value="No relevant memories.")),
             approval_gate=ApprovalGate(enabled=False, timeout_seconds=30, console=MagicMock()),
             approval_enabled=False, db_engine=db_engine,
         )
