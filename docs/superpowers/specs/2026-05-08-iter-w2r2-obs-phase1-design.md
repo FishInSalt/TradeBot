@@ -504,6 +504,8 @@ session.add(
 
 **Note 1（语义对齐验证 = AC-11）**：双轨设计——旧变量名 (`cache_hit` / `cache_miss` / `input_total` / `hit_rate`) 保留给 cli/app.py:613-616 logger.info 输出 + 现有 sim log 解析脚本兼容；新变量名 (`cache_read` / `cache_write` / `input_tok` / `output_tok`) 走 pydantic-ai 标准属性给 DB 写入。AC-11 验证两轨语义一致：(a) `usage.cache_read_tokens ≈ cache_hit`（5% 误差内）；(b) `usage.input_tokens ≈ cache_hit + cache_miss`（5% 误差内）。不一致按 standard 属性为准 + plan 中记录差异。
 
+**T0 实测结论 (2026-05-08, deepseek-v4-pro)**: 长 system_prompt (~425 input tokens) 触发 DeepSeek KV cache 后两轨完全对齐——`usage.cache_read_tokens=384` vs `details['prompt_cache_hit_tokens']=384`（相对误差 **0.0%**）；`usage.input_tokens=425` vs `(cache_hit + cache_miss)=425`（相对误差 **0.0%**）。两轨语义对齐 ✓ → 续 plan。注：短 prompt（<256 tokens）DeepSeek 不触发 cache；长 prefix prompt 才能验证 (a)。
+
 **前置验证选项（不强制）**：archived sim DB 不含 raw `result.usage()` 对象（仅 `tokens_consumed` 总数），无法反推；如 spec land 前可抽空在 `cli/app.py:600` 加 `logger.debug(f'usage: {vars(usage)} | details: {details}')` 跑一个 dev cycle 抓 raw 比对，结论前置写入本 Note；否则按 plan task 0 处理（plan 阶段加临时 logger.debug → 跑 cycle → 比对 → 删除 logger）。
 
 **Note 2（wall_time_ms vs Footer Duration 语义差）**：本字段在 `AgentCycle(...)` constructor 内 capture，发生在 `await session.commit()` **之前**；现有 Footer Duration 取 `cycle_ended_at` 在 commit **之后**（cli/app.py:540-542 注释明确写 "实墙时间含 DB 写入"）。两者差 ~5-50ms（DB write 时间）。**分析者比对 wall_time_ms 与 session log Footer Duration 时需注意此 5-50ms 漂移**，不视为 bug。如未来需要二者完全对齐需走 R2-Next-J cycle state machine refactor。
