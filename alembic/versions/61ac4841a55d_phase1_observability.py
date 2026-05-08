@@ -22,7 +22,68 @@ depends_on: Sequence[str] | None = None
 
 
 # View SQL 字符串（T13/T15/T17 后续 task 填充；本 task 仅占位空字符串）
-_V_CYCLE_METRICS_SQL = ""      # T13 填充
+_V_CYCLE_METRICS_SQL = """
+CREATE VIEW v_cycle_metrics AS
+WITH ac_with_anchors AS (
+  SELECT
+    ac.*,
+    CASE WHEN ac.decision LIKE '%(1) Stance%' OR ac.decision LIKE '%(1) **Stance%'
+           OR ac.decision LIKE '%**(1) Stance%' OR ac.decision LIKE '%**(1)** Stance%'
+         THEN 1 ELSE 0 END AS has_stance,
+    CASE WHEN ac.decision LIKE '%(2) Active%' OR ac.decision LIKE '%(2) **Active%'
+           OR ac.decision LIKE '%**(2) Active%' OR ac.decision LIKE '%**(2)** Active%'
+         THEN 1 ELSE 0 END AS has_active_commitments,
+    CASE WHEN ac.decision LIKE '%(3) This cycle%' OR ac.decision LIKE '%(3) **This cycle%'
+           OR ac.decision LIKE '%**(3) This cycle%' OR ac.decision LIKE '%**(3)** This cycle%'
+         THEN 1 ELSE 0 END AS has_this_cycle_delta,
+    CASE WHEN ac.decision LIKE '%(4) Thesis%' OR ac.decision LIKE '%(4) **Thesis%'
+           OR ac.decision LIKE '%**(4) Thesis%' OR ac.decision LIKE '%**(4)** Thesis%'
+         THEN 1 ELSE 0 END AS has_thesis_invalidation,
+    CASE WHEN ac.decision LIKE '%(5) Watch%' OR ac.decision LIKE '%(5) **Watch%'
+           OR ac.decision LIKE '%**(5) Watch%' OR ac.decision LIKE '%**(5)** Watch%'
+         THEN 1 ELSE 0 END AS has_watch_list
+  FROM agent_cycles ac
+)
+SELECT
+  ac.session_id, ac.cycle_id, ac.triggered_by, ac.execution_status,
+  ac.created_at, ac.model_id,
+  ac.wall_time_ms, ac.llm_call_ms,
+  (SELECT SUM(tc.duration_ms) FROM tool_calls tc
+   WHERE tc.session_id=ac.session_id AND tc.cycle_id=ac.cycle_id) AS tool_total_ms,
+  ac.tokens_consumed, ac.input_tokens, ac.output_tokens,
+  ac.cache_read_tokens, ac.cache_write_tokens,
+  ac.reasoning_tokens,
+  ac.cache_hit_rate,
+  CASE WHEN ac.input_tokens IS NOT NULL AND ac.input_tokens > 0
+       THEN ac.cache_read_tokens * 100.0 / ac.input_tokens
+       ELSE NULL END AS cache_hit_rate_derived,
+  CAST(json_extract(ac.state_snapshot, '$.position.contracts')      AS REAL)    AS position_size,
+       json_extract(ac.state_snapshot, '$.position.side')                       AS position_side,
+  CAST(json_extract(ac.state_snapshot, '$.position.leverage')       AS INTEGER) AS position_leverage,
+  CAST(json_extract(ac.state_snapshot, '$.position.unrealized_pnl') AS REAL)    AS position_unrealized_pnl,
+  CAST(json_extract(ac.state_snapshot, '$.position.pnl_pct')        AS REAL)    AS position_pnl_pct,
+  CAST(json_extract(ac.state_snapshot, '$.balance.free_usdt')       AS REAL)    AS balance_free_usdt,
+  CAST(json_extract(ac.state_snapshot, '$.market.ticker_last')      AS REAL)    AS ticker_last,
+       json_extract(ac.state_snapshot, '$.market.fetched_at')                   AS state_captured_at,
+  json_array_length(json_extract(ac.state_snapshot, '$.pending_orders')) AS pending_orders_count,
+  json_array_length(json_extract(ac.state_snapshot, '$.active_alerts'))  AS active_alerts_count,
+  json_array_length(json_extract(ac.state_snapshot, '$._errors'))        AS snapshot_errors_count,
+  CASE WHEN json_extract(ac.state_snapshot, '$.position') IS NOT NULL
+       THEN 1 ELSE 0 END AS has_position,
+  length(ac.decision) AS decision_length,
+  ac.has_stance, ac.has_active_commitments, ac.has_this_cycle_delta,
+  ac.has_thesis_invalidation, ac.has_watch_list,
+  CASE WHEN (ac.has_stance + ac.has_active_commitments
+           + ac.has_this_cycle_delta + ac.has_thesis_invalidation) >= 4
+       THEN 1 ELSE 0 END AS five_field_complete,
+  CASE WHEN ac.execution_status='ok'
+        AND ac.decision IS NOT NULL
+        AND length(ac.decision) > 0
+       THEN 1 ELSE 0 END AS is_ok_cycle,
+  CASE WHEN ac.execution_status IN ('retry_exhausted','usage_limit_exceeded')
+       THEN 1 ELSE 0 END AS is_forensic_cycle
+FROM ac_with_anchors ac
+"""
 _V_ALERT_LIFECYCLE_SQL = ""    # T15 填充
 _V_ORDER_LIFECYCLE_SQL = ""    # T17 填充
 
