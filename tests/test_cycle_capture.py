@@ -287,6 +287,7 @@ def test_trigger_context_price_level_alert():
         symbol="BTC/USDT:USDT", target_price=75600.0, direction="above",
         current_price=75623.0, reasoning="FOMC reaction watch",
         timestamp=1746098000000,
+        alert_id="fomc0001",
     )
     result = _capture_trigger_context("cyc-tc3", "alert", pla)
     assert result["type"] == "price_level_alert"
