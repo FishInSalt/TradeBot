@@ -176,9 +176,16 @@ async def db_engine_with_real_db(tmp_path):
 
     与 db_engine 区别：本 fixture 用 alembic CLI（DB 已 W1-like schema 存在），
     db_engine 用 init_db Path 3（fresh empty DB）。
+
+    **Skip if data/tradebot.db missing** (PR #42 review I-3): data/ 是 gitignored，
+    clean CI / fresh contributor checkout 没有此文件；shutil.copy 会 hard-fail。
+    历史兼容测试本质需要真实 sim DB，无文件就 skip。
     """
     import subprocess
-    src = "data/tradebot.db"
+    from pathlib import Path
+    src = Path("data/tradebot.db")
+    if not src.exists():
+        pytest.skip(f"{src} not present (gitignored); historical compat tests need real sim DB")
     dst = tmp_path / "compat_test.db"
     shutil.copy(src, dst)
     db_url = f"sqlite+aiosqlite:///{dst}"
