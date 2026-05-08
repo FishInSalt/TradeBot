@@ -189,11 +189,13 @@ async def db_engine_with_real_db(tmp_path):
     dst = tmp_path / "compat_test.db"
     shutil.copy(src, dst)
     db_url = f"sqlite+aiosqlite:///{dst}"
-    subprocess.run(
-        ["alembic", "upgrade", "head"],
-        env={**os.environ, "TRADEBOT_DB_URL": db_url},
-        check=True, capture_output=True,
-    )
+    # PR #42 review v4 I-4: 强 downgrade -1 → upgrade head 真测 migration 上行,
+    # 不只是验证"已 head 状态"。data/tradebot.db 早在 T13/T15/T17 已 upgrade 到
+    # Phase 1 head, 直接 upgrade 是 no-op；显式回到 R2-7 再上让 migration 在
+    # production-shape 数据上跑一遍 (335 rows, 3 sessions) 真验证 AC-8.
+    sub_env = {**os.environ, "TRADEBOT_DB_URL": db_url}
+    subprocess.run(["alembic", "downgrade", "-1"], env=sub_env, check=True, capture_output=True)
+    subprocess.run(["alembic", "upgrade", "head"], env=sub_env, check=True, capture_output=True)
     engine = create_async_engine(db_url)
     yield engine
     await engine.dispose()

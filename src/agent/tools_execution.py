@@ -16,11 +16,16 @@ logger = logging.getLogger(__name__)
 # update _EXECUTION_SUCCESS_PREFIXES in display.py accordingly.
 
 
-async def _record_action(deps: TradingDeps, action: str, order_id: str | None = None,
+async def _record_action(deps: TradingDeps, action: str, *,
+                          order_id: str | None = None,
                           alert_id: str | None = None,
                           side: str | None = None, price: float | None = None,
                           pnl: float | None = None, reasoning: str | None = None) -> None:
-    """写入一条 TradeAction 记录。写入失败不影响 tool 返回（容错）。"""
+    """写入一条 TradeAction 记录。写入失败不影响 tool 返回（容错）。
+
+    `*` 之后全 kwarg-only — 防 future positional caller 把例如 side="long"
+    误写入 alert_id 列（PR #42 review v4 I-5 修订）。
+    """
     if deps.db_engine is None:
         return
     from src.storage.database import get_session

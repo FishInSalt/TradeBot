@@ -57,13 +57,17 @@ async def test_v_order_lifecycle_select_on_historical(db_engine_with_real_db):
 
 @pytest.mark.asyncio
 async def test_v_cycle_metrics_historical_8_new_cols_null(db_engine_with_real_db):
-    """T19.4: 历史 cycle 的 8 新列全 NULL（不破坏 view 但 cache_hit_rate_derived 也 NULL）。"""
+    """T19.4: 历史 cycle 的 8 新列全 NULL（不破坏 view 但 cache_hit_rate_derived 也 NULL）。
+
+    PR #42 review v4 I-1 修订: 用 wall_time_ms IS NULL 作 invariant 而非
+    硬编码日期 — 后者今后任何 sim 写入都会让 filter 漂移失效。
+    """
     async with db_engine_with_real_db.connect() as conn:
         result = await conn.execute(text(
             "SELECT cycle_id, wall_time_ms, input_tokens, cache_hit_rate_derived "
             "FROM v_cycle_metrics "
-            "WHERE created_at < '2026-05-09'"
-            " LIMIT 5"
+            "WHERE wall_time_ms IS NULL "       # invariant: 没 Phase 1 instrumentation 的 row
+            "LIMIT 5"
         ))
         rows = result.mappings().all()
 

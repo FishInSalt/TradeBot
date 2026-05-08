@@ -693,6 +693,10 @@ async def run_agent_cycle(
                 model_id=model_id_var,
                 tokens_consumed=tokens,
                 # === Phase 1 (T10) ===
+                # spec §5.5.1 Note 2: wall_time_ms 在 commit 之前 capture，
+                # 比 footer Duration (commit 之后) 少 ~5-50ms（DB write 时间）。
+                # 分析者比对二者时勿误认为 bug；R2-Next-J cycle state machine
+                # refactor 是消除此差的 follow-up.
                 wall_time_ms=int((datetime.now(timezone.utc) - cycle_started_at).total_seconds() * 1000),
                 llm_call_ms=llm_call_ms,
                 input_tokens=input_tok,
