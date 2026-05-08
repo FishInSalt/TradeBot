@@ -152,7 +152,7 @@ SELECT
   so.created_at, so.filled_at, so.status,
   CASE
     WHEN so.filled_at IS NOT NULL
-    THEN CAST((julianday(so.filled_at) - julianday(so.created_at)) * 86400 AS INTEGER)
+    THEN CAST(ROUND((julianday(so.filled_at) - julianday(so.created_at)) * 86400) AS INTEGER)
   END AS lifetime_seconds,
   CASE
     WHEN so.order_type IN ('stop','take_profit')
