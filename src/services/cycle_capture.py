@@ -50,9 +50,10 @@ def _capture_trigger_context(cycle_id: str, trigger_type: str, context) -> dict 
             }
         if trigger_type == "alert" and context is not None:
             if isinstance(context, PriceLevelAlertInfo):
-                # base.py:285-292: 6 字段 + type
+                # base.py: 7 字段（含 T1 alert_id）+ type
                 return {
                     "type": "price_level_alert",
+                    "alert_id": context.alert_id,
                     "symbol": context.symbol,
                     "current_price": context.current_price,
                     "target_price": context.target_price,

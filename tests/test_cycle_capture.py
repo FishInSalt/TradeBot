@@ -282,7 +282,7 @@ def test_trigger_context_fill_event():
 
 
 def test_trigger_context_price_level_alert():
-    """T-TC-3: PriceLevelAlertInfo → 7 字段含 timestamp (P1-1)。"""
+    """T-TC-3: PriceLevelAlertInfo → 7 字段含 alert_id (P1-1 + T2 mirror)。"""
     pla = PriceLevelAlertInfo(
         symbol="BTC/USDT:USDT", target_price=75600.0, direction="above",
         current_price=75623.0, reasoning="FOMC reaction watch",
@@ -293,9 +293,10 @@ def test_trigger_context_price_level_alert():
     assert result["type"] == "price_level_alert"
     assert result["target_price"] == 75600.0
     assert result["timestamp"] == 1746098000000
+    assert result["alert_id"] == "fomc0001"
     assert set(result.keys()) == {
-        "type", "symbol", "current_price", "target_price",
-        "direction", "reasoning", "timestamp",
+        "type", "alert_id", "symbol", "current_price",
+        "target_price", "direction", "reasoning", "timestamp",
     }
 
 
