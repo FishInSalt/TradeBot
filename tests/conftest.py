@@ -89,24 +89,21 @@ def pytest_addoption(parser):
 
 @pytest_asyncio.fixture
 async def db_engine(tmp_path):
-    """Async engine on a fresh tmp DB with full schema via alembic upgrade head.
+    """Async engine on a fresh tmp DB at Phase 1 head.
 
-    **不用 Base.metadata.create_all** — SQLAlchemy metadata 不知道 alembic 创建的
-    view (op.execute("CREATE VIEW ...")), 导致 T14/T16/T18/T21 跑 SELECT * FROM
-    v_cycle_metrics 会 OperationalError "no such table"。改用 alembic upgrade head
-    作 single source of truth：schema (含 9 列) + 3 view 全部由 alembic migration 创建。
+    Bootstrap 用 init_db Path 3（Base.metadata.create_all + stamp head），避开
+    第一 migration 假设 W1-like fixture 的限制（fresh DB 跑 alembic upgrade
+    会因 "no such index ix_sim_orders_session_status" 失败）。
 
-    env var: TRADEBOT_DB_URL (alembic/env.py:35) — async URL form normalized to sync inside env.
+    **3 view 派生层** (T13/T15/T17) 在 Phase 1 head 由 alembic CLI 应用，但
+    init_db Path 3 只 stamp 不 run migration —— view 不存在；T14/T16/T18 用
+    text() SELECT v_xxx 时需 fallback 在 fixture 内手动 op.execute view SQL。
+    本 task (T8) 不依赖 view，可直接用。
     """
-    import subprocess
+    from src.storage.database import init_db
     db_path = tmp_path / "phase1_test.db"
     db_url = f"sqlite+aiosqlite:///{db_path}"
-    subprocess.run(
-        ["alembic", "upgrade", "head"],
-        env={**os.environ, "TRADEBOT_DB_URL": db_url},
-        check=True, capture_output=True,
-    )
-    engine = create_async_engine(db_url)
+    engine = await init_db(db_url)
     yield engine
     await engine.dispose()
 
@@ -133,7 +130,7 @@ def deps_factory(db_engine):
     from src.integrations.exchange.simulated import SimulatedExchange
     from src.config import ExchangeConfig
 
-    def _make(symbol="BTC/USDT:USDT", session_id=None):
+    def _make(symbol="BTC/USDT:USDT", session_id=None, initial_balance=10000.0):
         if session_id is None:
             import uuid
             session_id = str(uuid.uuid4())
@@ -142,6 +139,19 @@ def deps_factory(db_engine):
             config=config, db_engine=db_engine,
             session_id=session_id, symbol=symbol,
         )
+        # Pre-populate state mirroring tests/_fixtures.py:make_sim_exchange — avoids
+        # async start() while making _latest_price / _latest_ticker available so tools
+        # (e.g. add_price_level_alert) reading these attrs don't AttributeError.
+        from tests._fixtures import make_ticker
+        exchange._free_usdt = initial_balance
+        exchange._used_usdt = 0.0
+        exchange._frozen_usdt = 0.0
+        exchange._positions = {}
+        exchange._pending_orders = []
+        exchange._leverage = {}
+        exchange._latest_ticker = make_ticker(symbol=symbol)
+        exchange._latest_price = exchange._latest_ticker.last
+        exchange._running = True
         deps = TradingDeps(
             session_id=session_id, symbol=symbol,
             timeframe="15m", exchange=exchange,
@@ -163,12 +173,14 @@ async def deps_with_sim_exchange(deps_factory):
 
 @pytest_asyncio.fixture
 async def db_engine_with_real_db(tmp_path):
-    """Copy of data/tradebot.db + 自含 alembic upgrade head (AC-8 historical compat).
+    """Copy of data/tradebot.db + alembic upgrade head 到副本 (AC-8 historical compat).
 
-    **不依赖主 DB schema 状态** — copy 后显式 alembic upgrade head 到副本，
-    确保 fresh checkout / 主 DB 处于 R2-7 head 时也可跑（不受 T13/T15/T17 副作用影响）。
+    **不依赖主 DB schema 状态** — copy 后 init_db 走 Path 1（已有 schema → 走 alembic
+    upgrade head 增量到 Phase 1 head）确保 fresh checkout / 主 DB 处于 R2-7 head
+    时也可跑（不受 T13/T15/T17 副作用影响）。
 
-    env var: TRADEBOT_DB_URL (alembic/env.py:35).
+    与 db_engine 区别：本 fixture 用 alembic CLI（DB 已 W1-like schema 存在），
+    db_engine 用 init_db Path 3（fresh empty DB）。
     """
     import subprocess
     src = "data/tradebot.db"
