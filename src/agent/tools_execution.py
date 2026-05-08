@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _record_action(deps: TradingDeps, action: str, order_id: str | None = None,
+                          alert_id: str | None = None,
                           side: str | None = None, price: float | None = None,
                           pnl: float | None = None, reasoning: str | None = None) -> None:
     """写入一条 TradeAction 记录。写入失败不影响 tool 返回（容错）。"""
@@ -29,9 +30,10 @@ async def _record_action(deps: TradingDeps, action: str, order_id: str | None = 
         async with get_session(deps.db_engine) as session:
             session.add(TradeAction(
                 session_id=deps.session_id,
-                cycle_id=deps.cycle_id,        # ← 新增（从 deps 取，11 个 callers 0 改动）
+                cycle_id=deps.cycle_id,
                 action=action,
                 order_id=order_id,
+                alert_id=alert_id,
                 symbol=deps.symbol,
                 side=side,
                 price=price,
@@ -246,7 +248,9 @@ async def add_price_level_alert(
         return "Price level alert limit reached (max 20). Remove or wait for existing alerts to trigger."
 
     await _record_action(
-        deps, action="add_price_level_alert", price=price,
+        deps, action="add_price_level_alert",
+        alert_id=alert_id,
+        price=price,
         reasoning=f"{direction} {price} | {reasoning}",
     )
 
@@ -282,7 +286,8 @@ async def cancel_price_level_alert(
     if ok:
         await _record_action(
             deps, action="cancel_price_level_alert",
-            reasoning=f"id={alert_id} | {reasoning}",
+            alert_id=alert_id,
+            reasoning=reasoning,
         )
         return f"Price level alert cancelled (id={alert_id})"
     note_biz_error("alert_not_found")
