@@ -95,16 +95,18 @@ async def db_engine(tmp_path):
     view (op.execute("CREATE VIEW ...")), 导致 T14/T16/T18/T21 跑 SELECT * FROM
     v_cycle_metrics 会 OperationalError "no such table"。改用 alembic upgrade head
     作 single source of truth：schema (含 9 列) + 3 view 全部由 alembic migration 创建。
+
+    env var: TRADEBOT_DB_URL (alembic/env.py:35) — async URL form normalized to sync inside env.
     """
     import subprocess
     db_path = tmp_path / "phase1_test.db"
-    db_url = f"sqlite:///{db_path}"
+    db_url = f"sqlite+aiosqlite:///{db_path}"
     subprocess.run(
         ["alembic", "upgrade", "head"],
-        env={**os.environ, "DATABASE_URL": db_url},
+        env={**os.environ, "TRADEBOT_DB_URL": db_url},
         check=True, capture_output=True,
     )
-    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    engine = create_async_engine(db_url)
     yield engine
     await engine.dispose()
 
@@ -165,16 +167,19 @@ async def db_engine_with_real_db(tmp_path):
 
     **不依赖主 DB schema 状态** — copy 后显式 alembic upgrade head 到副本，
     确保 fresh checkout / 主 DB 处于 R2-7 head 时也可跑（不受 T13/T15/T17 副作用影响）。
+
+    env var: TRADEBOT_DB_URL (alembic/env.py:35).
     """
     import subprocess
     src = "data/tradebot.db"
     dst = tmp_path / "compat_test.db"
     shutil.copy(src, dst)
+    db_url = f"sqlite+aiosqlite:///{dst}"
     subprocess.run(
         ["alembic", "upgrade", "head"],
-        env={**os.environ, "DATABASE_URL": f"sqlite:///{dst}"},
+        env={**os.environ, "TRADEBOT_DB_URL": db_url},
         check=True, capture_output=True,
     )
-    engine = create_async_engine(f"sqlite+aiosqlite:///{dst}")
+    engine = create_async_engine(db_url)
     yield engine
     await engine.dispose()
