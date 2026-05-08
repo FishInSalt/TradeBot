@@ -142,7 +142,32 @@ LEFT JOIN triggers       t  ON t.session_id=r.session_id  AND t.alert_id=r.alert
 LEFT JOIN cancels        c  ON c.session_id=r.session_id  AND c.alert_id=r.alert_id
 LEFT JOIN cancel_attempts ca ON ca.session_id=r.session_id AND ca.alert_id=r.alert_id
 """
-_V_ORDER_LIFECYCLE_SQL = ""    # T17 填充
+_V_ORDER_LIFECYCLE_SQL = """
+CREATE VIEW v_order_lifecycle AS
+SELECT
+  so.session_id,
+  so.order_id, so.symbol, so.side, so.position_side,
+  so.order_type, so.amount,
+  so.trigger_price, so.filled_price, so.fee, so.leverage, so.frozen_margin,
+  so.created_at, so.filled_at, so.status,
+  CASE
+    WHEN so.filled_at IS NOT NULL
+    THEN CAST((julianday(so.filled_at) - julianday(so.created_at)) * 86400 AS INTEGER)
+  END AS lifetime_seconds,
+  CASE
+    WHEN so.order_type IN ('stop','take_profit')
+     AND so.trigger_price IS NOT NULL AND so.filled_price IS NOT NULL
+    THEN (so.filled_price - so.trigger_price) / so.trigger_price * 100.0
+    ELSE NULL
+  END AS trigger_drift_pct,
+  (SELECT ta.cycle_id
+   FROM trade_actions ta
+   WHERE ta.order_id=so.order_id
+     AND ta.action IN ('open_position','close_position','place_limit_order',
+                       'set_stop_loss','set_take_profit')
+   ORDER BY ta.created_at LIMIT 1) AS originated_cycle_id
+FROM sim_orders so
+"""
 
 
 def upgrade() -> None:
