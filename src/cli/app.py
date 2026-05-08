@@ -539,6 +539,15 @@ async def run_agent_cycle(
                     execution_status="usage_limit_exceeded",
                     model_id=model_id_var,
                     tokens_consumed=0,                            # spec §3.1 #3: UsageLimitExceeded 不携带 partial usage
+                    # === Phase 1 (T11 forensic) — 仅 wall_time_ms 填，其余 NULL ===
+                    wall_time_ms=int((datetime.now(timezone.utc) - cycle_started_at).total_seconds() * 1000),
+                    llm_call_ms=llm_call_ms,    # default None (T10 retry-loop pre-init)
+                    input_tokens=None,
+                    output_tokens=None,
+                    cache_read_tokens=None,
+                    cache_write_tokens=None,
+                    reasoning_tokens=None,
+                    cache_hit_rate=None,
                 ))
                 await session.commit()
             # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
@@ -581,6 +590,15 @@ async def run_agent_cycle(
                         execution_status="retry_exhausted",
                         model_id=model_id_var,
                         tokens_consumed=0,
+                        # === Phase 1 (T11 forensic) — 仅 wall_time_ms 填，其余 NULL ===
+                        wall_time_ms=int((datetime.now(timezone.utc) - cycle_started_at).total_seconds() * 1000),
+                        llm_call_ms=llm_call_ms,    # default None
+                        input_tokens=None,
+                        output_tokens=None,
+                        cache_read_tokens=None,
+                        cache_write_tokens=None,
+                        reasoning_tokens=None,
+                        cache_hit_rate=None,
                     ))
                     await session.commit()
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
