@@ -6,13 +6,30 @@ Caveats §4.4 / SQL §3.5 / R2-7 cutoff §6.4 must be honored.
 """
 from __future__ import annotations
 
+import sys
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-# `from sqlalchemy import text` is added in T2 when collect_roundtrips needs it;
-# T1 skeleton does not require it yet. Same for `import json` / `import statistics`
-# / `import re` — added in T6/T8 respectively as their functions arrive.
+from sqlalchemy import text
+
+
+def _parse_dt(value: datetime | str | None) -> datetime | None:
+    """Coerce SQLite text timestamp to aware datetime. Returns None if value is None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    # aiosqlite returns 'YYYY-MM-DD HH:MM:SS.ffffff' (no TZ suffix)
+    s = str(value)
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse datetime: {value!r}")
 
 
 R2_7_MERGED_AT = datetime(2026, 5, 2, tzinfo=timezone.utc)
@@ -108,3 +125,131 @@ class Roundtrip:
     pnl_net: float
     duration_seconds: int
     exit_type: str
+
+
+_FILLS_SQL = text("""
+    SELECT so.id, so.order_id, so.side, so.position_side, so.order_type,
+           so.amount, so.filled_price, so.fee, so.filled_at, so.leverage,
+           vol.originated_cycle_id, ta_filled.pnl AS trade_action_pnl
+    FROM sim_orders so
+    LEFT JOIN v_order_lifecycle vol ON vol.order_id = so.order_id
+    LEFT JOIN trade_actions ta_filled
+      ON ta_filled.order_id = so.order_id
+     AND ta_filled.session_id = :sid
+     AND ta_filled.action = 'order_filled'
+    WHERE so.session_id = :sid AND so.filled_at IS NOT NULL
+    ORDER BY so.filled_at ASC, so.id ASC
+""")
+
+
+async def _fetch_fee_rate(engine, session_id: str) -> float | None:
+    async with engine.connect() as conn:
+        row = (await conn.execute(
+            text("SELECT fee_rate FROM sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).first()
+    return row.fee_rate if row else None
+
+
+async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], dict]:
+    """FIFO lot pairing. See spec §4.2 for full algorithm.
+
+    Returns (roundtrips, caveats):
+      caveats keys: unclosed_lot_count {'long': int, 'short': int},
+                    invariant_violations: int,
+                    liquidation_count: int,
+                    stale_close_amount_count: int
+    """
+    fee_rate = await _fetch_fee_rate(engine, session_id)
+    async with engine.connect() as conn:
+        result = await conn.execute(_FILLS_SQL, {"sid": session_id})
+        fills = result.all()
+
+    roundtrips: list[Roundtrip] = []
+    open_lots: dict[str, deque[_Lot]] = {"long": deque(), "short": deque()}
+    caveats = {
+        "unclosed_lot_count": {"long": 0, "short": 0},
+        "invariant_violations": 0,
+        "liquidation_count": 0,
+        "stale_close_amount_count": 0,
+    }
+
+    for fill in fills:
+        if not _is_close_fill(fill.position_side, fill.side):
+            open_lots[fill.position_side].append(_Lot(
+                open_at=_parse_dt(fill.filled_at),
+                open_cycle_id=fill.originated_cycle_id,
+                side=fill.position_side,
+                entry_px=fill.filled_price,
+                original_amount=fill.amount,
+                remaining_amount=fill.amount,
+                leverage=fill.leverage,
+                open_fee=fill.fee or 0.0,
+            ))
+            continue
+
+        # CLOSE — FIFO consume
+        actual_amount, derived_ok = _derive_close_amount(fill, fee_rate)
+        if not derived_ok:
+            caveats["stale_close_amount_count"] += 1
+        close_remaining = actual_amount
+        close_fee_total = fill.fee or 0.0
+        lot_queue = open_lots[fill.position_side]
+
+        while close_remaining > 0:
+            if not lot_queue:
+                caveats["invariant_violations"] += 1
+                print(
+                    f"close fill {fill.order_id} has no preceding open lot",
+                    file=sys.stderr,
+                )
+                break
+            lot = lot_queue[0]
+            consumed = min(lot.remaining_amount, close_remaining)
+
+            if fill.order_type == "liquidation":
+                if fill.trade_action_pnl is None:
+                    caveats["invariant_violations"] += 1
+                    print(
+                        f"liquidation fill {fill.order_id} missing trade_actions.pnl row",
+                        file=sys.stderr,
+                    )
+                    pnl_gross = 0.0
+                else:
+                    pnl_gross = fill.trade_action_pnl * (consumed / actual_amount)
+            else:
+                pnl_gross = _compute_pnl(lot.entry_px, fill.filled_price, consumed, lot.side)
+
+            fee_open_share = lot.open_fee * (consumed / lot.original_amount)
+            fee_close_share = close_fee_total * (consumed / actual_amount)
+            fee_total = fee_open_share + fee_close_share
+
+            close_at_dt = _parse_dt(fill.filled_at)
+            roundtrips.append(Roundtrip(
+                open_at=lot.open_at, close_at=close_at_dt,
+                open_cycle_id=lot.open_cycle_id,
+                close_cycle_id=(fill.originated_cycle_id
+                                if fill.order_type != "liquidation" else None),
+                side=lot.side, entry_px=lot.entry_px, exit_px=fill.filled_price,
+                amount=consumed, leverage=lot.leverage,
+                pnl_gross=pnl_gross,
+                fee_open_share=fee_open_share, fee_close_share=fee_close_share,
+                fee_total=fee_total,
+                pnl_net=pnl_gross - fee_total,
+                duration_seconds=int((close_at_dt - lot.open_at).total_seconds()),
+                exit_type=fill.order_type,
+            ))
+
+            lot.remaining_amount -= consumed
+            close_remaining -= consumed
+            if lot.remaining_amount <= 1e-9:
+                lot_queue.popleft()
+
+        if fill.order_type == "liquidation":
+            caveats["liquidation_count"] += 1
+
+    caveats["unclosed_lot_count"] = {
+        "long": len(open_lots["long"]),
+        "short": len(open_lots["short"]),
+    }
+    return roundtrips, caveats
