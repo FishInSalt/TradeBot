@@ -138,7 +138,7 @@ async def test_analyze_emits_all_28_metric_groups(db_engine):
         # Behavior
         "total_cycles", "ok_count", "forensic_count",
         "triggered_by[", "decision_type[",
-        "5field_complete_rate", "has_stance",
+        "five_field_complete_rate", "has_stance",
         "avg_decision_length_chars", "decision_length_p95",
         "retraction_rate", "avg_reasoning_tokens", "avg_thinking_chars",
         # alert_lifecycle_summary expands to 3 sub-rows

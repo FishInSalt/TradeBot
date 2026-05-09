@@ -210,9 +210,11 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
 
         # Pre-compute liquidation per-unit pnl ONCE per fill — fixes invariant
         # counter overcounting when liquidation spans N lots.
+        # Defensive guard: actual_amount<=0 (degenerate sim_orders.amount)
+        # would crash on the division below; route through invariant pathway.
         liq_pnl_per_unit: float | None = None
         if fill.order_type == "liquidation":
-            if fill.trade_action_pnl is None:
+            if fill.trade_action_pnl is None or actual_amount <= 0:
                 caveats["invariant_violations"] += 1
                 print(
                     f"liquidation fill {fill.order_id} missing trade_actions.pnl row",

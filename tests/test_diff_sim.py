@@ -271,6 +271,29 @@ async def test_diff_distribution_expansion(db_engine):
     assert "exit_type[liquidation]" in r.stdout
 
 
+async def test_diff_distribution_missing_key_zero_fills_per_spec_5_3(db_engine):
+    """Spec §5.3 example: A triggered_by[alert]=N / B missing → B=0,
+    Δ=-N, Δ%=-100%, flag=🔴 (NOT ⚠️ via signal-lost fallback)."""
+    db_path = _resolve_db_path(db_engine)
+    # A: 5 alert-triggered cycles
+    await make_session(db_engine, name="trig_a")
+    sid_a = await make_session_id(db_engine, "trig_a")
+    for i in range(5):
+        await make_cycle(db_engine, sid_a, f"c{i}", triggered_by="alert")
+    # B: only scheduled cycles (no alert)
+    await make_session(db_engine, name="trig_b")
+    sid_b = await make_session_id(db_engine, "trig_b")
+    for i in range(3):
+        await make_cycle(db_engine, sid_b, f"c{i}", triggered_by="scheduled")
+    r = _run_diff("--a", "trig_a", "--b", "trig_b", db_path=db_path)
+    assert r.returncode == 0
+    row = _row_for(r.stdout, "triggered_by[alert]")
+    assert row is not None
+    # Per spec §5.3: B's missing key zero-filled → flag based on Δ%=-100% → 🔴
+    assert "🔴" in row, f"expected 🔴 from zero-fill, got: {row!r}"
+    assert "-100.0%" in row
+
+
 async def test_diff_a_equals_b_warning(db_engine):
     db_path = _resolve_db_path(db_engine)
     await make_session(db_engine, name="same")

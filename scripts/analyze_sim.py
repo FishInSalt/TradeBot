@@ -186,7 +186,7 @@ async def _render_behavior(engine, session) -> str:
         rows.append((f"triggered_by[{k}]", _fmt_count(v)))
     for k, v in dt.items():
         rows.append((f"decision_type[{k}]", _fmt_count(v)))
-    rows.append(("5field_complete_rate", _fmt_pct(await five_field_complete_rate(engine, session.id))))
+    rows.append(("five_field_complete_rate", _fmt_pct(await five_field_complete_rate(engine, session.id))))
     for k, v in pfh.items():
         rows.append((k, _fmt_pct(v)))
     rows += [

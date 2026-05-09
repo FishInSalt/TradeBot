@@ -394,6 +394,29 @@ def _flatten_dist_into_dict(metrics: dict, source_key: str, prefix: str) -> None
         metrics[f"{prefix}{k}"] = v
 
 
+# Distribution prefixes that follow spec §5.3 zero-fill semantics:
+# missing key on one side = 0 (not None) so flag dispatches via Δ% instead of
+# the "signal lost" ⚠️ branch. Spec example: sim_a triggered_by[alert]=20%,
+# sim_b missing → sim_b=0%, Δ=-20pp, Δ%=-100%, flag=🔴.
+_DIST_ZEROFILL_PREFIXES = (
+    "exit_type[",
+    "triggered_by[",
+    "decision_type[",
+    "per_tool_call_top10[",
+)
+
+
+def _zero_fill_dist_keys(metrics_a: dict, metrics_b: dict) -> None:
+    """Mutate both dicts so any union-key under a distribution prefix exists
+    on both sides (default 0). Spec §5.3 distribution missing-key rule."""
+    for prefix in _DIST_ZEROFILL_PREFIXES:
+        union = {k for k in metrics_a if k.startswith(prefix)}
+        union |= {k for k in metrics_b if k.startswith(prefix)}
+        for k in union:
+            metrics_a.setdefault(k, 0)
+            metrics_b.setdefault(k, 0)
+
+
 def _build_pnl_labels(metrics_a, metrics_b) -> list[str]:
     return PNL_LABELS + _expand_dist_labels(metrics_a, metrics_b, PNL_DIST_PREFIX)
 
@@ -415,6 +438,8 @@ async def render_diff(engine, session_a, session_b) -> str:
     # Flatten dict-valued entries (per_tool_call_top10) into label-prefixed keys
     _flatten_dist_into_dict(metrics_a, "per_tool_call_top10", "per_tool_call_top10[")
     _flatten_dist_into_dict(metrics_b, "per_tool_call_top10", "per_tool_call_top10[")
+    # Spec §5.3: distribution missing-key zero-fill (one-side keys default to 0).
+    _zero_fill_dist_keys(metrics_a, metrics_b)
 
     parts = [_render_diff_header(session_a, session_b)]
     parts.append(_render_diff_section("PnL", _build_pnl_labels(metrics_a, metrics_b),
