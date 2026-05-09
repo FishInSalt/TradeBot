@@ -1,7 +1,6 @@
 """F7 OKX REST OHLCV helper — unit tests (mock-only, no live REST)."""
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import ccxt
