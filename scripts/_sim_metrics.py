@@ -383,3 +383,85 @@ async def total_pnl_net(engine, session_id: str, rts: list[Roundtrip]) -> float:
         """), {"sid": session_id})).first()
     gross = row.gross or 0.0
     return gross - sum(rt.fee_total for rt in rts)
+
+
+# ── Cost metric functions (C1-C8) ─────────────────────────────────────────────
+
+
+async def cost_token_sums(engine, session_id: str) -> dict[str, int]:
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("""
+            SELECT COALESCE(SUM(input_tokens), 0) AS total_input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS total_output_tokens,
+                   COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens
+            FROM v_cycle_metrics WHERE session_id = :sid
+        """), {"sid": session_id})).first()
+    return {
+        "total_input_tokens": row.total_input_tokens,
+        "total_output_tokens": row.total_output_tokens,
+        "total_cache_read_tokens": row.total_cache_read_tokens,
+    }
+
+
+async def avg_cache_hit_rate(engine, session_id: str) -> float | None:
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("""
+            SELECT SUM(input_tokens) AS total_in, SUM(cache_read_tokens) AS total_cache
+            FROM v_cycle_metrics WHERE session_id = :sid
+        """), {"sid": session_id})).first()
+    if not row.total_in:
+        return None
+    return row.total_cache / row.total_in
+
+
+async def tokens_per_cycle_percentile(engine, session_id: str, p: int) -> float | None:
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("""
+            SELECT tokens_consumed FROM v_cycle_metrics
+            WHERE session_id = :sid AND tokens_consumed IS NOT NULL
+            ORDER BY tokens_consumed
+        """), {"sid": session_id})).all()
+    return _percentile([r.tokens_consumed for r in rows], p)
+
+
+_AVG_COLUMN_ALLOWED = frozenset({
+    "wall_time_ms", "llm_call_ms", "tool_total_ms",
+    "decision_length", "reasoning_tokens",
+})
+
+
+async def _avg_view_column(engine, session_id: str, col: str) -> float | None:
+    """Internal: AVG over a whitelisted v_cycle_metrics column.
+
+    SQL identifier must be interpolated (DB-API can't bind column names);
+    the whitelist defends against accidental misuse from future contributors.
+    """
+    if col not in _AVG_COLUMN_ALLOWED:
+        raise ValueError(f"_avg_view_column: column {col!r} not in whitelist")
+    async with engine.connect() as conn:
+        row = (await conn.execute(text(
+            f"SELECT AVG({col}) AS avg_val FROM v_cycle_metrics WHERE session_id = :sid"
+        ), {"sid": session_id})).first()
+    return row.avg_val
+
+
+async def avg_wall_time_ms(engine, session_id: str) -> float | None:
+    return await _avg_view_column(engine, session_id, "wall_time_ms")
+
+
+async def avg_llm_call_ms(engine, session_id: str) -> float | None:
+    return await _avg_view_column(engine, session_id, "llm_call_ms")
+
+
+async def avg_tool_total_ms(engine, session_id: str) -> float | None:
+    return await _avg_view_column(engine, session_id, "tool_total_ms")
+
+
+async def per_tool_call_top10(engine, session_id: str) -> list[tuple[str, int]]:
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("""
+            SELECT tool_name, COUNT(*) AS cnt FROM tool_calls
+            WHERE session_id = :sid
+            GROUP BY tool_name ORDER BY cnt DESC LIMIT 10
+        """), {"sid": session_id})).all()
+    return [(r.tool_name, r.cnt) for r in rows]

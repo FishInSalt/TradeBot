@@ -581,3 +581,77 @@ async def test_total_pnl_net_excludes_unclosed_lot_open_fee(db_engine):
     rts, _ = await collect_roundtrips(db_engine, sid)
     p2 = await total_pnl_net(db_engine, sid, rts)
     assert p2 == pytest.approx(91.9, abs=0.01)
+
+
+# === T7: Cost metric functions ===
+
+from scripts._sim_metrics import (
+    cost_token_sums, avg_cache_hit_rate,
+    tokens_per_cycle_percentile,
+    avg_wall_time_ms, avg_llm_call_ms, avg_tool_total_ms,
+    per_tool_call_top10,
+)
+
+
+async def test_cost_token_sums_from_view(db_engine):
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1", input_tokens=1000, output_tokens=200, cache_read_tokens=700)
+    await make_cycle(db_engine, sid, "c2", input_tokens=2000, output_tokens=300, cache_read_tokens=1500)
+    sums = await cost_token_sums(db_engine, sid)
+    assert sums["total_input_tokens"] == 3000
+    assert sums["total_output_tokens"] == 500
+    assert sums["total_cache_read_tokens"] == 2200
+
+
+async def test_avg_cache_hit_rate_weighted_by_input_tokens(db_engine):
+    """(1000*0.7 + 2000*0.75) / 3000 = 2200/3000."""
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1", input_tokens=1000, cache_read_tokens=700)
+    await make_cycle(db_engine, sid, "c2", input_tokens=2000, cache_read_tokens=1500)
+    rate = await avg_cache_hit_rate(db_engine, sid)
+    assert rate == pytest.approx(2200 / 3000)
+
+
+async def test_avg_cache_hit_rate_all_zero_returns_none(db_engine):
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1", input_tokens=0, cache_read_tokens=0)
+    assert await avg_cache_hit_rate(db_engine, sid) is None
+
+
+async def test_tokens_per_cycle_percentile(db_engine):
+    """For sorted [100..1000] (10 values, indices 0..9), linear interp:
+       p50: k = 9*0.5 = 4.5 → 500 + (600-500)*0.5 = 550
+       p95: k = 9*0.95 = 8.55 → 900 + (1000-900)*0.55 = 955
+    Tight assertions catch both algorithm bugs AND fixture drift.
+    """
+    sid = await make_session(db_engine)
+    for i, t in enumerate([100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]):
+        await make_cycle(db_engine, sid, f"c{i}",
+                         input_tokens=t, output_tokens=0, cache_read_tokens=0)
+    p50 = await tokens_per_cycle_percentile(db_engine, sid, 50)
+    p95 = await tokens_per_cycle_percentile(db_engine, sid, 95)
+    assert p50 == pytest.approx(550)
+    assert p95 == pytest.approx(955)
+
+
+async def test_avg_wall_time_ms(db_engine):
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1", wall_time_ms=1000)
+    await make_cycle(db_engine, sid, "c2", wall_time_ms=2000)
+    assert await avg_wall_time_ms(db_engine, sid) == pytest.approx(1500)
+
+
+async def test_per_tool_call_top10_aggregation(db_engine):
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1")
+    from sqlalchemy import insert
+    from src.storage.models import ToolCall
+    async with db_engine.begin() as conn:
+        for tool in ["get_market_state"] * 5 + ["read_alerts"] * 3 + ["set_next_wake"] * 1:
+            await conn.execute(insert(ToolCall).values(
+                session_id=sid, cycle_id="c1", tool_name=tool,
+                status="ok", duration_ms=100,
+            ))
+    top = await per_tool_call_top10(db_engine, sid)
+    assert top[0] == ("get_market_state", 5)
+    assert top[1] == ("read_alerts", 3)
