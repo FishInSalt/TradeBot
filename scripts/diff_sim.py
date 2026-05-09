@@ -23,7 +23,8 @@ from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 from scripts._sim_metrics import (  # noqa: E402
     R2_7_MERGED_AT, METRIC_GROUPS,
-    assert_not_legacy, collect_roundtrips,
+    assert_not_legacy, assert_schema_migrated,
+    collect_roundtrips,
     render_caveats_per_side, render_caveats_diff_only,
     win_rate, total_pnl_net, roundtrip_count,
     avg_fifo_pnl_per_roundtrip,
@@ -488,6 +489,7 @@ async def amain(args):
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{args.db}")
     try:
+        await assert_schema_migrated(engine)
         sa = await _resolve_session(engine, args.a)
         sb = await _resolve_session(engine, args.b)
         if sa is None or sb is None:

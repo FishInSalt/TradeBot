@@ -604,17 +604,22 @@ async def test_cost_token_sums_from_view(db_engine):
 
 
 async def test_avg_cache_hit_rate_weighted_by_input_tokens(db_engine):
-    """(1000*0.7 + 2000*0.75) / 3000 = 2200/3000."""
+    """(1000*0.7 + 2000*0.75) / 3000 = 2200/3000.
+
+    decision="ok" needed: post-PR43 review, cycle averages filter
+    is_ok_cycle=1 (spec §6.3 forensic-exclusion); is_ok_cycle requires
+    non-NULL decision (views.py:77-80).
+    """
     sid = await make_session(db_engine)
-    await make_cycle(db_engine, sid, "c1", input_tokens=1000, cache_read_tokens=700)
-    await make_cycle(db_engine, sid, "c2", input_tokens=2000, cache_read_tokens=1500)
+    await make_cycle(db_engine, sid, "c1", input_tokens=1000, cache_read_tokens=700, decision="ok")
+    await make_cycle(db_engine, sid, "c2", input_tokens=2000, cache_read_tokens=1500, decision="ok")
     rate = await avg_cache_hit_rate(db_engine, sid)
     assert rate == pytest.approx(2200 / 3000)
 
 
 async def test_avg_cache_hit_rate_all_zero_returns_none(db_engine):
     sid = await make_session(db_engine)
-    await make_cycle(db_engine, sid, "c1", input_tokens=0, cache_read_tokens=0)
+    await make_cycle(db_engine, sid, "c1", input_tokens=0, cache_read_tokens=0, decision="ok")
     assert await avg_cache_hit_rate(db_engine, sid) is None
 
 
@@ -623,11 +628,13 @@ async def test_tokens_per_cycle_percentile(db_engine):
        p50: k = 9*0.5 = 4.5 → 500 + (600-500)*0.5 = 550
        p95: k = 9*0.95 = 8.55 → 900 + (1000-900)*0.55 = 955
     Tight assertions catch both algorithm bugs AND fixture drift.
+    decision="ok" required by post-PR43 forensic filter.
     """
     sid = await make_session(db_engine)
     for i, t in enumerate([100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]):
         await make_cycle(db_engine, sid, f"c{i}",
-                         input_tokens=t, output_tokens=0, cache_read_tokens=0)
+                         input_tokens=t, output_tokens=0, cache_read_tokens=0,
+                         decision="ok")
     p50 = await tokens_per_cycle_percentile(db_engine, sid, 50)
     p95 = await tokens_per_cycle_percentile(db_engine, sid, 95)
     assert p50 == pytest.approx(550)
@@ -636,9 +643,22 @@ async def test_tokens_per_cycle_percentile(db_engine):
 
 async def test_avg_wall_time_ms(db_engine):
     sid = await make_session(db_engine)
-    await make_cycle(db_engine, sid, "c1", wall_time_ms=1000)
-    await make_cycle(db_engine, sid, "c2", wall_time_ms=2000)
+    await make_cycle(db_engine, sid, "c1", wall_time_ms=1000, decision="ok")
+    await make_cycle(db_engine, sid, "c2", wall_time_ms=2000, decision="ok")
     assert await avg_wall_time_ms(db_engine, sid) == pytest.approx(1500)
+
+
+async def test_avg_wall_time_ms_filters_forensic(db_engine):
+    """Spec §6.3 forensic-exclusion contract: averages skip is_ok_cycle=0."""
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1", wall_time_ms=1000, decision="ok")
+    await make_cycle(db_engine, sid, "c2", wall_time_ms=2000, decision="ok")
+    # Forensic cycle with extreme wall_time_ms — must NOT enter average.
+    await make_cycle(db_engine, sid, "c3", wall_time_ms=99999,
+                     execution_status="usage_limit_exceeded")
+    avg = await avg_wall_time_ms(db_engine, sid)
+    # If forensic leaked in: avg ≈ 34333. Filtered: 1500.
+    assert avg == pytest.approx(1500)
 
 
 async def test_per_tool_call_top10_aggregation(db_engine):
@@ -859,6 +879,11 @@ def test_render_caveats_per_side_zero_ok_cycles():
     out = render_caveats_per_side([], _empty_caveats(), prefix="",
                                   ok_cycle_count=0)
     assert "Session has 0 ok cycles" in out
+    # Post-PR43-review: caveat must NOT claim "all metrics N/A" — sums and
+    # counts still render. Lock the softened phrasing so future drift to
+    # "all metrics" can be caught here.
+    assert "all metrics N/A" not in out
+    assert "raw sums and counts" in out
 
 
 def test_render_caveats_per_side_zero_roundtrips():

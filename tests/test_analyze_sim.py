@@ -32,6 +32,19 @@ async def test_analyze_db_file_missing_exit_1(tmp_path):
     assert "Database file not found" in r.stderr
 
 
+async def test_analyze_schema_unmigrated_friendly_error(tmp_path):
+    """Spec §6.2 row 3: empty/unmigrated SQLite → friendly stderr + alembic hint,
+    NOT a SQLAlchemy traceback dump."""
+    db_path = tmp_path / "empty.db"
+    db_path.touch()  # exists but no tables
+    r = _run_analyze("--session", "any", db_path=db_path)
+    assert r.returncode == 1
+    assert "agent_cycles / sim_orders / v_cycle_metrics not found in DB" in r.stderr
+    assert "Run: alembic upgrade head" in r.stderr
+    # No raw traceback should leak to stderr (per spec §6.2 friendly path).
+    assert "Traceback" not in r.stderr
+
+
 async def test_analyze_session_by_name_resolves(db_engine):
     db_path = _resolve_db_path(db_engine)
     sid = await make_session(db_engine, name="my_friendly_name")

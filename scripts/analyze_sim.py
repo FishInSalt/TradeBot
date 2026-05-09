@@ -26,7 +26,8 @@ from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 from scripts._sim_metrics import (  # noqa: E402
     R2_7_MERGED_AT, METRIC_GROUPS,
-    assert_not_legacy, collect_roundtrips, render_caveats_per_side,
+    assert_not_legacy, assert_schema_migrated,
+    collect_roundtrips, render_caveats_per_side,
     win_rate, total_pnl_net, roundtrip_count,
     avg_fifo_pnl_per_roundtrip,
     avg_roundtrip_duration_min, median_roundtrip_duration_min,
@@ -75,10 +76,10 @@ async def amain(args):
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{args.db}")
     try:
+        await assert_schema_migrated(engine)
         session = await _resolve_session(engine, args.session)
         if session is None:
             print(f"Session '{args.session}' not found in {args.db}.", file=sys.stderr)
-            print("Use --list-sessions to see candidates.", file=sys.stderr)
             sys.exit(1)
         assert_not_legacy(session)
 

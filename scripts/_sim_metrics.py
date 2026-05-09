@@ -407,10 +407,12 @@ async def cost_token_sums(engine, session_id: str) -> dict[str, int]:
 
 
 async def avg_cache_hit_rate(engine, session_id: str) -> float | None:
+    # Forensic filter (spec §6.3 forensic caveat): cycle averages exclude
+    # is_ok_cycle = 0 to honor the "excluded from cycle averages" contract.
     async with engine.connect() as conn:
         row = (await conn.execute(text("""
             SELECT SUM(input_tokens) AS total_in, SUM(cache_read_tokens) AS total_cache
-            FROM v_cycle_metrics WHERE session_id = :sid
+            FROM v_cycle_metrics WHERE session_id = :sid AND is_ok_cycle = 1
         """), {"sid": session_id})).first()
     if not row.total_in:
         return None
@@ -418,10 +420,12 @@ async def avg_cache_hit_rate(engine, session_id: str) -> float | None:
 
 
 async def tokens_per_cycle_percentile(engine, session_id: str, p: int) -> float | None:
+    # Forensic filter: percentile is "typical cycle" — exclude forensic.
     async with engine.connect() as conn:
         rows = (await conn.execute(text("""
             SELECT tokens_consumed FROM v_cycle_metrics
-            WHERE session_id = :sid AND tokens_consumed IS NOT NULL
+            WHERE session_id = :sid AND is_ok_cycle = 1
+              AND tokens_consumed IS NOT NULL
             ORDER BY tokens_consumed
         """), {"sid": session_id})).all()
     return _percentile([r.tokens_consumed for r in rows], p)
@@ -438,12 +442,16 @@ async def _avg_view_column(engine, session_id: str, col: str) -> float | None:
 
     SQL identifier must be interpolated (DB-API can't bind column names);
     the whitelist defends against accidental misuse from future contributors.
+
+    Forensic filter (spec §6.3): all callers compute "cycle averages",
+    contractually excluded from forensic per the Caveats section.
     """
     if col not in _AVG_COLUMN_ALLOWED:
         raise ValueError(f"_avg_view_column: column {col!r} not in whitelist")
     async with engine.connect() as conn:
         row = (await conn.execute(text(
-            f"SELECT AVG({col}) AS avg_val FROM v_cycle_metrics WHERE session_id = :sid"
+            f"SELECT AVG({col}) AS avg_val FROM v_cycle_metrics "
+            f"WHERE session_id = :sid AND is_ok_cycle = 1"
         ), {"sid": session_id})).first()
     return row.avg_val
 
@@ -601,22 +609,25 @@ async def five_field_complete_rate(engine, session_id: str) -> float | None:
     rate" semantically. Renaming is W3 follow-up; Phase 2 sticks with
     column name to avoid view churn.
     """
+    # Forensic filter: 5-field rate is a decision-quality average.
     async with engine.connect() as conn:
         row = (await conn.execute(text("""
             SELECT AVG(CAST(five_field_complete AS REAL)) AS rate
-            FROM v_cycle_metrics WHERE session_id = :sid
+            FROM v_cycle_metrics WHERE session_id = :sid AND is_ok_cycle = 1
         """), {"sid": session_id})).first()
     return row.rate
 
 
 async def per_field_hit_rate(engine, session_id: str) -> dict[str, float | None]:
+    # Forensic filter: per-anchor hit rates are decision-quality averages.
     fields = ["has_stance", "has_active_commitments", "has_this_cycle_delta",
               "has_thesis_invalidation", "has_watch_list"]
     out: dict[str, float | None] = {}
     async with engine.connect() as conn:
         for f in fields:
             row = (await conn.execute(text(
-                f"SELECT AVG(CAST({f} AS REAL)) AS rate FROM v_cycle_metrics WHERE session_id = :sid"
+                f"SELECT AVG(CAST({f} AS REAL)) AS rate FROM v_cycle_metrics "
+                f"WHERE session_id = :sid AND is_ok_cycle = 1"
             ), {"sid": session_id})).first()
             out[f] = row.rate
     return out
@@ -627,10 +638,12 @@ async def avg_decision_length_chars(engine, session_id: str) -> float | None:
 
 
 async def decision_length_p95(engine, session_id: str) -> float | None:
+    # Forensic filter: percentile is "typical cycle" — exclude forensic.
     async with engine.connect() as conn:
         rows = (await conn.execute(text("""
             SELECT decision_length FROM v_cycle_metrics
-            WHERE session_id = :sid AND decision_length IS NOT NULL
+            WHERE session_id = :sid AND is_ok_cycle = 1
+              AND decision_length IS NOT NULL
             ORDER BY decision_length
         """), {"sid": session_id})).all()
     return _percentile([r.decision_length for r in rows], 95)
@@ -641,10 +654,15 @@ async def avg_reasoning_tokens(engine, session_id: str) -> float | None:
 
 
 async def avg_thinking_chars(engine, session_id: str) -> float | None:
+    # Forensic filter: cycle-level average of reasoning length excludes
+    # is_ok_cycle = 0. Direct agent_cycles query (LENGTH not in view), so
+    # replicate the is_ok_cycle predicate inline (matches views.py:77-80).
     async with engine.connect() as conn:
         row = (await conn.execute(text("""
             SELECT AVG(LENGTH(reasoning)) AS avg_chars FROM agent_cycles
             WHERE session_id = :sid AND reasoning IS NOT NULL
+              AND execution_status = 'ok'
+              AND decision IS NOT NULL AND length(decision) > 0
         """), {"sid": session_id})).first()
     return row.avg_chars
 
@@ -669,6 +687,31 @@ async def alert_lifecycle_summary(engine, session_id: str) -> dict:
 
 
 # ── Legacy session guard + caveats helpers ────────────────────────────────────
+
+
+async def assert_schema_migrated(engine) -> None:
+    """Spec §6.2 row 3: schema-missing fail-fast.
+
+    Probes agent_cycles + sim_orders + v_cycle_metrics. On 'no such table'
+    or 'no such view' (alembic upgrade not applied to this DB), exit 1
+    with the spec-prescribed friendly message + alembic hint.
+
+    Other OperationalErrors propagate per spec §6.2 last row.
+    """
+    from sqlalchemy.exc import OperationalError
+    probes = ("agent_cycles", "sim_orders", "v_cycle_metrics")
+    try:
+        async with engine.connect() as conn:
+            for name in probes:
+                await conn.execute(text(f"SELECT 1 FROM {name} LIMIT 0"))
+    except OperationalError as e:
+        msg = str(e).lower()
+        if "no such table" in msg or "no such view" in msg:
+            raise SystemExit(
+                "agent_cycles / sim_orders / v_cycle_metrics not found in DB.\n"
+                "Run: alembic upgrade head"
+            )
+        raise
 
 
 def assert_not_legacy(session) -> None:
@@ -704,7 +747,14 @@ def render_caveats_per_side(
     lines: list[str] = []
 
     if ok_cycle_count == 0:
-        lines.append(f"- {prefix}Session has 0 ok cycles — all metrics N/A.")
+        # Cycle averages / rates / decision-derived metrics now filter is_ok_cycle=1
+        # (spec §6.3 forensic-exclusion contract), so they ARE N/A. Raw aggregations
+        # (token sums, total cycle counts, distributions) still report all cycles.
+        lines.append(
+            f"- {prefix}Session has 0 ok cycles — cycle averages, rates, "
+            f"and decision-derived metrics are N/A; raw sums and counts "
+            f"still reported."
+        )
 
     if not rts and ok_cycle_count > 0:
         lines.append(f"- {prefix}0 closed roundtrips — PnL metrics N/A.")

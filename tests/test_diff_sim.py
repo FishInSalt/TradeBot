@@ -27,6 +27,17 @@ def _row_for(out: str, metric: str) -> str | None:
     return None
 
 
+async def test_diff_schema_unmigrated_friendly_error(tmp_path):
+    """Spec §6.2 row 3 applies to diff_sim too (mirror of analyze_sim test)."""
+    db_path = tmp_path / "empty.db"
+    db_path.touch()
+    r = _run_diff("--a", "x", "--b", "y", db_path=db_path)
+    assert r.returncode == 1
+    assert "agent_cycles / sim_orders / v_cycle_metrics not found in DB" in r.stderr
+    assert "Run: alembic upgrade head" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
 async def _seed_pnl_session(engine, name, total_pnl):
     """Single roundtrip session with controlled total_pnl_net.
 
