@@ -329,3 +329,112 @@ async def test_collect_roundtrips_non_liquidation_recomputes_pnl_from_lot(db_eng
                           exit_px=82000, amount=0.1, pnl_gross=999.0)
     rts, _ = await collect_roundtrips(db_engine, sid)
     assert rts[0].pnl_gross == pytest.approx(200.0)
+
+
+# === T5: collect_roundtrips stale amount + close-no-lot + diverge ===
+
+
+async def test_collect_roundtrips_stale_sl_amount_derived_from_fee(db_engine):
+    """SL order.amount=0.2 stale, position 0.05; fee derived 0.05; rt.amount=0.05."""
+    sid = await make_session(db_engine, fee_rate=0.0005)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", amount=0.05)
+    # fee = 0.05 * 82000 * 0.0005 = 2.05; pass explicit stale amount=0.2 with that fee
+    await make_close_fill(db_engine, sid, cycle_id="c2", exit_type="stop",
+                          amount=0.2, fee=2.05, pnl_gross=100.0)
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert len(rts) == 1
+    assert rts[0].amount == pytest.approx(0.05)
+    assert caveats["stale_close_amount_count"] == 0  # derive succeeded
+
+
+async def test_collect_roundtrips_stale_amount_fallback_to_order_amount(db_engine, capsys):
+    """fee=0 → derivation fails → fallback sim_orders.amount + 2 caveats:
+    stale_close_amount_count=1 (derive failed) AND invariant_violations=1
+    (close_remaining=0.15 unmatched after consuming the only 0.05 lot).
+    """
+    sid = await make_session(db_engine, fee_rate=0.0005)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", amount=0.05)
+    await make_close_fill(db_engine, sid, cycle_id="c2", exit_type="stop",
+                          amount=0.2, fee=0.0, pnl_gross=100.0)
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert caveats["stale_close_amount_count"] == 1
+    assert caveats["invariant_violations"] == 1  # 0.15 unmatched after lot exhausted
+    assert "no preceding open lot" in capsys.readouterr().err
+
+
+async def test_collect_roundtrips_unclosed_lot(db_engine):
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1")
+    await make_open_lot(db_engine, sid, cycle_id="c1")
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert rts == []
+    assert caveats["unclosed_lot_count"] == {"long": 1, "short": 0}
+
+
+async def test_collect_roundtrips_close_no_lot_warning(db_engine, capsys):
+    """Close fill with no preceding lot → stderr warning + invariant_violations += 1."""
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1")
+    await make_close_fill(db_engine, sid, cycle_id="c1", exit_type="market",
+                          amount=0.1, pnl_gross=100.0)
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert rts == []
+    assert caveats["invariant_violations"] == 1
+    err = capsys.readouterr().err
+    assert "no preceding open lot" in err
+
+
+async def test_collect_roundtrips_cycle_id_5_enum_join(db_engine):
+    """open_cycle_id resolves via v_order_lifecycle (5-enum), not order_filled."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1")
+    await make_close_fill(db_engine, sid, cycle_id="c2", pnl_gross=200.0)
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    assert rts[0].open_cycle_id == "c1"
+    assert rts[0].close_cycle_id == "c2"
+
+
+async def test_collect_roundtrips_duration_seconds(db_engine):
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    base = R2_7_MERGED_AT + timedelta(days=2)
+    await make_open_lot(db_engine, sid, cycle_id="c1", filled_at=base)
+    await make_close_fill(db_engine, sid, cycle_id="c2",
+                          filled_at=base + timedelta(minutes=15), pnl_gross=100.0)
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    assert rts[0].duration_seconds == 15 * 60
+
+
+async def test_collect_roundtrips_partial_close_lot_pnl_diverges_from_sim_weighted(db_engine):
+    """Spec §4.4 item 8: lot1=100/1 + lot2=200/1 + close 0.5@150
+    → FIFO lot pnl=+25, sim weighted=0; both legitimate."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2", "c3"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", entry_px=100, amount=1.0)
+    await make_open_lot(db_engine, sid, cycle_id="c2", entry_px=200, amount=1.0)
+    await make_close_fill(db_engine, sid, cycle_id="c3", exit_px=150, amount=0.5,
+                          pnl_gross=0.0)  # sim weighted = 0
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    # lot1 consumed 0.5 → (150-100)*0.5 = +25
+    assert rts[0].pnl_gross == pytest.approx(25.0)
+
+
+async def test_collect_roundtrips_full_close_lot_pnl_matches_sim_weighted(db_engine):
+    """All lots fully closed → sum(FIFO lot pnl_gross) == sim realized."""
+    sid = await make_session(db_engine, fee_rate=0.0005)
+    for c in ["c1", "c2", "c3"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", entry_px=100, amount=1.0)
+    await make_open_lot(db_engine, sid, cycle_id="c2", entry_px=200, amount=1.0)
+    await make_close_fill(db_engine, sid, cycle_id="c3", exit_px=150, amount=2.0,
+                          pnl_gross=0.0)
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    assert sum(rt.pnl_gross for rt in rts) == pytest.approx(0.0, abs=0.01)
