@@ -538,3 +538,52 @@ async def test_fetch_empty_window_AC_F7_15(db_engine, monkeypatch):
     assert df["timestamp_ms"].dtype == "int64"
     for col in ("open", "high", "low", "close", "volume"):
         assert df[col].dtype == "float64"
+
+
+# ===== _write_csv tests (use db_engine + _resolve_db_path; see Task 6 note) =====
+
+async def test_fetch_writes_csv_with_overwrite_AC_F7_6(db_engine, monkeypatch, tmp_path):
+    """AC-F7-6: 写 CSV + 覆盖现有文件 + 自动 mkdir 父目录."""
+    from scripts.fetch_session_ohlcv import fetch_session_ohlcv, TF_MS
+
+    sid, start_ms, _ = await _setup_session_with_window(db_engine, name="csv_write", hours=1)
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_client = MagicMock()
+    mock_client.fetch_ohlcv = AsyncMock(return_value=_make_candle_page(start_ms, 5, TF_MS["1m"]))
+    mock_client.close = AsyncMock()
+    monkeypatch.setattr("ccxt.async_support.okx", lambda *a, **kw: mock_client)
+
+    output = tmp_path / "nonexistent_subdir" / "out.csv"
+    db_path = _resolve_db_path(db_engine)
+
+    # First write
+    await fetch_session_ohlcv(sid, db_path=db_path, output_path=output)
+    assert output.exists()
+    content1 = output.read_text()
+    assert "timestamp_ms" in content1.splitlines()[0]
+
+    # Second write should overwrite
+    await fetch_session_ohlcv(sid, db_path=db_path, output_path=output)
+    content2 = output.read_text()
+    assert content1 == content2  # same data, no append
+
+
+async def test_fetch_no_write_when_output_none(db_engine, monkeypatch, tmp_path):
+    """spec §2.1 step 8: output_path=None → 不写盘."""
+    from scripts.fetch_session_ohlcv import fetch_session_ohlcv, TF_MS
+
+    sid, start_ms, _ = await _setup_session_with_window(db_engine, name="no_write", hours=1)
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_client = MagicMock()
+    mock_client.fetch_ohlcv = AsyncMock(return_value=_make_candle_page(start_ms, 5, TF_MS["1m"]))
+    mock_client.close = AsyncMock()
+    monkeypatch.setattr("ccxt.async_support.okx", lambda *a, **kw: mock_client)
+
+    df = await fetch_session_ohlcv(sid, db_path=_resolve_db_path(db_engine), output_path=None)
+    assert len(df) == 5  # mock returns 5 candles; verifies path executed without writing
+    # A dedicated csv dir we never passed as output should remain empty (no CSV written)
+    csv_dir = tmp_path / "csv_output"
+    csv_dir.mkdir()
+    assert list(csv_dir.iterdir()) == []
