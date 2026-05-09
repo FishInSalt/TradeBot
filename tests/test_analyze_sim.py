@@ -147,3 +147,22 @@ async def test_analyze_emits_all_28_metric_groups(db_engine):
     ]
     for s in expected_substrings:
         assert s in r.stdout, f"missing render: {s!r}"
+
+
+async def test_analyze_legacy_session_rejected(db_engine):
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="legacy_sim",
+                       created_at=R2_7_MERGED_AT - timedelta(days=1))
+    r = _run_analyze("--session", "legacy_sim", db_path=db_path)
+    assert r.returncode == 1
+    assert "legacy sessions" in r.stderr
+
+
+async def test_analyze_post_cutoff_naive_datetime_works(db_engine):
+    """SQLite returns naive datetime; tzinfo normalization in assert_not_legacy."""
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="post_naive")
+    sid = await make_session_id(db_engine, "post_naive")
+    await make_cycle(db_engine, sid, "c1")
+    r = _run_analyze("--session", "post_naive", db_path=db_path)
+    assert r.returncode == 0
