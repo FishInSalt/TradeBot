@@ -748,6 +748,12 @@ def test_extract_stance_basic():
     assert extract_stance(None) is None
 
 
+def test_extract_stance_em_dash_separator():
+    """W2 sim #7/#8 smoke: actual prompt uses '(1) Stance — Holding ...'."""
+    assert extract_stance("(1) Stance — Holding long, breakout filled.") == "holding"
+    assert extract_stance("(1) Stance – bear") == "bear"  # en-dash variant
+
+
 def test_retraction_rate_cycle_to_cycle_stance_change():
     class _C:
         def __init__(self, cid, decision, status="ok"):

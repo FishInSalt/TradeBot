@@ -472,7 +472,9 @@ async def per_tool_call_top10(engine, session_id: str) -> list[tuple[str, int]]:
 
 
 STANCE_RE = re.compile(
-    r"(?:^|\n)\s*(?:\*\*)?\(?1\)?\.?\s*(?:\*\*)?\s*[Ss]tance(?:\*\*)?\s*[:：]\s*"
+    # Separator class includes ASCII colon, fullwidth colon, em-dash, en-dash —
+    # W2 smoke (sim #7/#8) showed actual prompt uses em-dash ("(1) Stance — ...").
+    r"(?:^|\n)\s*(?:\*\*)?\(?1\)?\.?\s*(?:\*\*)?\s*[Ss]tance(?:\*\*)?\s*[:：—–]\s*"
     r"(?:\*\*)?(\w+)",
     re.MULTILINE,
 )
