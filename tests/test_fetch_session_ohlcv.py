@@ -1,7 +1,15 @@
 """F7 OKX REST OHLCV helper — unit tests (mock-only, no live REST)."""
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import ccxt
 import pytest
+import pytest_asyncio
+
+from src.storage.database import init_db
+from tests._sim_fixtures import make_session
 
 
 # ===== TF_MS drift guard (AC-F7-4 配套) =====
@@ -31,10 +39,6 @@ def test_timeframes_whitelist_matches_tf_ms_keys():
 
 
 # ===== _resolve_session tests =====
-
-import pytest_asyncio
-from src.storage.database import init_db
-from tests._sim_fixtures import make_session
 
 
 @pytest_asyncio.fixture
@@ -139,3 +143,162 @@ async def test_resolve_session_epoch_accuracy_AC_F7_3a(engine):
     _, start_ms, end_ms = await _resolve_session(engine, sid)
     assert start_ms == 1778846400000, f"start_ms drift (likely tzinfo bug): {start_ms}"
     assert end_ms - start_ms == 3_600_000, f"window != 1h: {end_ms - start_ms}ms"
+
+
+# ===== _paginate_ohlcv tests =====
+
+
+def _mock_client_returning_pages(pages: list[list[list]]) -> MagicMock:
+    """Build a mock ccxt client whose fetch_ohlcv returns each page in sequence."""
+    client = MagicMock()
+    pages_iter = iter(pages)
+    async def fake_fetch_ohlcv(symbol, timeframe, since, limit):
+        try:
+            return next(pages_iter)
+        except StopIteration:
+            return []
+    client.fetch_ohlcv = AsyncMock(side_effect=fake_fetch_ohlcv)
+    return client
+
+
+def _make_candle_page(start_ms: int, count: int, tf_ms: int) -> list[list]:
+    """Build `count` consecutive candles starting at start_ms with tf_ms cadence."""
+    return [
+        [start_ms + i * tf_ms, 80000.0, 80100.0, 79900.0, 80050.0, 1.5]
+        for i in range(count)
+    ]
+
+
+async def test_paginate_basic_assembly_AC_F7_3(monkeypatch):
+    """AC-F7-3: mock 按 since 偏移返回 100 条，任意非整百窗口拼接 + 单调递增."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv, TF_MS
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())  # 跳过节流 sleep
+
+    tf_ms = TF_MS["1m"]
+    start_ms = 1_700_000_000_000
+    end_ms = start_ms + 250 * tf_ms  # 250 candles → 3 pages (100/100/50)
+    pages = [
+        _make_candle_page(start_ms + 0 * tf_ms, 100, tf_ms),
+        _make_candle_page(start_ms + 100 * tf_ms, 100, tf_ms),
+        _make_candle_page(start_ms + 200 * tf_ms, 50, tf_ms),
+    ]
+    client = _mock_client_returning_pages(pages)
+
+    rows = await _paginate_ohlcv(client, "BTC/USDT:USDT", "1m", start_ms, end_ms)
+    assert len(rows) == 250
+    timestamps = [r[0] for r in rows]
+    assert timestamps == sorted(timestamps)  # 单调递增
+    assert timestamps[0] == start_ms
+    assert timestamps[-1] == start_ms + 249 * tf_ms
+
+
+async def test_paginate_short_return_AC_F7_9(monkeypatch):
+    """AC-F7-9: 服务端少返回（50 而非 100），cursor 仍正确推进至覆盖完整窗口."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv, TF_MS
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    tf_ms = TF_MS["1m"]
+    start_ms = 1_700_000_000_000
+    end_ms = start_ms + 100 * tf_ms
+    pages = [
+        _make_candle_page(start_ms, 50, tf_ms),
+        _make_candle_page(start_ms + 50 * tf_ms, 50, tf_ms),
+    ]
+    client = _mock_client_returning_pages(pages)
+
+    rows = await _paginate_ohlcv(client, "BTC/USDT:USDT", "1m", start_ms, end_ms)
+    assert len(rows) == 100
+
+
+async def test_paginate_terminates_on_empty(monkeypatch):
+    """spec §2.1 step 5: 本次返回为空 → 终止."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv, TF_MS
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    client = _mock_client_returning_pages([[]])
+    rows = await _paginate_ohlcv(client, "BTC/USDT:USDT", "1m",
+                                  1_700_000_000_000, 1_700_000_000_000 + 1000 * TF_MS["1m"])
+    assert rows == []
+
+
+async def test_paginate_terminates_on_stale_last_ts(monkeypatch):
+    """spec §2.1 step 5: 末根 ts <= 上次末根 → 终止 (防卡死)."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv, TF_MS
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    tf_ms = TF_MS["1m"]
+    start_ms = 1_700_000_000_000
+    page1 = _make_candle_page(start_ms, 5, tf_ms)
+    # Page 2 returns same last ts (服务端重复返回同一窗口)
+    page2 = _make_candle_page(start_ms, 5, tf_ms)
+    client = _mock_client_returning_pages([page1, page2])
+
+    rows = await _paginate_ohlcv(client, "BTC/USDT:USDT", "1m", start_ms,
+                                  start_ms + 10000 * tf_ms)
+    # page1: 5 candles stored, last_seen_ts=ts4
+    # page2: same 5 candles, last ts == ts4 → stale break
+    # 严格 == 2 (放宽到 <= 3 会让"循环再多走一轮" regression 漏检)
+    assert client.fetch_ohlcv.await_count == 2
+    assert len(rows) == 5  # page1 stored, page2 not appended (stale break before extend)
+
+
+async def test_paginate_transient_retry_succeeds_AC_F7_10(monkeypatch):
+    """AC-F7-10: NetworkError 抛 2 次后第 3 次成功 → 函数返回正常结果, sleep=[1,2]."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv, TF_MS
+    sleep_calls: list[float] = []
+    async def fake_sleep(d): sleep_calls.append(d)
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    tf_ms = TF_MS["1m"]
+    start_ms = 1_700_000_000_000
+    success_page = _make_candle_page(start_ms, 5, tf_ms)
+    call_count = [0]
+    async def flaky(symbol, timeframe, since, limit):
+        call_count[0] += 1
+        if call_count[0] <= 2:
+            raise ccxt.NetworkError("transient")
+        return success_page
+    client = MagicMock()
+    client.fetch_ohlcv = AsyncMock(side_effect=flaky)
+
+    rows = await _paginate_ohlcv(client, "BTC/USDT:USDT", "1m", start_ms,
+                                  start_ms + 5 * tf_ms)
+    assert len(rows) == 5
+    # Filter out throttle sleeps (0.5s); retry sleeps are [1.0, 2.0]
+    retry_sleeps = [s for s in sleep_calls if s in (1.0, 2.0)]
+    assert retry_sleeps == [1.0, 2.0]
+
+
+async def test_paginate_transient_exhaust_AC_F7_11(monkeypatch):
+    """AC-F7-11: NetworkError 连抛 3 次 → raise, sleep=[1,2] (no tail sleep)."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv, TF_MS
+    sleep_calls: list[float] = []
+    async def fake_sleep(d): sleep_calls.append(d)
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    client = MagicMock()
+    client.fetch_ohlcv = AsyncMock(side_effect=ccxt.NetworkError("dead"))
+
+    with pytest.raises(ccxt.NetworkError, match="dead"):
+        await _paginate_ohlcv(client, "BTC/USDT:USDT", "1m",
+                              1_700_000_000_000, 1_700_000_000_000 + 1000 * TF_MS["1m"])
+    retry_sleeps = [s for s in sleep_calls if s in (1.0, 2.0)]
+    assert retry_sleeps == [1.0, 2.0]  # 2 sleeps, not 3
+
+
+async def test_paginate_permanent_no_retry_AC_F7_12(monkeypatch):
+    """AC-F7-12: BadSymbol → 立即 raise (no retry, no sleep)."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv, TF_MS
+    sleep_calls: list[float] = []
+    async def fake_sleep(d): sleep_calls.append(d)
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    client = MagicMock()
+    client.fetch_ohlcv = AsyncMock(side_effect=ccxt.BadSymbol("nope"))
+
+    with pytest.raises(ccxt.BadSymbol):
+        await _paginate_ohlcv(client, "BTC/USDT:USDT", "1m",
+                              1_700_000_000_000, 1_700_000_000_000 + 1000 * TF_MS["1m"])
+    retry_sleeps = [s for s in sleep_calls if s in (1.0, 2.0)]
+    assert retry_sleeps == []
+    assert client.fetch_ohlcv.await_count == 1

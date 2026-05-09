@@ -5,8 +5,10 @@ for full spec including resource contract, retry semantics, and AC list.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
+import ccxt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import sessionmaker
@@ -57,3 +59,52 @@ async def _resolve_session(engine: AsyncEngine, session_id: str) -> tuple[str, i
     if end_ms <= start_ms:
         raise ValueError(f"session has zero duration: {session_id}")
     return row.symbol, start_ms, end_ms
+
+
+_RETRY_SLEEP_SCHEDULE: tuple[float, ...] = (1.0, 2.0)  # 2 sleeps; raise 后不再 sleep
+_THROTTLE_SLEEP_S: float = 0.5
+_PAGE_LIMIT: int = 100
+
+
+async def _paginate_ohlcv(
+    client, symbol: str, timeframe: str, start_ms: int, end_ms: int
+) -> list[list]:
+    """Paginate OKX REST fetch_ohlcv from start_ms forward until end_ms.
+
+    spec §2.1: cursor advances by last-candle-ts + tf_ms (not blind 100×tf_ms).
+    Termination: cursor >= end_ms OR empty page OR last_ts <= prev_last_ts.
+    Retry: 3 attempts total, sleeps [1.0, 2.0], only NetworkError /
+    ExchangeNotAvailable / TimeoutError; raise others immediately.
+    """
+    tf_ms = TF_MS[timeframe]
+    cursor_ms = start_ms
+    last_seen_ts: int | None = None
+    rows: list[list] = []
+
+    while cursor_ms < end_ms:
+        page = await _fetch_with_retry(client, symbol, timeframe, cursor_ms)
+        if not page:
+            break
+        page_last_ts = page[-1][0]
+        if last_seen_ts is not None and page_last_ts <= last_seen_ts:
+            break  # 末根不前进 → 防卡死
+        rows.extend(page)
+        last_seen_ts = page_last_ts
+        cursor_ms = page_last_ts + tf_ms
+        await asyncio.sleep(_THROTTLE_SLEEP_S)
+
+    return rows
+
+
+async def _fetch_with_retry(client, symbol: str, timeframe: str, since_ms: int) -> list[list]:
+    """3 attempts total; sleep [1.0, 2.0] between failures; no tail sleep."""
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            return await client.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=_PAGE_LIMIT)
+        except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, asyncio.TimeoutError) as e:
+            last_err = e
+            if attempt < 2:  # 前 2 次失败 sleep；第 3 次失败直接 raise
+                await asyncio.sleep(_RETRY_SLEEP_SCHEDULE[attempt])
+    assert last_err is not None
+    raise last_err
