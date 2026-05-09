@@ -242,3 +242,92 @@ def test_compute_row_flag_avg_pnl_prefers_pct_falls_back_to_abs():
     assert _compute_row_flag(-5.0, 5.0, "avg_pnl") == "—"
     # cross-zero |Δ|=60 ≥ 50 → ⚠️
     assert _compute_row_flag(-30.0, 30.0, "avg_pnl") == "⚠️"
+
+
+# === T15: distributions + missing values + caveats reuse ===
+
+
+async def test_diff_distribution_expansion(db_engine):
+    """exit_type with key only on one side → key union, missing → 0%."""
+    db_path = _resolve_db_path(db_engine)
+    # A: 1 market roundtrip
+    await make_session(db_engine, name="exit_a")
+    sid_a = await make_session_id(db_engine, "exit_a")
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid_a, c)
+    await make_open_lot(db_engine, sid_a, cycle_id="c1")
+    await make_close_fill(db_engine, sid_a, cycle_id="c2", exit_type="market", pnl_gross=10.0)
+    # B: 1 liquidation
+    await make_session(db_engine, name="exit_b")
+    sid_b = await make_session_id(db_engine, "exit_b")
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid_b, c)
+    await make_open_lot(db_engine, sid_b, cycle_id="c1")
+    await make_close_fill(db_engine, sid_b, cycle_id="c2", exit_type="liquidation",
+                          pnl_gross=-50.0)
+    r = _run_diff("--a", "exit_a", "--b", "exit_b", db_path=db_path)
+    assert r.returncode == 0
+    assert "exit_type[market]" in r.stdout
+    assert "exit_type[liquidation]" in r.stdout
+
+
+async def test_diff_a_equals_b_warning(db_engine):
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="same")
+    sid = await make_session_id(db_engine, "same")
+    await make_cycle(db_engine, sid, "c1")
+    r = _run_diff("--a", "same", "--b", "same", db_path=db_path)
+    assert "WARNING: A and B refer to same session" in r.stdout
+
+
+async def test_diff_cross_symbol_warning(db_engine):
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="btc_sim", symbol="BTC/USDT:USDT")
+    await make_session(db_engine, name="eth_sim", symbol="ETH/USDT:USDT")
+    sid_a = await make_session_id(db_engine, "btc_sim")
+    sid_b = await make_session_id(db_engine, "eth_sim")
+    await make_cycle(db_engine, sid_a, "c1")
+    await make_cycle(db_engine, sid_b, "c1")
+    r = _run_diff("--a", "btc_sim", "--b", "eth_sim", db_path=db_path)
+    assert "A=BTC/USDT:USDT, B=ETH/USDT:USDT" in r.stdout
+    assert r.returncode == 0
+
+
+async def test_diff_caveats_aggregated_per_side(db_engine):
+    """A 1 unclosed lot, B 0 → caveats prefixed [A] / [B]."""
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="A_unclosed")
+    sid_a = await make_session_id(db_engine, "A_unclosed")
+    await make_cycle(db_engine, sid_a, "c1")
+    await make_open_lot(db_engine, sid_a, cycle_id="c1")  # no close → unclosed
+    await make_session(db_engine, name="B_clean")
+    sid_b = await make_session_id(db_engine, "B_clean")
+    await make_cycle(db_engine, sid_b, "c1")
+    r = _run_diff("--a", "A_unclosed", "--b", "B_clean", db_path=db_path)
+    assert "[A] 1 unclosed lot(s)" in r.stdout
+
+
+async def test_diff_missing_value_a_has_b_none(db_engine):
+    """A has retraction_rate (≥1 valid pair), B has 0 cycles → flag=⚠️."""
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="A_with")
+    sid_a = await make_session_id(db_engine, "A_with")
+    await make_cycle(db_engine, sid_a, "c1", decision="(1) Stance: bull")
+    await make_cycle(db_engine, sid_a, "c2", decision="(1) Stance: bear")
+    await make_session(db_engine, name="B_empty")
+    r = _run_diff("--a", "A_with", "--b", "B_empty", db_path=db_path)
+    row = _row_for(r.stdout, "retraction_rate")
+    assert "⚠️" in row
+
+
+async def test_diff_missing_value_a_none_b_has(db_engine):
+    """Symmetric: A 0 cycles / B has data → flag=⚠️."""
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="A_empty2")
+    await make_session(db_engine, name="B_with2")
+    sid_b = await make_session_id(db_engine, "B_with2")
+    await make_cycle(db_engine, sid_b, "c1", decision="(1) Stance: bull")
+    await make_cycle(db_engine, sid_b, "c2", decision="(1) Stance: bear")
+    r = _run_diff("--a", "A_empty2", "--b", "B_with2", db_path=db_path)
+    row = _row_for(r.stdout, "retraction_rate")
+    assert "⚠️" in row

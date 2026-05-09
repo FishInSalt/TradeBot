@@ -351,21 +351,104 @@ def _fmt_pct_cell(pct):
     return f"{pct:+.1f}%"
 
 
-# T13 stub: render_diff body lives in T15 (distributions + caveats).
-# T13 ships a minimal diff that emits enough to satisfy the e2e tests in this
-# task: header + a single PnL/Behavior section showing total_cycles, total_pnl_net,
-# and roundtrip_count. T15 replaces with full section-rendering.
+# Section static label inventory (excludes dynamic distribution / per_tool keys).
+PNL_LABELS = [
+    "total_pnl_net", "win_rate", "roundtrip_count", "avg_fifo_pnl_per_roundtrip",
+    "avg_roundtrip_duration_min", "median_roundtrip_duration_min", "max_drawdown_pct",
+    "largest_win", "largest_loss", "profit_factor",
+]
+PNL_DIST_PREFIX = "exit_type["
+
+COST_STATIC_LABELS = [
+    "total_input_tokens", "total_output_tokens", "total_cache_read_tokens",
+    "avg_cache_hit_rate", "tokens_per_cycle_p50", "tokens_per_cycle_p95",
+    "avg_wall_time_ms", "avg_llm_call_ms", "avg_tool_total_ms",
+]
+COST_DIST_PREFIX = "per_tool_call_top10["
+
+BEH_STATIC_LABELS = [
+    "total_cycles", "ok_count", "forensic_count",
+    # triggered_by[*] / decision_type[*] inserted dynamically before next group
+    "five_field_complete_rate",
+    "has_stance", "has_active_commitments", "has_this_cycle_delta",
+    "has_thesis_invalidation", "has_watch_list",
+    "avg_decision_length_chars", "decision_length_p95",
+    "retraction_rate", "avg_reasoning_tokens", "avg_thinking_chars",
+    "alert_triggered_rate", "alert_cancelled_rate", "alert_avg_cancel_attempt_count",
+]
+
+
+def _expand_dist_labels(metrics_a: dict, metrics_b: dict, prefix: str) -> list[str]:
+    """Union of dynamic distribution keys; sorted for stable output."""
+    keys = {k for k in metrics_a if k.startswith(prefix)}
+    keys |= {k for k in metrics_b if k.startswith(prefix)}
+    return sorted(keys)
+
+
+def _flatten_dist_into_dict(metrics: dict, source_key: str, prefix: str) -> None:
+    """metrics[source_key] = {k1: v1, ...} → metrics[f'{prefix}{k1}']=v1, ..."""
+    payload = metrics.pop(source_key, None)
+    if not payload:
+        return
+    for k, v in payload.items():
+        metrics[f"{prefix}{k}"] = v
+
+
+def _build_pnl_labels(metrics_a, metrics_b) -> list[str]:
+    return PNL_LABELS + _expand_dist_labels(metrics_a, metrics_b, PNL_DIST_PREFIX)
+
+
+def _build_cost_labels(metrics_a, metrics_b) -> list[str]:
+    return COST_STATIC_LABELS + _expand_dist_labels(metrics_a, metrics_b, COST_DIST_PREFIX)
+
+
+def _build_behavior_labels(metrics_a, metrics_b) -> list[str]:
+    # Insert triggered_by[*] + decision_type[*] after forensic_count (index 2)
+    trig = _expand_dist_labels(metrics_a, metrics_b, "triggered_by[")
+    dt = _expand_dist_labels(metrics_a, metrics_b, "decision_type[")
+    return BEH_STATIC_LABELS[:3] + trig + dt + BEH_STATIC_LABELS[3:]
+
+
 async def render_diff(engine, session_a, session_b) -> str:
-    metrics_a, _, _ = await compute_metrics_for_session(engine, session_a)
-    metrics_b, _, _ = await compute_metrics_for_session(engine, session_b)
+    metrics_a, rts_a, cv_a = await compute_metrics_for_session(engine, session_a)
+    metrics_b, rts_b, cv_b = await compute_metrics_for_session(engine, session_b)
+    # Flatten dict-valued entries (per_tool_call_top10) into label-prefixed keys
+    _flatten_dist_into_dict(metrics_a, "per_tool_call_top10", "per_tool_call_top10[")
+    _flatten_dist_into_dict(metrics_b, "per_tool_call_top10", "per_tool_call_top10[")
+
     parts = [_render_diff_header(session_a, session_b)]
-    # Minimal section to satisfy T13 e2e tests (full render in T15)
-    minimal_labels = [
-        "total_cycles",
-        "total_pnl_net",
-        "roundtrip_count",
+    parts.append(_render_diff_section("PnL", _build_pnl_labels(metrics_a, metrics_b),
+                                      metrics_a, metrics_b))
+    parts.append(_render_diff_section("Behavior", _build_behavior_labels(metrics_a, metrics_b),
+                                      metrics_a, metrics_b))
+    parts.append(_render_diff_section("Cost", _build_cost_labels(metrics_a, metrics_b),
+                                      metrics_a, metrics_b))
+
+    # Caveats: per-side ×2 + diff-only ×1
+    counts_a = await ok_vs_forensic_count(engine, session_a.id)
+    counts_b = await ok_vs_forensic_count(engine, session_b.id)
+    null_a = await _detect_null_pollution(engine, session_a.id)
+    null_b = await _detect_null_pollution(engine, session_b.id)
+    cav_lines = [
+        render_caveats_per_side(
+            rts_a, cv_a, prefix="[A] ",
+            ok_cycle_count=counts_a["ok"], forensic_count=counts_a["forensic"],
+            null_field_summary=null_a,
+        ),
+        render_caveats_per_side(
+            rts_b, cv_b, prefix="[B] ",
+            ok_cycle_count=counts_b["ok"], forensic_count=counts_b["forensic"],
+            null_field_summary=null_b,
+        ),
+        render_caveats_diff_only(
+            a_eq_b=(session_a.id == session_b.id),
+            cross_symbol=(session_a.symbol, session_b.symbol),
+        ),
     ]
-    parts.append(_render_diff_section("PnL", minimal_labels, metrics_a, metrics_b))
+    body = "\n".join(line for line in cav_lines if line.strip())
+    if not body:
+        body = "- (no caveats)"
+    parts.append(f"## Caveats\n\n{body}")
     return "\n\n".join(parts) + "\n"
 
 
