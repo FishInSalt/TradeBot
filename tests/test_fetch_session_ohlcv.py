@@ -587,3 +587,47 @@ async def test_fetch_no_write_when_output_none(db_engine, monkeypatch, tmp_path)
     csv_dir = tmp_path / "csv_output"
     csv_dir.mkdir()
     assert list(csv_dir.iterdir()) == []
+
+
+# ===== sanitize + label fallback tests =====
+
+@pytest.mark.parametrize("name,expected", [
+    ("clean_name", "clean_name"),
+    ("BTC trend strategy", "BTC_trend_strategy"),
+    ("test/with:slashes", "test_with_slashes"),
+    ("trail_underscore_", "trail_underscore"),
+    ("_lead_underscore", "lead_underscore"),
+    ("0123456789012345678901234567890123456789_extra", "0123456789012345678901234567890123456789"),  # 40 char cap
+    ("!!!", ""),  # all unsafe → empty after strip
+    ("", ""),
+])
+def test_sanitize_label(name, expected):
+    """spec §3.3: sanitize = re.sub(r'[^\\w-]+', '_', name).strip('_')[:40]"""
+    from scripts.fetch_session_ohlcv import _sanitize_label
+    assert _sanitize_label(name) == expected
+
+
+def test_default_output_path_uses_session_name():
+    """spec §3.3: label = sanitize(name) when sanitize非空."""
+    from scripts.fetch_session_ohlcv import _build_default_output_path
+    path = _build_default_output_path(
+        session_id="11111111-2222-3333-4444-555555555555",
+        name="BTC trend strategy",
+        symbol="BTC/USDT:USDT",
+        timeframe="1m",
+    )
+    assert "BTC_trend_strategy" in str(path)
+    assert "BTC_USDT_USDT" in str(path)
+    assert str(path).endswith("_1m.csv")
+
+
+def test_default_output_path_fallback_to_session_id_prefix():
+    """spec §3.3: name='' or sanitize 退化为空 → fallback session_id[:8]."""
+    from scripts.fetch_session_ohlcv import _build_default_output_path
+    path = _build_default_output_path(
+        session_id="abcdef12-3456-7890-1234-567890abcdef",
+        name="!!!",  # all unsafe → sanitize 退化
+        symbol="BTC/USDT:USDT",
+        timeframe="1m",
+    )
+    assert "abcdef12" in str(path)

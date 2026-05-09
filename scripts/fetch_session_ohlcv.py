@@ -5,7 +5,9 @@ for full spec including resource contract, retry semantics, and AC list.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -194,3 +196,66 @@ def _write_csv(df: pd.DataFrame, path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
+
+
+def _sanitize_label(name: str) -> str:
+    """spec §3.3: re.sub(r'[^\\w-]+', '_', name).strip('_')[:40]"""
+    return re.sub(r"[^\w-]+", "_", name).strip("_")[:40]
+
+
+def _sanitize_symbol(symbol: str) -> str:
+    """spec §3.3: 'BTC/USDT:USDT' → 'BTC_USDT_USDT'."""
+    return symbol.replace("/", "_").replace(":", "_")
+
+
+def _build_default_output_path(
+    session_id: str, name: str, symbol: str, timeframe: str
+) -> Path:
+    """spec §3.3 default: .working/ohlcv/<label>_<symbol_safe>_<tf>.csv"""
+    label = _sanitize_label(name) or session_id[:8]
+    symbol_safe = _sanitize_symbol(symbol)
+    return Path(".working/ohlcv") / f"{label}_{symbol_safe}_{timeframe}.csv"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Fetch OKX REST OHLCV for a sim session's window."
+    )
+    parser.add_argument("--session", required=True, help="session id (UUID)")
+    parser.add_argument("--timeframe", default="1m", choices=list(TIMEFRAMES))
+    parser.add_argument("--db", default="data/tradebot.db", dest="db_path",
+                        help="SQLite DB path (default: data/tradebot.db)")
+    parser.add_argument("--output", default=None, dest="output_path",
+                        help="output CSV path (default: .working/ohlcv/<label>_<symbol>_<tf>.csv)")
+    args = parser.parse_args()
+
+    async def _run():
+        # Resolve default output: need symbol + name from DB.
+        # Use AsyncSession to get ORM object (engine.connect+scalar_one returns first column not entity).
+        output_path = args.output_path
+        if output_path is None:
+            engine = create_async_engine(f"sqlite+aiosqlite:///{args.db_path}")
+            try:
+                async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(SessionModel).where(SessionModel.id == args.session)
+                    )
+                    row = result.scalars().first()
+                if row is None:
+                    raise ValueError(f"session not found: {args.session}")
+                output_path = _build_default_output_path(
+                    args.session, row.name, row.symbol, args.timeframe
+                )
+            finally:
+                await engine.dispose()
+        await fetch_session_ohlcv(
+            args.session, timeframe=args.timeframe,
+            db_path=args.db_path, output_path=Path(output_path),
+        )
+
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    main()
