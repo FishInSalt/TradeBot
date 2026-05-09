@@ -15,7 +15,15 @@ from sqlalchemy import text
 
 
 def _parse_dt(value: datetime | str | None) -> datetime | None:
-    """Coerce SQLite text timestamp to aware datetime. Returns None if value is None."""
+    """Coerce aiosqlite-returned datetime value to datetime.
+
+    aiosqlite returns DATETIME columns from raw text() queries as strings of
+    the form 'YYYY-MM-DD HH:MM:SS[.ffffff]' (no TZ suffix). Strings that
+    include a TZ offset (e.g. '+00:00') are NOT supported and will raise
+    ValueError — current callers never produce such values.
+
+    Returns None if value is None.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -195,8 +203,23 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
         close_remaining = actual_amount
         close_fee_total = fill.fee or 0.0
         lot_queue = open_lots[fill.position_side]
+        close_at_dt = _parse_dt(fill.filled_at)  # hoisted: parse once per fill
 
-        while close_remaining > 0:
+        # Pre-compute liquidation per-unit pnl ONCE per fill — fixes invariant
+        # counter overcounting when liquidation spans N lots.
+        liq_pnl_per_unit: float | None = None
+        if fill.order_type == "liquidation":
+            if fill.trade_action_pnl is None:
+                caveats["invariant_violations"] += 1
+                print(
+                    f"liquidation fill {fill.order_id} missing trade_actions.pnl row",
+                    file=sys.stderr,
+                )
+                liq_pnl_per_unit = 0.0
+            else:
+                liq_pnl_per_unit = fill.trade_action_pnl / actual_amount
+
+        while close_remaining > 1e-9:  # epsilon-tolerant (matches lot-pop tolerance)
             if not lot_queue:
                 caveats["invariant_violations"] += 1
                 print(
@@ -208,15 +231,7 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
             consumed = min(lot.remaining_amount, close_remaining)
 
             if fill.order_type == "liquidation":
-                if fill.trade_action_pnl is None:
-                    caveats["invariant_violations"] += 1
-                    print(
-                        f"liquidation fill {fill.order_id} missing trade_actions.pnl row",
-                        file=sys.stderr,
-                    )
-                    pnl_gross = 0.0
-                else:
-                    pnl_gross = fill.trade_action_pnl * (consumed / actual_amount)
+                pnl_gross = liq_pnl_per_unit * consumed
             else:
                 pnl_gross = _compute_pnl(lot.entry_px, fill.filled_price, consumed, lot.side)
 
@@ -224,7 +239,6 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
             fee_close_share = close_fee_total * (consumed / actual_amount)
             fee_total = fee_open_share + fee_close_share
 
-            close_at_dt = _parse_dt(fill.filled_at)
             roundtrips.append(Roundtrip(
                 open_at=lot.open_at, close_at=close_at_dt,
                 open_cycle_id=lot.open_cycle_id,
