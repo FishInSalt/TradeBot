@@ -9,6 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import ccxt
+import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import sessionmaker
@@ -108,3 +109,36 @@ async def _fetch_with_retry(client, symbol: str, timeframe: str, since_ms: int) 
                 await asyncio.sleep(_RETRY_SLEEP_SCHEDULE[attempt])
     assert last_err is not None
     raise last_err
+
+
+_DTYPE_SCHEMA = {
+    "timestamp_ms": "int64",
+    "datetime_iso": "object",
+    "open": "float64",
+    "high": "float64",
+    "low": "float64",
+    "close": "float64",
+    "volume": "float64",
+}
+
+
+def _to_dataframe(rows: list[list]) -> pd.DataFrame:
+    """Convert ccxt raw OHLCV rows to DataFrame; force §3.2 dtypes even when empty."""
+    if not rows:
+        # Build empty DataFrame with explicit dtypes (default empty df is 'object')
+        return pd.DataFrame({col: pd.Series(dtype=dtype) for col, dtype in _DTYPE_SCHEMA.items()})
+
+    records = [
+        {
+            "timestamp_ms": int(r[0]),
+            "datetime_iso": datetime.fromtimestamp(r[0] / 1000, tz=timezone.utc).isoformat(),
+            "open": float(r[1]),
+            "high": float(r[2]),
+            "low": float(r[3]),
+            "close": float(r[4]),
+            "volume": float(r[5]),
+        }
+        for r in rows
+    ]
+    df = pd.DataFrame(records)
+    return df.astype(_DTYPE_SCHEMA)

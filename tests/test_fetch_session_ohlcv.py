@@ -339,3 +339,40 @@ async def test_paginate_cursor_advances_by_tf_ms_AC_F7_4(monkeypatch, tf, tf_ms)
     assert captured_since[1] == page2_first_ts, (
         f"{tf}: cursor expected {page2_first_ts}, got {captured_since[1]}"
     )
+
+
+# ===== _to_dataframe tests =====
+
+def test_to_dataframe_schema_AC_F7_5():
+    """AC-F7-5: DataFrame 7 columns with correct dtypes."""
+    import pandas as pd
+    from scripts.fetch_session_ohlcv import _to_dataframe
+
+    rows = [
+        [1_700_000_000_000, 80000.0, 80100.0, 79900.0, 80050.0, 1.5],
+        [1_700_000_060_000, 80050.0, 80200.0, 80000.0, 80150.0, 2.0],
+    ]
+    df = _to_dataframe(rows)
+    assert list(df.columns) == [
+        "timestamp_ms", "datetime_iso", "open", "high", "low", "close", "volume",
+    ]
+    assert df["timestamp_ms"].dtype == "int64"
+    assert df["datetime_iso"].dtype == "object"
+    for col in ("open", "high", "low", "close", "volume"):
+        assert df[col].dtype == "float64", f"{col}: {df[col].dtype}"
+    assert df["datetime_iso"].iloc[0].endswith("Z") or "+00:00" in df["datetime_iso"].iloc[0]
+
+
+def test_to_dataframe_empty_dtype_preserved():
+    """AC-F7-15 (dtype 部分): 空 rows 仍返回 7 列 + 正确 dtype."""
+    import pandas as pd
+    from scripts.fetch_session_ohlcv import _to_dataframe
+
+    df = _to_dataframe([])
+    assert len(df) == 0
+    assert list(df.columns) == [
+        "timestamp_ms", "datetime_iso", "open", "high", "low", "close", "volume",
+    ]
+    assert df["timestamp_ms"].dtype == "int64"
+    for col in ("open", "high", "low", "close", "volume"):
+        assert df[col].dtype == "float64", f"empty {col}: {df[col].dtype}"
