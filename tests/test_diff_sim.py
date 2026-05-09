@@ -143,3 +143,102 @@ async def test_diff_pnl_threshold_200_usdt_inclusive(db_engine):
     r = _run_diff("--a", "p0_2", "--b", "p200", db_path=db_path)
     row = _row_for(r.stdout, "total_pnl_net")
     assert "🔴" in row
+
+
+# === T14: rate flag + _compute_row_flag dispatch unit tests ===
+
+
+def test_flag_rate_91_to_92_no_flag():
+    from scripts.diff_sim import _flag_by_rate
+    assert _flag_by_rate(1.0, 1.1) == "—"
+
+
+def test_flag_rate_91_to_96_warn_via_pp_only():
+    from scripts.diff_sim import _flag_by_rate
+    assert _flag_by_rate(5.0, 5.5) == "⚠️"
+
+
+def test_flag_rate_5_to_10_crit_via_pct_promotes():
+    from scripts.diff_sim import _flag_by_rate
+    assert _flag_by_rate(5.0, 100.0) == "🔴"
+
+
+def test_flag_rate_50_to_35_crit_inclusive():
+    from scripts.diff_sim import _flag_by_rate
+    assert _flag_by_rate(-15.0, -30.0) == "🔴"
+
+
+def test_flag_rate_below_5pp_no_flag():
+    from scripts.diff_sim import _flag_by_rate
+    assert _flag_by_rate(3.0, 3.2) == "—"
+
+
+def test_flag_pct_inclusive_at_10():
+    from scripts.diff_sim import _flag_by_pct
+    assert _flag_by_pct(10.0) == "⚠️"
+    assert _flag_by_pct(9.9) == "—"
+
+
+def test_flag_pct_inclusive_at_30():
+    from scripts.diff_sim import _flag_by_pct
+    assert _flag_by_pct(30.0) == "🔴"
+    assert _flag_by_pct(29.9) == "⚠️"
+
+
+def test_flag_pnl_abs_inclusive_at_50_200():
+    from scripts.diff_sim import _flag_by_pnl_abs
+    assert _flag_by_pnl_abs(50.0) == "⚠️"
+    assert _flag_by_pnl_abs(49.9) == "—"
+    assert _flag_by_pnl_abs(200.0) == "🔴"
+    assert _flag_by_pnl_abs(199.9) == "⚠️"
+
+
+# _compute_row_flag — spec §5.5 missing-value dispatch.
+
+def test_compute_row_flag_both_none():
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(None, None, "count") == "—"
+
+
+def test_compute_row_flag_a_has_b_none_signal_lost():
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(0.5, None, "rate") == "⚠️"
+
+
+def test_compute_row_flag_a_none_b_has_signal_new():
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(None, 0.5, "rate") == "⚠️"
+
+
+def test_compute_row_flag_zero_divisor_non_pnl_warn():
+    """Spec §5.5: a=0 (non-PnL), |Δ|>0 → ⚠️ regardless of Δ%='n/a'."""
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(0, 2, "count") == "⚠️"
+    assert _compute_row_flag(0, 0, "count") == "—"
+
+
+def test_compute_row_flag_pnl_cross_zero_uses_abs():
+    """Spec §5.4: PnL uses |Δ| absolute even when Δ% n/a (cross-zero)."""
+    from scripts.diff_sim import _compute_row_flag
+    # a=-81, b=120 → |Δ|=201 ≥ 200 → 🔴
+    assert _compute_row_flag(-81.0, 120.0, "sum_pnl") == "🔴"
+    # a=0, b=50 → |Δ|=50 inclusive → ⚠️
+    assert _compute_row_flag(0.0, 50.0, "sum_pnl") == "⚠️"
+
+
+def test_compute_row_flag_count_uses_pct():
+    """Counts judged by Δ% threshold."""
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(10, 11, "count") == "⚠️"   # +10%
+    assert _compute_row_flag(10, 13, "count") == "🔴"   # +30%
+
+
+def test_compute_row_flag_avg_pnl_prefers_pct_falls_back_to_abs():
+    """Spec §5.3: avg_pnl prefers Δ%; falls back to PnL |Δ| when Δ% n/a."""
+    from scripts.diff_sim import _compute_row_flag
+    # divergent +30%: Δ% triggers 🔴 ahead of |Δ|
+    assert _compute_row_flag(10.0, 13.0, "avg_pnl") == "🔴"
+    # cross-zero: Δ% n/a, fall back to PnL abs (|Δ|=10 < 50 → —)
+    assert _compute_row_flag(-5.0, 5.0, "avg_pnl") == "—"
+    # cross-zero |Δ|=60 ≥ 50 → ⚠️
+    assert _compute_row_flag(-30.0, 30.0, "avg_pnl") == "⚠️"
