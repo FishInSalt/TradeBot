@@ -662,3 +662,103 @@ async def alert_lifecycle_summary(engine, session_id: str) -> dict:
         "cancelled_rate": row.cancelled_rate,
         "avg_cancel_attempt_count": row.avg_cancel_attempt_count,
     }
+
+
+# ── Legacy session guard + caveats helpers ────────────────────────────────────
+
+
+def assert_not_legacy(session) -> None:
+    created_at = session.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if created_at < R2_7_MERGED_AT:
+        raise SystemExit(
+            f"Session '{session.name}' was created at {created_at.isoformat()} "
+            f"(before R2-7 schema reframe at {R2_7_MERGED_AT.date()}); "
+            f"legacy sessions are intentionally unsupported "
+            f"(pre-R2-7 schema cutoff)."
+        )
+
+
+def render_caveats_per_side(
+    rts, caveats, *, prefix: str,
+    ok_cycle_count: int,
+    forensic_count: int = 0,
+    null_field_summary: list[tuple[str, int]] | None = None,
+) -> str:
+    """Emit 8 per-session caveat templates (spec §6.3 rows 1-7 + 10).
+
+    Args:
+      rts: roundtrips list (drives "0 closed roundtrips" branch).
+      caveats: dict from collect_roundtrips (unclosed/invariant/liquidation/stale).
+      prefix: '' for analyze single-sim; '[A] ' / '[B] ' for diff per-side.
+      ok_cycle_count: drives "0 ok cycles" branch.
+      forensic_count: drives "N forensic cycle(s)" branch.
+      null_field_summary: list of (field, row_count) for >5% NULL fields.
+    """
+    null_field_summary = null_field_summary or []
+    lines: list[str] = []
+
+    if ok_cycle_count == 0:
+        lines.append(f"- {prefix}Session has 0 ok cycles — all metrics N/A.")
+
+    if not rts and ok_cycle_count > 0:
+        lines.append(f"- {prefix}0 closed roundtrips — PnL metrics N/A.")
+
+    unclosed = caveats.get("unclosed_lot_count", {"long": 0, "short": 0})
+    n_unclosed = unclosed["long"] + unclosed["short"]
+    if n_unclosed:
+        lines.append(
+            f"- {prefix}{n_unclosed} unclosed lot(s) at session end "
+            f"(long: {unclosed['long']}, short: {unclosed['short']}) "
+            f"excluded from roundtrip metrics."
+        )
+
+    if caveats.get("invariant_violations"):
+        lines.append(
+            f"- {prefix}{caveats['invariant_violations']} invariant violation(s) "
+            f"detected — see stderr logs for details."
+        )
+
+    if caveats.get("liquidation_count"):
+        lines.append(
+            f"- {prefix}{caveats['liquidation_count']} liquidation event(s) — "
+            f"close_cycle_id N/A (liquidation does not write 5-enum trade_action); "
+            f"pnl read from trade_actions.pnl due to sim pnl_cap."
+        )
+
+    if caveats.get("stale_close_amount_count"):
+        lines.append(
+            f"- {prefix}{caveats['stale_close_amount_count']} stale close amount(s) — "
+            f"actual_amount derivation failed (fee or fee_rate missing); "
+            f"fell back to sim_orders.amount which may overstate close size."
+        )
+
+    if forensic_count:
+        lines.append(
+            f"- {prefix}{forensic_count} forensic cycle(s) "
+            f"(execution_status != 'ok') — excluded from cycle averages."
+        )
+
+    for field, count in null_field_summary:
+        lines.append(
+            f"- {prefix}{count} rows with NULL {field} in agent_cycles — "
+            f"affected metrics may be biased."
+        )
+
+    return "\n".join(lines)
+
+
+def render_caveats_diff_only(
+    *, a_eq_b: bool, cross_symbol: tuple[str, str] | None,
+) -> str:
+    """Emit 2 diff-specific caveat templates (spec §6.3 rows 8 + 9)."""
+    lines: list[str] = []
+    if a_eq_b:
+        lines.append("- WARNING: A and B refer to same session — all deltas are zero.")
+    if cross_symbol and cross_symbol[0] != cross_symbol[1]:
+        lines.append(
+            f"- WARNING: A={cross_symbol[0]}, B={cross_symbol[1]}; "
+            f"PnL comparable in USDT but market context differs."
+        )
+    return "\n".join(lines)

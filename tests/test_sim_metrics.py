@@ -797,3 +797,138 @@ async def test_alert_lifecycle_summary_from_view(db_engine):
     assert "triggered_rate" in summary
     assert "cancelled_rate" in summary
     assert "avg_cancel_attempt_count" in summary  # matches v_alert_lifecycle column
+
+
+# === T9: assert_not_legacy + caveats helpers ===
+
+from scripts._sim_metrics import (
+    assert_not_legacy, render_caveats_per_side, render_caveats_diff_only,
+)
+
+
+def test_assert_not_legacy_post_cutoff_passes():
+    class _S:
+        name = "post"
+        created_at = R2_7_MERGED_AT + timedelta(days=1)
+    assert_not_legacy(_S())
+
+
+def test_assert_not_legacy_pre_cutoff_raises():
+    class _S:
+        name = "legacy"
+        created_at = R2_7_MERGED_AT - timedelta(days=1)
+    with pytest.raises(SystemExit) as exc:
+        assert_not_legacy(_S())
+    assert "legacy sessions" in str(exc.value)
+
+
+def test_assert_not_legacy_naive_datetime_normalized():
+    """SQLite returns naive datetime; coerce to UTC, do not raise TypeError."""
+    class _S:
+        name = "naive_post"
+        created_at = (R2_7_MERGED_AT + timedelta(days=1)).replace(tzinfo=None)
+    assert_not_legacy(_S())
+
+
+def test_assert_not_legacy_naive_pre_cutoff_raises():
+    class _S:
+        name = "naive_legacy"
+        created_at = (R2_7_MERGED_AT - timedelta(days=1)).replace(tzinfo=None)
+    with pytest.raises(SystemExit):
+        assert_not_legacy(_S())
+
+
+# Per-side caveats — 8 templates.
+
+def _empty_caveats(*, unclosed=None, invariant=0, liquidation=0, stale=0):
+    return {
+        "unclosed_lot_count": unclosed or {"long": 0, "short": 0},
+        "invariant_violations": invariant,
+        "liquidation_count": liquidation,
+        "stale_close_amount_count": stale,
+    }
+
+
+def test_render_caveats_per_side_zero_ok_cycles():
+    out = render_caveats_per_side([], _empty_caveats(), prefix="",
+                                  ok_cycle_count=0)
+    assert "Session has 0 ok cycles" in out
+
+
+def test_render_caveats_per_side_zero_roundtrips():
+    out = render_caveats_per_side([], _empty_caveats(), prefix="",
+                                  ok_cycle_count=10)
+    assert "0 closed roundtrips" in out
+
+
+def test_render_caveats_per_side_unclosed_lots():
+    cv = _empty_caveats(unclosed={"long": 2, "short": 1})
+    out = render_caveats_per_side([], cv, prefix="", ok_cycle_count=10)
+    assert "3 unclosed lot(s)" in out
+    assert "long: 2" in out and "short: 1" in out
+
+
+def test_render_caveats_per_side_invariant():
+    cv = _empty_caveats(invariant=2)
+    out = render_caveats_per_side([_rt()], cv, prefix="", ok_cycle_count=10)
+    assert "2 invariant violation(s)" in out
+
+
+def test_render_caveats_per_side_liquidation():
+    cv = _empty_caveats(liquidation=1)
+    out = render_caveats_per_side([_rt()], cv, prefix="", ok_cycle_count=10)
+    assert "1 liquidation event(s)" in out
+    assert "pnl_cap" in out
+
+
+def test_render_caveats_per_side_stale_close_amount():
+    cv = _empty_caveats(stale=3)
+    out = render_caveats_per_side([_rt()], cv, prefix="", ok_cycle_count=10)
+    assert "3 stale close amount(s)" in out
+
+
+def test_render_caveats_per_side_forensic():
+    out = render_caveats_per_side([_rt()], _empty_caveats(), prefix="",
+                                  ok_cycle_count=10, forensic_count=4)
+    assert "4 forensic cycle(s)" in out
+
+
+def test_render_caveats_per_side_null_pollution():
+    out = render_caveats_per_side([_rt()], _empty_caveats(), prefix="",
+                                  ok_cycle_count=10,
+                                  null_field_summary=[("decision", 12)])
+    assert "12 rows with NULL decision" in out
+
+
+def test_render_caveats_per_side_prefix_decorates():
+    """diff use case: prefix='[A] ' applied to all per-side messages."""
+    cv = _empty_caveats(unclosed={"long": 1, "short": 0})
+    out = render_caveats_per_side([], cv, prefix="[A] ", ok_cycle_count=10)
+    assert "[A] 1 unclosed lot(s)" in out
+
+
+# Diff-only caveats — 2 templates.
+
+def test_render_caveats_diff_only_a_equals_b():
+    out = render_caveats_diff_only(a_eq_b=True, cross_symbol=None)
+    assert "WARNING: A and B refer to same session" in out
+
+
+def test_render_caveats_diff_only_cross_symbol():
+    out = render_caveats_diff_only(a_eq_b=False,
+                                   cross_symbol=("BTC/USDT:USDT", "ETH/USDT:USDT"))
+    assert "A=BTC/USDT:USDT, B=ETH/USDT:USDT" in out
+
+
+def test_render_caveats_diff_only_neither():
+    """Empty when no diff-specific condition fires."""
+    out = render_caveats_diff_only(a_eq_b=False,
+                                   cross_symbol=("BTC/USDT:USDT", "BTC/USDT:USDT"))
+    assert out == ""
+
+
+def test_render_caveats_diff_only_does_not_emit_per_side():
+    """Sanity: diff-only never emits per-side template fragments."""
+    out = render_caveats_diff_only(a_eq_b=True, cross_symbol=None)
+    assert "0 closed roundtrips" not in out
+    assert "unclosed lot" not in out
