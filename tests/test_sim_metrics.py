@@ -260,3 +260,72 @@ async def test_collect_roundtrips_pnl_uses_lot_entry_not_weighted(db_engine):
                           pnl_gross=0.0)  # sim weighted
     rts, _ = await collect_roundtrips(db_engine, sid)
     assert rts[0].pnl_gross == pytest.approx(50.0)
+
+
+# === T4: collect_roundtrips liquidation + invariants ===
+
+
+async def test_collect_roundtrips_liquidation_close_cycle_id_none(db_engine):
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", amount=0.1)
+    await make_close_fill(db_engine, sid, cycle_id="c2", exit_type="liquidation",
+                          amount=0.1, pnl_gross=-50.0)
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert len(rts) == 1
+    assert rts[0].exit_type == "liquidation"
+    assert rts[0].close_cycle_id is None
+    assert caveats["liquidation_count"] == 1
+
+
+async def test_collect_roundtrips_liquidation_uses_trade_actions_pnl(db_engine):
+    """Sim caps liquidation loss; FIFO recompute would over-state.
+    Verify roundtrip.pnl_gross = trade_actions.pnl proportional."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    # entry 80000, exit 40000, amount 0.1, lev 10 → recompute -4000;
+    # sim pnl_cap stub = -800 (margin floor)
+    await make_open_lot(db_engine, sid, cycle_id="c1", entry_px=80000, amount=0.1, leverage=10)
+    await make_close_fill(db_engine, sid, cycle_id="c2", exit_type="liquidation",
+                          exit_px=40000, amount=0.1, pnl_gross=-800.0)
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    # consumed 0.1 / actual 0.1 → full pnl_gross = -800
+    assert rts[0].pnl_gross == pytest.approx(-800.0)
+
+
+async def test_collect_roundtrips_liquidation_missing_trade_action_invariant(db_engine, capsys):
+    """Liquidation fill without order_filled trade_action → invariant violation."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", amount=0.1)
+    # Manually insert sim_orders WITHOUT any trade_action row
+    from sqlalchemy import insert
+    from src.storage.models import SimOrder
+    async with db_engine.begin() as conn:
+        await conn.execute(insert(SimOrder).values(
+            session_id=sid, order_id="liq-orphan", symbol="BTC/USDT:USDT",
+            side="sell", position_side="long", order_type="liquidation",
+            amount=0.1, status="filled", filled_price=40000, fee=2.0,
+            filled_at=R2_7_MERGED_AT + timedelta(days=2, minutes=5),
+        ))
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert caveats["invariant_violations"] >= 1
+    assert any(rt.exit_type == "liquidation" and rt.pnl_gross == 0.0 for rt in rts)
+    err = capsys.readouterr().err
+    assert "missing trade_actions.pnl" in err
+
+
+async def test_collect_roundtrips_non_liquidation_recomputes_pnl_from_lot(db_engine):
+    """Non-liquidation must recompute from lot.entry_px (ignore trade_actions.pnl)."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", entry_px=80000, amount=0.1)
+    # set wrong trade_actions.pnl=999 → if read, test catches; expected PnL = 200
+    await make_close_fill(db_engine, sid, cycle_id="c2", exit_type="market",
+                          exit_px=82000, amount=0.1, pnl_gross=999.0)
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    assert rts[0].pnl_gross == pytest.approx(200.0)
