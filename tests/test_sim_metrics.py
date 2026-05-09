@@ -655,3 +655,145 @@ async def test_per_tool_call_top10_aggregation(db_engine):
     top = await per_tool_call_top10(db_engine, sid)
     assert top[0] == ("get_market_state", 5)
     assert top[1] == ("read_alerts", 3)
+
+
+# === T8: Behavior metric functions ===
+
+from scripts._sim_metrics import (
+    total_cycles, ok_vs_forensic_count,
+    triggered_by_distribution, decision_type_distribution,
+    five_field_complete_rate, per_field_hit_rate,
+    avg_decision_length_chars, decision_length_p95,
+    retraction_rate, avg_reasoning_tokens, avg_thinking_chars,
+    alert_lifecycle_summary, extract_stance,
+)
+
+
+async def test_total_cycles_count(db_engine):
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2", "c3"]:
+        await make_cycle(db_engine, sid, c)
+    assert await total_cycles(db_engine, sid) == 3
+
+
+async def test_ok_vs_forensic_count(db_engine):
+    sid = await make_session(db_engine)
+    # is_ok_cycle requires decision IS NOT NULL AND length > 0 (view line 77-80)
+    await make_cycle(db_engine, sid, "c1", execution_status="ok", decision="ok decision")
+    await make_cycle(db_engine, sid, "c2", execution_status="ok", decision="ok decision")
+    await make_cycle(db_engine, sid, "c3", execution_status="usage_limit_exceeded")
+    counts = await ok_vs_forensic_count(db_engine, sid)
+    assert counts["ok"] == 2
+    assert counts["forensic"] == 1
+
+
+async def test_decision_type_distribution_hold_double_meaning(db_engine):
+    """Spec §3.5 caveat 1: hold (pure-observation) vs hold (wake-only)."""
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1")  # no trade_action → pure-observation
+    await make_cycle(db_engine, sid, "c2")
+    from sqlalchemy import insert
+    from src.storage.models import TradeAction
+    async with db_engine.begin() as conn:
+        # c2 only set_next_wake → wake-only
+        await conn.execute(insert(TradeAction).values(
+            session_id=sid, cycle_id="c2", action="set_next_wake",
+            symbol="BTC/USDT:USDT",
+        ))
+    dist = await decision_type_distribution(db_engine, sid)
+    assert dist.get("hold (pure-observation)") == 1
+    assert dist.get("hold (wake-only)") == 1
+
+
+async def test_decision_type_distribution_excludes_order_filled(db_engine):
+    """make_close_fill writes both close_position + order_filled for the
+    same cycle. Distribution must record close_position (decision intent),
+    not order_filled (sim bookkeeping).
+    """
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1")
+    await make_close_fill(db_engine, sid, cycle_id="c2", pnl_gross=100.0)
+    dist = await decision_type_distribution(db_engine, sid)
+    assert dist.get("close_position") == 1
+    assert dist.get("order_filled", 0) == 0  # bookkeeping filtered out
+    assert dist.get("open_position") == 1
+
+
+async def test_decision_type_distribution_priority_deterministic(db_engine):
+    """Cycle with both close_position + place_limit_order → close_position
+    wins by priority (deterministic; not PYTHONHASHSEED-dependent).
+    """
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1")
+    from sqlalchemy import insert
+    from src.storage.models import TradeAction
+    async with db_engine.begin() as conn:
+        for action in ["place_limit_order", "close_position"]:
+            await conn.execute(insert(TradeAction).values(
+                session_id=sid, cycle_id="c1", action=action,
+                symbol="BTC/USDT:USDT",
+            ))
+    dist = await decision_type_distribution(db_engine, sid)
+    assert dist.get("close_position") == 1
+    # place_limit_order NOT double-counted (priority picked close_position first)
+    assert dist.get("place_limit_order", 0) == 0
+
+
+def test_extract_stance_basic():
+    assert extract_stance("**(1) Stance**: bull\n...") == "bull"
+    assert extract_stance("(1) Stance: BEAR\n") == "bear"
+    assert extract_stance("nothing here") is None
+    assert extract_stance(None) is None
+
+
+def test_retraction_rate_cycle_to_cycle_stance_change():
+    class _C:
+        def __init__(self, cid, decision, status="ok"):
+            self.cycle_id = cid
+            self.decision = decision
+            self.execution_status = status
+    cycles = [
+        _C("c1", "(1) Stance: bull"),
+        _C("c2", "(1) Stance: bull"),
+        _C("c3", "(1) Stance: bear"),       # retraction
+        _C("c4", "(1) Stance: bear"),
+        _C("c5", "(1) Stance: neutral"),    # retraction
+    ]
+    assert retraction_rate(cycles) == pytest.approx(2 / 4)
+
+
+def test_retraction_rate_zero_pairs_returns_none():
+    assert retraction_rate([]) is None
+
+
+async def test_5field_complete_rate_uses_view_column(db_engine):
+    sid = await make_session(db_engine)
+    # view matches '%(3) This cycle%' (space, not hyphen) per views.py:32-33
+    complete = ("(1) Stance: bull\n(2) Active commitments: x\n"
+                "(3) This cycle delta: x\n(4) Thesis invalidation: x\n(5) Watch list: x")
+    incomplete = "(1) Stance: bull"
+    await make_cycle(db_engine, sid, "c1", decision=complete)
+    await make_cycle(db_engine, sid, "c2", decision=incomplete)
+    rate = await five_field_complete_rate(db_engine, sid)
+    assert rate == pytest.approx(0.5)
+
+
+async def test_per_field_hit_rate_5_keys(db_engine):
+    sid = await make_session(db_engine)
+    await make_cycle(db_engine, sid, "c1", decision="(1) Stance: bull")
+    rates = await per_field_hit_rate(db_engine, sid)
+    assert set(rates.keys()) == {
+        "has_stance", "has_active_commitments", "has_this_cycle_delta",
+        "has_thesis_invalidation", "has_watch_list",
+    }
+
+
+async def test_alert_lifecycle_summary_from_view(db_engine):
+    """Smoke: empty session → key set fixed (cancel_attempt_count column from view)."""
+    sid = await make_session(db_engine)
+    summary = await alert_lifecycle_summary(db_engine, sid)
+    assert "triggered_rate" in summary
+    assert "cancelled_rate" in summary
+    assert "avg_cancel_attempt_count" in summary  # matches v_alert_lifecycle column

@@ -7,6 +7,7 @@ Caveats §4.4 / SQL §3.5 / R2-7 cutoff §6.4 must be honored.
 from __future__ import annotations
 
 import json
+import re
 import statistics
 import sys
 from collections import deque
@@ -465,3 +466,199 @@ async def per_tool_call_top10(engine, session_id: str) -> list[tuple[str, int]]:
             GROUP BY tool_name ORDER BY cnt DESC LIMIT 10
         """), {"sid": session_id})).all()
     return [(r.tool_name, r.cnt) for r in rows]
+
+
+# ── Behavior metric functions (B1-B10) ────────────────────────────────────────
+
+
+STANCE_RE = re.compile(
+    r"(?:^|\n)\s*(?:\*\*)?\(?1\)?\.?\s*(?:\*\*)?\s*[Ss]tance(?:\*\*)?\s*[:：]\s*"
+    r"(?:\*\*)?(\w+)",
+    re.MULTILINE,
+)
+
+
+def extract_stance(decision: str | None) -> str | None:
+    if not decision:
+        return None
+    m = STANCE_RE.search(decision)
+    return m.group(1).lower().strip() if m else None
+
+
+def retraction_rate(cycles) -> float | None:
+    """cycle N stance ≠ cycle N-1 stance ratio. None when 0 valid pairs.
+
+    Caveat (spec §3.5 item 3): substring-LIKE not anchored; R2-Next-A
+    priors-injection引述 may inflate count. Accepted first-cut precision.
+    """
+    valid = [(c.cycle_id, extract_stance(c.decision))
+             for c in cycles if c.execution_status == "ok"]
+    pairs = [(prev, curr) for prev, curr in zip(valid, valid[1:])
+             if prev[1] is not None and curr[1] is not None]
+    if not pairs:
+        return None
+    return sum(1 for prev, curr in pairs if prev[1] != curr[1]) / len(pairs)
+
+
+async def total_cycles(engine, session_id: str) -> int:
+    async with engine.connect() as conn:
+        row = (await conn.execute(text(
+            "SELECT COUNT(*) AS n FROM v_cycle_metrics WHERE session_id = :sid"
+        ), {"sid": session_id})).first()
+    return row.n
+
+
+async def ok_vs_forensic_count(engine, session_id: str) -> dict[str, int]:
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("""
+            SELECT
+              SUM(CASE WHEN is_ok_cycle = 1 THEN 1 ELSE 0 END) AS ok,
+              SUM(CASE WHEN is_forensic_cycle = 1 THEN 1 ELSE 0 END) AS forensic
+            FROM v_cycle_metrics WHERE session_id = :sid
+        """), {"sid": session_id})).first()
+    return {"ok": row.ok or 0, "forensic": row.forensic or 0}
+
+
+async def triggered_by_distribution(engine, session_id: str) -> dict[str, int]:
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("""
+            SELECT triggered_by, COUNT(*) AS cnt FROM v_cycle_metrics
+            WHERE session_id = :sid GROUP BY triggered_by
+        """), {"sid": session_id})).all()
+    return {r.triggered_by: r.cnt for r in rows}
+
+
+DECISION_ACTION_PRIORITY: list[str] = [
+    "open_position",
+    "close_position",
+    "place_limit_order",
+    "set_stop_loss",
+    "set_take_profit",
+    "add_price_level_alert",
+    "cancel_price_level_alert",
+]
+
+
+async def decision_type_distribution(engine, session_id: str) -> dict[str, int]:
+    """§3.5 caveat 1: hold (pure-observation) vs hold (wake-only).
+
+    Determinism (R3 fix): SQL filters out 'order_filled' (sim bookkeeping,
+    not a decision) so multi-action cycles aren't polluted by fill events.
+    Python uses DECISION_ACTION_PRIORITY (fixed order) to pick a primary
+    action when a cycle has multiple decision actions — avoids set-iteration
+    non-determinism (PYTHONHASHSEED-dependent).
+    """
+    async with engine.connect() as conn:
+        active_rows = (await conn.execute(text("""
+            SELECT cycle_id,
+                   GROUP_CONCAT(DISTINCT action) AS actions,
+                   COUNT(DISTINCT action) AS distinct_count
+            FROM trade_actions
+            WHERE session_id = :sid
+              AND action != 'order_filled'   -- drop sim bookkeeping (not a decision)
+            GROUP BY cycle_id
+        """), {"sid": session_id})).all()
+        all_rows = (await conn.execute(text(
+            "SELECT cycle_id FROM agent_cycles WHERE session_id = :sid"
+        ), {"sid": session_id})).all()
+    active_ids = {r.cycle_id for r in active_rows}
+    all_ids = {r.cycle_id for r in all_rows}
+    pure_obs = all_ids - active_ids
+    dist: dict[str, int] = {"hold (pure-observation)": len(pure_obs)} if pure_obs else {}
+    for r in active_rows:
+        # GROUP BY + WHERE filter ensures GROUP_CONCAT(DISTINCT action) is non-empty
+        # for any row in active_rows; the `or ""` guard is defensive only — if
+        # SQLite ever returned empty/NULL it would split to {""} which doesn't
+        # match any priority-list entry and falls through to wake-only branch.
+        actions = set((r.actions or "").split(","))
+        if actions == {"set_next_wake"}:
+            dist["hold (wake-only)"] = dist.get("hold (wake-only)", 0) + 1
+            continue
+        # Pick primary action by fixed priority (deterministic)
+        for primary in DECISION_ACTION_PRIORITY:
+            if primary in actions:
+                dist[primary] = dist.get(primary, 0) + 1
+                break
+        else:
+            # No priority-list action matched — only set_next_wake plus
+            # something unknown; treat as wake-only (defensive; should not
+            # happen for sessions written by current src/cli/app.py paths).
+            dist["hold (wake-only)"] = dist.get("hold (wake-only)", 0) + 1
+    return dist
+
+
+async def five_field_complete_rate(engine, session_id: str) -> float | None:
+    """Reads v_cycle_metrics.five_field_complete column.
+
+    Pre-existing schema caveat (Phase 1 PR #42): despite the name,
+    `five_field_complete` checks only 4 anchors (stance + active_commitments
+    + this_cycle_delta + thesis_invalidation; **excludes** has_watch_list)
+    — see views.py:74-76 `>= 4`. This metric is "first-4 fields complete
+    rate" semantically. Renaming is W3 follow-up; Phase 2 sticks with
+    column name to avoid view churn.
+    """
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("""
+            SELECT AVG(CAST(five_field_complete AS REAL)) AS rate
+            FROM v_cycle_metrics WHERE session_id = :sid
+        """), {"sid": session_id})).first()
+    return row.rate
+
+
+async def per_field_hit_rate(engine, session_id: str) -> dict[str, float | None]:
+    fields = ["has_stance", "has_active_commitments", "has_this_cycle_delta",
+              "has_thesis_invalidation", "has_watch_list"]
+    out: dict[str, float | None] = {}
+    async with engine.connect() as conn:
+        for f in fields:
+            row = (await conn.execute(text(
+                f"SELECT AVG(CAST({f} AS REAL)) AS rate FROM v_cycle_metrics WHERE session_id = :sid"
+            ), {"sid": session_id})).first()
+            out[f] = row.rate
+    return out
+
+
+async def avg_decision_length_chars(engine, session_id: str) -> float | None:
+    return await _avg_view_column(engine, session_id, "decision_length")
+
+
+async def decision_length_p95(engine, session_id: str) -> float | None:
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("""
+            SELECT decision_length FROM v_cycle_metrics
+            WHERE session_id = :sid AND decision_length IS NOT NULL
+            ORDER BY decision_length
+        """), {"sid": session_id})).all()
+    return _percentile([r.decision_length for r in rows], 95)
+
+
+async def avg_reasoning_tokens(engine, session_id: str) -> float | None:
+    return await _avg_view_column(engine, session_id, "reasoning_tokens")
+
+
+async def avg_thinking_chars(engine, session_id: str) -> float | None:
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("""
+            SELECT AVG(LENGTH(reasoning)) AS avg_chars FROM agent_cycles
+            WHERE session_id = :sid AND reasoning IS NOT NULL
+        """), {"sid": session_id})).first()
+    return row.avg_chars
+
+
+async def alert_lifecycle_summary(engine, session_id: str) -> dict:
+    """Reads v_alert_lifecycle (column = cancel_attempt_count per views.py:142)."""
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("""
+            SELECT
+              CAST(SUM(CASE WHEN triggered_at IS NOT NULL THEN 1 ELSE 0 END) AS REAL)
+                / NULLIF(COUNT(*), 0) AS triggered_rate,
+              CAST(SUM(CASE WHEN cancelled_at IS NOT NULL THEN 1 ELSE 0 END) AS REAL)
+                / NULLIF(COUNT(*), 0) AS cancelled_rate,
+              AVG(cancel_attempt_count) AS avg_cancel_attempt_count
+            FROM v_alert_lifecycle WHERE session_id = :sid
+        """), {"sid": session_id})).first()
+    return {
+        "triggered_rate": row.triggered_rate,
+        "cancelled_rate": row.cancelled_rate,
+        "avg_cancel_attempt_count": row.avg_cancel_attempt_count,
+    }
