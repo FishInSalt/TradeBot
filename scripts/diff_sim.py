@@ -50,14 +50,20 @@ CRIT_PP = 15.0
 WARN_PNL_USDT = 50.0
 CRIT_PNL_USDT = 200.0
 
+# Float tolerance for spec §5.4 "≥ inclusive" boundary cases. Real rate
+# inputs are in 0..1 fraction space (×100 for pp); IEEE 754 makes
+# 0.96 - 0.91 = 0.04999999999999993 → ×100 = 4.999... < 5.0 strict.
+# Spec example 91%→96% (pp=5) is required to fire ⚠️.
+_FLAG_EPS = 1e-9
+
 
 def _flag_by_pct(pct: float | None) -> str:
     if pct is None:
         return "—"
     a = abs(pct)
-    if a >= CRIT_PCT:
+    if a + _FLAG_EPS >= CRIT_PCT:
         return "🔴"
-    if a >= WARN_PCT:
+    if a + _FLAG_EPS >= WARN_PCT:
         return "⚠️"
     return "—"
 
@@ -66,9 +72,9 @@ def _flag_by_pnl_abs(delta: float | None) -> str:
     if delta is None:
         return "—"
     a = abs(delta)
-    if a >= CRIT_PNL_USDT:
+    if a + _FLAG_EPS >= CRIT_PNL_USDT:
         return "🔴"
-    if a >= WARN_PNL_USDT:
+    if a + _FLAG_EPS >= WARN_PNL_USDT:
         return "⚠️"
     return "—"
 
@@ -79,9 +85,9 @@ def _flag_by_rate(delta_pp: float | None, delta_pct: float | None) -> str:
         return "—"
     pp = abs(delta_pp) if delta_pp is not None else 0.0
     pct = abs(delta_pct) if delta_pct is not None else 0.0
-    if pp >= CRIT_PP or pct >= CRIT_PCT:
+    if pp + _FLAG_EPS >= CRIT_PP or pct + _FLAG_EPS >= CRIT_PCT:
         return "🔴"
-    if pp >= WARN_PP or pct >= WARN_PCT:
+    if pp + _FLAG_EPS >= WARN_PP or pct + _FLAG_EPS >= WARN_PCT:
         return "⚠️"
     return "—"
 
@@ -129,7 +135,12 @@ def _compute_row_flag(a, b, kind: str) -> str:
     if a == 0:
         return "⚠️" if abs(delta) > 0 else "—"
     if kind == "rate":
-        return _flag_by_rate(delta, _delta_pct(a, b))
+        # Rate values are stored as 0..1 fractions (display ×100 for "pp" / "%");
+        # _flag_by_rate expects pp-space delta. Without ×100 the WARN_PP=5 /
+        # CRIT_PP=15 thresholds are dead code (pp branch never trips on a 0..1
+        # delta). Spec §5.4 example 91%→96% (pp=5, Δ%=5.5%) requires ⚠️ via
+        # the pp-only path; pre-fix it returned "—".
+        return _flag_by_rate(delta * 100, _delta_pct(a, b))
     return _flag_by_pct(_delta_pct(a, b))
 
 

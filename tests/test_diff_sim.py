@@ -228,6 +228,28 @@ def test_compute_row_flag_zero_divisor_non_pnl_warn():
     assert _compute_row_flag(0, 0, "count") == "—"
 
 
+def test_compute_row_flag_rate_pp_only_trigger_at_91_to_96():
+    """Spec §5.4 example: rate 0.91 → 0.96 (pp=5, Δ%≈5.5%) → ⚠️ via pp-only.
+    Pre-fix dispatched 0.05 (0..1 space) into _flag_by_rate which compared
+    against WARN_PP=5 (pp space), silently returning '—'. Lock the unit-fix.
+    """
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(0.91, 0.96, "rate") == "⚠️"
+    assert _compute_row_flag(0.96, 0.91, "rate") == "⚠️"  # symmetric
+
+
+def test_compute_row_flag_rate_below_pp_threshold_no_flag():
+    """Sanity: rate 0.30 → 0.32 (pp=2, Δ%≈6.67%) — both below thresholds → '—'."""
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(0.30, 0.32, "rate") == "—"
+
+
+def test_compute_row_flag_rate_pct_promotes_to_crit():
+    """Spec §5.4: rate 5% → 10% (pp=5, Δ%=100%) — pp ⚠️ but Δ% 🔴 wins."""
+    from scripts.diff_sim import _compute_row_flag
+    assert _compute_row_flag(0.05, 0.10, "rate") == "🔴"
+
+
 def test_compute_row_flag_pnl_cross_zero_uses_abs():
     """Spec §5.4: PnL uses |Δ| absolute even when Δ% n/a (cross-zero)."""
     from scripts.diff_sim import _compute_row_flag

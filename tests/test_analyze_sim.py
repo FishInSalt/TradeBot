@@ -71,6 +71,14 @@ async def test_analyze_session_by_name_resolves(db_engine):
     assert "my_friendly_name" in r.stdout
 
 
+# NOTE: ambiguous-name detection in _resolve_session is defensive only —
+# sessions.name has unique=True at the model level (models.py:38), so
+# the DB rejects duplicates before they reach the resolver. Spec §5.1
+# mentions the case ("race 罕见") in case future schema drops the
+# constraint; the guard exists, but no test can exercise it without
+# bypassing the constraint.
+
+
 async def test_analyze_out_dir_missing_exit_1(db_engine, tmp_path):
     db_path = _resolve_db_path(db_engine)
     await make_session(db_engine)

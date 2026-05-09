@@ -46,7 +46,12 @@ from src.storage.models import Session as SessionModel  # noqa: E402
 
 
 async def _resolve_session(engine, key: str):
-    """UUID first; then sessions.name. Returns SessionModel or None."""
+    """UUID first; then sessions.name. Returns SessionModel or None.
+
+    Per spec §5.1: ambiguous name (>1 row, "race 罕见" but possible —
+    sessions.name has no DB-level unique constraint) → SystemExit listing
+    candidate UUIDs. UUID match path is unique by PK so first() is safe.
+    """
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import sessionmaker
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -56,7 +61,14 @@ async def _resolve_session(engine, key: str):
         if obj:
             return obj
         result = await db.execute(select(SessionModel).where(SessionModel.name == key))
-        return result.scalars().first()
+        candidates = result.scalars().all()
+        if len(candidates) > 1:
+            ids = ", ".join(c.id for c in candidates)
+            raise SystemExit(
+                f"Session name '{key}' is ambiguous ({len(candidates)} matches); "
+                f"specify by UUID instead. Candidates: {ids}"
+            )
+        return candidates[0] if candidates else None
 
 
 async def amain(args):
