@@ -154,6 +154,8 @@ python -m scripts.fetch_session_ohlcv --session <id> [--timeframe 1m] [--output 
 
 ```python
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import sessionmaker
 from src.storage.models import Session as SessionModel
 from scripts.analyze_sim import _render_pnl, _render_cost, _render_behavior
 from scripts.diff_sim import PNL_LABELS, COST_STATIC_LABELS, BEH_STATIC_LABELS
@@ -162,10 +164,13 @@ from tests._sim_fixtures import make_session
 # pyproject asyncio_mode="auto" — 不写 @pytest.mark.asyncio
 async def test_analyze_pnl_emits_all_pnl_labels(engine):
     sid = await make_session(engine, name="drift_guard_pnl")
-    async with engine.connect() as conn:
-        session = (await conn.execute(
-            select(SessionModel).where(SessionModel.id == sid)
-        )).scalar_one()
+    # 用 AsyncSession + sessionmaker 拿 ORM 对象（与 scripts/analyze_sim.py:55-71 一致）。
+    # engine.connect() + select(SessionModel) + scalar_one() 在 Connection 级别返回的是
+    # first column (id: str) 而非 ORM 实体，后续 session.symbol / session.id 会失败。
+    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with async_session() as db:
+        result = await db.execute(select(SessionModel).where(SessionModel.id == sid))
+        session = result.scalars().one()
     output = await _render_pnl(engine, session, [])
     emitted = _parse_label_column(output)
     missing = set(PNL_LABELS) - emitted
@@ -174,11 +179,12 @@ async def test_analyze_pnl_emits_all_pnl_labels(engine):
 # 同模式 _render_cost / _render_behavior
 ```
 
-### §5.2 辅助函数（同文件 ~5 行）
+### §5.2 辅助函数（同文件 ~10 行）
 
 - `_parse_label_column(md_output: str) -> set[str]` — markdown 表抽第 1 列
+- `_load_session(engine, sid) -> SessionModel` — AsyncSession + sessionmaker + scalars().one() 拿 ORM 对象（3 个测试共用，避免重复 sessionmaker boilerplate）
 
-> Session row 直接 inline `select(SessionModel).where(SessionModel.id == sid)` 拿，不另起 `_get_session` 助手，避免与 `analyze_sim.py:48 _resolve_session(engine, key)`（by-name 路径）命名相似而语义不同造成阅读混淆。
+> 不另起 `_get_session` 全局命名（与 `analyze_sim.py:48 _resolve_session(engine, key)` 的 by-name 路径命名相似而语义不同）；`_load_session` 是测试模块内部 helper，作用域窄不冲突。
 
 ### §5.3 断言与边界
 
@@ -236,13 +242,16 @@ async def test_analyze_pnl_emits_all_pnl_labels(engine):
 
 ## §7 提交与 PR 节奏
 
-按 `feedback_plan_doc_commit_first`：
+按 `feedback_plan_doc_commit_first` + TDD `frequent commits` 原则：
 
-| Commit | 内容 |
-|---|---|
-| 1 | `docs/superpowers/specs/2026-05-09-iter-w2r2-obs-followup-a-design.md` |
-| 2 | `scripts/fetch_session_ohlcv.py` + `tests/test_fetch_session_ohlcv.py`（F7） |
-| 3 | `tests/test_label_drift_guard.py`（F5） |
+| 阶段 | 内容 | Commit 数 |
+|---|---|---|
+| 1. spec | `docs/superpowers/specs/...-design.md` | 1（spec doc） + 后续 amend 视 plan/impl 阶段发现 |
+| 2. plan | `docs/superpowers/plans/...-plan.md` | 1（plan doc） |
+| 3. F7 impl (TDD) | 按 plan task-by-task：常量 → _resolve_session → _paginate_ohlcv → tf parametrize → _to_dataframe → 主入口/半开/去重/finally → _write_csv → CLI/sanitize | ~8（每 task 一个 self-contained commit；每 commit 测试自洽，bisectability 不退化） |
+| 4. F5 impl | `tests/test_label_drift_guard.py` | 1 |
+
+总计 ~11 commits。每 commit 通过自身 TDD 测试 + 不引入 broken 中间态（`_write_csv` 等 placeholder 不允许跨 commit）。
 
 **分支**：`feature/iter-w2r2-obs-followup-a`
 **PR**：单 PR `feat(iter-w2r2-obs-followup-a): F7 OHLCV helper + F5 label drift guard`
