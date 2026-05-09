@@ -302,3 +302,40 @@ async def test_paginate_permanent_no_retry_AC_F7_12(monkeypatch):
     retry_sleeps = [s for s in sleep_calls if s in (1.0, 2.0)]
     assert retry_sleeps == []
     assert client.fetch_ohlcv.await_count == 1
+
+
+# ===== AC-F7-4: timeframe parametrize drift guard =====
+
+@pytest.mark.parametrize("tf,tf_ms", [
+    ("1m", 60_000),
+    ("5m", 300_000),
+    ("15m", 900_000),
+    ("1h", 3_600_000),
+    ("4h", 14_400_000),
+    ("1d", 86_400_000),
+])
+async def test_paginate_cursor_advances_by_tf_ms_AC_F7_4(monkeypatch, tf, tf_ms):
+    """AC-F7-4: cursor_ms == 上页末根 ts + tf_ms (drift guard for TF_MS dict)."""
+    from scripts.fetch_session_ohlcv import _paginate_ohlcv
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    start_ms = 1_700_000_000_000
+    page1_last_ts = start_ms + 99 * tf_ms  # last candle of page 1
+    page2_first_ts = page1_last_ts + tf_ms  # expected: cursor advances by tf_ms
+
+    captured_since: list[int] = []
+    async def capture_since(symbol, timeframe, since, limit):
+        captured_since.append(since)
+        if len(captured_since) == 1:
+            return _make_candle_page(start_ms, 100, tf_ms)
+        return []  # terminate after 2nd call
+
+    client = MagicMock()
+    client.fetch_ohlcv = AsyncMock(side_effect=capture_since)
+
+    await _paginate_ohlcv(client, "BTC/USDT:USDT", tf, start_ms, start_ms + 1000 * tf_ms)
+
+    assert captured_since[0] == start_ms
+    assert captured_since[1] == page2_first_ts, (
+        f"{tf}: cursor expected {page2_first_ts}, got {captured_since[1]}"
+    )
