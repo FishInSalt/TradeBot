@@ -6,6 +6,8 @@ Caveats §4.4 / SQL §3.5 / R2-7 cutoff §6.4 must be honored.
 """
 from __future__ import annotations
 
+import json
+import statistics
 import sys
 from collections import deque
 from dataclasses import dataclass
@@ -267,3 +269,117 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
         "short": len(open_lots["short"]),
     }
     return roundtrips, caveats
+
+
+# ── PnL metric functions (P1-P10) ─────────────────────────────────────────────
+
+
+def win_rate(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    return sum(1 for rt in rts if rt.pnl_net > 0) / len(rts)
+
+
+def roundtrip_count(rts: list[Roundtrip]) -> int:
+    return len(rts)
+
+
+def avg_fifo_pnl_per_roundtrip(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    return statistics.mean(rt.pnl_net for rt in rts)
+
+
+def avg_roundtrip_duration_min(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    return statistics.mean(rt.duration_seconds / 60 for rt in rts)
+
+
+def median_roundtrip_duration_min(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    return statistics.median(rt.duration_seconds / 60 for rt in rts)
+
+
+def largest_win_loss(rts: list[Roundtrip]) -> tuple[float | None, float | None]:
+    if not rts:
+        return None, None
+    pnls = [rt.pnl_net for rt in rts]
+    return max(pnls), min(pnls)
+
+
+def profit_factor(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    wins = sum(rt.pnl_net for rt in rts if rt.pnl_net > 0)
+    losses = sum(rt.pnl_net for rt in rts if rt.pnl_net < 0)
+    if wins == 0 or losses == 0:
+        return None
+    return wins / abs(losses)
+
+
+def exit_type_distribution(rts: list[Roundtrip]) -> dict[str, float]:
+    keys = ["market", "stop", "take_profit", "limit", "liquidation"]
+    counts = {k: 0 for k in keys}
+    for rt in rts:
+        counts[rt.exit_type] = counts.get(rt.exit_type, 0) + 1
+    total = len(rts) or 1
+    return {k: counts.get(k, 0) / total for k in keys}
+
+
+def _percentile(sorted_values: list[float], p: int) -> float | None:
+    if not sorted_values:
+        return None
+    k = (len(sorted_values) - 1) * (p / 100)
+    f = int(k)
+    c = min(f + 1, len(sorted_values) - 1)
+    if f == c:
+        return sorted_values[f]
+    return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
+
+
+async def max_drawdown_pct(engine, session_id: str) -> float | None:
+    async with engine.connect() as conn:
+        sess = (await conn.execute(text(
+            "SELECT initial_balance FROM sessions WHERE id = :sid"
+        ), {"sid": session_id})).first()
+        if not sess:
+            return None
+        rows = (await conn.execute(text("""
+            SELECT state_snapshot FROM agent_cycles
+            WHERE session_id = :sid AND state_snapshot IS NOT NULL
+            ORDER BY id ASC
+        """), {"sid": session_id})).all()
+    if not rows:
+        return None
+    totals = [sess.initial_balance]
+    for r in rows:
+        try:
+            totals.append(json.loads(r.state_snapshot)["balance"]["total_usdt"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+    if len(totals) < 2:
+        return None
+    peak = totals[0]
+    max_dd = 0.0
+    for v in totals:
+        peak = max(peak, v)
+        dd = (peak - v) / peak if peak > 0 else 0
+        max_dd = max(max_dd, dd)
+    return max_dd
+
+
+async def total_pnl_net(engine, session_id: str, rts: list[Roundtrip]) -> float:
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("""
+            SELECT COALESCE(SUM(ta.pnl), 0) AS gross
+            FROM trade_actions ta
+            JOIN sim_orders so ON so.order_id = ta.order_id
+            WHERE ta.session_id = :sid
+              AND ta.action = 'order_filled'
+              AND ((so.position_side = 'long' AND so.side = 'sell')
+                OR (so.position_side = 'short' AND so.side = 'buy'))
+        """), {"sid": session_id})).first()
+    gross = row.gross or 0.0
+    return gross - sum(rt.fee_total for rt in rts)

@@ -438,3 +438,146 @@ async def test_collect_roundtrips_full_close_lot_pnl_matches_sim_weighted(db_eng
                           pnl_gross=0.0)
     rts, _ = await collect_roundtrips(db_engine, sid)
     assert sum(rt.pnl_gross for rt in rts) == pytest.approx(0.0, abs=0.01)
+
+
+# === T6: PnL metric functions ===
+
+from scripts._sim_metrics import (
+    win_rate, total_pnl_net, roundtrip_count,
+    avg_fifo_pnl_per_roundtrip,
+    avg_roundtrip_duration_min, median_roundtrip_duration_min,
+    max_drawdown_pct, exit_type_distribution,
+    largest_win_loss, profit_factor,
+)
+
+
+def _rt(pnl_net=10.0, duration=60, exit_type="market", side="long"):
+    """Roundtrip stub for unit tests."""
+    now = datetime(2026, 5, 5, tzinfo=timezone.utc)
+    return Roundtrip(
+        open_at=now, close_at=now, open_cycle_id=None, close_cycle_id=None,
+        side=side, entry_px=0, exit_px=0, amount=0, leverage=1,
+        pnl_gross=pnl_net, fee_open_share=0, fee_close_share=0, fee_total=0,
+        pnl_net=pnl_net, duration_seconds=duration, exit_type=exit_type,
+    )
+
+
+def test_win_rate_basic():
+    rts = [_rt(pnl_net=10), _rt(pnl_net=-5), _rt(pnl_net=20)]
+    assert win_rate(rts) == pytest.approx(2 / 3)
+
+
+def test_win_rate_all_wins_returns_100pct():
+    assert win_rate([_rt(pnl_net=10), _rt(pnl_net=20)]) == pytest.approx(1.0)
+
+
+def test_win_rate_zero_roundtrips_returns_none():
+    assert win_rate([]) is None
+
+
+def test_roundtrip_count():
+    assert roundtrip_count([_rt(), _rt(), _rt()]) == 3
+    assert roundtrip_count([]) == 0
+
+
+def test_avg_fifo_pnl_per_roundtrip_uses_lot_mean():
+    assert avg_fifo_pnl_per_roundtrip([_rt(pnl_net=10), _rt(pnl_net=-4)]) == pytest.approx(3.0)
+
+
+def test_avg_fifo_pnl_per_roundtrip_zero_returns_none():
+    assert avg_fifo_pnl_per_roundtrip([]) is None
+
+
+def test_avg_roundtrip_duration_min():
+    rts = [_rt(duration=120), _rt(duration=180)]  # 2 min, 3 min
+    assert avg_roundtrip_duration_min(rts) == pytest.approx(2.5)
+
+
+def test_median_roundtrip_duration_min():
+    rts = [_rt(duration=60), _rt(duration=120), _rt(duration=300)]
+    assert median_roundtrip_duration_min(rts) == pytest.approx(2.0)
+
+
+def test_largest_win_loss():
+    rts = [_rt(pnl_net=10), _rt(pnl_net=-50), _rt(pnl_net=80)]
+    win, loss = largest_win_loss(rts)
+    assert win == 80.0
+    assert loss == -50.0
+
+
+def test_largest_win_loss_no_roundtrips():
+    win, loss = largest_win_loss([])
+    assert win is None and loss is None
+
+
+def test_profit_factor_basic():
+    rts = [_rt(pnl_net=100), _rt(pnl_net=-50)]  # 100/50 = 2.0
+    assert profit_factor(rts) == pytest.approx(2.0)
+
+
+def test_profit_factor_all_wins_returns_none():
+    assert profit_factor([_rt(pnl_net=10), _rt(pnl_net=20)]) is None
+
+
+def test_profit_factor_all_losses_returns_none():
+    assert profit_factor([_rt(pnl_net=-10), _rt(pnl_net=-20)]) is None
+
+
+def test_profit_factor_zero_returns_none():
+    assert profit_factor([]) is None
+
+
+def test_exit_type_distribution_dict_format_5_keys():
+    rts = [_rt(exit_type="market"), _rt(exit_type="market"), _rt(exit_type="stop"),
+           _rt(exit_type="take_profit"), _rt(exit_type="liquidation")]
+    dist = exit_type_distribution(rts)
+    assert set(dist.keys()) == {"market", "stop", "take_profit", "limit", "liquidation"}
+    assert dist["market"] == pytest.approx(2 / 5)
+    assert dist["limit"] == 0
+
+
+async def test_max_drawdown_pct_uses_total_usdt_not_free(db_engine):
+    """state_snapshot.balance.total_usdt timeseries; sessions.initial_balance start."""
+    import json
+    sid = await make_session(db_engine, initial_balance=100.0)
+    snap = lambda total: json.dumps({"balance": {"total_usdt": total, "free_usdt": 50.0}})
+    await make_cycle(db_engine, sid, "c1", state_snapshot=snap(100.0))
+    await make_cycle(db_engine, sid, "c2", state_snapshot=snap(120.0))  # peak
+    await make_cycle(db_engine, sid, "c3", state_snapshot=snap(90.0))   # 25% dd
+    dd = await max_drawdown_pct(db_engine, sid)
+    assert dd == pytest.approx(0.25)
+
+
+async def test_total_pnl_net_uses_sim_realized_minus_roundtrip_fees(db_engine):
+    """P2 = sum(close trade_actions.pnl) - sum(roundtrip.fee_total).
+
+    Use auto-fee (per C-2): open_fee = 0.1*80000*0.0005 = 4.0;
+    close_fee = 0.1*82000*0.0005 = 4.1; rt.fee_total = 8.1.
+    P2 = 200 (gross) - 8.1 = 191.9.
+    """
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1")
+    await make_close_fill(db_engine, sid, cycle_id="c2", pnl_gross=200.0)
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    p2 = await total_pnl_net(db_engine, sid, rts)
+    assert p2 == pytest.approx(191.9, abs=0.01)
+
+
+async def test_total_pnl_net_excludes_unclosed_lot_open_fee(db_engine):
+    """Lot1 fully paired (fee_total 8.1); lot2 still open (open_fee 4.0 NOT in P2).
+
+    Auto-fee (per C-2): each open=4.0, close=4.1.
+    P2 = 100 (gross from lot1 close) - 8.1 (rt.fee_total) = 91.9.
+    Lot2's open_fee 4.0 stays attributed to it (待将来 close 才入对应 rt).
+    """
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2", "c3"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1")
+    await make_close_fill(db_engine, sid, cycle_id="c2", pnl_gross=100.0)
+    await make_open_lot(db_engine, sid, cycle_id="c3")  # still open
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    p2 = await total_pnl_net(db_engine, sid, rts)
+    assert p2 == pytest.approx(91.9, abs=0.01)
