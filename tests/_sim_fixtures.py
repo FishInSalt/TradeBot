@@ -26,6 +26,19 @@ from src.storage.models import (
 )
 
 
+async def make_session_id(engine, name: str) -> str:
+    """Look up session UUID by name. Raises if not found."""
+    from sqlalchemy import text
+    async with engine.connect() as conn:
+        row = (await conn.execute(
+            text("SELECT id FROM sessions WHERE name = :name"),
+            {"name": name},
+        )).first()
+    if row is None:
+        raise ValueError(f"Session '{name}' not found in DB")
+    return row.id
+
+
 async def make_session(
     engine, *, name="test_sim", symbol="BTC/USDT:USDT",
     created_at=None, fee_rate=0.0005, initial_balance=100.0,
