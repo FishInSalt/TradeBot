@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 import ccxt
+import ccxt.async_support
 import pandas as pd
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.storage.models import Session as SessionModel
@@ -142,3 +144,53 @@ def _to_dataframe(rows: list[list]) -> pd.DataFrame:
     ]
     df = pd.DataFrame(records)
     return df.astype(_DTYPE_SCHEMA)
+
+
+async def fetch_session_ohlcv(
+    session_id: str,
+    timeframe: str = "1m",
+    db_path: str = "data/tradebot.db",
+    output_path: Path | None = None,
+) -> pd.DataFrame:
+    """Fetch OKX REST OHLCV for a sim session's [created_at, last_active_at) window.
+
+    Returns: DataFrame；window 内 OKX 无数据时返回空（不抛）。完整 schema 与
+             空返回契约见 spec §3.2 / §4 表。
+
+    Raises: ValueError if session_id not found or window has zero duration.
+            Re-raises ccxt errors after retry exhaustion (transient) or
+            immediately (permanent — BadSymbol etc).
+    """
+    assert timeframe in TF_MS, f"unsupported timeframe: {timeframe}"
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    client = ccxt.async_support.okx()
+    try:
+        symbol, start_ms, end_ms = await _resolve_session(engine, session_id)
+        rows = await _paginate_ohlcv(client, symbol, timeframe, start_ms, end_ms)
+        # Sort + dedup (spec §2.1 step 6)
+        rows.sort(key=lambda r: r[0])
+        seen: set[int] = set()
+        deduped: list[list] = []
+        for r in rows:
+            ts = r[0]
+            if ts in seen:
+                continue
+            seen.add(ts)
+            deduped.append(r)
+        # Half-open filter [start_ms, end_ms)
+        filtered = [r for r in deduped if start_ms <= r[0] < end_ms]
+        df = _to_dataframe(filtered)
+        if output_path is not None:
+            _write_csv(df, output_path)
+        return df
+    finally:
+        await client.close()
+        await engine.dispose()
+
+
+def _write_csv(df: pd.DataFrame, path: Path) -> None:
+    """Write DataFrame to CSV; mkdir parents if missing; overwrite existing."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)

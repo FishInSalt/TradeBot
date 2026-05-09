@@ -376,3 +376,165 @@ def test_to_dataframe_empty_dtype_preserved():
     assert df["timestamp_ms"].dtype == "int64"
     for col in ("open", "high", "low", "close", "volume"):
         assert df[col].dtype == "float64", f"empty {col}: {df[col].dtype}"
+
+
+# ===== fetch_session_ohlcv main entry tests =====
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncEngine
+from src.storage.models import Session as SessionModel
+from tests._sim_fixtures import _resolve_db_path
+
+# 注意：本组测试使用 file-based db_engine fixture（tests/conftest.py:90）+
+# _resolve_db_path 拿物理路径传给 F7。不能用 in-memory engine —
+# `:memory:` URL 跨 engine 不共享 DB，F7 内部 create_async_engine 拿到全新空库。
+
+
+async def _setup_session_with_window(db_engine, *, name: str, hours: int = 2,
+                                      symbol: str = "BTC/USDT:USDT"):
+    """Helper: create session with explicit start/end window. Returns (sid, start_ms, end_ms)."""
+    # 用已知 UTC start 时间（避开 fixture 默认 _safe_created_at 的随机度）
+    start_dt = datetime(2026, 5, 15, 12, 0, 0, tzinfo=timezone.utc)
+    end_dt = start_dt + timedelta(hours=hours)
+    sid = await make_session(db_engine, name=name, symbol=symbol, created_at=start_dt)
+    async with db_engine.begin() as conn:
+        await conn.execute(
+            update(SessionModel).where(SessionModel.id == sid).values(last_active_at=end_dt)
+        )
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
+    return sid, start_ms, end_ms
+
+
+async def test_fetch_half_open_filter_AC_F7_7(db_engine, monkeypatch):
+    """AC-F7-7: candle ts < end_ms 保留；ts >= end_ms 剔除."""
+    from scripts.fetch_session_ohlcv import fetch_session_ohlcv, TF_MS
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    sid, start_ms, end_ms = await _setup_session_with_window(db_engine, name="halfopen", hours=2)
+    tf_ms = TF_MS["1m"]
+    # 构造从 start_ms 起、跨过 end_ms 的 page（200 根，覆盖 200 分钟 > 2h window）
+    async def mock_fetch(symbol, timeframe, since, limit):
+        return _make_candle_page(since, 200, tf_ms)
+    mock_client = MagicMock()
+    mock_client.fetch_ohlcv = AsyncMock(side_effect=mock_fetch)
+    mock_client.close = AsyncMock()
+    monkeypatch.setattr("ccxt.async_support.okx", lambda *a, **kw: mock_client)
+
+    df = await fetch_session_ohlcv(sid, timeframe="1m", db_path=_resolve_db_path(db_engine))
+    # window 2h = 120 candles；半开 [start, end) 应得 120 candles
+    assert len(df) == 120
+    assert df["timestamp_ms"].max() < end_ms
+    assert df["timestamp_ms"].min() >= start_ms
+
+
+async def test_fetch_dedup_AC_F7_8(db_engine, monkeypatch):
+    """AC-F7-8: 同一 ts 出现两次 → 去重为 1."""
+    from scripts.fetch_session_ohlcv import fetch_session_ohlcv, TF_MS
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    # window 24h 足够大，避免 dedup 后被半开过滤掉
+    sid, start_ms, end_ms = await _setup_session_with_window(db_engine, name="dedup2", hours=24)
+    tf_ms = TF_MS["1m"]
+    # 两页，从真实 start_ms 起；第二页前 5 条与第一页重叠
+    pages = [
+        _make_candle_page(start_ms, 50, tf_ms),                     # ts: start..start+49*tf_ms
+        _make_candle_page(start_ms + 45 * tf_ms, 20, tf_ms),       # ts: start+45..start+64*tf_ms (5 重叠)
+    ]
+    pages_iter = iter(pages)
+    async def mock_fetch(symbol, timeframe, since, limit):
+        try:
+            return next(pages_iter)
+        except StopIteration:
+            return []
+    mock_client = MagicMock()
+    mock_client.fetch_ohlcv = AsyncMock(side_effect=mock_fetch)
+    mock_client.close = AsyncMock()
+    monkeypatch.setattr("ccxt.async_support.okx", lambda *a, **kw: mock_client)
+
+    df = await fetch_session_ohlcv(sid, timeframe="1m", db_path=_resolve_db_path(db_engine))
+    # 50 + 20 - 5 (overlap) = 65 unique
+    assert len(df) == 65
+    assert df["timestamp_ms"].is_monotonic_increasing
+    assert df["timestamp_ms"].is_unique
+
+
+async def test_fetch_resource_cleanup_success_AC_F7_13(db_engine, monkeypatch):
+    """AC-F7-13: 成功路径 ccxt.close() + engine.dispose() 各调一次.
+
+    用 patch.object(AsyncEngine, "dispose") 替代实例赋值（AsyncEngine.__slots__ 拒绝实例赋值）。
+    """
+    from scripts.fetch_session_ohlcv import fetch_session_ohlcv, TF_MS
+
+    sid, start_ms, _ = await _setup_session_with_window(db_engine, name="cleanup", hours=1)
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_client = MagicMock()
+    mock_client.fetch_ohlcv = AsyncMock(return_value=_make_candle_page(start_ms, 5, TF_MS["1m"]))
+    mock_client.close = AsyncMock()
+    monkeypatch.setattr("ccxt.async_support.okx", lambda *a, **kw: mock_client)
+
+    # patch class method (not instance attr) — __slots__ 阻止实例赋值
+    dispose_calls: list[None] = []
+    real_dispose = AsyncEngine.dispose
+    async def spy_dispose(self):
+        dispose_calls.append(None)
+        await real_dispose(self)
+
+    with patch.object(AsyncEngine, "dispose", spy_dispose):
+        await fetch_session_ohlcv(sid, db_path=_resolve_db_path(db_engine))
+
+    assert mock_client.close.await_count == 1
+    # F7 内部 create_async_engine 一个 engine + dispose 一次；db_engine fixture 自身也会 dispose（teardown 时）
+    # 测试期间至少 1 次（F7 内部）；fixture teardown 在测试结束后才发生
+    assert len(dispose_calls) >= 1
+
+
+async def test_fetch_resource_cleanup_on_exception_AC_F7_14(db_engine, monkeypatch):
+    """AC-F7-14: fetch_ohlcv raise 时仍调用 close + dispose."""
+    from scripts.fetch_session_ohlcv import fetch_session_ohlcv
+
+    sid, _, _ = await _setup_session_with_window(db_engine, name="cleanup_err", hours=1)
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_client = MagicMock()
+    mock_client.fetch_ohlcv = AsyncMock(side_effect=ccxt.BadSymbol("nope"))
+    mock_client.close = AsyncMock()
+    monkeypatch.setattr("ccxt.async_support.okx", lambda *a, **kw: mock_client)
+
+    dispose_calls: list[None] = []
+    real_dispose = AsyncEngine.dispose
+    async def spy_dispose(self):
+        dispose_calls.append(None)
+        await real_dispose(self)
+
+    with patch.object(AsyncEngine, "dispose", spy_dispose):
+        with pytest.raises(ccxt.BadSymbol):
+            await fetch_session_ohlcv(sid, db_path=_resolve_db_path(db_engine))
+
+    assert mock_client.close.await_count == 1
+    assert len(dispose_calls) >= 1
+
+
+async def test_fetch_empty_window_AC_F7_15(db_engine, monkeypatch):
+    """AC-F7-15: OKX 返回 [] → 空 DataFrame (7 列, dtype 同 §3.2), 不抛 ValueError."""
+    from scripts.fetch_session_ohlcv import fetch_session_ohlcv
+
+    sid, _, _ = await _setup_session_with_window(db_engine, name="empty", hours=1)
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    mock_client = MagicMock()
+    mock_client.fetch_ohlcv = AsyncMock(return_value=[])
+    mock_client.close = AsyncMock()
+    monkeypatch.setattr("ccxt.async_support.okx", lambda *a, **kw: mock_client)
+
+    df = await fetch_session_ohlcv(sid, db_path=_resolve_db_path(db_engine))
+    assert len(df) == 0
+    assert list(df.columns) == [
+        "timestamp_ms", "datetime_iso", "open", "high", "low", "close", "volume",
+    ]
+    assert df["timestamp_ms"].dtype == "int64"
+    for col in ("open", "high", "low", "close", "volume"):
+        assert df[col].dtype == "float64"
