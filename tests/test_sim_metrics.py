@@ -37,7 +37,9 @@ def test_compute_pnl_short_profit():
 
 class _FillStub:
     def __init__(self, fee=None, filled_price=None, amount=None):
-        self.fee = fee; self.filled_price = filled_price; self.amount = amount
+        self.fee = fee
+        self.filled_price = filled_price
+        self.amount = amount
 
 
 def test_derive_close_amount_uses_fee_inverse():
