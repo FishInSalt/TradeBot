@@ -45,6 +45,23 @@ async def test_analyze_schema_unmigrated_friendly_error(tmp_path):
     assert "Traceback" not in r.stderr
 
 
+@pytest.mark.parametrize("missing_view", ["v_order_lifecycle", "v_alert_lifecycle"])
+async def test_analyze_partial_migration_friendly_error(db_engine, missing_view):
+    """PR #43 review v2: partially-migrated DB (a single view dropped) must
+    also fall through assert_schema_migrated, not crash mid-collect_roundtrips.
+    """
+    from sqlalchemy import text
+    db_path = _resolve_db_path(db_engine)
+    await make_session(db_engine, name="probe")
+    async with db_engine.begin() as conn:
+        await conn.execute(text(f"DROP VIEW {missing_view}"))
+    r = _run_analyze("--session", "probe", db_path=db_path)
+    assert r.returncode == 1
+    assert "agent_cycles / sim_orders / v_cycle_metrics not found in DB" in r.stderr
+    assert "Run: alembic upgrade head" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
 async def test_analyze_session_by_name_resolves(db_engine):
     db_path = _resolve_db_path(db_engine)
     sid = await make_session(db_engine, name="my_friendly_name")

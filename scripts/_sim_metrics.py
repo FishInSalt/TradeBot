@@ -692,14 +692,22 @@ async def alert_lifecycle_summary(engine, session_id: str) -> dict:
 async def assert_schema_migrated(engine) -> None:
     """Spec §6.2 row 3: schema-missing fail-fast.
 
-    Probes agent_cycles + sim_orders + v_cycle_metrics. On 'no such table'
-    or 'no such view' (alembic upgrade not applied to this DB), exit 1
-    with the spec-prescribed friendly message + alembic hint.
+    Probes every hard dependency the scripts read at runtime:
+      tables: sessions, agent_cycles, sim_orders, trade_actions, tool_calls
+      views:  v_cycle_metrics, v_order_lifecycle, v_alert_lifecycle
+    Partial migrations (e.g. tables present but a view missing) previously
+    leaked SQLAlchemy tracebacks past this guard — covered by reviewer
+    findings on PR #43.
 
-    Other OperationalErrors propagate per spec §6.2 last row.
+    On 'no such table' or 'no such view' → SystemExit with spec-prescribed
+    friendly message + alembic hint. Other OperationalErrors propagate
+    per spec §6.2 last row.
     """
     from sqlalchemy.exc import OperationalError
-    probes = ("agent_cycles", "sim_orders", "v_cycle_metrics")
+    probes = (
+        "sessions", "agent_cycles", "sim_orders", "trade_actions", "tool_calls",
+        "v_cycle_metrics", "v_order_lifecycle", "v_alert_lifecycle",
+    )
     try:
         async with engine.connect() as conn:
             for name in probes:
