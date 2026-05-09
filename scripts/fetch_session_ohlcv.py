@@ -48,8 +48,8 @@ async def _resolve_session(engine: AsyncEngine, session_id: str) -> tuple[str, i
     zero duration. last_active_at falls back to updated_at (schema NOT NULL,
     always populated by ORM default+onupdate); spec §4.
 
-    Uses AsyncSession (parallel to scripts/analyze_sim.py:55-71) — engine.connect()
-    + scalar_one_or_none returns first column not ORM object.
+    Uses AsyncSession (parallel to analyze_sim._resolve_session) — Connection
+    executes ORM statements but doesn't hydrate ORM entities; only Session does.
     """
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with async_session() as db:
@@ -68,7 +68,7 @@ async def _resolve_session(engine: AsyncEngine, session_id: str) -> tuple[str, i
 
 _RETRY_SLEEP_SCHEDULE: tuple[float, ...] = (1.0, 2.0)  # 2 sleeps; raise 后不再 sleep
 _THROTTLE_SLEEP_S: float = 0.5
-_PAGE_LIMIT: int = 100
+_PAGE_LIMIT: int = 100  # OKX REST default; max 300, 100 conservative for rate limit
 
 
 async def _paginate_ohlcv(

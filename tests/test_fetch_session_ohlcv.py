@@ -344,7 +344,6 @@ async def test_paginate_cursor_advances_by_tf_ms_AC_F7_4(monkeypatch, tf, tf_ms)
 
 def test_to_dataframe_schema_AC_F7_5():
     """AC-F7-5: DataFrame 7 columns with correct dtypes."""
-    import pandas as pd
     from scripts.fetch_session_ohlcv import _to_dataframe
 
     rows = [
@@ -359,12 +358,11 @@ def test_to_dataframe_schema_AC_F7_5():
     assert df["datetime_iso"].dtype == "object"
     for col in ("open", "high", "low", "close", "volume"):
         assert df[col].dtype == "float64", f"{col}: {df[col].dtype}"
-    assert df["datetime_iso"].iloc[0].endswith("Z") or "+00:00" in df["datetime_iso"].iloc[0]
+    assert "+00:00" in df["datetime_iso"].iloc[0]  # isoformat() UTC = '...+00:00'
 
 
 def test_to_dataframe_empty_dtype_preserved():
     """AC-F7-15 (dtype 部分): 空 rows 仍返回 7 列 + 正确 dtype."""
-    import pandas as pd
     from scripts.fetch_session_ohlcv import _to_dataframe
 
     df = _to_dataframe([])
@@ -486,9 +484,9 @@ async def test_fetch_resource_cleanup_success_AC_F7_13(db_engine, monkeypatch):
         await fetch_session_ohlcv(sid, db_path=_resolve_db_path(db_engine))
 
     assert mock_client.close.await_count == 1
-    # F7 内部 create_async_engine 一个 engine + dispose 一次；db_engine fixture 自身也会 dispose（teardown 时）
-    # 测试期间至少 1 次（F7 内部）；fixture teardown 在测试结束后才发生
-    assert len(dispose_calls) >= 1
+    # F7 内部 create_async_engine 一个 engine + dispose 一次；patch.object with-block 退出后撤销 spy，
+    # db_engine fixture teardown 已在 with-block 之外，不会被 spy 捕获 → 严格 == 1
+    assert len(dispose_calls) == 1
 
 
 async def test_fetch_resource_cleanup_on_exception_AC_F7_14(db_engine, monkeypatch):
@@ -514,7 +512,7 @@ async def test_fetch_resource_cleanup_on_exception_AC_F7_14(db_engine, monkeypat
             await fetch_session_ohlcv(sid, db_path=_resolve_db_path(db_engine))
 
     assert mock_client.close.await_count == 1
-    assert len(dispose_calls) >= 1
+    assert len(dispose_calls) == 1
 
 
 async def test_fetch_empty_window_AC_F7_15(db_engine, monkeypatch):

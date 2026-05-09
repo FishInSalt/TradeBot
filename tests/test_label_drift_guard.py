@@ -3,7 +3,7 @@
 spec docs/superpowers/specs/2026-05-09-iter-w2r2-obs-followup-a-design.md §5.
 pyproject asyncio_mode='auto' — no @pytest.mark.asyncio needed.
 
-NOTE: 使用 AsyncSession + sessionmaker 拿 ORM 对象（与 scripts/analyze_sim.py:55-71
+NOTE: 使用 AsyncSession + sessionmaker 拿 ORM 对象（与 analyze_sim._resolve_session
 一致）。直接 engine.connect() + select(SessionModel) + scalar_one() 在 Connection
 级别返回的是 first column (id: str) 而非 ORM 实体，后续 session.id / session.symbol 会失败。
 
