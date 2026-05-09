@@ -177,3 +177,86 @@ async def test_collect_roundtrips_long_short_alternating(db_engine):
     assert len(rts) == 2
     assert {rt.side for rt in rts} == {"long", "short"}
     assert caveats["unclosed_lot_count"] == {"long": 0, "short": 0}
+
+
+# === T3: collect_roundtrips lot-model edges ===
+
+
+async def test_collect_roundtrips_same_side_addition_two_lots_one_close(db_engine):
+    """lot1(long, 0.1) + lot2(long, 0.1) + close 0.2 → 2 roundtrips."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2", "c3"]:
+        await make_cycle(db_engine, sid, c)
+    base = R2_7_MERGED_AT + timedelta(days=2)
+    await make_open_lot(db_engine, sid, cycle_id="c1", entry_px=80000, amount=0.1, filled_at=base)
+    await make_open_lot(db_engine, sid, cycle_id="c2", entry_px=82000, amount=0.1,
+                        filled_at=base + timedelta(minutes=5))
+    await make_close_fill(db_engine, sid, cycle_id="c3", exit_px=85000, amount=0.2,
+                          pnl_gross=800.0, filled_at=base + timedelta(minutes=10))
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert len(rts) == 2
+    assert rts[0].pnl_gross == pytest.approx(500.0)  # (85000-80000)*0.1
+    assert rts[1].pnl_gross == pytest.approx(300.0)  # (85000-82000)*0.1
+    assert caveats["unclosed_lot_count"] == {"long": 0, "short": 0}
+
+
+async def test_collect_roundtrips_partial_close(db_engine):
+    """open(0.2) + close(0.05) → 1 rt (amount=0.05); 1 unclosed lot remaining."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    await make_open_lot(db_engine, sid, cycle_id="c1", amount=0.2)
+    await make_close_fill(db_engine, sid, cycle_id="c2", amount=0.05, pnl_gross=100.0)
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert len(rts) == 1
+    assert rts[0].amount == pytest.approx(0.05)
+    assert caveats["unclosed_lot_count"]["long"] == 1
+
+
+async def test_collect_roundtrips_close_spans_multiple_lots(db_engine):
+    """lot1(0.1) + lot2(0.1) + close(0.15) → lot1 fully + lot2 0.05 partial."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2", "c3"]:
+        await make_cycle(db_engine, sid, c)
+    base = R2_7_MERGED_AT + timedelta(days=2)
+    await make_open_lot(db_engine, sid, cycle_id="c1", amount=0.1, filled_at=base)
+    await make_open_lot(db_engine, sid, cycle_id="c2", amount=0.1,
+                        filled_at=base + timedelta(minutes=5))
+    await make_close_fill(db_engine, sid, cycle_id="c3", amount=0.15, pnl_gross=400.0,
+                          filled_at=base + timedelta(minutes=10))
+    rts, caveats = await collect_roundtrips(db_engine, sid)
+    assert len(rts) == 2
+    assert rts[0].amount == pytest.approx(0.1)   # lot1 fully
+    assert rts[1].amount == pytest.approx(0.05)  # lot2 partial
+    assert caveats["unclosed_lot_count"]["long"] == 1
+
+
+async def test_collect_roundtrips_fee_proportional_split(db_engine):
+    """open.fee=0.50 (explicit), lot 50% consumed → fee_open_share=0.25."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2"]:
+        await make_cycle(db_engine, sid, c)
+    # explicit fee to make assertion straightforward
+    await make_open_lot(db_engine, sid, cycle_id="c1", amount=0.2, fee=0.5)
+    # close 0.1 (50% of lot) → fee_close auto = 0.1 * 82000 * 0.0005 = 4.1
+    await make_close_fill(db_engine, sid, cycle_id="c2", amount=0.1, pnl_gross=200.0)
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    assert len(rts) == 1
+    assert rts[0].fee_open_share == pytest.approx(0.25)
+
+
+async def test_collect_roundtrips_pnl_uses_lot_entry_not_weighted(db_engine):
+    """Non-liquidation pnl_gross = (exit_px - lot.entry_px) * consumed,
+    not trade_actions.pnl (sim weighted)."""
+    sid = await make_session(db_engine)
+    for c in ["c1", "c2", "c3"]:
+        await make_cycle(db_engine, sid, c)
+    # lot1 entry 100, lot2 entry 200; close 1.0 at 150
+    # FIFO lot1 consumed 1.0 → (150-100)*1 = +50
+    # If wrongly used trade_actions.pnl=0 (sim weighted), test catches.
+    await make_open_lot(db_engine, sid, cycle_id="c1", entry_px=100, amount=1.0)
+    await make_open_lot(db_engine, sid, cycle_id="c2", entry_px=200, amount=1.0)
+    await make_close_fill(db_engine, sid, cycle_id="c3", exit_px=150, amount=1.0,
+                          pnl_gross=0.0)  # sim weighted
+    rts, _ = await collect_roundtrips(db_engine, sid)
+    assert rts[0].pnl_gross == pytest.approx(50.0)
