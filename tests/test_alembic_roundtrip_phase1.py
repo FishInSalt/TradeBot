@@ -26,13 +26,37 @@ def _query_views(db_path: str) -> set[str]:
 
 @pytest.fixture
 async def head_db(tmp_path):
-    """Bootstrap fresh DB at Phase 1 head via init_db (Path 3)."""
+    """Bootstrap fresh DB at current head via init_db (Path 3)."""
     from src.storage.database import init_db
     db_path = tmp_path / "roundtrip.db"
     db_url_async = f"sqlite+aiosqlite:///{db_path}"
     engine = await init_db(db_url_async)
     await engine.dispose()
     env = {**os.environ, "TRADEBOT_DB_URL": db_url_async}
+    return str(db_path), env
+
+
+@pytest.fixture
+async def phase1_head_db(tmp_path):
+    """Bootstrap fresh DB then explicitly downgrade to Phase 1 head.
+
+    Tests that assert ``downgrade -1`` removes Phase 1 columns/views must
+    start from Phase 1 head, not from whatever the current head happens to
+    be.  This fixture walks from current head (which may have more migrations
+    on top of Phase 1 in future iters) down to PHASE1_REV first, so the
+    subsequent ``alembic downgrade -1`` in the test body correctly steps
+    Phase 1 → R2-7.  Pattern is forward-compatible with future migrations.
+    """
+    from src.storage.database import init_db
+    db_path = tmp_path / "phase1_roundtrip.db"
+    db_url_async = f"sqlite+aiosqlite:///{db_path}"
+    engine = await init_db(db_url_async)
+    await engine.dispose()
+    env = {**os.environ, "TRADEBOT_DB_URL": db_url_async}
+    subprocess.run(
+        ["alembic", "downgrade", PHASE1_REV],
+        check=True, env=env, capture_output=True,
+    )
     return str(db_path), env
 
 
@@ -63,9 +87,9 @@ async def test_head_has_3_views(head_db):
     assert EXPECTED_VIEWS.issubset(views), f"missing views: {EXPECTED_VIEWS - views}"
 
 
-async def test_downgrade_drops_phase1_columns(head_db):
+async def test_downgrade_drops_phase1_columns(phase1_head_db):
     """T5.3: downgrade -1 后 Phase 1 9 列全消失（roundtrip clean）。"""
-    db, env = head_db
+    db, env = phase1_head_db
     subprocess.run(["alembic", "downgrade", "-1"], check=True, env=env, capture_output=True)
 
     conn = sqlite3.connect(db)
@@ -79,9 +103,9 @@ async def test_downgrade_drops_phase1_columns(head_db):
     assert "alert_id" not in ta_cols
 
 
-async def test_downgrade_drops_views(head_db):
+async def test_downgrade_drops_views(phase1_head_db):
     """T5.6 (PR #42 fix): downgrade -1 后 3 view 全 drop。"""
-    db, env = head_db
+    db, env = phase1_head_db
     subprocess.run(["alembic", "downgrade", "-1"], check=True, env=env, capture_output=True)
     views = _query_views(db)
     assert not (EXPECTED_VIEWS & views), f"views still exist after downgrade: {EXPECTED_VIEWS & views}"
