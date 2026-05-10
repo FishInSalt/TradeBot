@@ -1,0 +1,196 @@
+"""P4 cycle-level capture — agent_cycles.user_prompt_snapshot for all 3 INSERT paths.
+
+Tests:
+  1. Happy path: user_prompt_snapshot equals the prompt passed to agent.run.
+  2. usage_limit_exceeded: forensic row has user_prompt_snapshot non-NULL +
+     identical content to happy.
+  3. retry_exhausted: 3 raised exceptions → forensic row has user_prompt_snapshot
+     non-NULL + identical content (covers any-Exception catch-all).
+
+Reuses _make_deps_engine_with_capture_mocks helper pattern (test_usage_limits.py).
+"""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+from pydantic_ai import models
+from pydantic_ai.usage import UsageLimitExceeded
+from sqlalchemy import select
+
+from src.storage.database import init_db, get_session
+from src.storage.models import Session as SessionModel, AgentCycle
+
+models.ALLOW_MODEL_REQUESTS = False
+
+
+def _mock_usage_legacy(total_tokens: int = 100):
+    u = MagicMock()
+    u.total_tokens = total_tokens
+    u.input_tokens = total_tokens
+    u.output_tokens = 0
+    u.cache_read_tokens = 0
+    u.cache_write_tokens = 0
+    u.details = None
+    return u
+
+
+async def _make_deps_engine_with_capture_mocks(session_id: str = "sess-p4c"):
+    """Same shape as test_usage_limits / test_agent_cycle_injection helpers."""
+    from src.agent.trader import TradingDeps
+    from src.integrations.exchange.base import Balance, Ticker
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+    async with get_session(engine) as db:
+        db.add(SessionModel(id=session_id, name="p4-cycle"))
+        await db.commit()
+
+    exchange = MagicMock()
+    exchange.fetch_positions = AsyncMock(return_value=[])
+    exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10000.0, free_usdt=10000.0, used_usdt=0.0,
+    ))
+    exchange.fetch_open_orders = AsyncMock(return_value=[])
+    exchange.get_price_level_alerts = MagicMock(return_value=[])
+
+    market_data = MagicMock()
+    market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=75000.0, bid=74999.0, ask=75001.0,
+        high=75500.0, low=74500.0, base_volume=1000.0, timestamp=1746098096000,
+    ))
+
+    deps = TradingDeps(
+        symbol="BTC/USDT:USDT",
+        timeframe="15m",
+        market_data=market_data,
+        exchange=exchange,
+        technical=MagicMock(),
+        memory=AsyncMock(format_for_prompt=AsyncMock(return_value="No relevant memories.")),
+        session_id=session_id,
+        db_engine=engine,
+    )
+    return deps, engine
+
+
+async def test_cycle_captures_user_prompt_snapshot_happy():
+    """AC-3 happy path: user_prompt_snapshot non-NULL + contains trigger phrase."""
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-h")
+    budget = TokenBudget(daily_max=500_000)
+
+    captured = {}
+
+    async def mock_run(prompt, **kwargs):
+        captured["prompt"] = prompt
+        result = MagicMock()
+        result.usage = lambda: _mock_usage_legacy(100)
+        result.new_messages = lambda: []
+        result.output = "decision text"
+        return result
+
+    agent = MagicMock()
+    agent.run = mock_run
+    agent.model = "test-model"
+
+    await run_agent_cycle(
+        agent, deps, "scheduled", budget, engine,
+        context=None, model="test-model",
+    )
+
+    async with get_session(engine) as db:
+        cycle = (await db.execute(
+            select(AgentCycle).where(AgentCycle.session_id == "sess-h")
+        )).scalar_one()
+
+    assert cycle.user_prompt_snapshot is not None, "user_prompt_snapshot should be populated"
+    assert cycle.user_prompt_snapshot == captured["prompt"], (
+        "user_prompt_snapshot must match the prompt passed to agent.run"
+    )
+    assert "You have been woken up" in cycle.user_prompt_snapshot, (
+        "trigger phrase must be present"
+    )
+
+
+async def test_cycle_captures_user_prompt_snapshot_usage_limit():
+    """AC-4 usage_limit_exceeded forensic path: user_prompt_snapshot still set
+    + identical to happy-path content under same input."""
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-ul")
+    budget = TokenBudget(daily_max=500_000)
+
+    captured = {}
+
+    async def mock_run(prompt, **kwargs):
+        captured["prompt"] = prompt
+        # Raise UsageLimitExceeded — exits via line ~525 except branch
+        raise UsageLimitExceeded("simulated token cap")
+
+    agent = MagicMock()
+    agent.run = mock_run
+    agent.model = "test-model"
+
+    await run_agent_cycle(
+        agent, deps, "scheduled", budget, engine,
+        context=None, model="test-model",
+    )
+
+    async with get_session(engine) as db:
+        cycle = (await db.execute(
+            select(AgentCycle).where(AgentCycle.session_id == "sess-ul")
+        )).scalar_one()
+
+    assert cycle.execution_status == "usage_limit_exceeded"
+    assert cycle.user_prompt_snapshot is not None, "forensic row missing user_prompt_snapshot"
+    assert cycle.user_prompt_snapshot == captured["prompt"], (
+        "forensic capture must match the prompt sent to agent.run "
+        "(identical to happy path under same input)"
+    )
+
+
+async def test_cycle_captures_user_prompt_snapshot_retry_exhausted(monkeypatch):
+    """AC-4 retry_exhausted forensic path: 3 raised exceptions → forensic row
+    has user_prompt_snapshot identical to what would have been sent on attempt 1.
+
+    Note: takes `monkeypatch` fixture so asyncio.sleep can be patched safely
+    (no module-attribute racing under pytest-xdist parallel workers).
+    """
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-re")
+    budget = TokenBudget(daily_max=500_000)
+
+    captured = {}
+
+    async def mock_run(prompt, **kwargs):
+        if "prompt" not in captured:
+            captured["prompt"] = prompt
+        # Raise on every attempt — except Exception path falls through 3× to
+        # retry_exhausted INSERT at line ~582
+        raise RuntimeError("simulated unexpected LLM failure")
+
+    agent = MagicMock()
+    agent.run = mock_run
+    agent.model = "test-model"
+
+    # Use monkeypatch.setattr (fixture-scoped, auto-teardown, safe under pytest-xdist
+    # parallel workers) instead of raw module-attribute assignment.
+    import asyncio
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+
+    await run_agent_cycle(
+        agent, deps, "scheduled", budget, engine,
+        context=None, model="test-model",
+    )
+
+    async with get_session(engine) as db:
+        cycle = (await db.execute(
+            select(AgentCycle).where(AgentCycle.session_id == "sess-re")
+        )).scalar_one()
+
+    assert cycle.execution_status == "retry_exhausted"
+    assert cycle.user_prompt_snapshot is not None, "retry_exhausted row missing user_prompt_snapshot"
+    assert cycle.user_prompt_snapshot == captured["prompt"], (
+        "forensic capture must match prompt from attempt 1 "
+        "(retry-loop prompt invariant — see AC-10)"
+    )

@@ -94,6 +94,8 @@ def test_g1_agent_cycle_field_sot_drift_guard():
         "input_tokens", "output_tokens",
         "cache_read_tokens", "cache_write_tokens",
         "reasoning_tokens", "cache_hit_rate",
+        # P4 (Phase 3): full user_prompt sent to agent.run(); per-cycle
+        "user_prompt_snapshot",
         "created_at",
     }
 

@@ -18,6 +18,7 @@ from src.agent.persona import (
     CYCLE_DECISION_CHAR_HARD_FLOOR,
     CYCLE_DECISION_WORD_CAP,
     RuntimeConfig,
+    generate_system_prompt,
 )
 from src.cli.approval import ApprovalGate
 from pydantic_ai.messages import (
@@ -32,7 +33,7 @@ from src.cli.display import (
 )
 from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging
 from src.cli.session_state import SessionStats
-from src.config import ExchangeConfig, Settings, load_settings, load_trader_config
+from src.config import ExchangeConfig, PersonaConfig, Settings, load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
@@ -504,6 +505,11 @@ async def run_agent_cycle(
     if memory_context != "No relevant memories.":
         prompt += f"\n\nYour memories:\n{memory_context}"
 
+    # P4 (obs roadmap Phase 3): capture full user_prompt for forensic snapshot. String
+    # reference assignment cannot raise — see spec §5.3 (cycle-level new
+    # failure surface = 0).
+    user_prompt_snapshot_var = prompt
+
     # LLM call with exponential backoff retry
     run_kwargs = {"deps": deps}
     if model is not None:
@@ -548,6 +554,7 @@ async def run_agent_cycle(
                     cache_write_tokens=None,
                     reasoning_tokens=None,
                     cache_hit_rate=None,
+                    user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
                 ))
                 await session.commit()
             # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
@@ -599,6 +606,7 @@ async def run_agent_cycle(
                         cache_write_tokens=None,
                         reasoning_tokens=None,
                         cache_hit_rate=None,
+                        user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
                     ))
                     await session.commit()
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
@@ -705,6 +713,7 @@ async def run_agent_cycle(
                 cache_write_tokens=cache_write,
                 reasoning_tokens=reasoning_tokens,
                 cache_hit_rate=hit_rate,
+                user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
             )
         )
         await session.commit()
@@ -735,6 +744,48 @@ _DEFAULT_PRECISION = {
     "BTC/USDT:USDT": 3,
     "ETH/USDT:USDT": 2,
 }
+
+
+def _compute_max_wake(scheduler_interval_min: int) -> int:
+    """Compute wake_max_minutes ceiling from scheduler interval.
+
+    Formula: 4 * interval, clamped to [60, 180]. Single source of truth shared
+    by build_services and P4 session-level capture (run() in src/cli/app.py).
+
+    See test_drift_p4_capture_paths.py::test_p4_runtime_config_matches_build_services
+    for invariant pinning.
+    """
+    return min(max(4 * scheduler_interval_min, 60), 180)
+
+
+async def _capture_session_system_prompt(
+    engine,
+    session_id: str,
+    persona: PersonaConfig,
+    runtime: RuntimeConfig,
+) -> None:
+    """P4 session-level capture: render system_prompt + UPDATE sessions row.
+
+    Fail-isolated: any exception is logged at WARNING and swallowed; session
+    startup is never blocked. Resulting NULL row is interpreted as "capture
+    failed" via the warning in session log (see spec §5.4).
+
+    Called once per session start (including resume) from run(). The UPDATE
+    semantics align with the resume-path model_config rewrite at
+    src/cli/session_manager.py:170-176 — both fields are session-fixed and
+    refreshed on every startup.
+    """
+    try:
+        system_prompt_text = generate_system_prompt(persona, runtime)
+        async with get_session(engine) as s:
+            await s.execute(
+                sql_update(Session)
+                .where(Session.id == session_id)
+                .values(system_prompt=system_prompt_text)
+            )
+            await s.commit()
+    except Exception as e:
+        logger.warning(f"P4 system_prompt capture failed: {e!r}")
 
 
 def build_services(
@@ -780,7 +831,7 @@ def build_services(
     )
 
     # R2-5: session-fixed runtime config injected into system prompt
-    max_wake = min(max(4 * result.scheduler_interval_min, 60), 180)
+    max_wake = _compute_max_wake(result.scheduler_interval_min)
     runtime_config = RuntimeConfig(wake_max_minutes=max_wake)
     agent = create_trader_agent(
         model=result.model,
@@ -932,6 +983,14 @@ async def run(
     # ── Phase 5: Build services ──
     exchange, deps, agent, budget, stats = build_services(
         result, engine, session_id, sc, settings,
+    )
+
+    # ── Phase 5b: P4 system_prompt capture ──
+    runtime_config_for_capture = RuntimeConfig(
+        wake_max_minutes=_compute_max_wake(result.scheduler_interval_min),
+    )
+    await _capture_session_system_prompt(
+        engine, session_id, result.persona, runtime_config_for_capture,
     )
 
     # ── Phase 6: Main loop ──
