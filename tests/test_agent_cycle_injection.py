@@ -138,6 +138,32 @@ async def test_subsequent_cycle_injects_prior_summaries_with_header():
     assert "Prior summary #0 body." in prompt
     assert "Prior summary #1 body." in prompt
 
+    # P4 integration smoke: user_prompt_snapshot in DB must equal the prompt
+    # captured by mock_run. Validates the full wiring trigger → priors block →
+    # memory → user_prompt_snapshot_var → AgentCycle INSERT → DB.
+    #
+    # Filter excludes seeded prior cycles (cycle_id pattern "prio0000".."prio000N"
+    # per _seed_prior_cycles in test_agent_cycle_injection.py:96) so scalar_one()
+    # picks exactly the new cycle written by run_agent_cycle.
+    #
+    # NOTE: target test is structured as
+    #   `deps, engine = await _make_deps_engine_with_capture_mocks("sess-t4-X")`
+    # so there is no `session_id` local variable in the test scope — use
+    # `deps.session_id` (which holds the same string the helper was called with).
+    from src.storage.models import AgentCycle as _AC  # local alias to avoid top-level disturbance
+    from sqlalchemy import select as _select
+    async with get_session(engine) as db:
+        cycle = (await db.execute(
+            _select(_AC)
+            .where(_AC.session_id == deps.session_id)
+            .where(~_AC.cycle_id.like("prio%"))
+        )).scalar_one()
+    assert cycle.user_prompt_snapshot == captured["prompt"], (
+        "P4: user_prompt_snapshot in DB must equal prompt sent to agent.run "
+        f"(diff length: snapshot={len(cycle.user_prompt_snapshot or '')} "
+        f"vs captured={len(captured['prompt'])})"
+    )
+
 
 async def test_injection_appears_before_memory_context():
     """T4.3: order in prompt is trigger intro → recent summaries → memory."""
