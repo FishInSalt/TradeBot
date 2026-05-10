@@ -737,6 +737,18 @@ _DEFAULT_PRECISION = {
 }
 
 
+def _compute_max_wake(scheduler_interval_min: int) -> int:
+    """Compute wake_max_minutes ceiling from scheduler interval.
+
+    Formula: 4 * interval, clamped to [60, 180]. Single source of truth shared
+    by build_services and P4 session-level capture (run() in src/cli/app.py).
+
+    See test_drift_p4_capture_paths.py::test_p4_runtime_config_matches_build_services
+    for invariant pinning.
+    """
+    return min(max(4 * scheduler_interval_min, 60), 180)
+
+
 def build_services(
     result: WizardResult,
     engine,
@@ -780,7 +792,7 @@ def build_services(
     )
 
     # R2-5: session-fixed runtime config injected into system prompt
-    max_wake = min(max(4 * result.scheduler_interval_min, 60), 180)
+    max_wake = _compute_max_wake(result.scheduler_interval_min)
     runtime_config = RuntimeConfig(wake_max_minutes=max_wake)
     agent = create_trader_agent(
         model=result.model,
