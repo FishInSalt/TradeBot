@@ -51,6 +51,8 @@ class Session(Base):
     alert_config: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON: {enabled, window, threshold}
     fee_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     token_budget: Mapped[int] = mapped_column(Integer, default=500000)
+    # P4 (Phase 3): rendered system_prompt at session creation; session-fixed
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -105,6 +107,8 @@ class AgentCycle(Base):
     cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cache_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # P4 (Phase 3): full user_prompt sent to agent.run(); per-cycle
+    user_prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     # === END Phase 1 ===
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
