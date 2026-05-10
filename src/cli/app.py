@@ -505,7 +505,7 @@ async def run_agent_cycle(
     if memory_context != "No relevant memories.":
         prompt += f"\n\nYour memories:\n{memory_context}"
 
-    # P4 (Phase 3): capture full user_prompt for forensic snapshot. String
+    # P4 (obs roadmap Phase 3): capture full user_prompt for forensic snapshot. String
     # reference assignment cannot raise — see spec §5.3 (cycle-level new
     # failure surface = 0).
     user_prompt_snapshot_var = prompt
@@ -554,7 +554,7 @@ async def run_agent_cycle(
                     cache_write_tokens=None,
                     reasoning_tokens=None,
                     cache_hit_rate=None,
-                    user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (Phase 3)
+                    user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
                 ))
                 await session.commit()
             # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
@@ -606,7 +606,7 @@ async def run_agent_cycle(
                         cache_write_tokens=None,
                         reasoning_tokens=None,
                         cache_hit_rate=None,
-                        user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (Phase 3)
+                        user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
                     ))
                     await session.commit()
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
@@ -713,7 +713,7 @@ async def run_agent_cycle(
                 cache_write_tokens=cache_write,
                 reasoning_tokens=reasoning_tokens,
                 cache_hit_rate=hit_rate,
-                user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (Phase 3)
+                user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
             )
         )
         await session.commit()
@@ -985,7 +985,7 @@ async def run(
         result, engine, session_id, sc, settings,
     )
 
-    # ── Phase 5b: P4 session_prompt capture ──
+    # ── Phase 5b: P4 system_prompt capture ──
     runtime_config_for_capture = RuntimeConfig(
         wake_max_minutes=_compute_max_wake(result.scheduler_interval_min),
     )
