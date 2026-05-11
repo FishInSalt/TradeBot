@@ -346,10 +346,11 @@ async def test_get_market_data_four_segments():
     # Ticker data
     assert "74880" in result
     assert "74870" in result  # bid
-    # Market context — ATR and Volume come from indicators dict
+    # Market context — ATR and last-bar volume present (iter w2r2-next-d Task 4
+    # replaced the old "Volume:" label with "Last bar vol: X (Y× SMA(20) avg)").
     assert "ATR" in result
-    assert "Volume" in result
-    assert "avg" in result  # volume ratio label
+    assert "Last bar vol:" in result
+    assert "SMA(20) avg" in result  # volume ratio label
 
 
 async def test_get_market_data_default_params():
@@ -452,7 +453,14 @@ async def test_get_market_data_5m_atr_no_qualitative_label():
 
 
 async def test_get_market_data_truncated_data():
-    """When exchange returns fewer candles than requested, display_count adapts."""
+    """When exchange returns fewer candles than requested, display_count adapts.
+
+    iter w2r2-next-d Task 4 changed two things:
+      - _closed_bars now strips the in-progress bar before display: with n=70
+        raw rows, available_closed = 69 (not 70).
+      - display_count formula unchanged: max(10, available_closed - 50).
+        With available_closed = 69, display_count = 19.
+    """
     from src.agent.tools_perception import get_market_data
 
     deps = _make_deps()
@@ -474,8 +482,9 @@ async def test_get_market_data_truncated_data():
     deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
     result = await get_market_data(deps, candle_count=50)
-    # display_count = max(10, 70-50) = 20
-    assert "last 20" in result
+    # available_closed = 70 - 1 (in-progress strip) = 69
+    # 69 < 50 + 50 = 100 → display_count = max(10, 69-50) = 19
+    assert "last 19" in result
 
 
 async def test_get_market_data_candle_count_clamp():

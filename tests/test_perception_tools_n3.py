@@ -45,31 +45,31 @@ def _make_ohlcv_df(n_rows: int, last_close: float = 75_234.50) -> pd.DataFrame:
     """Build a synthetic OHLCV dataframe of n_rows.
 
     Prices ascend linearly so MAs are deterministic; highs add +500 and
-    lows subtract -500 for a stable range.
-
-    NOTE: this shape is intentionally extreme — 100-period high always falls
-    in the last row, so range position is ~92%. Tests below assert on string
-    presence only, not numeric correctness of range position. If a future
-    test asserts on the range-position number, replace this helper with a
-    fixture that produces a less degenerate shape.
-
-    NOTE2 (post-_htf_ago_fmt): last-row max high means hi_ago=0 — the hi
-    range line renders "latest" (not "N days ago") after the §3.5 M1 change.
-    The lo range line still renders "99 days ago" (lo_ago=99 → plural), so
-    existing "days ago" / "4h-bars ago" / "weeks ago" / "months ago"
-    substring assertions in test_htf_view_period_label_for_* survive via
-    the lo-line alone.
+    lows subtract -500 for a stable range. The last row is treated as the
+    in-progress candle (stripped by `_closed_bars`).
     """
     base = last_close - (n_rows - 1) * 50
     rows = []
     for i in range(n_rows):
         close = base + i * 50
         rows.append({
-            "timestamp": 1_776_000_000 + i * 86_400_000,
+            "timestamp": 1_776_000_000_000 + i * 86_400_000,
             "open": close - 10, "high": close + 500, "low": close - 500,
             "close": close, "volume": 1000.0,
         })
     return pd.DataFrame(rows)
+
+
+def _make_ticker(last: float = 75_234.50):
+    """Mock ticker double for HTF (which now uses ticker.last as live price)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(last=last, bid=last - 0.1, ask=last + 0.1)
+
+
+def _htf_deps_with_ticker(market_data):
+    """_make_deps + market_data.get_ticker mock (HTF list-form needs both)."""
+    market_data.get_ticker = AsyncMock(return_value=_make_ticker())
+    return _make_deps(market_data=market_data)
 
 
 async def test_htf_view_format_1d():
@@ -77,56 +77,63 @@ async def test_htf_view_format_1d():
 
     market_data = AsyncMock()
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
-    deps = _make_deps(market_data=market_data)
+    deps = _htf_deps_with_ticker(market_data)
 
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
+    result = await get_higher_timeframe_view(deps, timeframes=["1d"])
 
-    # R2-8c §4.1.1 param order: (symbol, timeframe).
-    assert "Higher Timeframe View (BTC/USDT:USDT, 1d)" in result
+    # Iter w2r2-next-d list-form: header has `(symbol @ HH:MM:SS UTC)`;
+    # per-tf section has `[1d] (last closed candle: open …)`.
+    assert "Higher Timeframe View (BTC/USDT:USDT @" in result
+    assert "UTC) ===" in result
+    assert "[1d] (last closed candle: open" in result
     assert "MA50:" in result
     assert "MA100:" in result
     assert "MA200:" in result
     assert "100-period High" in result
     assert "100-period Low" in result
-    assert "Current price within range" in result
+    assert "Range pos (within 100-period):" in result
     assert "20-period High" in result
-    assert "20-period Low" in result
-    assert "20-period range width" in result
-    # Period-unit label: 1d → "days"
-    assert "days ago" in result
+    assert "range width" in result
+    # Per-bar 'bars ago' suffix on 100-period High/Low lines
+    assert "bars ago, candle open" in result
 
 
-async def test_htf_view_period_label_for_4h():
+async def test_htf_view_per_tf_section_header_for_4h():
+    """[4h] section header marks the timeframe (replaces old _UNIT_LABEL test)."""
     from src.agent.tools_perception import get_higher_timeframe_view
 
     market_data = AsyncMock()
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
-    deps = _make_deps(market_data=market_data)
+    deps = _htf_deps_with_ticker(market_data)
 
-    result = await get_higher_timeframe_view(deps, timeframe="4h")
-    assert "4h-bars ago" in result
+    result = await get_higher_timeframe_view(deps, timeframes=["4h"])
+    assert "[4h] (last closed candle: open" in result
 
 
-async def test_htf_view_period_label_for_1w():
+async def test_htf_view_per_tf_section_header_for_1w():
+    """[1w] section header marks the timeframe (replaces old _UNIT_LABEL test)."""
     from src.agent.tools_perception import get_higher_timeframe_view
 
     market_data = AsyncMock()
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
-    deps = _make_deps(market_data=market_data)
+    deps = _htf_deps_with_ticker(market_data)
 
-    result = await get_higher_timeframe_view(deps, timeframe="1w")
-    assert "weeks ago" in result
+    result = await get_higher_timeframe_view(deps, timeframes=["1w"])
+    assert "[1w] (last closed candle: open" in result
 
 
-async def test_htf_view_period_label_for_1m():
+async def test_htf_view_per_tf_section_header_for_1m():
+    """[1M] section header marks the timeframe and includes the (12/24/60) tag."""
     from src.agent.tools_perception import get_higher_timeframe_view
 
     market_data = AsyncMock()
+    # 1M needs ≥ 61 (MA60 + 1) candles to render; supply 250 to satisfy.
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
-    deps = _make_deps(market_data=market_data)
+    deps = _htf_deps_with_ticker(market_data)
 
-    result = await get_higher_timeframe_view(deps, timeframe="1M")
-    assert "months ago" in result
+    result = await get_higher_timeframe_view(deps, timeframes=["1M"])
+    assert "[1M] (last closed candle: open" in result
+    assert "1y/2y/5y monthly" in result
 
 
 async def test_htf_view_passes_symbol_and_limit_to_market_data():
@@ -134,9 +141,9 @@ async def test_htf_view_passes_symbol_and_limit_to_market_data():
 
     market_data = AsyncMock()
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
-    deps = _make_deps(market_data=market_data)
+    deps = _htf_deps_with_ticker(market_data)
 
-    await get_higher_timeframe_view(deps, timeframe="1d")
+    await get_higher_timeframe_view(deps, timeframes=["1d"])
     market_data.get_ohlcv_dataframe.assert_awaited_once_with(
         "BTC/USDT:USDT", "1d", limit=250,
     )
@@ -148,8 +155,8 @@ async def test_htf_view_has_no_subjective_labels():
 
     market_data = AsyncMock()
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
-    deps = _make_deps(market_data=market_data)
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
+    deps = _htf_deps_with_ticker(market_data)
+    result = await get_higher_timeframe_view(deps, timeframes=["1d"])
 
     lower = result.lower()
     for label in ("uptrend", "downtrend", "strong", "weak",
@@ -163,29 +170,32 @@ async def test_htf_view_upstream_failure_degrades():
 
     market_data = AsyncMock()
     market_data.get_ohlcv_dataframe.side_effect = RuntimeError("OKX down")
-    deps = _make_deps(market_data=market_data)
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
+    deps = _htf_deps_with_ticker(market_data)
+    result = await get_higher_timeframe_view(deps, timeframes=["1d"])
 
-    # R2-8c §4.2.2 Option D form: `=== Higher Timeframe View ({symbol}, {timeframe}) ===`
-    # + inline `Error: {msg}` body field.
-    assert "=== Higher Timeframe View (BTC/USDT:USDT, 1d) ===" in result
-    assert "Error: Temporarily unavailable" in result
+    # Iter w2r2-next-d: header includes `@ HH:MM:SS UTC`; per-tf marker is
+    # `[1d] Error: Temporarily unavailable.` (overall ticker fetch succeeded
+    # via the ticker mock; only the OHLCV fetch for 1d fails).
+    assert "=== Higher Timeframe View (BTC/USDT:USDT @" in result
+    assert "[1d] Error: Temporarily unavailable" in result
 
 
-async def test_htf_view_insufficient_data_for_ma200():
-    """If fewer than 200 candles are returned, MA200 degrades but others work."""
+async def test_htf_view_insufficient_data_degrades_per_tf():
+    """Iter w2r2-next-d: if data is shorter than slow MA + 1, the per-tf
+    section degrades to a `insufficient data (need N candles, got M)` note.
+    Replaces the old per-MA degradation test — the new function bails on
+    the whole section once the slow MA is unavailable."""
     from src.agent.tools_perception import get_higher_timeframe_view
 
     market_data = AsyncMock()
+    # 150 closed bars < 201 (MA200 + 1 in-progress) → 1d section degrades.
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(150)
-    deps = _make_deps(market_data=market_data)
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
+    deps = _htf_deps_with_ticker(market_data)
+    result = await get_higher_timeframe_view(deps, timeframes=["1d"])
 
-    assert "MA50:" in result
-    assert "MA100:" in result
-    # MA200 should appear but flagged as insufficient.
-    assert "MA200" in result
-    assert "insufficient data" in result.lower()
+    assert "[1d] insufficient data" in result
+    assert "need 201 candles" in result
+    assert "got 150" in result
 
 
 async def test_htf_empty_dataframe_returns_insufficient_data():
@@ -197,12 +207,14 @@ async def test_htf_empty_dataframe_returns_insufficient_data():
     market_data.get_ohlcv_dataframe.return_value = pd.DataFrame({
         "timestamp": [], "open": [], "high": [], "low": [], "close": [], "volume": [],
     })
-    deps = _make_deps(market_data=market_data)
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
+    deps = _htf_deps_with_ticker(market_data)
+    result = await get_higher_timeframe_view(deps, timeframes=["1d"])
 
-    # R2-8c §4.2.2 Option D form for insufficient-data degradation.
-    assert "=== Higher Timeframe View (BTC/USDT:USDT, 1d) ===" in result
-    assert "Error: Insufficient data" in result
+    # Iter w2r2-next-d: header includes `@ HH:MM:SS UTC`; per-tf insufficient
+    # marker is `[1d] insufficient data (need N candles, got 0)`.
+    assert "=== Higher Timeframe View (BTC/USDT:USDT @" in result
+    assert "[1d] insufficient data" in result
+    assert "got 0" in result
     assert "Temporarily unavailable" not in result
 
 
@@ -212,8 +224,8 @@ async def test_htf_ma_format_includes_vs_ma_prefix():
 
     market_data = AsyncMock()
     market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df(250)
-    deps = _make_deps(market_data=market_data)
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
+    deps = _htf_deps_with_ticker(market_data)
+    result = await get_higher_timeframe_view(deps, timeframes=["1d"])
 
     # Must contain the new prefix; must NOT contain the old bare 'price +X%'
     assert "(price vs MA:" in result
@@ -221,88 +233,50 @@ async def test_htf_ma_format_includes_vs_ma_prefix():
     assert "(price +" not in result and "(price -" not in result
 
 
-async def test_htf_range_latest_when_zero_ago():
-    """When the max/min occurs on the last bar, render 'latest' instead of '0 X ago'."""
+async def test_htf_range_bars_ago_uses_numeric_format():
+    """Iter w2r2-next-d: 100-period range High/Low lines render
+    `(N bars ago, candle open YYYY-MM-DD HH:MM UTC)` — no special-case
+    grammar (no 'latest', no singular/plural). Replaces the legacy
+    test_htf_range_latest_when_zero_ago / _singular_when_one_ago pair which
+    tested the removed `_htf_ago_fmt` helper.
+
+    Builds a series where the global high lands on the LAST closed bar
+    (hi_ago = 0) — guards against re-introducing the 'latest' special case.
+    """
     from src.agent.tools_perception import get_higher_timeframe_view
     import pandas as pd
 
     market_data = AsyncMock()
-    n = 100
-    # Fabricate a series where both the global high AND global low land on the
-    # very last bar (last bar has highest high AND lowest low — spike candle).
-    # hi_ago and lo_ago are both 0, so both range lines should render "latest".
+    # 250 bars (249 closed + 1 in-progress). Spike high on closed bar 248
+    # (last closed) makes hi_ago = 99 - 99 = 0 within the last_100 window.
+    # Last bar (index 249) is in-progress, stripped by _closed_bars.
     rows = []
-    for i in range(n):
-        if i == n - 1:
+    for i in range(250):
+        if i == 248:  # last closed bar — spike high
             rows.append({
-                "timestamp": i * 86_400_000,
-                "open": 100.0, "high": 200.0, "low": 50.0,
-                "close": 150.0, "volume": 1.0,
-            })
-        else:
-            rows.append({
-                "timestamp": i * 86_400_000,
-                "open": 100.0, "high": 110.0, "low": 90.0,
-                "close": 100.0, "volume": 1.0,
-            })
-    market_data.get_ohlcv_dataframe.return_value = pd.DataFrame(rows)
-    deps = _make_deps(market_data=market_data)
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
-
-    # BOTH hi_ago=0 AND lo_ago=0 hold (spike bar is max high AND min low);
-    # both Range lines must render "latest". count==2 catches the partial-
-    # fix bug where only one line got updated.
-    lower = result.lower()
-    assert lower.count("latest") == 2, (
-        f"expected exactly 2 'latest' occurrences (hi + lo lines), got "
-        f"{lower.count('latest')}:\n{result}"
-    )
-    # Must NOT emit the old "0 days ago" / "0 4h-bars ago" phrasing
-    assert "0 day" not in lower
-    assert "0 4h-bar" not in lower
-    assert "0 week" not in lower
-    assert "0 month" not in lower
-
-
-async def test_htf_range_singular_when_one_ago():
-    """When hi_ago or lo_ago == 1, use singular 'day/week/4h-bar/month'."""
-    from src.agent.tools_perception import get_higher_timeframe_view
-    import pandas as pd
-
-    market_data = AsyncMock()
-    n = 100
-    # Spike on the second-to-last bar (index 98):
-    #   high=300.0  > all other highs (110.0)  → hi_ago = 1
-    #   low=90.0    < all other lows  (95.0)   → lo_ago = 1 (same bar drives both lines)
-    # Both range lines must therefore render "1 day ago".
-    rows = []
-    for i in range(n):
-        if i == n - 2:
-            rows.append({
-                "timestamp": i * 86_400_000,
-                "open": 100.0, "high": 300.0, "low": 90.0,
+                "timestamp": 1_776_000_000_000 + i * 86_400_000,
+                "open": 100.0, "high": 9999.0, "low": 90.0,
                 "close": 100.0, "volume": 1.0,
             })
         else:
             rows.append({
-                "timestamp": i * 86_400_000,
+                "timestamp": 1_776_000_000_000 + i * 86_400_000,
                 "open": 100.0, "high": 110.0, "low": 95.0,
                 "close": 100.0, "volume": 1.0,
             })
     market_data.get_ohlcv_dataframe.return_value = pd.DataFrame(rows)
-    deps = _make_deps(market_data=market_data)
-    result = await get_higher_timeframe_view(deps, timeframe="1d")
+    deps = _htf_deps_with_ticker(market_data)
+    result = await get_higher_timeframe_view(deps, timeframes=["1d"])
 
-    # BOTH hi_ago=1 (spike high at n-2) AND lo_ago=1 (spike low at n-2) hold;
-    # both Range lines must render "1 day ago" (singular). count==2 catches
-    # the partial-fix bug where only one line uses singular.
+    # New format: `(0 bars ago, candle open YYYY-MM-DD HH:MM UTC)`
+    assert "0 bars ago, candle open" in result
+    # No special-case grammar — these should NOT appear
     lower = result.lower()
-    assert lower.count("1 day ago") == 2, (
-        f"expected exactly 2 '1 day ago' occurrences (hi + lo lines), got "
-        f"{lower.count('1 day ago')}:\n{result}"
-    )
-    # Must NOT emit the plural form anywhere (would indicate singular logic missed)
-    assert "1 days ago" not in lower
+    assert "latest" not in lower
+    assert "days ago" not in lower
+    assert "weeks ago" not in lower
+    assert "months ago" not in lower
+    assert "4h-bar" not in lower
 
 
 # ===== get_macro_context =====

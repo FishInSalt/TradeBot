@@ -547,12 +547,17 @@ async def test_get_derivatives_data_fact_only():
 async def test_get_higher_timeframe_view_fact_only():
     """Typical 250-bar OHLCV → MA + range rendering."""
     from src.agent.tools_perception import get_higher_timeframe_view
+    from types import SimpleNamespace
     deps = MockDeps()
-    df = pd.DataFrame([{"timestamp": i, "open": 64000 + i, "high": 64100 + i,
-                        "low": 63900 + i, "close": 64050 + i, "volume": 100.0}
+    df = pd.DataFrame([{"timestamp": i * 14_400_000, "open": 64000 + i,
+                        "high": 64100 + i, "low": 63900 + i,
+                        "close": 64050 + i, "volume": 100.0}
                        for i in range(250)])
     deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df)
-    output = await get_higher_timeframe_view(deps, "4h")
+    deps.market_data.get_ticker = AsyncMock(return_value=SimpleNamespace(
+        last=64200.0, bid=64199.5, ask=64200.5,
+    ))
+    output = await get_higher_timeframe_view(deps, ["4h"])
     hits = _scan(output)
     assert hits == [], f"get_higher_timeframe_view emitted banned words: {hits}"
 

@@ -1,5 +1,6 @@
 """Rendering tests for 3 new tools + get_position enhancement (spec §5.2)."""
 from __future__ import annotations
+import re
 import pytest
 from dataclasses import dataclass, field
 from unittest.mock import AsyncMock
@@ -303,10 +304,12 @@ async def test_multi_tf_snapshot_typical(mocker):
     ))
     result = await get_multi_timeframe_snapshot(deps)
     assert "Multi-TF Snapshot" in result
-    assert "Current price:" in result
+    # New layout (iter w2r2-next-d Task 5): cycle-opening primary with Last
+    # (ticker @ HH:MM:SS UTC) and per-tf rows prefixed [tf] not "tf:".
+    assert re.search(r"Last \(ticker @ \d{2}:\d{2}:\d{2} UTC\):", result)
     assert "Columns: Momentum" in result
     for tf in ("5m", "1h", "4h", "1d"):
-        assert f"{tf}:" in result
+        assert f"[{tf}]" in result
 
 
 @pytest.mark.asyncio
@@ -320,8 +323,9 @@ async def test_multi_tf_snapshot_custom_tfs(mocker):
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
     result = await get_multi_timeframe_snapshot(deps, tfs=["1h"])
-    assert "1h:" in result
-    assert "5m:" not in result
+    # New layout (iter w2r2-next-d Task 5): per-tf rows prefixed [tf]
+    assert "[1h]" in result
+    assert "[5m]" not in result
 
 
 @pytest.mark.asyncio
@@ -360,16 +364,17 @@ async def test_multi_tf_snapshot_single_tf_failure_isolated(mocker):
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
     result = await get_multi_timeframe_snapshot(deps)
-    # Failed TF: per-TF degrade line
-    assert "5m: temporarily unavailable" in result
-    # Other TFs: normal data rendering
-    for tf in ("1h:", "4h:", "1d:"):
+    # New layout (iter w2r2-next-d Task 5): "[5m]  temporarily unavailable"
+    assert "[5m]  temporarily unavailable" in result
+    # Other TFs: normal data rendering with [tf] prefix
+    for tf in ("[1h]", "[4h]", "[1d]"):
         assert tf in result
-    # And they actually rendered data, not failure
-    assert "vs MA50" in result
-    # Header still present — overall degrade was NOT triggered
+    # And they actually rendered data — Mom/Structure/ATR columns present.
+    assert "Mom " in result
+    assert "ATR " in result
+    # Header still present — overall degrade was NOT triggered.
     assert "Multi-TF Snapshot" in result
-    assert "Current price:" in result
+    assert re.search(r"Last \(ticker @ \d{2}:\d{2}:\d{2} UTC\):", result)
 
 
 @pytest.mark.asyncio
@@ -390,13 +395,14 @@ async def test_multi_tf_snapshot_per_tf_insufficient(mocker):
         high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
     ))
     result = await get_multi_timeframe_snapshot(deps)
-    assert "5m: insufficient data" in result
-    assert "1h:" in result  # still rendered
+    # New layout: "[5m]  insufficient data (need N candles, got M)"
+    assert "[5m]  insufficient data" in result
+    assert "[1h]" in result  # still rendered
 
 
 @pytest.mark.asyncio
 async def test_multi_tf_snapshot_ma_entangled(mocker):
-    """MA fast ≈ MA slow (diff < 0.1%) → 'MA{fast} at MA{slow}' rendering."""
+    """MA fast ≈ MA slow (diff < 0.1%) → 'MA{fast}: X ≈ MA{slow}: Y' rendering."""
     from src.agent.tools_perception import get_multi_timeframe_snapshot
     deps = MockDeps()
     # Construct a DataFrame where MA50 and MA200 are within 0.1% (constant close → rolling means all equal)
@@ -414,7 +420,8 @@ async def test_multi_tf_snapshot_ma_entangled(mocker):
         high=64001.0, low=63999.0, base_volume=1000.0, timestamp=0,
     ))
     result = await get_multi_timeframe_snapshot(deps, tfs=["1h"])
-    assert "MA50 at MA200" in result
+    # New layout (iter w2r2-next-d Task 5): "MA50: X.XX ≈ MA200: Y.YY"
+    assert re.search(r"MA50:\s*\d+\.\d+\s*≈\s*MA200:\s*\d+\.\d+", result)
 
 
 from datetime import datetime, timezone

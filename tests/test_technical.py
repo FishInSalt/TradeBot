@@ -109,7 +109,7 @@ def test_format_for_llm_is_fact_only(sample_ohlcv):
     assert "price vs MA:" in text
     assert any(
         phrase in text
-        for phrase in ("of band width", "above upper band", "below lower band")
+        for phrase in ("0%=Lower / 100%=Upper", "above Upper", "below Lower")
     )
     # format_for_llm should NOT include ATR or Volume (those are in Market Context)
     assert "ATR" not in text
@@ -136,9 +136,9 @@ def test_format_for_llm_bb_position_at_lower_band():
     }
     text = service.format_for_llm(indicators, current_price=90.0, timeframe="5m")
     # BB line must mention 0% position
-    bb_line = next(line for line in text.split("\n") if line.startswith("BB:"))
+    bb_line = next(line for line in text.split("\n") if line.startswith("BB(20,2):"))
     assert "0%" in bb_line
-    assert "of band width" in bb_line
+    assert "0%=Lower / 100%=Upper" in bb_line
     assert "above" not in bb_line and "below" not in bb_line
 
 
@@ -153,9 +153,9 @@ def test_format_for_llm_bb_position_at_upper_band():
         "atr_14": None, "volume_ratio": None,
     }
     text = service.format_for_llm(indicators, current_price=110.0, timeframe="5m")
-    bb_line = next(line for line in text.split("\n") if line.startswith("BB:"))
+    bb_line = next(line for line in text.split("\n") if line.startswith("BB(20,2):"))
     assert "100%" in bb_line
-    assert "of band width" in bb_line
+    assert "0%=Lower / 100%=Upper" in bb_line
 
 
 def test_format_for_llm_bb_position_edge_case_equal_bands():
@@ -176,10 +176,12 @@ def test_format_for_llm_bb_position_edge_case_equal_bands():
         "atr_14": None, "volume_ratio": None,
     }
     text = service.format_for_llm(indicators, current_price=100.0, timeframe="5m")
-    bb_line = next(line for line in text.split("\n") if line.startswith("BB:"))
-    # Extract content inside the parentheses (position segment only)
-    m = re.search(r"\(([^)]*)\)", bb_line)
-    assert m, f"BB line missing parentheses: {bb_line}"
+    bb_line = next(line for line in text.split("\n") if line.startswith("BB(20,2):"))
+    # Extract content inside the *trailing* position parentheses. The line
+    # also has '(20,2)' immediately after 'BB', so we anchor to the final
+    # paren group only.
+    m = re.search(r"\(([^()]*)\)\s*$", bb_line)
+    assert m, f"BB line missing trailing parentheses: {bb_line}"
     pos_segment = m.group(1)
     assert "N/A" in pos_segment
     # Guard against future 'N/A%' or '0%' compromise

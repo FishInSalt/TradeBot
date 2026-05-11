@@ -35,103 +35,192 @@ MULTI_TF_STRUCTURE_MAS = {
 MULTI_TF_RANGE_PERIODS = 20
 MULTI_TF_OHLCV_LIMIT = {"5m": 80, "1h": 250, "4h": 250, "1d": 250, "1w": 60, "1M": 60}
 
+# get_higher_timeframe_view (Iter w2r2-next-d): per-tf MA periods.
+# 4h/1d/1w use standard (50, 100, 200); 1M uses (12, 24, 60) = 1y/2y/5y
+# monthly per crypto-industry convention (spec §5.4).
+HTF_MA_PERIODS: dict[str, tuple[int, int, int]] = {
+    "4h": (50, 100, 200),
+    "1d": (50, 100, 200),
+    "1w": (50, 100, 200),
+    "1M": (12, 24, 60),
+}
+HTF_OHLCV_LIMIT = 250  # uniform; longest MA(200) + slope lookback 10 + buffer
+
 
 async def get_market_data(
     deps: TradingDeps,
     symbol: str | None = None,
     timeframe: str | None = None,
-    candle_count: int = 50,
+    candle_count: int = 30,
 ) -> str:
-    """Get market data: ticker, indicators, market context, and recent candles.
+    """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
 
-    candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis.
-    Default 50. Values above 50 may be capped by exchange API limits.
-    Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
+    All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
+
+    Markers in OHLCV table (upside-only thresholds):
+        "vol↑"   — bar volume > 2× SMA(20) of bar volumes
+        "range↑" — bar range (high - low) > 2× ATR(14)
+        Empty    — neither threshold tripped.
+
+    Time column shows candle open in UTC.
+
+    Args:
+        symbol: Trading symbol. Defaults to session symbol.
+        timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
+        candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
+
+    Example call:
+        get_market_data(timeframe="5m", candle_count=30)
+    Example output:
+        === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
+        Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
+        ...
+        === Recent Candles (5m, last 30, oldest-first by row) ===
+        Time (open UTC)   Open ... Vol     Markers
+        14:20         ...         245.3   vol↑
+        ...
+        === Period summary (last 5 closed candles vs prior 5 closed candles) ===
+        Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
+        Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
+        Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
+
+    Related perception tools (factual capability surface, not a calling order):
+        - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
+        - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
     """
+    import pandas as pd
+    from datetime import datetime, timezone
+    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+
     symbol = symbol or deps.symbol
     timeframe = timeframe or deps.timeframe
     candle_count = max(10, min(candle_count, 80))
 
     ticker = await deps.market_data.get_ticker(symbol)
+    live_price = _live_price(ticker)
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
     fetch_limit = max(candle_count + 50, 100)
     df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=fetch_limit)
-    indicators = deps.technical.compute_indicators(df)
+    df_closed = _closed_bars(df)
+    indicators = deps.technical.compute_indicators(df_closed)
     indicators_text = deps.technical.format_for_llm(
-        indicators, current_price=ticker.last, timeframe=timeframe,
+        indicators, current_price=live_price, timeframe=timeframe,
     )
 
-    # Determine display count
-    available = len(df)
-    if available >= candle_count + 50:
+    available_closed = len(df_closed)
+    if available_closed >= candle_count + 50:
         display_count = candle_count
     else:
-        display_count = max(10, available - 50)
-    display_df = df.tail(display_count)
+        display_count = max(10, available_closed - 50)
+    display_df = df_closed.tail(display_count)
 
     sections: list[str] = []
 
     # === Ticker ===
     sections.append(
-        f"=== Ticker ({symbol}) ===\n"
-        f"Price: {ticker.last:.2f} | Bid: {ticker.bid:.2f} | Ask: {ticker.ask:.2f}\n"
-        f"24h High: {ticker.high:.2f} | Low: {ticker.low:.2f} | Volume: {ticker.base_volume:.2f}"
+        f"=== Ticker ({symbol} @ {fetch_ts} UTC) ===\n"
+        f"Last: {live_price:.2f} | Bid: {ticker.bid:.2f} | Ask: {ticker.ask:.2f}\n"
+        f"24h High: {ticker.high:.2f} | 24h Low: {ticker.low:.2f} | 24h base vol: {ticker.base_volume:.2f}"
     )
 
     # === Technical Indicators ===
-    sections.append(
-        f"=== Technical Indicators ({timeframe}) ===\n{indicators_text}"
-    )
+    sections.append(f"=== Technical Indicators ({timeframe}) ===\n{indicators_text}")
 
     # === Market Context ===
-    ctx_lines = []
+    ctx_lines: list[str] = []
     atr = indicators.get("atr_14")
-    if atr is not None and ticker.last > 0:
-        pct = atr / ticker.last * 100
-        ctx_lines.append(
-            f"ATR(14): {atr:.2f} ({pct:.2f}% of price, {timeframe} candles)"
-        )
+    if atr is not None and live_price > 0:
+        pct = atr / live_price * 100
+        ctx_lines.append(f"ATR(14): {atr:.2f} ({pct:.2f}% of price, {timeframe} candles)")
     else:
         ctx_lines.append("ATR(14): N/A")
 
-    vr = indicators.get("volume_ratio")
-    if vr is not None:
-        raw_vol = df["volume"].iloc[-2] if len(df) >= 2 else df["volume"].iloc[-1]
-        ctx_lines.append(f"Volume: {raw_vol:.1f} ({vr:.2f}x avg)")
+    # F-O3: Last bar vol with SMA(20) period explicit.
+    # Window: "last 20 closed bars including the latest" — identical to HTF
+    # (spec §5.5), so the same market state renders the same ratio in both
+    # tools. Note: the bar in the numerator (df_closed.iloc[-1]) is the most
+    # recent closed bar, which differs from TechnicalAnalysisService
+    # compute_indicators.volume_ratio (uses iloc[-2]); only the SMA window
+    # matches across tools, not the numerator-bar selection.
+    if len(df_closed) >= 20:
+        vol_now = float(df_closed["volume"].iloc[-1])
+        vol_avg = float(df_closed["volume"].iloc[-20:].mean())
+        ratio = vol_now / vol_avg if vol_avg > 0 else 0.0
+        ctx_lines.append(f"Last bar vol: {vol_now:.1f} ({ratio:.2f}× SMA(20) avg)")
     else:
-        ctx_lines.append("Volume: N/A")
+        ctx_lines.append("Last bar vol: N/A")
 
     if not display_df.empty:
-        candle_high = display_df["high"].max()
-        candle_low = display_df["low"].min()
-        ctx_lines.append(f"{display_count}-candle Range: {candle_low:.0f} — {candle_high:.0f}")
+        ctx_lines.append(
+            f"{display_count}-candle High-Low: {display_df['low'].min():.0f} — {display_df['high'].max():.0f}"
+        )
     else:
         ctx_lines.append("Range: N/A")
     sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
 
-    # === Recent Candles ===
-    from datetime import datetime, timezone
-    tf_short = timeframe.lower()
-    candle_lines = [f"{'Time':<14} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10} {'Vol':>10}"]
-    for _, row in display_df.iterrows():
-        ts = row["timestamp"]
-        if isinstance(ts, (int, float)):
-            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+    # === Recent Candles (OHLCV with markers) ===
+    vol_sma = df_closed["volume"].rolling(20).mean()
+    atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None
+    candle_lines: list[str] = [
+        f"{'Time (open UTC)':<16} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10} {'Vol':>10}  Markers"
+    ]
+    for idx in display_df.index:
+        row = df_closed.loc[idx]
+        ts_val = row["timestamp"]
+        if isinstance(ts_val, (int, float)):
+            dt = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc)
         else:
-            dt = ts
+            dt = ts_val
+        tf_short = timeframe.lower()
         if tf_short in ("1m", "5m", "15m"):
             time_str = dt.strftime("%H:%M")
         elif tf_short in ("1h", "4h"):
             time_str = dt.strftime("%m-%d %H:%M")
         else:
             time_str = dt.strftime("%Y-%m-%d")
+
+        markers: list[str] = []
+        vol_sma_at = vol_sma.loc[idx] if idx in vol_sma.index else None
+        if vol_sma_at is not None and not pd.isna(vol_sma_at) and float(vol_sma_at) > 0:
+            if float(row["volume"]) > 2 * float(vol_sma_at):
+                markers.append("vol↑")
+        atr_at = None
+        if atr_series is not None and idx in atr_series.index:
+            atr_at = atr_series.loc[idx]
+        if atr_at is not None and not pd.isna(atr_at) and float(atr_at) > 0:
+            if (float(row["high"]) - float(row["low"])) > 2 * float(atr_at):
+                markers.append("range↑")
+        marker_str = " ".join(markers)
+
         candle_lines.append(
-            f"{time_str:<14} {row['open']:>10.2f} {row['high']:>10.2f} "
-            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}"
+            f"{time_str:<16} {row['open']:>10.2f} {row['high']:>10.2f} "
+            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  {marker_str}".rstrip()
         )
     sections.append(
-        f"=== Recent Candles ({timeframe}, last {display_count}) ===\n"
+        f"=== Recent Candles ({timeframe}, last {display_count}, oldest-first by row) ===\n"
         + "\n".join(candle_lines)
     )
+
+    # === Period summary ===
+    if len(df_closed) >= 10:
+        last_5 = df_closed.iloc[-5:]
+        prior_5 = df_closed.iloc[-10:-5]
+        avg_vol_last = float(last_5["volume"].mean())
+        avg_vol_prior = float(prior_5["volume"].mean())
+        vol_ratio = avg_vol_last / avg_vol_prior if avg_vol_prior > 0 else 0.0
+        avg_rng_last = float((last_5["high"] - last_5["low"]).mean())
+        avg_rng_prior = float((prior_5["high"] - prior_5["low"]).mean())
+        rng_ratio = avg_rng_last / avg_rng_prior if avg_rng_prior > 0 else 0.0
+        net_delta_last = float(df_closed["close"].iloc[-1] - df_closed["close"].iloc[-5])
+        net_delta_prior = float(df_closed["close"].iloc[-6] - df_closed["close"].iloc[-10])
+        summary = (
+            "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===\n"
+            f"Avg vol:            last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
+            f"Avg range (H-L):    last 5 {avg_rng_last:.1f} / prior 5 {avg_rng_prior:.1f} ({rng_ratio:.2f}×)\n"
+            f"Net Δclose:         last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
+        )
+        sections.append(summary)
 
     return "\n\n".join(sections)
 
@@ -187,8 +276,8 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         pos_lines = [f"=== Position ({symbol}) ===",
                      f"Side: {p.side.capitalize()} | Contracts: {p.contracts} | Entry: {p.entry_price:,.2f}",
                      f"Leverage: {p.leverage}x"]
-        if p.liquidation_price is not None:
-            pos_lines.append(f"Liquidation: {p.liquidation_price:,.2f}")
+        # F-P2: Liquidation lives in Risk Exposure section (richer form with
+        # `(P% away = Q× ATR(1h))`); deduplicated from Position section.
         pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT")
 
         pnl_lines = ["=== PnL ==="]
@@ -848,90 +937,196 @@ def _htf_ago_fmt(n: int, timeframe: Literal["4h", "1d", "1w", "1M"]) -> str:
 
 async def get_higher_timeframe_view(
     deps: TradingDeps,
-    timeframe: Literal["4h", "1d", "1w", "1M"],
+    timeframes: list[Literal["4h", "1d", "1w", "1M"]] | None = None,
 ) -> str:
-    """Show long-period MAs and range position for a higher timeframe.
+    """Long-term structural view across one or more higher timeframes: ticker (authoritative live price), per-tf MA50/MA100/MA200 with raw value, price-vs-MA percentage, and MA slope (10-bar lookback); MA stack comparison; 100-period high and low with bars-ago and the candle open timestamp; range position within 100-period; 20-period high-low range width; last-bar volume vs 20-period SMA ratio (base volume); ATR(14) raw, percent of price, and ratio vs 20-period ATR average.
 
-    Output is fact-only per spec §3.1: MA distances as percentages, range
-    position as 0-100%, no labels like 'uptrend' / 'strong' / 'upper third'.
-    ~250 tokens total.
+    All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). The slope reference and all rolling averages use the closed-candle series. ATR(14) is computed via _atr_series (mamode='rma' algorithm lock per spec §6.4.2).
+
+    MA stack comparison uses ">" / "<" / "≈" with 0.1% tolerance: when |MAa - MAb| / MAb < 0.001, the operator collapses to "≈" (e.g., "MA50 ≈ MA100 < MA200").
+
+    Per-tf MA periods: 4h / 1d / 1w use (50, 100, 200) — standard moving-average periods. 1M uses (12, 24, 60), corresponding to 1-year / 2-year / 5-year monthly cycles, matching crypto-industry monthly chart conventions; the 1M section header marks the period choice explicitly.
+
+    Args:
+        timeframes: List of CCXT timeframes from {"4h", "1d", "1w", "1M"}. Default ["4h", "1d"]. Each timeframe rendered as a separate section.
+
+    Example call:
+        get_higher_timeframe_view(timeframes=["4h", "1d"])
+    Example output:
+        === Higher Timeframe View (BTC/USDT:USDT @ 14:23:08 UTC) ===
+        Last: 81870.50
+
+        [4h] (last closed candle: open 2026-05-11 08:00 UTC)
+          MA50: 79200.00 (price vs MA: +3.4%; MA slope vs 10 bars ago: +0.8%)
+          ...
+          MA stack: MA50 > MA100 > MA200
+          100-period High: 82800.00 (32 bars ago, candle open 2026-05-06 00:00 UTC)
+          ...
+          Last bar vol (base): 1521.6 (5.0× SMA(20) avg)
+          ATR(14): 1572.30 (1.92% of price; 1.04× vs 20-period ATR(14) avg)
+        ...
+
+    Degradation: per-tf "insufficient data (need N candles)" if OHLCV history is shorter than the longest MA period; per-tf "Error: Temporarily unavailable" if the OHLCV fetch for that tf fails; overall returns header-only error if the ticker fetch fails.
+
+    Related perception tools (factual capability surface, not a calling order):
+        - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
+        - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
     """
+    import asyncio
+    import pandas as pd
+    from datetime import datetime, timezone
+
+    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+
     symbol = deps.symbol
+    if timeframes is None:
+        timeframes = ["4h", "1d"]
 
     try:
-        df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=250)
+        ticker = await deps.market_data.get_ticker(symbol)
+        live_price = _live_price(ticker)
     except Exception:
-        logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
-        return (
-            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
-            f"Error: Temporarily unavailable."
-        )
+        logger.warning("HTF ticker fetch failed for %s", symbol, exc_info=True)
+        return f"=== Higher Timeframe View ({symbol}) ===\nError: Temporarily unavailable."
 
-    if df.empty:
-        return (
-            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
-            f"Error: Insufficient data."
-        )
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
-    last_close = float(df["close"].iloc[-1])
+    async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
+        try:
+            df = await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=HTF_OHLCV_LIMIT)
+            return tf, df
+        except Exception as e:
+            return tf, e
+
+    results = await asyncio.gather(*[_fetch_one(tf) for tf in timeframes])
 
     sections: list[str] = [
-        f"=== Higher Timeframe View ({symbol}, {timeframe}) ===",
-        f"Current Price: {last_close:,.2f}",
+        f"=== Higher Timeframe View ({symbol} @ {fetch_ts} UTC) ===",
+        f"Last: {live_price:.2f}",
         "",
-        "=== MA Distances ===",
     ]
 
-    def _ma(period: int) -> float | None:
-        if len(df) < period:
-            return None
-        return float(df["close"].rolling(period).mean().iloc[-1])
+    for tf, df_or_err in results:
+        ma_periods = HTF_MA_PERIODS.get(tf, (50, 100, 200))
+        fast_n, mid_n, slow_n = ma_periods
 
-    for period in (50, 100, 200):
-        ma = _ma(period)
-        if ma is None:
-            sections.append(f"MA{period}: insufficient data (need {period} candles)")
+        if isinstance(df_or_err, Exception):
+            sections.append(f"[{tf}] Error: Temporarily unavailable.")
+            sections.append("")
             continue
-        dist_pct = (last_close - ma) / ma * 100.0
-        sections.append(
-            f"MA{period}: {ma:,.2f} (price vs MA: {dist_pct:+.1f}%)"
-        )
 
-    # Range: last 100 periods. Reset index to 0-based integers so .idxmax()
-    # returns a position, not a timestamp — defensive if market_data ever
-    # switches to a timestamp index.
-    if len(df) >= 100:
-        last_100 = df.iloc[-100:].reset_index(drop=True)
-        hi100_idx = int(last_100["high"].idxmax())
-        lo100_idx = int(last_100["low"].idxmin())
-        hi100 = float(last_100["high"].max())
-        lo100 = float(last_100["low"].min())
-        hi_ago = 99 - hi100_idx
-        lo_ago = 99 - lo100_idx
-        rng_pos = 0.0 if hi100 == lo100 else (last_close - lo100) / (hi100 - lo100) * 100.0
-        sections.extend([
-            "",
-            "=== Range Position ===",
-            f"100-period High: {hi100:,.2f} ({_htf_ago_fmt(hi_ago, timeframe)})",
-            f"100-period Low:  {lo100:,.2f} ({_htf_ago_fmt(lo_ago, timeframe)})",
-            f"Current price within range: {rng_pos:.1f}%",
-        ])
+        df = df_or_err
+        if df.empty or len(df) < slow_n + 1:
+            sections.append(
+                f"[{tf}] insufficient data (need {slow_n + 1} candles, got {len(df)})"
+            )
+            sections.append("")
+            continue
 
-    # 20-period band.
-    if len(df) >= 20:
-        last_20 = df.iloc[-20:]
-        hi20 = float(last_20["high"].max())
-        lo20 = float(last_20["low"].min())
-        width_pct = 0.0 if lo20 == 0 else (hi20 - lo20) / lo20 * 100.0
-        sections.extend([
-            "",
-            "=== 20-period Band ===",
-            f"20-period High: {hi20:,.2f}",
-            f"20-period Low:  {lo20:,.2f}",
-            f"20-period range width: {width_pct:.1f}%",
-        ])
+        df_closed = _closed_bars(df)
+        # Header — last closed candle timestamp
+        last_ts_ms = int(df_closed["timestamp"].iloc[-1])
+        last_dt = datetime.fromtimestamp(last_ts_ms / 1000, tz=timezone.utc)
+        if tf == "1M":
+            header = (
+                f"[{tf}] (last closed candle: open {last_dt.strftime('%Y-%m-%d %H:%M')} UTC; "
+                f"MA periods {fast_n}/{mid_n}/{slow_n} = 1y/2y/5y monthly — "
+                f"adapted for crypto-industry monthly cycle conventions)"
+            )
+        else:
+            header = f"[{tf}] (last closed candle: open {last_dt.strftime('%Y-%m-%d %H:%M')} UTC)"
+        sections.append(header)
 
-    return "\n".join(sections)
+        # MA lines — fast / mid / slow with slope
+        close = df_closed["close"]
+        def _ma_line(n: int) -> str:
+            if len(df_closed) < n + 10:
+                return f"  MA{n}: insufficient data (need {n + 10} candles)"
+            ma_now = float(close.rolling(n).mean().iloc[-1])
+            ma_then = float(close.rolling(n).mean().iloc[-11])
+            slope_pct = (ma_now - ma_then) / ma_then * 100.0 if ma_then > 0 else 0.0
+            dist_pct = (live_price - ma_now) / ma_now * 100.0
+            return (
+                f"  MA{n}: {ma_now:.2f}  (price vs MA: {dist_pct:+.1f}%; "
+                f"MA slope vs 10 bars ago: {slope_pct:+.1f}%)"
+            )
+
+        ma_fast_line = _ma_line(fast_n)
+        ma_mid_line = _ma_line(mid_n)
+        ma_slow_line = _ma_line(slow_n)
+        sections.extend([ma_fast_line, ma_mid_line, ma_slow_line])
+
+        # MA stack
+        try:
+            ma_vals = {
+                fast_n: float(close.rolling(fast_n).mean().iloc[-1]),
+                mid_n: float(close.rolling(mid_n).mean().iloc[-1]),
+                slow_n: float(close.rolling(slow_n).mean().iloc[-1]),
+            }
+            ordered = sorted(ma_vals.items(), key=lambda kv: -kv[1])
+            ops: list[str] = []
+            for (_, va), (_, vb) in zip(ordered, ordered[1:]):
+                # 0.1% tolerance per spec §5.3: MAs within 0.1% collapse to "≈".
+                rel_diff = abs(va - vb) / vb if vb > 0 else 0.0
+                ops.append("≈" if rel_diff < 0.001 else ">")
+            stack_str = " ".join(
+                [f"MA{ordered[0][0]}"]
+                + [f"{ops[i]} MA{ordered[i + 1][0]}" for i in range(len(ops))]
+            )
+            sections.append(f"  MA stack: {stack_str}")
+        except Exception:
+            sections.append("  MA stack: insufficient data")
+
+        # 100-period range
+        if len(df_closed) >= 100:
+            last_100 = df_closed.iloc[-100:].reset_index(drop=True)
+            hi_idx = int(last_100["high"].idxmax())
+            lo_idx = int(last_100["low"].idxmin())
+            hi100 = float(last_100["high"].max())
+            lo100 = float(last_100["low"].min())
+            hi_ago = 99 - hi_idx
+            lo_ago = 99 - lo_idx
+            hi_ts = datetime.fromtimestamp(int(last_100["timestamp"].iloc[hi_idx]) / 1000, tz=timezone.utc)
+            lo_ts = datetime.fromtimestamp(int(last_100["timestamp"].iloc[lo_idx]) / 1000, tz=timezone.utc)
+            rng_pos = ((live_price - lo100) / (hi100 - lo100) * 100.0) if hi100 != lo100 else 0.0
+            sections.extend([
+                f"  100-period High: {hi100:.2f}  ({hi_ago} bars ago, candle open {hi_ts.strftime('%Y-%m-%d %H:%M')} UTC)",
+                f"  100-period Low:  {lo100:.2f}  ({lo_ago} bars ago, candle open {lo_ts.strftime('%Y-%m-%d %H:%M')} UTC)",
+                f"  Range pos (within 100-period): {rng_pos:.0f}%  (0%=Low, 100%=High)",
+            ])
+
+        # 20-period band
+        if len(df_closed) >= 20:
+            last_20 = df_closed.iloc[-20:]
+            hi20 = float(last_20["high"].max())
+            lo20 = float(last_20["low"].min())
+            width_pct = (hi20 - lo20) / lo20 * 100.0 if lo20 > 0 else 0.0
+            sections.append(
+                f"  20-period High: {hi20:.2f} / Low: {lo20:.2f} / range width: {width_pct:.1f}% (= (High-Low)/Low)"
+            )
+
+        # Last bar vol regime
+        if len(df_closed) >= 21:
+            vol_now = float(df_closed["volume"].iloc[-1])
+            vol_avg_20 = float(df_closed["volume"].iloc[-20:].mean())
+            ratio = vol_now / vol_avg_20 if vol_avg_20 > 0 else 0.0
+            sections.append(f"  Last bar vol (base): {vol_now:.1f}  ({ratio:.1f}× SMA(20) avg)")
+
+        # ATR regime
+        if len(df_closed) >= 35:  # 14 ATR window + 20 ATR-avg window + 1
+            atr_series = _atr_series(df_closed, period=14)
+            atr_now = float(atr_series.iloc[-1])
+            atr_avg = float(atr_series.rolling(20).mean().iloc[-1])
+            atr_pct = atr_now / live_price * 100.0 if live_price > 0 else 0.0
+            atr_ratio = atr_now / atr_avg if atr_avg > 0 else 0.0
+            sections.append(
+                f"  ATR(14): {atr_now:.2f}  ({atr_pct:.2f}% of price; "
+                f"{atr_ratio:.2f}× vs 20-period ATR(14) avg)"
+            )
+
+        sections.append("")
+
+    return "\n".join(sections).rstrip()
 
 
 def _fmt_signed_dollars(v: float) -> str:
@@ -1421,112 +1616,172 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
 
 
 async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None = None) -> str:
-    """Quick multi-timeframe scan: momentum | structure | volatility | range position.
+    """Multi-timeframe snapshot: ticker (authoritative current price) plus a cross-tf MA fast-vs-slow direction line plus per-tf rows containing momentum (live ticker vs primary MA, %), fast-vs-slow MA structure (MA names with raw values and comparison operator; weekly/monthly tfs use degraded (20, 50) periods marked with " (short-structure)"), volatility (ATR % of price and its ratio vs 20-period ATR average), range position (live ticker price within the last 20 closed-bar high-low, 0% = low / 100% = high), and the most recent 3 closed candle closes with the close timestamp.
+
+    All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). Per-tf MA values are rendered inline in the Structure column; the Momentum column shows the percentage from live ticker to the primary MA on each tf. ATR(14) is computed via _atr_series (mamode='rma' algorithm lock per spec §6.4.2); shared 4h/1d signals also surfaced by HTF use the same SMA formula and the same _atr_series helper, so identical inputs produce identical values by construction (§2.2.1 algorithm-lock invariant; end-to-end verified by test_mts_htf_overlap_values_match).
 
     Args:
         tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"].
 
-    Returns:
-        str: 4-column row per TF + Columns header. See spec §2.3.
+    Example call:
+        get_multi_timeframe_snapshot()
+    Example output:
+        === Multi-TF Snapshot (BTC/USDT:USDT) ===
+        Last (ticker @ 14:23:08 UTC): 81870.50
+        MA fast-vs-slow per tf: 5m below | 1h above | 4h above | 1d below
+        Columns: ...
 
-    Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall unavailable only if ALL TFs fail.
+        [5m]  Mom -0.3% (vs MA20) | MA20: 81960 < MA50: 82150 | ATR 0.15% (20p avg 0.18%, 0.83×) | Range pos 65%
+              Last 3 closes (closed @ 2026-05-11 14:20 UTC): 81870→81848→81870
+        ... (3 more tf rows)
+
+    Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall returns header-only error if all TFs fail or ticker fetch fails.
+
+    Related perception tools (factual capability surface, not a calling order):
+        - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
+        - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
     """
     import asyncio
     import pandas as pd
+    from datetime import datetime, timezone
+    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+
     symbol = deps.symbol
     if tfs is None:
         tfs = ["5m", "1h", "4h", "1d"]
 
-    # Fetch current price (from ticker, not per-TF close).
-    # Uses MarketDataService layer for consistency with other perception tools
-    # (get_market_data / get_position). market_data.get_ticker is a no-cache
-    # passthrough wrapper so the behavior is functionally identical to calling
-    # exchange.fetch_ticker directly.
     try:
         ticker = await deps.market_data.get_ticker(symbol)
-        current_price = ticker.last
+        live_price = _live_price(ticker)
     except Exception:
         logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
-        return (
-            f"=== Multi-TF Snapshot ({symbol}) ===\n"
-            f"Error: Temporarily unavailable."
-        )
+        return f"=== Multi-TF Snapshot ({symbol}) ===\nError: Temporarily unavailable."
+
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
         try:
-            df = await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250))
+            df = await deps.market_data.get_ohlcv_dataframe(
+                symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250),
+            )
             return tf, df
         except Exception as e:
             return tf, e
 
-    results = await asyncio.gather(*[_fetch_one(tf) for tf in tfs], return_exceptions=False)
+    results = await asyncio.gather(*[_fetch_one(tf) for tf in tfs])
 
-    # All failed?
     if all(isinstance(r[1], Exception) for r in results):
         return (
             f"=== Multi-TF Snapshot ({symbol}) ===\n"
             f"Error: Temporarily unavailable (all timeframes failed)."
         )
 
+    # First pass: compute MA fast-vs-slow direction tags per tf.
+    direction_tags: list[str] = []
     rows: list[str] = []
+
+    # Fixed seconds per tf, used to derive the "close @ T UTC" timestamp on
+    # the Last 3 closes line. For 1M the fixed 30-day step is an approximation
+    # (real months range 28-31 days) — when df has more than one closed bar
+    # available, the implementation below prefers `df['timestamp'].iloc[-1]`
+    # (the in-progress candle's open = the just-closed candle's close moment)
+    # over this constant, which is exact for all tfs at the cost of one
+    # row's data availability. The constant remains the fallback when the
+    # next-bar timestamp is absent.
+    _TF_SECONDS = {
+        "1m": 60, "5m": 300, "15m": 900, "1h": 3600,
+        "4h": 14400, "1d": 86400, "1w": 7 * 86400, "1M": 30 * 86400,
+    }
+
     for tf, df_or_err in results:
-        primary_ma_n = MULTI_TF_PRIMARY_MA.get(tf, 50)
-        fast, slow = MULTI_TF_STRUCTURE_MAS.get(tf, (50, 200))
+        primary_n = MULTI_TF_PRIMARY_MA.get(tf, 50)
+        fast_n, slow_n = MULTI_TF_STRUCTURE_MAS.get(tf, (50, 200))
         if isinstance(df_or_err, Exception):
-            rows.append(f"{tf}: temporarily unavailable")
+            rows.append(f"[{tf}]  temporarily unavailable")
             continue
         df = df_or_err
-        if df.empty or len(df) < slow:
-            rows.append(f"{tf}: insufficient data (need {slow} candles, got {len(df)})")
+        df_closed = _closed_bars(df)
+        if df_closed.empty or len(df_closed) < max(slow_n, 20) + 1:
+            rows.append(f"[{tf}]  insufficient data (need {slow_n + 1} candles, got {len(df_closed)})")
             continue
-        indicators = deps.technical.compute_indicators(df)
-        atr = indicators.get("atr_14")
-        close = float(df["close"].iloc[-1])
 
-        # Momentum: live ticker price vs primary MA.
-        # Intentional: uses `current_price` (live ticker) NOT `df["close"].iloc[-1]`
-        # so the row answers "where is RIGHT NOW relative to this TF's MA?".
-        # Per-TF close lags by up to one candle period (e.g. 1d close = previous
-        # day's close), which would understate fast-moving intraday moves on
-        # higher TFs. Do not "fix" this to df.close.iloc[-1].
-        primary_ma_val = float(df["close"].rolling(primary_ma_n).mean().iloc[-1])
-        mom_pct = (current_price - primary_ma_val) / primary_ma_val * 100
-        mom_str = f"{mom_pct:+.1f}% vs MA{primary_ma_n}"
+        close = df_closed["close"]
+        ma_fast = float(close.rolling(fast_n).mean().iloc[-1])
+        ma_slow = float(close.rolling(slow_n).mean().iloc[-1])
+        primary_ma = float(close.rolling(primary_n).mean().iloc[-1])
 
-        # Structure: MA(fast) vs MA(slow)
-        ma_fast = float(df["close"].rolling(fast).mean().iloc[-1])
-        ma_slow = float(df["close"].rolling(slow).mean().iloc[-1])
-        diff_pct = abs(ma_fast - ma_slow) / ma_slow * 100
+        # Cross-tf direction tag is a 2-way side proxy per spec §3 example
+        # (5m below | 1h above | ...). Spec does not surface a third "flat"
+        # state here; entanglement (< 0.1%) is rendered via "≈" in the
+        # per-tf Structure column below, not in this summary line.
+        direction_tags.append(f"{tf} {'above' if ma_fast > ma_slow else 'below'}")
+
+        mom_pct = (live_price - primary_ma) / primary_ma * 100.0 if primary_ma > 0 else 0.0
+        diff_pct = abs(ma_fast - ma_slow) / ma_slow * 100.0 if ma_slow > 0 else 0.0
         if diff_pct < 0.1:
-            struct_str = f"MA{fast} at MA{slow}"
+            op = "≈"
         elif ma_fast > ma_slow:
-            struct_str = f"MA{fast} above MA{slow}"
+            op = ">"
         else:
-            struct_str = f"MA{fast} below MA{slow}"
-        # (short-structure) marker ONLY for 1w/1M — these are degraded from (50, 200) due to history shortage.
-        # 5m's (MA20, MA50) is its native structure, not a degradation → no marker (spec §2.3 example).
+            op = "<"
+        struct_str = f"MA{fast_n}: {ma_fast:.2f} {op} MA{slow_n}: {ma_slow:.2f}"
+        # 1w/1M use (20, 50) instead of native (50, 200) due to weekly/monthly
+        # history shortage in the MTS 20-bar window context — mark as degraded
+        # so the agent reads them as fact-with-caveat, not as native structure
+        # (spec §5.3; preserved from baseline tools_perception.py:1506-1509).
         if tf in ("1w", "1M"):
             struct_str += " (short-structure)"
 
-        # Volatility
-        atr_pct = (atr / close * 100) if atr is not None else None
-        atr_str = f"ATR {atr_pct:.2f}%" if atr_pct is not None else "ATR N/A"
+        # ATR%, ratio
+        atr_str = "ATR N/A"
+        if len(df_closed) >= 35:
+            atr_series = _atr_series(df_closed, period=14)
+            atr_now = float(atr_series.iloc[-1])
+            atr_avg = float(atr_series.rolling(20).mean().iloc[-1])
+            atr_pct = atr_now / live_price * 100.0
+            atr_ratio = atr_now / atr_avg if atr_avg > 0 else 0.0
+            atr_str = f"ATR {atr_pct:.2f}% (20p avg {atr_avg / live_price * 100:.2f}%, {atr_ratio:.2f}×)"
 
-        # Range position: last 20-bar high/low
-        last_20 = df.iloc[-MULTI_TF_RANGE_PERIODS:]
+        # Range pos (no clamping, per §3.2)
+        last_20 = df_closed.iloc[-MULTI_TF_RANGE_PERIODS:]
         hi = float(last_20["high"].max())
         lo = float(last_20["low"].min())
-        range_pct = 0.0 if hi == lo else (close - lo) / (hi - lo) * 100
+        range_pct = (live_price - lo) / (hi - lo) * 100.0 if hi != lo else 0.0
 
-        rows.append(f"{tf}:  {mom_str:<16} | {struct_str:<40} | {atr_str:<12} | range pos {range_pct:.0f}%")
+        # Last 3 closes line — "closed @ T UTC" anchor. Prefer the in-progress
+        # candle's timestamp (df.iloc[-1]['timestamp']) which equals the
+        # just-closed candle's official close moment exactly; fall back to
+        # last_closed_ts + _TF_SECONDS only if df has no in-progress bar at all.
+        # Exact for 1M (no 30-day approximation drift).
+        if len(df) > len(df_closed):
+            close_dt = datetime.fromtimestamp(
+                int(df["timestamp"].iloc[-1]) / 1000, tz=timezone.utc
+            )
+        else:
+            last_closed_ts_ms = int(df_closed["timestamp"].iloc[-1])
+            close_moment_s = last_closed_ts_ms / 1000 + _TF_SECONDS.get(tf, 0)
+            close_dt = datetime.fromtimestamp(close_moment_s, tz=timezone.utc)
+        closes_3 = df_closed["close"].iloc[-3:].tolist()
+        last3_str = "→".join(f"{c:.2f}" for c in closes_3)
 
-    header = [
+        row1 = (
+            f"[{tf}]  Mom {mom_pct:+.1f}% (vs MA{primary_n}) | {struct_str} | "
+            f"{atr_str} | Range pos {range_pct:.0f}%"
+        )
+        row2 = f"      Last 3 closes (closed @ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC): {last3_str}"
+        rows.append(row1)
+        rows.append(row2)
+        rows.append("")
+
+    tags_str = " | ".join(direction_tags) if direction_tags else "(no data)"
+    header_lines = [
         f"=== Multi-TF Snapshot ({symbol}) ===",
-        f"Current price: {current_price:.2f}",
-        "Columns: Momentum (price vs primary MA) | Structure (MA alignment) | Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, 0%=low / 100%=high)",
+        f"Last (ticker @ {fetch_ts} UTC): {live_price:.2f}",
+        f"MA fast-vs-slow per tf: {tags_str}",
+        "Columns: Momentum (live ticker vs primary MA, %) | Structure (fast MA value vs slow MA value, with comparison) | Volatility (ATR % of price; ratio vs 20-period ATR avg) | Range pos (live ticker price within 20-bar closed-bar high-low; 0%=Low, 100%=High) | Last 3 closed candle closes",
         "",
     ]
-    return "\n".join(header + rows)
+    return "\n".join(header_lines + rows).rstrip()
 
 
 # === Iter 3 — get_price_pivots helpers ===
@@ -1706,7 +1961,7 @@ async def get_price_pivots(deps: TradingDeps) -> str:
 
     sections: list[str] = [
         f"=== Price Pivots ({symbol}, main TF: {main_tf}) ===",
-        f"Current Price: {current_price:,.2f}",
+        f"Last: {current_price:.2f}",
         "",
         "=== Levels Above Current Price ===",
         *(above_rows or ["(none)"]),

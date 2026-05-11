@@ -15,7 +15,7 @@ def test_summarize_get_market_data():
         "MA(20): 84000.00 (price vs MA: +0.2%)\n"
         "MA(50): 83500.00 (price vs MA: +0.8%)\n"
         "MACD: 50.00 | Signal: 45.00 | Histogram: 5.00\n"
-        "BB: 85000 / 84000 / 83000 (position: 60% of band width)\n\n"
+        "BB(20,2): Upper 85000.00 | Middle 84000.00 | Lower 83000.00 (position: 60%, 0%=Lower / 100%=Upper)\n\n"
         "=== Market Context ===\n"
         "ATR(14): 101.04 (0.12% of price, 15m candles)\n"
         "Volume: 500.0 (1.10x avg)\n"
@@ -1623,45 +1623,32 @@ def test_snapshot_get_market_data_happy_path():
 
 
 def test_snapshot_get_higher_timeframe_view_happy_path():
-    """Snapshot — get_higher_timeframe_view 4-section happy path (incl. 20-period Band header)."""
+    """Snapshot — get_higher_timeframe_view list-form happy path
+    (iter w2r2-next-d Task 3; single section, body kept under the
+    D4 clip-at-10-rows threshold so the snapshot pins the renderer's
+    indent semantics rather than the clip semantics)."""
     content = (
-        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
-        "Current Price: 75,212.00\n"
+        "=== Higher Timeframe View (BTC/USDT:USDT @ 14:23:08 UTC) ===\n"
+        "Last: 75212.00\n"
         "\n"
-        "=== MA Distances ===\n"
-        "MA50: 73,200.00 (price vs MA: +2.7%)\n"
-        "MA100: 71,500.00 (price vs MA: +5.2%)\n"
-        "MA200: 68,800.00 (price vs MA: +9.3%)\n"
-        "\n"
-        "=== Range Position ===\n"
-        "100-period High: 78,500.00 (12 4h-bars ago)\n"
-        "100-period Low:  68,200.00 (45 4h-bars ago)\n"
-        "Current price within range: 68.1%\n"
-        "\n"
-        "=== 20-period Band ===\n"
-        "20-period High: 76,800.00\n"
-        "20-period Low:  74,100.00\n"
-        "20-period range width: 3.6%"
+        "[4h] (last closed candle: open 2026-05-11 08:00 UTC)\n"
+        "  MA50: 73200.00  (price vs MA: +2.7%)\n"
+        "  MA200: 68800.00  (price vs MA: +9.3%)\n"
+        "  MA stack: MA50 > MA200\n"
+        "  Last bar vol (base): 1521.6  (1.2× SMA(20) avg)\n"
+        "  ATR(14): 850.00  (1.13% of price; 1.04× vs 20-period ATR(14) avg)"
     )
     expected = (
         "  ⚙ get_higher_timeframe_view\n"
-        "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
-        "    Current Price: 75,212.00\n"
+        "    === Higher Timeframe View (BTC/USDT:USDT @ 14:23:08 UTC) ===\n"
+        "    Last: 75212.00\n"
         "\n"
-        "    === MA Distances ===\n"
-        "    MA50: 73,200.00 (price vs MA: +2.7%)\n"
-        "    MA100: 71,500.00 (price vs MA: +5.2%)\n"
-        "    MA200: 68,800.00 (price vs MA: +9.3%)\n"
-        "\n"
-        "    === Range Position ===\n"
-        "    100-period High: 78,500.00 (12 4h-bars ago)\n"
-        "    100-period Low:  68,200.00 (45 4h-bars ago)\n"
-        "    Current price within range: 68.1%\n"
-        "\n"
-        "    === 20-period Band ===\n"
-        "    20-period High: 76,800.00\n"
-        "    20-period Low:  74,100.00\n"
-        "    20-period range width: 3.6%"
+        "    [4h] (last closed candle: open 2026-05-11 08:00 UTC)\n"
+        "      MA50: 73200.00  (price vs MA: +2.7%)\n"
+        "      MA200: 68800.00  (price vs MA: +9.3%)\n"
+        "      MA stack: MA50 > MA200\n"
+        "      Last bar vol (base): 1521.6  (1.2× SMA(20) avg)\n"
+        "      ATR(14): 850.00  (1.13% of price; 1.04× vs 20-period ATR(14) avg)"
     )
     _assert_perception_render("get_higher_timeframe_view", content, expected)
 
@@ -1669,43 +1656,52 @@ def test_snapshot_get_higher_timeframe_view_happy_path():
 def test_snapshot_get_higher_timeframe_view_unavailable():
     """Snapshot — get_higher_timeframe_view L2 inline Error fallback (Option D)."""
     content = (
-        "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "=== Higher Timeframe View (BTC/USDT:USDT) ===\n"
         "Error: Temporarily unavailable."
     )
     expected = (
         "  ⚙ get_higher_timeframe_view\n"
-        "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
+        "    === Higher Timeframe View (BTC/USDT:USDT) ===\n"
         "    Error: Temporarily unavailable."
     )
     _assert_perception_render("get_higher_timeframe_view", content, expected)
 
 
 def test_snapshot_get_multi_timeframe_snapshot_happy_path():
-    """Snapshot — get_multi_timeframe_snapshot single-section flat row layout."""
+    """Snapshot — get_multi_timeframe_snapshot list-form per-tf row layout
+    (iter w2r2-next-d Task 5; "[tf]" row prefix + Last 3 closes follow-up)."""
     content = (
         "=== Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
-        "Current price: 75212.00\n"
-        "Columns: Momentum (price vs primary MA) | Structure (MA alignment) | "
-        "Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, "
-        "0%=low / 100%=high)\n"
+        "Last (ticker @ 14:23:08 UTC): 75212.00\n"
+        "MA fast-vs-slow per tf: 5m above | 1h above\n"
+        "Columns: Momentum (live ticker vs primary MA, %) | Structure (fast MA value "
+        "vs slow MA value, with comparison) | Volatility (ATR % of price; ratio vs "
+        "20-period ATR avg) | Range pos (live ticker price within 20-bar closed-bar "
+        "high-low; 0%=Low, 100%=High) | Last 3 closed candle closes\n"
         "\n"
-        "5m:  +0.5% vs MA20    | MA20 above MA50                          | "
-        "ATR 0.29%   | range pos 60%\n"
-        "1h:  +1.2% vs MA50    | MA50 above MA200                         | "
-        "ATR 0.78%   | range pos 72%"
+        "[5m]  Mom +0.5% (vs MA20) | MA20: 74960.00 > MA50: 74800.00 | ATR 0.29% "
+        "(20p avg 0.31%, 0.94×) | Range pos 60%\n"
+        "      Last 3 closes (closed @ 2026-05-11 14:20 UTC): 75180.00→75200.00→75212.00\n"
+        "[1h]  Mom +1.2% (vs MA50) | MA50: 74300.00 > MA200: 71800.00 | ATR 0.78% "
+        "(20p avg 0.72%, 1.08×) | Range pos 72%\n"
+        "      Last 3 closes (closed @ 2026-05-11 14:00 UTC): 75100.00→75150.00→75212.00"
     )
     expected = (
         "  ⚙ get_multi_timeframe_snapshot\n"
         "    === Multi-TF Snapshot (BTC/USDT:USDT) ===\n"
-        "    Current price: 75212.00\n"
-        "    Columns: Momentum (price vs primary MA) | Structure (MA alignment) | "
-        "Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, "
-        "0%=low / 100%=high)\n"
+        "    Last (ticker @ 14:23:08 UTC): 75212.00\n"
+        "    MA fast-vs-slow per tf: 5m above | 1h above\n"
+        "    Columns: Momentum (live ticker vs primary MA, %) | Structure (fast MA value "
+        "vs slow MA value, with comparison) | Volatility (ATR % of price; ratio vs "
+        "20-period ATR avg) | Range pos (live ticker price within 20-bar closed-bar "
+        "high-low; 0%=Low, 100%=High) | Last 3 closed candle closes\n"
         "\n"
-        "    5m:  +0.5% vs MA20    | MA20 above MA50                          | "
-        "ATR 0.29%   | range pos 60%\n"
-        "    1h:  +1.2% vs MA50    | MA50 above MA200                         | "
-        "ATR 0.78%   | range pos 72%"
+        "    [5m]  Mom +0.5% (vs MA20) | MA20: 74960.00 > MA50: 74800.00 | ATR 0.29% "
+        "(20p avg 0.31%, 0.94×) | Range pos 60%\n"
+        "          Last 3 closes (closed @ 2026-05-11 14:20 UTC): 75180.00→75200.00→75212.00\n"
+        "    [1h]  Mom +1.2% (vs MA50) | MA50: 74300.00 > MA200: 71800.00 | ATR 0.78% "
+        "(20p avg 0.72%, 1.08×) | Range pos 72%\n"
+        "          Last 3 closes (closed @ 2026-05-11 14:00 UTC): 75100.00→75150.00→75212.00"
     )
     _assert_perception_render("get_multi_timeframe_snapshot", content, expected)
 
@@ -2896,9 +2892,15 @@ async def _invoke_path_b(tool_name: str) -> str:
         return await fn(deps)
 
     if tool_name == "get_higher_timeframe_view":
+        # Iter w2r2-next-d: HTF now needs ticker + uses `timeframes=[...]` list form.
         market_data = _AsyncMock_dg()
+        ticker = _MagicMock_dg()
+        ticker.last = 75200.0
+        ticker.bid = 75195.0
+        ticker.ask = 75205.0
+        market_data.get_ticker.return_value = ticker
         market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(250)
-        return await fn(_MockDeps(market_data=market_data), timeframe="4h")
+        return await fn(_MockDeps(market_data=market_data), timeframes=["4h"])
 
     if tool_name == "get_multi_timeframe_snapshot":
         market_data = _AsyncMock_dg()
@@ -2947,8 +2949,10 @@ async def _invoke_path_b(tool_name: str) -> str:
 
 
 PATH_B_TOOLS = [
-    "get_market_data", "get_higher_timeframe_view",
-    "get_multi_timeframe_snapshot", "get_price_pivots",
+    "get_market_data",
+    "get_higher_timeframe_view",
+    "get_multi_timeframe_snapshot",
+    "get_price_pivots",
     "get_recent_trades", "get_order_book", "get_derivatives_data",
     "get_account_balance", "get_open_orders",
 ]
@@ -3016,9 +3020,18 @@ async def test_dg_1b_path_b_canonical_section_lines(tool_name):
 _CRITICAL_FIELDS_PATH_B: dict[str, list[str]] = {
     "get_market_data": ["Ticker", "Technical Indicators", "Market Context",
                         "Recent Candles", "RSI", "MACD", "ATR"],
-    "get_higher_timeframe_view": ["Higher Timeframe View", "MA Distances",
-                                  "MA50", "MA100", "MA200"],
-    "get_multi_timeframe_snapshot": ["Multi-TF Snapshot", "Current price",
+    # HTF: iter w2r2-next-d Task 3 reshaped to list-form per-tf sections.
+    # Header is "Higher Timeframe View ({symbol} @ HH:MM:SS UTC)"; per-tf
+    # body has MA50/MA100/MA200 lines, MA stack, 100-period High/Low,
+    # Last bar vol (base), ATR(14). MA Distances section is gone.
+    "get_higher_timeframe_view": ["Higher Timeframe View", "Last:",
+                                  "MA50", "MA100", "MA200", "MA stack",
+                                  "100-period High", "ATR(14)"],
+    # MTS: iter w2r2-next-d Task 5 reshaped — "Last (ticker @ T UTC):"
+    # replaces "Current price:"; Columns line still lists Momentum /
+    # Structure / Volatility as column descriptions.
+    "get_multi_timeframe_snapshot": ["Multi-TF Snapshot", "Last (ticker @",
+                                     "MA fast-vs-slow per tf:",
                                      "Momentum", "Structure", "Volatility"],
     # get_price_pivots: Swing Status / Prior Period H/L are conditional sections —
     # tested via dedicated snapshots, not Path B happy-fixture lint.
@@ -3075,7 +3088,12 @@ async def test_dg_1c_path_b_critical_fields_present(tool_name):
 
 # === T-DG-1d: 参数顺序 lint (spec §4.1.1) ===
 @pytest.mark.parametrize("tool_name,expected_pattern", [
-    ("get_higher_timeframe_view", r"=== Higher Timeframe View \(BTC/USDT:USDT, 4h\) ==="),
+    # iter w2r2-next-d Task 3: HTF header is now list-form
+    # "Higher Timeframe View (BTC/USDT:USDT @ HH:MM:SS UTC)" — no per-tf
+    # in title (per-tf appears in [tf] section headers); symbol-first
+    # convention preserved.
+    ("get_higher_timeframe_view",
+     r"=== Higher Timeframe View \(BTC/USDT:USDT @ \d{2}:\d{2}:\d{2} UTC\) ==="),
     ("get_price_pivots", r"=== Price Pivots \(BTC/USDT:USDT, main TF: \w+\) ==="),
 ])
 async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
