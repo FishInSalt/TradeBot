@@ -1710,6 +1710,10 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         ma_slow = float(close.rolling(slow_n).mean().iloc[-1])
         primary_ma = float(close.rolling(primary_n).mean().iloc[-1])
 
+        # Cross-tf direction tag is a 2-way side proxy per spec §3 example
+        # (5m below | 1h above | ...). Spec does not surface a third "flat"
+        # state here; entanglement (< 0.1%) is rendered via "≈" in the
+        # per-tf Structure column below, not in this summary line.
         direction_tags.append(f"{tf} {'above' if ma_fast > ma_slow else 'below'}")
 
         mom_pct = (live_price - primary_ma) / primary_ma * 100.0 if primary_ma > 0 else 0.0
@@ -1769,10 +1773,11 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         rows.append(row2)
         rows.append("")
 
+    tags_str = " | ".join(direction_tags) if direction_tags else "(no data)"
     header_lines = [
         f"=== Multi-TF Snapshot ({symbol}) ===",
         f"Last (ticker @ {fetch_ts} UTC): {live_price:.2f}",
-        f"MA fast-vs-slow per tf: " + " | ".join(direction_tags) if direction_tags else "MA fast-vs-slow per tf: (no data)",
+        f"MA fast-vs-slow per tf: {tags_str}",
         "Columns: Momentum (live ticker vs primary MA, %) | Structure (fast MA value vs slow MA value, with comparison) | Volatility (ATR % of price; ratio vs 20-period ATR avg) | Range pos (live ticker price within 20-bar closed-bar high-low; 0%=Low, 100%=High) | Last 3 closed candle closes",
         "",
     ]
