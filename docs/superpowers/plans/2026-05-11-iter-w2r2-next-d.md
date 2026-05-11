@@ -34,7 +34,7 @@
 - `src/utils/ohlcv_utils.py` — Shared OHLCV helpers consumed by MTS / GMD / HTF: `_live_price`, `_closed_bars`, `_atr_series`. Three primitives carrying one design decision each (canonical live-price source / closed-only strip / `mamode="rma"` algorithm lock). API frozen at Task 2 (commit 2); tasks 3-5 import without modification.
 - `tests/test_ohlcv_utils.py` — Unit tests for the three helpers (closed-only stripping, live-price wrapper, ATR-series equivalence to `compute_indicators["atr_14"]`).
 - `tests/fixtures/multi_tf_ohlcv.py` — Pytest fixtures for hand-crafted OHLCV DataFrames (BTC/USDT:USDT-scaled) shared by HTF/GMD/MTS golden-mockup tests and the cross-tool drift-guard tests. **Includes** `pytest.fixture` factories returning DataFrames with deterministic timestamps and prices.
-- `tests/test_multi_tf_drift_guards.py` — The 6 cross-tool drift-guard invariants from spec §7.1.
+- `tests/test_multi_tf_drift_guards.py` — The 7 cross-tool drift-guard invariants (6 from spec §7.1 plus 1 GMD/HTF `Last bar vol` SMA(20)-window alignment test added during plan review).
 - `tests/test_iter_w2r2_next_d_goldens.py` — Golden-mockup tests per tool (one section per tool: HTF, GMD, MTS).
 
 ### Modified files
@@ -241,6 +241,28 @@ def df_5m_anomaly() -> pd.DataFrame:
 
 
 @pytest.fixture
+def df_4h_recent_vol_spike() -> pd.DataFrame:
+    """4h OHLCV identical to df_4h_250bars except the LAST closed bar
+    (df.loc[249]) has volume = 600 (6× the 100.0 baseline).
+
+    Used by drift-guard #7 (test_gmd_htf_last_bar_vol_ratio_match) to
+    make the SMA(20)-window choice observable in the rendered ratio:
+
+      - iloc[-20:] window (correct, spec §5.5):
+          mean = (19·100 + 600) / 20 = 125 → ratio = 600 / 125 = 4.8
+      - iloc[-21:-1] window (regression target):
+          mean = 100                       → ratio = 600 / 100 = 6.0
+
+    Without a recent spike the fixture has uniform volume = 100 and every
+    window choice yields ratio = 1.0, making the guard a tautology.
+    """
+    closes = [75000.0 + i * (7000.0 / 250) for i in range(251)]
+    df = _build(start_ms=1_700_000_000_000, tf="4h", closes=closes)
+    df.loc[249, "volume"] = 600.0  # df.iloc[-2] = last closed bar = vol_now
+    return df
+
+
+@pytest.fixture
 def fake_ticker_81870():
     """Mock ticker.last = 81870.50, bid 81870.40, ask 81870.60."""
     from types import SimpleNamespace
@@ -255,7 +277,7 @@ def fake_ticker_81870():
 Run:
 
 ```bash
-python -c "from tests.fixtures.multi_tf_ohlcv import df_4h_250bars, df_1d_250bars, df_5m_130bars, df_5m_anomaly, fake_ticker_81870; print('OK')"
+python -c "from tests.fixtures.multi_tf_ohlcv import df_4h_250bars, df_1d_250bars, df_5m_130bars, df_5m_anomaly, df_4h_recent_vol_spike, fake_ticker_81870; print('OK')"
 ```
 
 Expected: `OK` printed; no `ImportError`.
@@ -1418,10 +1440,15 @@ async def get_market_data(
     else:
         ctx_lines.append("ATR(14): N/A")
 
-    # F-O3: Last bar vol with SMA(20) period explicit
-    if len(df_closed) >= 21:
+    # F-O3: Last bar vol with SMA(20) period explicit.
+    # Use the same "last 20 closed bars including the latest" window as HTF
+    # (spec §5.5) and as baseline compute_indicators.volume_ratio
+    # (services/technical.py:36-41) — keeps the SMA(20) computation
+    # algorithm-identical across GMD and HTF so the same market state
+    # renders the same ratio in both tools.
+    if len(df_closed) >= 20:
         vol_now = float(df_closed["volume"].iloc[-1])
-        vol_avg = float(df_closed["volume"].iloc[-21:-1].mean())
+        vol_avg = float(df_closed["volume"].iloc[-20:].mean())
         ratio = vol_now / vol_avg if vol_avg > 0 else 0.0
         ctx_lines.append(f"Last bar vol: {vol_now:.1f} ({ratio:.2f}× SMA(20) avg)")
     else:
@@ -2241,14 +2268,14 @@ EOF
 
 # Task 8 — Commit 8: cross-tool drift-guard tests
 
-Spec ref: §7.1 (all 6 invariants).
+Spec ref: §7.1 (six invariants) + one GMD/HTF volume-window invariant added during plan review (covers spec §5.5 algorithm parity).
 
-The 6 drift-guard tests lock in the §2.2.1 algorithm-lock invariant (end-to-end), the closed-only contract, and the cross-tool `Last:` derivation. They are the final commit so they exercise every tool change landed by commits 3-7.
+The 7 drift-guard tests lock in the §2.2.1 algorithm-lock invariant (end-to-end), the closed-only contract, the cross-tool `Last:` derivation, and the GMD/HTF "Last bar vol (SMA(20) avg)" window alignment. They are the final commit so they exercise every tool change landed by commits 3-7.
 
 **Files:**
 - Create: `tests/test_multi_tf_drift_guards.py`
 
-## 8.1 Implement the 6 drift-guard tests
+## 8.1 Implement the 7 drift-guard tests
 
 - [ ] **Step 1: Create the test module**
 
@@ -2257,13 +2284,16 @@ Create `tests/test_multi_tf_drift_guards.py`:
 ```python
 """Cross-tool drift-guard tests for iter w2r2-next-d (spec §7.1).
 
-Six invariants:
+Seven invariants:
 1. test_indicator_temporal_stability_within_candle
 2. test_live_price_field_equals_ticker_last
 3. test_three_tools_use_same_ticker_last_in_Last_label
 4. test_no_in_progress_candle_in_indicator_inputs
 5. test_mts_htf_overlap_values_match (§2.2.1)
 6. test_atr_series_last_value_equals_compute_indicators_atr_14 (§6.4.2)
+7. test_gmd_htf_last_bar_vol_ratio_match — GMD/HTF "Last bar vol: X
+   (Y× SMA(20) avg)" use the same SMA(20) window formula
+   (spec §5.5; matches baseline compute_indicators.volume_ratio)
 
 These tests purposely use mocked deps and hand-crafted OHLCV fixtures
 so the invariants can be asserted bit-for-bit, without the runtime
@@ -2458,6 +2488,76 @@ def test_atr_series_last_value_equals_compute_indicators_atr_14(df_4h_250bars):
     series_last = _atr_series(df_closed, period=14).iloc[-1]
     scalar = TechnicalAnalysisService().compute_indicators(df_closed)["atr_14"]
     assert series_last == pytest.approx(scalar, rel=0, abs=0)
+
+
+@pytest.mark.asyncio
+async def test_gmd_htf_last_bar_vol_ratio_match(
+    fake_ticker_81870, df_4h_recent_vol_spike,
+):
+    """GMD and HTF both surface "Last bar vol: X (Y× SMA(20) avg)"; the
+    SMA(20) window formula must be identical across the two tools
+    (spec §5.5: `df.iloc[:-1]['volume'].rolling(20).mean().iloc[-1]`,
+    equivalent to `df_closed['volume'].iloc[-20:].mean()`; matches
+    baseline `compute_indicators.volume_ratio` at services/technical.py:36-41).
+
+    End-to-end test: feed the same df_4h_recent_vol_spike fixture into
+    both GMD (with timeframe="4h") and HTF (with timeframes=["4h"]),
+    regex-extract the Y× SMA(20) avg ratio from each rendered output,
+    and assert (1) the two tools render the same ratio at the same
+    precision, and (2) that ratio matches the canonical formula.
+
+    Discriminating power: df_4h_recent_vol_spike has a 600 volume at
+    the last closed bar (rest = 100). The spec §5.5 window iloc[-20:]
+    includes that bar → mean = 125 → ratio = 4.8. A regression to
+    iloc[-21:-1] would exclude that bar → mean = 100 → ratio = 6.0.
+    The assertion therefore distinguishes the two windows numerically,
+    unlike a guard built on uniform-volume fixtures which would yield
+    ratio = 1.0 for any window choice (tautology).
+    """
+    import re
+    from src.agent.tools_perception import get_market_data, get_higher_timeframe_view
+    from src.utils.ohlcv_utils import _closed_bars
+
+    # Both tools see the SAME 4h fixture.
+    deps_gmd = _build_deps(fake_ticker_81870, {"4h": df_4h_recent_vol_spike})
+    deps_htf = _build_deps(fake_ticker_81870, {"4h": df_4h_recent_vol_spike})
+
+    out_gmd = await get_market_data(deps_gmd, timeframe="4h")
+    out_htf = await get_higher_timeframe_view(deps_htf, timeframes=["4h"])
+
+    # GMD: "Last bar vol: X.X (Y.YY× SMA(20) avg)"  (2dp)
+    gmd_match = re.search(r"Last bar vol:[^(]*\((\d+\.\d+)× SMA\(20\) avg\)", out_gmd)
+    assert gmd_match, f"GMD missing Last bar vol line\n{out_gmd}"
+    gmd_ratio = float(gmd_match.group(1))
+
+    # HTF: "Last bar vol (base): X.X (Y.Y× SMA(20) avg)"  (1dp)
+    htf_match = re.search(r"Last bar vol \(base\):[^(]*\((\d+\.\d+)× SMA\(20\) avg\)", out_htf)
+    assert htf_match, f"HTF missing Last bar vol line\n{out_htf}"
+    htf_ratio = float(htf_match.group(1))
+
+    # Canonical formula on the same fixture (spec §5.5).
+    df_closed = _closed_bars(df_4h_recent_vol_spike)
+    expected = float(df_closed["volume"].iloc[-1]) / float(
+        df_closed["volume"].iloc[-20:].mean()
+    )
+    # Sanity check the fixture: the spike must put the canonical ratio
+    # at ≈ 4.8, distinguishable from the regression target (≈ 6.0).
+    assert 4.5 < expected < 5.0, (
+        f"Fixture lost its spike — expected canonical ratio ≈ 4.8, got {expected:.4f}. "
+        f"Drift-guard would degrade to tautology."
+    )
+
+    # Cross-tool: GMD's 2dp render, rounded to HTF's 1dp, must equal HTF's 1dp render.
+    assert round(gmd_ratio, 1) == htf_ratio, (
+        f"§5.5 algorithm drift: GMD ratio {gmd_ratio:.2f} (→1dp {round(gmd_ratio, 1)}) "
+        f"≠ HTF ratio {htf_ratio:.1f}"
+    )
+    # Both must equal the canonical formula at the rendered precision.
+    assert htf_ratio == pytest.approx(round(expected, 1), abs=0.05), (
+        f"§5.5 algorithm regression: HTF ratio {htf_ratio:.1f} ≠ canonical "
+        f"{expected:.4f} (rendered at 1dp). Likely cause: window choice changed "
+        f"from iloc[-20:] to iloc[-21:-1] or similar — see spec §5.5."
+    )
 ```
 
 - [ ] **Step 2: Run the drift-guards**
@@ -2466,7 +2566,7 @@ def test_atr_series_last_value_equals_compute_indicators_atr_14(df_4h_250bars):
 python -m pytest tests/test_multi_tf_drift_guards.py -v
 ```
 
-Expected: 6 passed.
+Expected: 7 passed.
 
 - [ ] **Step 3: Run full suite — final non-regression check**
 
@@ -2529,7 +2629,7 @@ python -m pytest --collect-only -q 2>&1 | tail -3
 
 Expected:
 - All tests passing (`X passed, Y skipped` — Y stays ≥ 5).
-- Total collected ≥ 1487 (baseline) + tests added (Task 2: 6, Task 3: 11, Task 4: 7, Task 5: 6, Task 6: 1, Task 7: 1, Task 8: 6 = +38 → 1525+).
+- Total collected ≥ 1487 (baseline) + tests added (Task 2: 6, Task 3: 11, Task 4: 7, Task 5: 6, Task 6: 1, Task 7: 1, Task 8: 7 = +39 → 1526+).
 
 If any test fails: do NOT commit. Diagnose, fix, then re-run.
 
@@ -2552,13 +2652,16 @@ git add tests/test_multi_tf_drift_guards.py tests/test_display_cycle.py tests/te
 git commit -m "$(cat <<'EOF'
 test: cross-tool drift-guards for multi-TF path reversal
 
-Adds tests/test_multi_tf_drift_guards.py with the six invariants from
-spec §7.1: (1) indicator temporal stability on closed-only inputs;
-(2) Last: field derived from ticker.last; (3) MTS / GMD / HTF all
-surface ticker.last in their Last: line; (4) in-progress bar
-mutation does not change rendered indicator values; (5) §2.2.1
-MTS / HTF shared-tf signals computed through identical helper path;
-(6) §6.4.2 ATR series last value bit-equals compute_indicators atr_14.
+Adds tests/test_multi_tf_drift_guards.py with seven invariants:
+(1) indicator temporal stability on closed-only inputs;
+(2) Last: field derived from ticker.last;
+(3) MTS / GMD / HTF all surface ticker.last in their Last: line;
+(4) in-progress bar mutation does not change rendered indicator values;
+(5) §2.2.1 end-to-end — MTS and HTF render identical MA50 / MA200 /
+ATR-ratio values at shared 4h/1d tfs;
+(6) §6.4.2 ATR series last value bit-equals compute_indicators atr_14;
+(7) GMD/HTF "Last bar vol (SMA(20) avg)" use the same window
+formula (spec §5.5; matches baseline compute_indicators.volume_ratio).
 
 Also completes the display_cycle / toolkit_iter2 test sweep:
 "Price:" / "Current Price:" / "Current price:" literals updated to
@@ -2595,7 +2698,7 @@ python -m pytest --collect-only -q 2>&1 | tail -3
 git diff --stat 06b1e6d..HEAD | tail -3
 ```
 
-Record: total test count delta (+~38), total diff lines (target 2000-2400 per spec §8).
+Record: total test count delta (+~39), total diff lines (target 2000-2400 per spec §8).
 
 - [ ] **Step 2: Show user the commit log + invite review**
 
@@ -2619,7 +2722,7 @@ gh pr create --title "feat(iter-w2r2-next-d): multi-TF path reversal — MTS / G
 - GMD retreat: single-TF depth — default `candle_count` 50→30, B3 anomaly markers, B4 period summary, closed-only indicator + table inputs, N13 / F-O3 labels (spec §4).
 - HTF list-form + N6 G1-G5: `timeframes: list[Literal[...]]` signature; per-tf MA50/100/200 with slope + MA stack + 100-period range with full date stamp + volume regime + ATR regime; 1M uses (12, 24, 60) periods (spec §5).
 - Cross-cutting: shared `src/utils/ohlcv_utils.py` (three primitives: _live_price / _closed_bars / _atr_series) provides the algorithm-lock primitives the §2.2.1 invariant rests on; F-O2 BB labels; F-P2 Position-section Liquidation dedup; N13 unification on `get_price_pivots`; wrapper-docstring "Related perception tools" tail on all three tools (spec §6.1 — Layer-1 intentionally untouched).
-- 6 cross-tool drift-guards (spec §7.1) lock in the invariants.
+- 7 cross-tool drift-guards (6 from spec §7.1 + 1 GMD/HTF volume-window alignment added during plan review) lock in the invariants.
 
 Spec: `docs/superpowers/specs/2026-05-11-iter-w2r2-next-d-multi-tf-design.md`.
 Plan: `docs/superpowers/plans/2026-05-11-iter-w2r2-next-d.md`.
@@ -2627,7 +2730,7 @@ Plan: `docs/superpowers/plans/2026-05-11-iter-w2r2-next-d.md`.
 ## Test plan
 - [x] `tests/test_ohlcv_utils.py` — helpers + F-O2 BB (Task 2)
 - [x] `tests/test_iter_w2r2_next_d_goldens.py` — per-tool golden mockups (Tasks 3-7)
-- [x] `tests/test_multi_tf_drift_guards.py` — 6 invariants (Task 8)
+- [x] `tests/test_multi_tf_drift_guards.py` — 7 invariants (Task 8)
 - [x] `tests/test_perception_tools_n3.py` — HTF list-form migration (Task 3)
 - [x] `tests/test_fact_only_wordlist.py` line 555 — HTF positional migration (Task 3)
 - [x] `tests/test_display_cycle.py` — Last: label sweep + HTF snapshot rewrite (Task 8)
