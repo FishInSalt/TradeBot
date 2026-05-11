@@ -35,6 +35,17 @@ MULTI_TF_STRUCTURE_MAS = {
 MULTI_TF_RANGE_PERIODS = 20
 MULTI_TF_OHLCV_LIMIT = {"5m": 80, "1h": 250, "4h": 250, "1d": 250, "1w": 60, "1M": 60}
 
+# get_higher_timeframe_view (Iter w2r2-next-d): per-tf MA periods.
+# 4h/1d/1w use standard (50, 100, 200); 1M uses (12, 24, 60) = 1y/2y/5y
+# monthly per crypto-industry convention (spec §5.4).
+HTF_MA_PERIODS: dict[str, tuple[int, int, int]] = {
+    "4h": (50, 100, 200),
+    "1d": (50, 100, 200),
+    "1w": (50, 100, 200),
+    "1M": (12, 24, 60),
+}
+HTF_OHLCV_LIMIT = 250  # uniform; longest MA(200) + slope lookback 10 + buffer
+
 
 async def get_market_data(
     deps: TradingDeps,
@@ -848,90 +859,195 @@ def _htf_ago_fmt(n: int, timeframe: Literal["4h", "1d", "1w", "1M"]) -> str:
 
 async def get_higher_timeframe_view(
     deps: TradingDeps,
-    timeframe: Literal["4h", "1d", "1w", "1M"],
+    timeframes: list[Literal["4h", "1d", "1w", "1M"]] | None = None,
 ) -> str:
-    """Show long-period MAs and range position for a higher timeframe.
+    """Long-term structural view across one or more higher timeframes: ticker (authoritative live price), per-tf MA50/MA100/MA200 with raw value, price-vs-MA percentage, and MA slope (10-bar lookback); MA stack comparison; 100-period high and low with bars-ago and the candle open timestamp; range position within 100-period; 20-period high-low range width; last-bar volume vs 20-period SMA ratio (base volume); ATR(14) raw, percent of price, and ratio vs 20-period ATR average.
 
-    Output is fact-only per spec §3.1: MA distances as percentages, range
-    position as 0-100%, no labels like 'uptrend' / 'strong' / 'upper third'.
-    ~250 tokens total.
+    All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). The slope reference and all rolling averages use the closed-candle series. ATR(14) is computed via _atr_series (mamode='rma' algorithm lock per spec §6.4.2).
+
+    MA stack comparison uses ">" / "<" / "≈" with 0.1% tolerance: when |MAa - MAb| / MAb < 0.001, the operator collapses to "≈" (e.g., "MA50 ≈ MA100 < MA200").
+
+    Per-tf MA periods: 4h / 1d / 1w use (50, 100, 200) — standard moving-average periods. 1M uses (12, 24, 60), corresponding to 1-year / 2-year / 5-year monthly cycles, matching crypto-industry monthly chart conventions; the 1M section header marks the period choice explicitly.
+
+    Args:
+        timeframes: List of CCXT timeframes from {"4h", "1d", "1w", "1M"}. Default ["4h", "1d"]. Each timeframe rendered as a separate section.
+
+    Example call:
+        get_higher_timeframe_view(timeframes=["4h", "1d"])
+    Example output:
+        === Higher Timeframe View (BTC/USDT:USDT @ 14:23:08 UTC) ===
+        Last: 81870.50
+
+        [4h] (last closed candle: open 2026-05-11 08:00 UTC)
+          MA50: 79200.00 (price vs MA: +3.4%; MA slope vs 10 bars ago: +0.8%)
+          ...
+          MA stack: MA50 > MA100 > MA200
+          100-period High: 82800.00 (32 bars ago, candle open 2026-05-06 00:00 UTC)
+          ...
+          Last bar vol (base): 1521.6 (5.0× SMA(20) avg)
+          ATR(14): 1572.30 (1.92% of price; 1.04× vs 20-period ATR(14) avg)
+        ...
+
+    Degradation: per-tf "insufficient data (need N candles)" if OHLCV history is shorter than the longest MA period; per-tf "Error: Temporarily unavailable" if the OHLCV fetch for that tf fails; overall returns header-only error if the ticker fetch fails.
+
+    Related perception tools (factual capability surface, not a calling order):
+        - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
+        - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
     """
+    import asyncio
+    import pandas as pd
+    from datetime import datetime, timezone
+
+    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+
     symbol = deps.symbol
+    if timeframes is None:
+        timeframes = ["4h", "1d"]
 
     try:
-        df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=250)
+        ticker = await deps.market_data.get_ticker(symbol)
+        live_price = _live_price(ticker)
     except Exception:
-        logger.warning("HTF fetch failed for %s %s", symbol, timeframe, exc_info=True)
-        return (
-            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
-            f"Error: Temporarily unavailable."
-        )
+        logger.warning("HTF ticker fetch failed for %s", symbol, exc_info=True)
+        return f"=== Higher Timeframe View ({symbol}) ===\nError: Temporarily unavailable."
 
-    if df.empty:
-        return (
-            f"=== Higher Timeframe View ({symbol}, {timeframe}) ===\n"
-            f"Error: Insufficient data."
-        )
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
-    last_close = float(df["close"].iloc[-1])
+    async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
+        try:
+            df = await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=HTF_OHLCV_LIMIT)
+            return tf, df
+        except Exception as e:
+            return tf, e
+
+    results = await asyncio.gather(*[_fetch_one(tf) for tf in timeframes])
 
     sections: list[str] = [
-        f"=== Higher Timeframe View ({symbol}, {timeframe}) ===",
-        f"Current Price: {last_close:,.2f}",
+        f"=== Higher Timeframe View ({symbol} @ {fetch_ts} UTC) ===",
+        f"Last: {live_price:.2f}",
         "",
-        "=== MA Distances ===",
     ]
 
-    def _ma(period: int) -> float | None:
-        if len(df) < period:
-            return None
-        return float(df["close"].rolling(period).mean().iloc[-1])
+    for tf, df_or_err in results:
+        ma_periods = HTF_MA_PERIODS.get(tf, (50, 100, 200))
+        fast_n, mid_n, slow_n = ma_periods
 
-    for period in (50, 100, 200):
-        ma = _ma(period)
-        if ma is None:
-            sections.append(f"MA{period}: insufficient data (need {period} candles)")
+        if isinstance(df_or_err, Exception):
+            sections.append(f"[{tf}] Error: Temporarily unavailable.")
+            sections.append("")
             continue
-        dist_pct = (last_close - ma) / ma * 100.0
-        sections.append(
-            f"MA{period}: {ma:,.2f} (price vs MA: {dist_pct:+.1f}%)"
-        )
 
-    # Range: last 100 periods. Reset index to 0-based integers so .idxmax()
-    # returns a position, not a timestamp — defensive if market_data ever
-    # switches to a timestamp index.
-    if len(df) >= 100:
-        last_100 = df.iloc[-100:].reset_index(drop=True)
-        hi100_idx = int(last_100["high"].idxmax())
-        lo100_idx = int(last_100["low"].idxmin())
-        hi100 = float(last_100["high"].max())
-        lo100 = float(last_100["low"].min())
-        hi_ago = 99 - hi100_idx
-        lo_ago = 99 - lo100_idx
-        rng_pos = 0.0 if hi100 == lo100 else (last_close - lo100) / (hi100 - lo100) * 100.0
-        sections.extend([
-            "",
-            "=== Range Position ===",
-            f"100-period High: {hi100:,.2f} ({_htf_ago_fmt(hi_ago, timeframe)})",
-            f"100-period Low:  {lo100:,.2f} ({_htf_ago_fmt(lo_ago, timeframe)})",
-            f"Current price within range: {rng_pos:.1f}%",
-        ])
+        df = df_or_err
+        if df.empty or len(df) < slow_n + 1:
+            sections.append(
+                f"[{tf}] insufficient data (need {slow_n + 1} candles, got {len(df)})"
+            )
+            sections.append("")
+            continue
 
-    # 20-period band.
-    if len(df) >= 20:
-        last_20 = df.iloc[-20:]
-        hi20 = float(last_20["high"].max())
-        lo20 = float(last_20["low"].min())
-        width_pct = 0.0 if lo20 == 0 else (hi20 - lo20) / lo20 * 100.0
-        sections.extend([
-            "",
-            "=== 20-period Band ===",
-            f"20-period High: {hi20:,.2f}",
-            f"20-period Low:  {lo20:,.2f}",
-            f"20-period range width: {width_pct:.1f}%",
-        ])
+        df_closed = _closed_bars(df)
+        # Header — last closed candle timestamp
+        last_ts_ms = int(df_closed["timestamp"].iloc[-1])
+        last_dt = datetime.fromtimestamp(last_ts_ms / 1000, tz=timezone.utc)
+        if tf == "1M":
+            header = (
+                f"[{tf}] (last closed candle: open {last_dt.strftime('%Y-%m-%d %H:%M')} UTC; "
+                f"MA periods {fast_n}/{mid_n}/{slow_n} = 1y/2y/5y monthly — "
+                f"adapted for crypto-industry monthly cycle conventions)"
+            )
+        else:
+            header = f"[{tf}] (last closed candle: open {last_dt.strftime('%Y-%m-%d %H:%M')} UTC)"
+        sections.append(header)
 
-    return "\n".join(sections)
+        # MA lines — fast / mid / slow with slope
+        close = df_closed["close"]
+        def _ma_line(n: int) -> str:
+            if len(df_closed) < n + 10:
+                return f"  MA{n}: insufficient data (need {n + 10} candles)"
+            ma_now = float(close.rolling(n).mean().iloc[-1])
+            ma_then = float(close.rolling(n).mean().iloc[-11])
+            slope_pct = (ma_now - ma_then) / ma_then * 100.0 if ma_then > 0 else 0.0
+            dist_pct = (live_price - ma_now) / ma_now * 100.0
+            return (
+                f"  MA{n}: {ma_now:.2f}  (price vs MA: {dist_pct:+.1f}%; "
+                f"MA slope vs 10 bars ago: {slope_pct:+.1f}%)"
+            )
+
+        ma_fast_line = _ma_line(fast_n)
+        ma_mid_line = _ma_line(mid_n)
+        ma_slow_line = _ma_line(slow_n)
+        sections.extend([ma_fast_line, ma_mid_line, ma_slow_line])
+
+        # MA stack
+        try:
+            ma_vals = {
+                fast_n: float(close.rolling(fast_n).mean().iloc[-1]),
+                mid_n: float(close.rolling(mid_n).mean().iloc[-1]),
+                slow_n: float(close.rolling(slow_n).mean().iloc[-1]),
+            }
+            ordered = sorted(ma_vals.items(), key=lambda kv: -kv[1])
+            ops: list[str] = []
+            for (na, va), (nb, vb) in zip(ordered, ordered[1:]):
+                rel_diff = abs(va - vb) / vb if vb > 0 else 0.0
+                ops.append("≈" if rel_diff < 0.001 else ">")
+            stack_str = " ".join(
+                [f"MA{ordered[0][0]}"]
+                + [f"{ops[i]} MA{ordered[i + 1][0]}" for i in range(len(ops))]
+            )
+            sections.append(f"  MA stack: {stack_str}")
+        except Exception:
+            sections.append("  MA stack: insufficient data")
+
+        # 100-period range
+        if len(df_closed) >= 100:
+            last_100 = df_closed.iloc[-100:].reset_index(drop=True)
+            hi_idx = int(last_100["high"].idxmax())
+            lo_idx = int(last_100["low"].idxmin())
+            hi100 = float(last_100["high"].max())
+            lo100 = float(last_100["low"].min())
+            hi_ago = 99 - hi_idx
+            lo_ago = 99 - lo_idx
+            hi_ts = datetime.fromtimestamp(int(last_100["timestamp"].iloc[hi_idx]) / 1000, tz=timezone.utc)
+            lo_ts = datetime.fromtimestamp(int(last_100["timestamp"].iloc[lo_idx]) / 1000, tz=timezone.utc)
+            rng_pos = ((live_price - lo100) / (hi100 - lo100) * 100.0) if hi100 != lo100 else 0.0
+            sections.extend([
+                f"  100-period High: {hi100:.2f}  ({hi_ago} bars ago, candle open {hi_ts.strftime('%Y-%m-%d %H:%M')} UTC)",
+                f"  100-period Low:  {lo100:.2f}  ({lo_ago} bars ago, candle open {lo_ts.strftime('%Y-%m-%d %H:%M')} UTC)",
+                f"  Range pos (within 100-period): {rng_pos:.0f}%  (0%=Low, 100%=High)",
+            ])
+
+        # 20-period band
+        if len(df_closed) >= 20:
+            last_20 = df_closed.iloc[-20:]
+            hi20 = float(last_20["high"].max())
+            lo20 = float(last_20["low"].min())
+            width_pct = (hi20 - lo20) / lo20 * 100.0 if lo20 > 0 else 0.0
+            sections.append(
+                f"  20-period High: {hi20:.2f} / Low: {lo20:.2f} / range width: {width_pct:.1f}% (= (High-Low)/Low)"
+            )
+
+        # Last bar vol regime
+        if len(df_closed) >= 21:
+            vol_now = float(df_closed["volume"].iloc[-1])
+            vol_avg_20 = float(df_closed["volume"].iloc[-20:].mean())
+            ratio = vol_now / vol_avg_20 if vol_avg_20 > 0 else 0.0
+            sections.append(f"  Last bar vol (base): {vol_now:.1f}  ({ratio:.1f}× SMA(20) avg)")
+
+        # ATR regime
+        if len(df_closed) >= 35:  # 14 ATR window + 20 ATR-avg window + 1
+            atr_series = _atr_series(df_closed, period=14)
+            atr_now = float(atr_series.iloc[-1])
+            atr_avg = float(atr_series.rolling(20).mean().iloc[-1])
+            atr_pct = atr_now / live_price * 100.0 if live_price > 0 else 0.0
+            atr_ratio = atr_now / atr_avg if atr_avg > 0 else 0.0
+            sections.append(
+                f"  ATR(14): {atr_now:.2f}  ({atr_pct:.2f}% of price; "
+                f"{atr_ratio:.2f}× vs 20-period ATR(14) avg)"
+            )
+
+        sections.append("")
+
+    return "\n".join(sections).rstrip()
 
 
 def _fmt_signed_dollars(v: float) -> str:

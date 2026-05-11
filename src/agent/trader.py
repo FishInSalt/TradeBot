@@ -273,21 +273,44 @@ def create_trader_agent(
     @tool
     async def get_higher_timeframe_view(
         ctx: RunContext[TradingDeps],
-        timeframe: Literal["4h", "1d", "1w", "1M"],
+        timeframes: list[Literal["4h", "1d", "1w", "1M"]] | None = None,
     ) -> str:
-        """Get long-period structure: MA50/100/200 distances and range position.
+        """Long-term structural view across one or more higher timeframes: ticker (authoritative live price), per-tf MA50/MA100/MA200 with raw value, price-vs-MA percentage, and MA slope (10-bar lookback); MA stack comparison; 100-period high and low with bars-ago and the candle open timestamp; range position within 100-period; 20-period high-low range width; last-bar volume vs 20-period SMA ratio (base volume); ATR(14) raw, percent of price, and ratio vs 20-period ATR average.
 
-        Reports moving averages (MA50/100/200), price position within the recent
-        100-period range, and structural highs/lows over a longer window than
-        your default trading timeframe. No default — explicitly pick the
-        timeframe. Output ~250 tokens.
+        All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). The slope reference and all rolling averages use the closed-candle series.
+
+        MA stack comparison uses ">" / "<" / "≈" with 0.1% tolerance: when |MAa - MAb| / MAb < 0.001, the operator collapses to "≈" (e.g., "MA50 ≈ MA100 < MA200").
+
+        Per-tf MA periods: 4h / 1d / 1w use (50, 100, 200) — standard moving-average periods. 1M uses (12, 24, 60), corresponding to 1-year / 2-year / 5-year monthly cycles, matching crypto-industry monthly chart conventions; the 1M section header marks the period choice explicitly.
 
         Args:
-            timeframe: '4h' bridges LTF and 1d; '1d'/'1w'/'1M' for swing/position context.
+            timeframes: List of CCXT timeframes from {"4h", "1d", "1w", "1M"}. Default ["4h", "1d"]. Each timeframe rendered as a separate section.
+
+        Example call:
+            get_higher_timeframe_view(timeframes=["4h", "1d"])
+        Example output:
+            === Higher Timeframe View (BTC/USDT:USDT @ 14:23:08 UTC) ===
+            Last: 81870.50
+
+            [4h] (last closed candle: open 2026-05-11 08:00 UTC)
+              MA50: 79200.00 (price vs MA: +3.4%; MA slope vs 10 bars ago: +0.8%)
+              ...
+              MA stack: MA50 > MA100 > MA200
+              100-period High: 82800.00 (32 bars ago, candle open 2026-05-06 00:00 UTC)
+              ...
+              Last bar vol (base): 1521.6 (5.0× SMA(20) avg)
+              ATR(14): 1572.30 (1.92% of price; 1.04× vs 20-period ATR(14) avg)
+            ...
+
+        Degradation: per-tf "insufficient data (need N candles)" if OHLCV history is shorter than the longest MA period; per-tf "Error: Temporarily unavailable" if the OHLCV fetch for that tf fails; overall returns header-only error if the ticker fetch fails.
+
+        Related perception tools (factual capability surface, not a calling order):
+            - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
+            - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
         """
         from src.agent.tools_perception import get_higher_timeframe_view as _impl
 
-        return await _impl(ctx.deps, timeframe)
+        return await _impl(ctx.deps, timeframes)
 
     @tool
     async def get_macro_context(ctx: RunContext[TradingDeps]) -> str:
