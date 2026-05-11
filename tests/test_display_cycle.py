@@ -15,7 +15,7 @@ def test_summarize_get_market_data():
         "MA(20): 84000.00 (price vs MA: +0.2%)\n"
         "MA(50): 83500.00 (price vs MA: +0.8%)\n"
         "MACD: 50.00 | Signal: 45.00 | Histogram: 5.00\n"
-        "BB: 85000 / 84000 / 83000 (position: 60% of band width)\n\n"
+        "BB(20,2): Upper 85000.00 | Middle 84000.00 | Lower 83000.00 (position: 60%, 0%=Lower / 100%=Upper)\n\n"
         "=== Market Context ===\n"
         "ATR(14): 101.04 (0.12% of price, 15m candles)\n"
         "Volume: 500.0 (1.10x avg)\n"

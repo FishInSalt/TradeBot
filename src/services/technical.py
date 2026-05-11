@@ -92,10 +92,13 @@ class TechnicalAnalysisService:
         else:
             lines.append(f"MACD: {_fmt(macd)} | Signal: {_fmt(signal)} | Histogram: {_fmt(hist)}")
 
-        # Bollinger Bands — fact-only: position as % of band width inside band;
-        # 'X% above/below upper/lower band' when price breaks out. Anchor inside
-        # the band is band width; anchor outside is the band edge (asymmetric on
-        # purpose — band is the reference frame, see spec §2.3 #2).
+        # Bollinger Bands (F-O2 per spec §6.3): full-word labels, explicit
+        # (20, 2) periods, explicit 0%=Lower / 100%=Upper anchor.
+        # Asymmetric anchor by design (spec §2.3 #2): inside the band, position
+        # is rendered as % of band width (the band is the reference frame);
+        # outside the band, position is rendered as % distance from the
+        # broken band edge (the edge is the reference frame). The frame
+        # changes with the regime, not the formula.
         bb_u = indicators.get("bb_upper")
         bb_m = indicators.get("bb_middle")
         bb_l = indicators.get("bb_lower")
@@ -104,15 +107,19 @@ class TechnicalAnalysisService:
                 pos = "position: N/A"
             elif current_price < bb_l:
                 pct_below = (bb_l - current_price) / bb_l * 100
-                pos = f"{pct_below:.1f}% below lower band"
+                pos = f"position: {pct_below:.1f}% below Lower"
             elif current_price > bb_u:
                 pct_above = (current_price - bb_u) / bb_u * 100
-                pos = f"{pct_above:.1f}% above upper band"
+                pos = f"position: {pct_above:.1f}% above Upper"
             else:
                 pct = (current_price - bb_l) / (bb_u - bb_l) * 100
-                pos = f"position: {pct:.0f}% of band width"
-            lines.append(f"BB: {bb_u:.0f} / {bb_m:.0f} / {bb_l:.0f} ({pos})")
+                pos = f"position: {pct:.0f}%, 0%=Lower / 100%=Upper"
+            lines.append(
+                f"BB(20,2): Upper {bb_u:.2f} | Middle {bb_m:.2f} | Lower {bb_l:.2f} ({pos})"
+            )
         else:
-            lines.append(f"BB: {_fmt(bb_u)} / {_fmt(bb_m)} / {_fmt(bb_l)}")
+            lines.append(
+                f"BB(20,2): Upper {_fmt(bb_u)} | Middle {_fmt(bb_m)} | Lower {_fmt(bb_l)}"
+            )
 
         return "\n".join(lines)
