@@ -10,10 +10,13 @@ not helpers.
 from __future__ import annotations
 import pytest
 import pandas as pd
-from types import SimpleNamespace
 
+# Fixture imports — pytest discovers fixtures by name in the test module's
+# namespace, so importing the fixture functions registers them for tests
+# below that take them as parameters. Tasks 3-5 will import additional
+# fixtures into their own test modules.
 from tests.fixtures.multi_tf_ohlcv import (
-    df_4h_250bars, df_1d_250bars, df_5m_130bars, df_5m_anomaly,
+    df_4h_250bars,
     fake_ticker_81870,
 )
 
