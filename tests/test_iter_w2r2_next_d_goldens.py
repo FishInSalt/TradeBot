@@ -173,3 +173,95 @@ class TestHTFGolden:
         assert "MA24:" in out
         assert "MA60:" in out
         assert "1y/2y/5y monthly" in out
+
+
+class TestGMDGolden:
+    @pytest.mark.asyncio
+    async def test_gmd_default_candle_count_is_30(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """B1: GMD default candle_count is 30 (was 50)."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "last 30" in out
+
+    @pytest.mark.asyncio
+    async def test_gmd_ticker_header_uses_last_and_timestamp(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """N13: Last: replaces Price:; header gets @ T UTC stamp."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "=== Ticker (BTC/USDT:USDT @" in out and "UTC) ===" in out
+        assert "Last: 81870.50" in out
+        assert "Bid: 81870.40" in out
+        assert "Ask: 81870.60" in out
+        assert "Price:" not in out
+        assert "24h base vol:" in out  # was Volume:
+
+    @pytest.mark.asyncio
+    async def test_gmd_market_context_uses_last_bar_vol_and_smaperiod(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """F-O3: Last bar vol: X (Y× SMA(20) avg)."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "Last bar vol:" in out
+        assert "SMA(20) avg)" in out
+        # Old label is gone:
+        assert "Volume:" not in out.split("=== Market Context ===")[1].split("===")[0]
+
+    @pytest.mark.asyncio
+    async def test_gmd_ohlcv_table_has_markers_column(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """B3: Markers column added; closed-only display."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "Markers" in out
+        assert "oldest-first by row" in out
+
+    @pytest.mark.asyncio
+    async def test_gmd_anomaly_markers_fire_on_high_vol_and_range(
+        self, fake_ticker_81870, df_5m_anomaly,
+    ):
+        """B3: vol↑ marker fires when bar volume > 2× SMA(20); range↑ when
+        (high-low) > 2× ATR(14)."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_anomaly})
+        out = await get_market_data(deps)
+        assert "vol↑" in out
+        assert "range↑" in out
+
+    @pytest.mark.asyncio
+    async def test_gmd_period_summary_section(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """B4: Period summary section after OHLCV table; 3 fields."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===" in out
+        assert "Avg vol:" in out
+        assert "Avg range (H-L):" in out
+        assert "Net Δclose:" in out
+
+    @pytest.mark.asyncio
+    async def test_gmd_closed_only_indicator_inputs(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """A4: Indicator inputs must be _closed_bars(df), not full df.
+        Spot-check: with our deterministic fixture, MA20 must equal
+        _closed_bars(df)['close'].rolling(20).mean().iloc[-1]."""
+        from src.agent.tools_perception import get_market_data
+        from src.utils.ohlcv_utils import _closed_bars
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        df_closed = _closed_bars(df_5m_130bars)
+        expected_ma20 = float(df_closed["close"].rolling(20).mean().iloc[-1])
+        # Output renders MA(20) at 2dp; verify presence with the exact rounded value
+        assert f"MA(20): {expected_ma20:.2f}" in out, out

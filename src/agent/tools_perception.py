@@ -51,98 +51,175 @@ async def get_market_data(
     deps: TradingDeps,
     symbol: str | None = None,
     timeframe: str | None = None,
-    candle_count: int = 50,
+    candle_count: int = 30,
 ) -> str:
-    """Get market data: ticker, indicators, market context, and recent candles.
+    """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
 
-    candle_count=20 for quick check or secondary timeframes, 50 for detailed analysis.
-    Default 50. Values above 50 may be capped by exchange API limits.
-    Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
+    All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
+
+    Markers in OHLCV table (upside-only thresholds):
+        "vol↑"   — bar volume > 2× SMA(20) of bar volumes
+        "range↑" — bar range (high - low) > 2× ATR(14)
+        Empty    — neither threshold tripped.
+
+    Time column shows candle open in UTC.
+
+    Args:
+        symbol: Trading symbol. Defaults to session symbol.
+        timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
+        candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
+
+    Example call:
+        get_market_data(timeframe="5m", candle_count=30)
+    Example output:
+        === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
+        Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
+        ...
+        === Recent Candles (5m, last 30, oldest-first by row) ===
+        Time (open UTC)   Open ... Vol     Markers
+        14:20         ...         245.3   vol↑
+        ...
+        === Period summary (last 5 closed candles vs prior 5 closed candles) ===
+        Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
+        Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
+        Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
+
+    Related perception tools (factual capability surface, not a calling order):
+        - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
+        - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
     """
+    import pandas as pd
+    from datetime import datetime, timezone
+    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+
     symbol = symbol or deps.symbol
     timeframe = timeframe or deps.timeframe
     candle_count = max(10, min(candle_count, 80))
 
     ticker = await deps.market_data.get_ticker(symbol)
+    live_price = _live_price(ticker)
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
     fetch_limit = max(candle_count + 50, 100)
     df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=fetch_limit)
-    indicators = deps.technical.compute_indicators(df)
+    df_closed = _closed_bars(df)
+    indicators = deps.technical.compute_indicators(df_closed)
     indicators_text = deps.technical.format_for_llm(
-        indicators, current_price=ticker.last, timeframe=timeframe,
+        indicators, current_price=live_price, timeframe=timeframe,
     )
 
-    # Determine display count
-    available = len(df)
-    if available >= candle_count + 50:
+    available_closed = len(df_closed)
+    if available_closed >= candle_count + 50:
         display_count = candle_count
     else:
-        display_count = max(10, available - 50)
-    display_df = df.tail(display_count)
+        display_count = max(10, available_closed - 50)
+    display_df = df_closed.tail(display_count)
 
     sections: list[str] = []
 
     # === Ticker ===
     sections.append(
-        f"=== Ticker ({symbol}) ===\n"
-        f"Price: {ticker.last:.2f} | Bid: {ticker.bid:.2f} | Ask: {ticker.ask:.2f}\n"
-        f"24h High: {ticker.high:.2f} | Low: {ticker.low:.2f} | Volume: {ticker.base_volume:.2f}"
+        f"=== Ticker ({symbol} @ {fetch_ts} UTC) ===\n"
+        f"Last: {live_price:.2f} | Bid: {ticker.bid:.2f} | Ask: {ticker.ask:.2f}\n"
+        f"24h High: {ticker.high:.2f} | 24h Low: {ticker.low:.2f} | 24h base vol: {ticker.base_volume:.2f}"
     )
 
     # === Technical Indicators ===
-    sections.append(
-        f"=== Technical Indicators ({timeframe}) ===\n{indicators_text}"
-    )
+    sections.append(f"=== Technical Indicators ({timeframe}) ===\n{indicators_text}")
 
     # === Market Context ===
-    ctx_lines = []
+    ctx_lines: list[str] = []
     atr = indicators.get("atr_14")
-    if atr is not None and ticker.last > 0:
-        pct = atr / ticker.last * 100
-        ctx_lines.append(
-            f"ATR(14): {atr:.2f} ({pct:.2f}% of price, {timeframe} candles)"
-        )
+    if atr is not None and live_price > 0:
+        pct = atr / live_price * 100
+        ctx_lines.append(f"ATR(14): {atr:.2f} ({pct:.2f}% of price, {timeframe} candles)")
     else:
         ctx_lines.append("ATR(14): N/A")
 
-    vr = indicators.get("volume_ratio")
-    if vr is not None:
-        raw_vol = df["volume"].iloc[-2] if len(df) >= 2 else df["volume"].iloc[-1]
-        ctx_lines.append(f"Volume: {raw_vol:.1f} ({vr:.2f}x avg)")
+    # F-O3: Last bar vol with SMA(20) period explicit.
+    # Use the same "last 20 closed bars including the latest" window as HTF
+    # (spec §5.5) and as baseline compute_indicators.volume_ratio
+    # (services/technical.py:36-41) — keeps the SMA(20) computation
+    # algorithm-identical across GMD and HTF so the same market state
+    # renders the same ratio in both tools.
+    if len(df_closed) >= 20:
+        vol_now = float(df_closed["volume"].iloc[-1])
+        vol_avg = float(df_closed["volume"].iloc[-20:].mean())
+        ratio = vol_now / vol_avg if vol_avg > 0 else 0.0
+        ctx_lines.append(f"Last bar vol: {vol_now:.1f} ({ratio:.2f}× SMA(20) avg)")
     else:
-        ctx_lines.append("Volume: N/A")
+        ctx_lines.append("Last bar vol: N/A")
 
     if not display_df.empty:
-        candle_high = display_df["high"].max()
-        candle_low = display_df["low"].min()
-        ctx_lines.append(f"{display_count}-candle Range: {candle_low:.0f} — {candle_high:.0f}")
+        ctx_lines.append(
+            f"{display_count}-candle High-Low: {display_df['low'].min():.0f} — {display_df['high'].max():.0f}"
+        )
     else:
         ctx_lines.append("Range: N/A")
     sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
 
-    # === Recent Candles ===
-    from datetime import datetime, timezone
-    tf_short = timeframe.lower()
-    candle_lines = [f"{'Time':<14} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10} {'Vol':>10}"]
-    for _, row in display_df.iterrows():
-        ts = row["timestamp"]
-        if isinstance(ts, (int, float)):
-            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+    # === Recent Candles (OHLCV with markers) ===
+    vol_sma = df_closed["volume"].rolling(20).mean()
+    atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None
+    candle_lines: list[str] = [
+        f"{'Time (open UTC)':<16} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10} {'Vol':>10}  Markers"
+    ]
+    for idx in display_df.index:
+        row = df_closed.loc[idx]
+        ts_val = row["timestamp"]
+        if isinstance(ts_val, (int, float)):
+            dt = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc)
         else:
-            dt = ts
+            dt = ts_val
+        tf_short = timeframe.lower()
         if tf_short in ("1m", "5m", "15m"):
             time_str = dt.strftime("%H:%M")
         elif tf_short in ("1h", "4h"):
             time_str = dt.strftime("%m-%d %H:%M")
         else:
             time_str = dt.strftime("%Y-%m-%d")
+
+        markers: list[str] = []
+        vol_sma_at = vol_sma.loc[idx] if idx in vol_sma.index else None
+        if vol_sma_at is not None and not pd.isna(vol_sma_at) and float(vol_sma_at) > 0:
+            if float(row["volume"]) > 2 * float(vol_sma_at):
+                markers.append("vol↑")
+        atr_at = None
+        if atr_series is not None and idx in atr_series.index:
+            atr_at = atr_series.loc[idx]
+        if atr_at is not None and not pd.isna(atr_at) and float(atr_at) > 0:
+            if (float(row["high"]) - float(row["low"])) > 2 * float(atr_at):
+                markers.append("range↑")
+        marker_str = " ".join(markers)
+
         candle_lines.append(
-            f"{time_str:<14} {row['open']:>10.2f} {row['high']:>10.2f} "
-            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}"
+            f"{time_str:<16} {row['open']:>10.2f} {row['high']:>10.2f} "
+            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  {marker_str}".rstrip()
         )
     sections.append(
-        f"=== Recent Candles ({timeframe}, last {display_count}) ===\n"
+        f"=== Recent Candles ({timeframe}, last {display_count}, oldest-first by row) ===\n"
         + "\n".join(candle_lines)
     )
+
+    # === Period summary ===
+    if len(df_closed) >= 10:
+        last_5 = df_closed.iloc[-5:]
+        prior_5 = df_closed.iloc[-10:-5]
+        avg_vol_last = float(last_5["volume"].mean())
+        avg_vol_prior = float(prior_5["volume"].mean())
+        vol_ratio = avg_vol_last / avg_vol_prior if avg_vol_prior > 0 else 0.0
+        avg_rng_last = float((last_5["high"] - last_5["low"]).mean())
+        avg_rng_prior = float((prior_5["high"] - prior_5["low"]).mean())
+        rng_ratio = avg_rng_last / avg_rng_prior if avg_rng_prior > 0 else 0.0
+        net_delta_last = float(df_closed["close"].iloc[-1] - df_closed["close"].iloc[-5])
+        net_delta_prior = float(df_closed["close"].iloc[-6] - df_closed["close"].iloc[-10])
+        summary = (
+            "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===\n"
+            f"Avg vol:            last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
+            f"Avg range (H-L):    last 5 {avg_rng_last:.1f} / prior 5 {avg_rng_prior:.1f} ({rng_ratio:.2f}×)\n"
+            f"Net Δclose:         last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
+        )
+        sections.append(summary)
 
     return "\n\n".join(sections)
 

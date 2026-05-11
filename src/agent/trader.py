@@ -87,22 +87,42 @@ def create_trader_agent(
         ctx: RunContext[TradingDeps],
         symbol: str | None = None,
         timeframe: str | None = None,
-        candle_count: int = 50,
+        candle_count: int = 30,
     ) -> str:
-        """Get market data: ticker, technical indicators, market context, and recent candles.
+        """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
 
-        Use multiple timeframes to build conviction before acting (e.g., "1h" for
-        the bigger picture, "5m" for entry timing). Pass candle_count=20 for
-        secondary timeframes to save tokens.
+        All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
 
-        Total output ~1000-1200 tokens (K-line table ~750-800 + indicators + context).
+        Markers in OHLCV table (upside-only thresholds):
+            "vol↑"   — bar volume > 2× SMA(20) of bar volumes
+            "range↑" — bar range (high - low) > 2× ATR(14)
+            Empty    — neither threshold tripped.
+
+        Time column shows candle open in UTC.
 
         Args:
-            symbol: trading symbol; None defaults to session symbol.
-            timeframe: candle timeframe (e.g., '5m', '1h', '4h', '1d'); None defaults to session timeframe.
-            candle_count: number of candles to fetch (default 50). Use 20 for quick checks
-                or secondary timeframes; 50 for detailed analysis. Values above 50 may be
-                capped by exchange API limits.
+            symbol: Trading symbol. Defaults to session symbol.
+            timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
+            candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
+
+        Example call:
+            get_market_data(timeframe="5m", candle_count=30)
+        Example output:
+            === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
+            Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
+            ...
+            === Recent Candles (5m, last 30, oldest-first by row) ===
+            Time (open UTC)   Open ... Vol     Markers
+            14:20         ...         245.3   vol↑
+            ...
+            === Period summary (last 5 closed candles vs prior 5 closed candles) ===
+            Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
+            Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
+            Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
+
+        Related perception tools (factual capability surface, not a calling order):
+            - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
+            - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
         """
         from src.agent.tools_perception import get_market_data as _impl
 
