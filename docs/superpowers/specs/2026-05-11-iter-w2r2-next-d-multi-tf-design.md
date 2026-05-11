@@ -80,7 +80,7 @@ Cycle entry → MTS (regime + alignment overview, single call)
 
 ### 2.2 Signal authority matrix
 
-Scope notation in matrix: "MTS tfs" = MTS default `["5m", "1h", "4h", "1d"]`; "HTF tfs" = HTF default `["4h", "1d"]` (and optionally `1w`/`1M`). Some signals are computed in both MTS and HTF for shared timeframes (4h, 1d) — see §2.2.1 for the intentionality argument and the single-compute-path guarantee that prevents value drift between the two views.
+Scope notation in matrix: "MTS tfs" = MTS default `["5m", "1h", "4h", "1d"]`; "HTF tfs" = HTF default `["4h", "1d"]` (and optionally `1w`/`1M`). Some signals are computed in both MTS and HTF for shared timeframes (4h, 1d) — see §2.2.1 for the intentionality argument and the algorithm-lock invariant + end-to-end drift-guard verification that together prevent value drift between the two views.
 
 | Signal | MTS | GMD | HTF |
 |---|---|---|---|
@@ -100,7 +100,7 @@ Scope notation in matrix: "MTS tfs" = MTS default `["5m", "1h", "4h", "1d"]`; "H
 | 20-period band (HTF tfs) | — | — | Authoritative |
 | Last bar volume + 20-bar SMA ratio (HTF tfs) | — | — | Authoritative |
 
-### 2.2.1 Intentional signal overlap and the single-compute-path guarantee
+### 2.2.1 Intentional signal overlap and the algorithm-lock invariant
 
 For shared timeframes (specifically 4h and 1d when MTS default and HTF default intersect), the following signals appear in **both** MTS and HTF outputs:
 
@@ -108,18 +108,22 @@ For shared timeframes (specifically 4h and 1d when MTS default and HTF default i
 - **MA200 raw value** (Structure column in MTS for 1h/4h/1d; third MA line in HTF for 4h/1d/1w; not in HTF 1M which uses MA60 instead per §5.4). Overlap exists only at 4h/1d.
 - **ATR(14) percent of price + ratio vs 20-period ATR average** (MTS for all of `["5m","1h","4h","1d"]`; HTF for `["4h","1d","1w","1M"]`). Overlap exists only at 4h/1d.
 
-Note: 1h is **MTS-only** (HTF intentionally excludes 1h per §5.6); 1w and 1M (and the MA100 row for HTF tfs) are **HTF-only** in their authoritative form. The "same-fetch-bit-equal" guarantee below applies strictly to the 4h/1d shared signals.
+Note: 1h is **MTS-only** (HTF intentionally excludes 1h per §5.6); 1w and 1M (and the MA100 row for HTF tfs) are **HTF-only** in their authoritative form. The invariant below applies strictly to the 4h/1d shared signals.
 
 This overlap is **intentional**, not a violation of "signal uniqueness" (principle 3 in `docs/superpowers/principles/tool-design-principles.md`). Each tool surfaces these signals in service of a different agent mental flow:
 
 - **MTS** surfaces them inline in a per-tf row layout, optimized for cross-tf alignment scanning at cycle entry — agent gets enough fact (raw MA + comparison + ATR ratio) to decide whether the regime warrants drilling deeper.
 - **HTF** surfaces them in a tf-section layout with adjacent long-term signals (MA100, slope, MA stack, 100-period range), optimized for structural depth on demand.
 
-To prevent value drift between the two views, both tools compute these signals through a **shared per-tf helper** (see §6.4). The helper takes `(tf, df_closed, ticker, ma_periods)` and returns a structured pack; MTS and HTF each render a subset/full-set of fields.
+To prevent value drift between the two views, both tools compute these signals through **the same algorithm primitives** (see §6.4):
 
-**Scope of the guarantee**: the shared helper guarantees **formula and code-path equality** — given identical `df_closed` and `ticker` inputs, MTS-displayed and HTF-displayed MA50 / MA200 / ATR ratio are bit-for-bit equal. The drift-guard test `test_mts_htf_overlap_values_match` (§7.1) enforces this against a fixture OHLCV.
+- **SMA formula**: every shared MA is computed as `df.iloc[:-1]["close"].rolling(n).mean().iloc[-1]` (closed-bar series via `_closed_bars`, identical pandas call). Pandas `rolling(n).mean()` is deterministic, so identical inputs produce identical outputs by construction.
+- **ATR algorithm lock**: every shared ATR(14) and its 20-period rolling-mean ratio is computed via `_atr_series(df_closed, period=14)`, which calls `pandas_ta.atr(..., mamode="rma")` explicitly — locking Wilder's smoothing against future pandas_ta default changes (see §6.4.2).
+- **Live price source**: every `Last:` field reads through `_live_price(ticker)` so both tools sample `ticker.last` rather than mixing live and closed-bar sources.
 
-**Scope of what is NOT guaranteed**: MTS and HTF are independent pydantic-ai tool invocations with independent OHLCV fetches; the inputs may differ by milliseconds. Divergence sources are reduced to "fetch-time OHLCV delta only" — at runtime, the only condition that can produce non-equal values is a fetch pair straddling a candle close boundary, where one tool's `df_closed` includes a bar the other's does not (one MA-window contribution). See §9 row "MTS / HTF fetches straddling a candle close boundary".
+**Scope of the invariant**: given the same `df_closed` and `ticker` inputs, MTS-rendered and HTF-rendered MA50 / MA200 / ATR-ratio values are equal because the underlying primitives are deterministic and algorithm-locked. The invariant is **verified end-to-end** by the drift-guard test `test_mts_htf_overlap_values_match` (§7.1): the test invokes both `get_multi_timeframe_snapshot` and `get_higher_timeframe_view` against the same fixture OHLCV at 4h and 1d, extracts the rendered MA50 / MA200 / ATR-ratio numbers via regex, and asserts equality. End-to-end verification catches both compute drift (a primitive call deviates) and render-side bugs (e.g., a typo that surfaces MA100 in the MA50 slot).
+
+**Scope of what is NOT guaranteed**: MTS and HTF are independent pydantic-ai tool invocations with independent OHLCV fetches; in production runs the inputs may differ by milliseconds. Divergence sources are reduced to "fetch-time OHLCV delta only" — at runtime, the only condition that can produce non-equal rendered values is a fetch pair straddling a candle close boundary, where one tool's `df_closed` includes a bar the other's does not (one MA-window contribution). See §9 row "MTS / HTF fetches straddling a candle close boundary".
 
 ### 2.3 Scope envelope
 
@@ -399,7 +403,7 @@ Last: 81870.50
 
 MTS continues to use its existing `MULTI_TF_STRUCTURE_MAS` table for 1w/1M (`(20, 50)` with `(short-structure)` marker — degraded due to weekly/monthly history shortage in the MTS 20-bar window context). HTF for the same 1w/1M uses the periods defined in §5.4 below (`(50, 100, 200)` for 1w, `(12, 24, 60)` for 1M). If a user passes 1w or 1M to MTS, they will see MA20/MA50; if they pass 1w or 1M to HTF, they will see MA50/100/200 or MA12/24/60.
 
-This is **intentional**: the two tools serve different mental flows (alignment scan vs long-term structural depth) and the MA periods are tuned to each flow. The §2.2.1 single-compute-path guarantee deliberately does **not** extend to 1w/1M — those signals are not "the same fact rendered twice" but two different period choices. Agent docstrings (§3.3 for MTS, §5.7 for HTF) describe the period choices per tool so the agent can interpret the differing values as design, not bug.
+This is **intentional**: the two tools serve different mental flows (alignment scan vs long-term structural depth) and the MA periods are tuned to each flow. The §2.2.1 algorithm-lock invariant deliberately does **not** extend to 1w/1M — those signals are not "the same fact rendered twice" but two different period choices. Agent docstrings (§3.3 for MTS, §5.7 for HTF) describe the period choices per tool so the agent can interpret the differing values as design, not bug.
 
 ### 5.4 Per-TF MA period table
 
@@ -610,7 +614,7 @@ After the rewrite, the GMD / HTF / MTS wrapper docstrings should match §3.3 / �
 
 ### 6.4 Data-source unification
 
-All four helpers (`_live_price`, `_closed_bars`, `_atr_series`, `_compute_per_tf_pack`) land in a **new module `src/utils/ohlcv_utils.py`** — chosen over inlining them into `tools_perception.py` because (a) `_compute_per_tf_pack` is cross-tool (consumed by MTS and HTF); (b) `_closed_bars` may be useful to `get_position` and other future consumers; (c) a dedicated utils module makes the helper API discoverable and unit-testable without importing the full `tools_perception` graph. Import path for tests and impl: `from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series, _compute_per_tf_pack`.
+Three helpers (`_live_price`, `_closed_bars`, `_atr_series`) land in a **new module `src/utils/ohlcv_utils.py`** — chosen over inlining them into `tools_perception.py` because (a) all three are cross-tool (consumed by MTS, GMD, HTF); (b) `_closed_bars` and `_live_price` may be useful to `get_position` and other future consumers; (c) a dedicated utils module makes the helper API discoverable and unit-testable without importing the full `tools_perception` graph. Each of the three is a thin wrapper that carries one design decision (algorithm lock / closed-only strip / canonical live-price source); together they constitute the algorithm-lock primitives the §2.2.1 invariant rests on. No per-tf signal-pack dataclass is introduced — MA50 / MA200 are 1-line `df.iloc[:-1]["close"].rolling(n).mean().iloc[-1]` calls and inlining them in each tool keeps the tool bodies linear and self-contained. Import path for tests and impl: `from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series`.
 
 ```python
 def _live_price(ticker) -> float:
@@ -640,56 +644,12 @@ def _closed_bars(df: pd.DataFrame) -> pd.DataFrame:
     return df.iloc[:-1]
 ```
 
-Both helpers are used by all three tools (MTS, GMD, HTF) for any field that should be live-state (use `_live_price`) or closed-bar derived (use `_closed_bars`).
+All three helpers are used by MTS / GMD / HTF for any field that should be live-state (`_live_price`), closed-bar derived (`_closed_bars`), or ATR-series derived (`_atr_series`). No higher-level per-tf signal-pack dataclass is introduced — MA50 / MA200 are 1-line `df.iloc[:-1]["close"].rolling(n).mean().iloc[-1]` calls that do not warrant a wrapper, and a pack would force one tool to carry fields the other does not read. The §2.2.1 invariant is delivered by:
 
-A third helper enforces the §2.2.1 single-compute-path guarantee for signals that MTS and HTF both surface at shared timeframes (4h, 1d):
+1. **Algorithm primitives are shared**: every overlap signal at 4h/1d uses `_closed_bars`, `_live_price`, and `_atr_series` (the three helpers above) and the same pandas SMA call. Pandas determinism plus the explicit `mamode="rma"` lock makes the computation step bit-equal on identical inputs by construction.
+2. **End-to-end drift-guard verification**: `test_mts_htf_overlap_values_match` (§7.1) invokes both `get_multi_timeframe_snapshot` and `get_higher_timeframe_view` on the same fixture OHLCV at 4h and 1d, regex-extracts the MA50 / MA200 / ATR-ratio numbers from each rendered output, and asserts equality. This guards both compute drift and render-side bugs.
 
-```python
-@dataclass(frozen=True)
-class PerTFPack:
-    """Per-tf signal pack shared by MTS and HTF rendering.
-
-    MTS renders a subset of fields in its inline per-tf row; HTF renders
-    the full set in its tf-section layout. Both consume the same instance
-    so values are identical to the floating-point bit at the same fetch
-    moment, satisfying the §2.2.1 single-compute-path guarantee.
-    """
-    ma_primary: float          # MTS: vs which Mom% is computed
-    ma_primary_n: int          # period of ma_primary
-    ma_fast: float             # MTS struct fast / HTF MA50
-    ma_fast_n: int
-    ma_slow: float             # MTS struct slow / HTF MA200
-    ma_slow_n: int
-    ma_mid: float | None       # HTF MA100 (None for MTS-only tfs like 5m)
-    ma_mid_n: int | None
-    atr_14: float              # raw ATR(14)
-    atr_14_pct: float          # ATR(14) / live_price × 100%
-    atr_14_ratio_20p: float    # ATR(14) / 20-period ATR(14) avg
-    last_closed_ts_ms: int     # df_closed['timestamp'].iloc[-1]
-    last_closed_close: float   # df_closed['close'].iloc[-1]
-    # ... additional fields as needed (range pos windows etc.)
-
-
-def _compute_per_tf_pack(
-    tf: str,
-    df_closed: pd.DataFrame,
-    live_price: float,
-    ma_periods: tuple[int, ...],   # MTS passes (primary, fast, slow); HTF passes (50, 100, 200) or G5
-) -> PerTFPack:
-    """Compute the per-tf signal pack used by both MTS and HTF.
-
-    Inputs are closed-only (df.iloc[:-1] from _closed_bars) so values are
-    temporally stable within a candle window (per A4 empirical). The
-    function is the *single* place where MA / ATR / ratio are computed
-    on a per-tf basis; both tools must call this rather than re-implementing.
-
-    See §2.2.1 for the overlap argument and the drift-guard test that
-    enforces value-equality at shared timeframes.
-    """
-    ...
-```
-
-Helper API contract is finalized in commit 2 (per §8 commit plan); commits 3-5 consume it without redefining.
+Helper API contract is finalized in commit 2 (per §8 commit plan); commits 3-5 consume the three helpers without redefining.
 
 #### 6.4.1 closed-only strategy: where is `df.iloc[:-1]` applied?
 
@@ -705,10 +665,10 @@ Helper API contract is finalized in commit 2 (per §8 commit plan); commits 3-5 
 
 §5.5 specifies `ATR(14) vs 20-period ATR(14) avg ratio`. Computing this requires the ATR(14) **series**, not just the latest scalar. Current `compute_indicators` returns the latest ATR as `indicators["atr_14"]: float`. Two options:
 
-- (a) **Compute ATR series directly inside `_compute_per_tf_pack`**: re-implement ATR(14) inside the per-tf helper (or call a new `_atr_series(df_closed, period=14) -> pd.Series` helper). This is the chosen path — keeps `compute_indicators` interface unchanged, avoids ripple to other consumers.
+- (a) **Add a dedicated `_atr_series(df_closed, period=14) -> pd.Series` helper** in `src/utils/ohlcv_utils.py` that both MTS and HTF call when they need the rolling-20 ratio. This is the chosen path — keeps `compute_indicators` interface unchanged, avoids ripple to other consumers, and the helper carries the `mamode="rma"` algorithm lock (load-bearing per the constraint below).
 - (b) Extend `compute_indicators` to optionally return series — broader scope, rejected.
 
-Implementation note for commit 2: add `_atr_series(df_closed, period=14) -> pd.Series` next to `_live_price` / `_closed_bars` / `_compute_per_tf_pack`. Internally used by `_compute_per_tf_pack` for ATR ratio; not part of the public helper surface for other callers.
+Implementation note for commit 2: `_atr_series(df_closed, period=14) -> pd.Series` lives next to `_live_price` / `_closed_bars`. MTS and HTF each call it directly when computing the ATR-ratio; the helper is public to other future callers needing the same algorithm-locked series.
 
 **Algorithm-consistency constraint**: `_atr_series` MUST use the same true-range and smoothing algorithm as `services/technical.py compute_indicators.atr_14`. Empirical anchor (verified at sim-#8 baseline, 2026-05-11): `services/technical.py:19` calls `pandas_ta.atr(...)`; `pandas_ta` 0.x default `mamode` is `"rma"` (i.e., Wilder's smoothing of TR). `_atr_series` must explicitly use `pandas_ta.atr(..., mamode="rma")` (or equivalent) to lock in the same algorithm — relying on `pandas_ta` defaults is fragile against future library upgrades. A drift-guard test (`test_atr_series_last_value_equals_compute_indicators_atr_14`, added to §7.1) enforces that `_atr_series(df_closed, 14).iloc[-1] == compute_indicators(df_closed)["atr_14"]` bit-for-bit. Otherwise HTF's `ATR(14): X` (latest of series) and GMD's `ATR(14): X` (scalar from compute_indicators) would silently diverge.
 
@@ -731,7 +691,7 @@ Decimal precision: 2 decimal places for prices and MA values (matching ccxt tick
 | Category | Criteria |
 |---|---|
 | Unit tests | All three tools' output format tests pass; format lint with four sub-checks (no evaluation words / explicit N period / explicit anchor / explicit unit) |
-| Drift-guard tests | (1) `test_indicator_temporal_stability_within_candle` — closed-only indicators stable, full-df indicators drift; reproduces verify_v2 A4 numerically. (2) `test_live_price_field_equals_ticker_last` — `Last:` header / MA distance / Range pos / BB position fields all derive from `ticker.last`. (3) `test_three_tools_use_same_ticker_last_in_Last_label` — MTS / GMD / HTF all surface ticker.last in their `Last:` line. (4) `test_no_in_progress_candle_in_indicator_inputs` — supplying df with an in-progress bar matches df.iloc[:-1] in all indicator outputs. (5) `test_mts_htf_overlap_values_match` (§2.2.1 invariant) — given identical fixture OHLCV at 4h and 1d, MTS [4h] MA50 / MA200 / ATR ratio equal HTF [4h] MA50 / MA200 / ATR ratio bit-for-bit; same for [1d]. (6) `test_atr_series_last_value_equals_compute_indicators_atr_14` (§6.4.2 invariant) — given the same `df_closed`, `_atr_series(df_closed, 14).iloc[-1]` equals `compute_indicators(df_closed)["atr_14"]` bit-for-bit; ensures HTF's series-based ATR display and GMD's scalar-based ATR display never diverge silently. |
+| Drift-guard tests | (1) `test_indicator_temporal_stability_within_candle` — closed-only indicators stable, full-df indicators drift; reproduces verify_v2 A4 numerically. (2) `test_live_price_field_equals_ticker_last` — `Last:` header / MA distance / Range pos / BB position fields all derive from `ticker.last`. (3) `test_three_tools_use_same_ticker_last_in_Last_label` — MTS / GMD / HTF all surface ticker.last in their `Last:` line. (4) `test_no_in_progress_candle_in_indicator_inputs` — supplying df with an in-progress bar matches df.iloc[:-1] in all indicator outputs. (5) `test_mts_htf_overlap_values_match` (§2.2.1 invariant) — **end-to-end**: the test invokes `get_multi_timeframe_snapshot` and `get_higher_timeframe_view` against the same fixture OHLCV at 4h and 1d through the same mocked `MarketDataService`; the rendered MA50 / MA200 / ATR-ratio numbers are regex-extracted from each tool's output and asserted equal. This catches both compute drift (one side diverges from the shared SMA / `_atr_series` primitives) and render-side bugs (a wrong attribute is surfaced in the MA50 slot). (6) `test_atr_series_last_value_equals_compute_indicators_atr_14` (§6.4.2 invariant) — given the same `df_closed`, `_atr_series(df_closed, 14).iloc[-1]` equals `compute_indicators(df_closed)["atr_14"]` bit-for-bit; ensures HTF's series-based ATR display and GMD's scalar-based ATR display never diverge silently. |
 | Golden mockup tests | Each of the three tools has a golden test using a fixture OHLCV data; output diff against the mockups in §3.1 / §4.1 / §5.1 |
 | Cross-tool consistency tests | `Last:` label / ticker timestamp format / candle timestamp format are identical across tools |
 | Per-tf degradation | HTF list with one tf having insufficient data renders `MAn: insufficient data` for that tf only; other tfs unaffected |
@@ -784,7 +744,7 @@ Single PR on branch `iter-w2r2-next-d/multi-tf` with eight ordered commits:
 
 ```
 commit 1: docs(iter-w2r2-next-d): spec + plan + empirical-foundations scripts
-commit 2: refactor(technical+utils): F-O2 BB labels + helpers in src/utils/ohlcv_utils.py (_live_price / _closed_bars / _atr_series / _compute_per_tf_pack — API frozen here, §6.4)
+commit 2: refactor(technical+utils): F-O2 BB labels + helpers in src/utils/ohlcv_utils.py (_live_price / _closed_bars / _atr_series — three primitives frozen here, §6.4)
 commit 3: feat(htf): list-form signature + N6 G1-G5 + 13 fact-stamping changes + "Related perception tools" docstring tail + test migration (per §7.1.1) — both trader.py @tool wrapper signature/docstring and tools_perception.py impl
 commit 4: feat(gmd): default 30 + B3/B4 markers + K-line closed-only + F-O3 + N13 Last + "Related perception tools" docstring tail + tests — both trader.py @tool wrapper signature/docstring and tools_perception.py impl
 commit 5: feat(mts): primary alignment + MA values column + Last 3 closes + "Related perception tools" docstring tail + tests — both trader.py @tool wrapper docstring and tools_perception.py impl
@@ -819,7 +779,7 @@ The scope is intentionally Maximal — three coupled tool refactors, wrapper-doc
 | GMD K-line table no longer shows in-progress row (visible UI change) | L | Header explicitly states `oldest-first by row, closed candles only`; agents needing in-progress price use `Last:` ticker / MTS |
 | 1M G5 (12, 24, 60) has zero sim coverage | L | Unit tests cover (12, 24, 60) MA computation correctness; W3+ surfaces real 1M usage |
 | Drift-guard tests differ from SimExchange behavior (Sim does not generate in-progress candles) | L | Tests use mock OHLCV fixtures with hand-crafted in-progress rows; verify_v2 script covers OKX live |
-| MTS / HTF fetches straddling a candle close boundary cause one MA-window divergence (§2.2.1 single-compute-path guarantee holds for identical inputs only) | L | Acknowledged by design; agent narrative parsing tolerates ms-level drift; `test_mts_htf_overlap_values_match` uses a fixed mock to assert the helper-level invariant rather than asserting live cross-tool equality |
+| MTS / HTF fetches straddling a candle close boundary cause one MA-window divergence (§2.2.1 algorithm-lock invariant holds for identical inputs only; production fetches are independent) | L | Acknowledged by design; agent narrative parsing tolerates ms-level drift; `test_mts_htf_overlap_values_match` mocks the OHLCV layer so MTS and HTF receive identical inputs and rendered MA50 / MA200 / ATR-ratio are asserted equal end-to-end. The test guards algorithm + render parity; it does not, and cannot, assert live cross-tool equality |
 
 ---
 
