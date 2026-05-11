@@ -987,7 +987,8 @@ async def get_higher_timeframe_view(
             }
             ordered = sorted(ma_vals.items(), key=lambda kv: -kv[1])
             ops: list[str] = []
-            for (na, va), (nb, vb) in zip(ordered, ordered[1:]):
+            for (_, va), (_, vb) in zip(ordered, ordered[1:]):
+                # 0.1% tolerance per spec §5.3: MAs within 0.1% collapse to "≈".
                 rel_diff = abs(va - vb) / vb if vb > 0 else 0.0
                 ops.append("≈" if rel_diff < 0.001 else ">")
             stack_str = " ".join(
