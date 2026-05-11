@@ -425,3 +425,44 @@ class TestPivotsLabel:
         # No thousand separator on the header price
         import re
         assert not re.search(r"Last: \d{1,3},\d{3}", out)
+
+
+class TestPositionLiquidationDedup:
+    @pytest.mark.asyncio
+    async def test_position_section_no_liquidation_line(self):
+        """F-P2: Liquidation: line removed from Position section; the
+        richer Risk Exposure section's Liquidation: line is kept."""
+        from src.agent.tools_perception import get_position
+        from unittest.mock import AsyncMock, MagicMock
+        from types import SimpleNamespace
+
+        p = SimpleNamespace(
+            side="long", contracts=0.01, entry_price=80000.0,
+            leverage=10, liquidation_price=72000.0,
+            unrealized_pnl=18.7, created_at=None,
+        )
+        deps = MagicMock()
+        deps.symbol = "BTC/USDT:USDT"
+        deps.timeframe = "5m"
+        deps.initial_balance = 10000.0
+        deps.exchange = MagicMock()
+        deps.exchange.fetch_positions = AsyncMock(return_value=[p])
+        deps.exchange.fetch_balance = AsyncMock(
+            return_value=SimpleNamespace(total_usdt=10000.0, used_usdt=80.0)
+        )
+        deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+        deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+        deps.market_data = MagicMock()
+        deps.market_data.get_ticker = AsyncMock(
+            return_value=SimpleNamespace(last=81870.50, bid=81870.4, ask=81870.6,
+                                         high=82000, low=80000, base_volume=10.0)
+        )
+        deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=None)
+
+        out = await get_position(deps)
+        position_section = out.split("=== PnL ===")[0]
+        # Position section MUST NOT contain Liquidation:
+        assert "Liquidation:" not in position_section, position_section
+        # Risk Exposure section MUST still have it (full form):
+        assert "Liquidation: 72000" in out
+        assert "ATR(1h)" in out or "% away" in out

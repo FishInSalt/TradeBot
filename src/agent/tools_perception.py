@@ -276,8 +276,8 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         pos_lines = [f"=== Position ({symbol}) ===",
                      f"Side: {p.side.capitalize()} | Contracts: {p.contracts} | Entry: {p.entry_price:,.2f}",
                      f"Leverage: {p.leverage}x"]
-        if p.liquidation_price is not None:
-            pos_lines.append(f"Liquidation: {p.liquidation_price:,.2f}")
+        # F-P2: Liquidation lives in Risk Exposure section (richer form with
+        # `(P% away = Q× ATR(1h))`); deduplicated from Position section.
         pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT")
 
         pnl_lines = ["=== PnL ==="]
