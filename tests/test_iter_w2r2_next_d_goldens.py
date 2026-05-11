@@ -384,3 +384,44 @@ class TestMTSGolden:
         m = re.search(r"Range pos (\-?\d+)%", out)
         assert m is not None
         assert int(m.group(1)) > 100, out
+
+
+class TestPivotsLabel:
+    @pytest.mark.asyncio
+    async def test_pivots_header_uses_last_no_thousand_separator(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """N13 expansion: get_price_pivots header label `Last: V`
+        (no thousand-separator). Section dividers `Levels Above/Below
+        Current Price` are retained as prose."""
+        from src.agent.tools_perception import get_price_pivots
+        from unittest.mock import AsyncMock, MagicMock
+        deps = MagicMock()
+        deps.symbol = "BTC/USDT:USDT"
+        deps.timeframe = "5m"
+        deps.market_data = MagicMock()
+        deps.market_data.get_ticker = AsyncMock(return_value=fake_ticker_81870)
+
+        # Distinguish per-tf returns: feed the 5m main fixture only on 5m;
+        # return an empty DataFrame for daily/weekly/monthly aux fetches so
+        # _get_prior_period_hl degrades gracefully without conflating 5m
+        # data into longer-tf computations. The test asserts only the
+        # header line, but a tf-aware mock keeps the rest of the output
+        # mathematically sensible too.
+        import pandas as pd
+
+        async def _ohlcv(sym, tf, limit):
+            if tf == "5m":
+                return df_5m_130bars
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv)
+        out = await get_price_pivots(deps)
+        assert "Last: 81870.50" in out
+        assert "Current Price:" not in out
+        # Section dividers retained
+        assert "=== Levels Above Current Price ===" in out
+        assert "=== Levels Below Current Price ===" in out
+        # No thousand separator on the header price
+        import re
+        assert not re.search(r"Last: \d{1,3},\d{3}", out)

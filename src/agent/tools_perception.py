@@ -1961,7 +1961,7 @@ async def get_price_pivots(deps: TradingDeps) -> str:
 
     sections: list[str] = [
         f"=== Price Pivots ({symbol}, main TF: {main_tf}) ===",
-        f"Current Price: {current_price:,.2f}",
+        f"Last: {current_price:.2f}",
         "",
         "=== Levels Above Current Price ===",
         *(above_rows or ["(none)"]),
