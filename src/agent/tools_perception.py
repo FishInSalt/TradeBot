@@ -137,11 +137,12 @@ async def get_market_data(
         ctx_lines.append("ATR(14): N/A")
 
     # F-O3: Last bar vol with SMA(20) period explicit.
-    # Use the same "last 20 closed bars including the latest" window as HTF
-    # (spec §5.5) and as baseline compute_indicators.volume_ratio
-    # (services/technical.py:36-41) — keeps the SMA(20) computation
-    # algorithm-identical across GMD and HTF so the same market state
-    # renders the same ratio in both tools.
+    # Window: "last 20 closed bars including the latest" — identical to HTF
+    # (spec §5.5), so the same market state renders the same ratio in both
+    # tools. Note: the bar in the numerator (df_closed.iloc[-1]) is the most
+    # recent closed bar, which differs from TechnicalAnalysisService
+    # compute_indicators.volume_ratio (uses iloc[-2]); only the SMA window
+    # matches across tools, not the numerator-bar selection.
     if len(df_closed) >= 20:
         vol_now = float(df_closed["volume"].iloc[-1])
         vol_avg = float(df_closed["volume"].iloc[-20:].mean())

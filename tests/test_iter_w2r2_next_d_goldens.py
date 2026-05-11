@@ -255,13 +255,26 @@ class TestGMDGolden:
         self, fake_ticker_81870, df_5m_130bars,
     ):
         """A4: Indicator inputs must be _closed_bars(df), not full df.
-        Spot-check: with our deterministic fixture, MA20 must equal
-        _closed_bars(df)['close'].rolling(20).mean().iloc[-1]."""
+
+        df_5m_130bars uses a cyclic close (i % 10) that divides MA(20), so
+        closed-only and full-df rolling means coincide on the unmodified
+        fixture. To make the test discriminating, mutate the in-progress
+        candle's close to an extreme value before invoking — that shifts
+        the full-df rolling mean measurably while leaving the closed-only
+        rolling mean unchanged. The rendered MA(20) must match the
+        closed-only value.
+        """
         from src.agent.tools_perception import get_market_data
         from src.utils.ohlcv_utils import _closed_bars
-        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        df_mut = df_5m_130bars.copy()
+        df_mut.loc[df_mut.index[-1], "close"] = 99999.0
+        deps = _build_deps(fake_ticker_81870, {"5m": df_mut})
         out = await get_market_data(deps)
-        df_closed = _closed_bars(df_5m_130bars)
-        expected_ma20 = float(df_closed["close"].rolling(20).mean().iloc[-1])
-        # Output renders MA(20) at 2dp; verify presence with the exact rounded value
-        assert f"MA(20): {expected_ma20:.2f}" in out, out
+        df_closed = _closed_bars(df_mut)
+        expected_closed = float(df_closed["close"].rolling(20).mean().iloc[-1])
+        expected_full = float(df_mut["close"].rolling(20).mean().iloc[-1])
+        assert expected_closed != expected_full, (
+            "fixture mutation failed to discriminate closed-only vs full-df"
+        )
+        assert f"MA(20): {expected_closed:.2f}" in out, out
+        assert f"MA(20): {expected_full:.2f}" not in out, out
