@@ -1616,112 +1616,167 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
 
 
 async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None = None) -> str:
-    """Quick multi-timeframe scan: momentum | structure | volatility | range position.
+    """Multi-timeframe snapshot: ticker (authoritative current price) plus a cross-tf MA fast-vs-slow direction line plus per-tf rows containing momentum (live ticker vs primary MA, %), fast-vs-slow MA structure (MA names with raw values and comparison operator; weekly/monthly tfs use degraded (20, 50) periods marked with " (short-structure)"), volatility (ATR % of price and its ratio vs 20-period ATR average), range position (live ticker price within the last 20 closed-bar high-low, 0% = low / 100% = high), and the most recent 3 closed candle closes with the close timestamp.
+
+    All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). Per-tf MA values are rendered inline in the Structure column; the Momentum column shows the percentage from live ticker to the primary MA on each tf. ATR(14) is computed via _atr_series (mamode='rma' algorithm lock per spec §6.4.2); shared 4h/1d signals also surfaced by HTF use the same SMA formula and the same _atr_series helper, so identical inputs produce identical values by construction (§2.2.1 algorithm-lock invariant; end-to-end verified by test_mts_htf_overlap_values_match).
 
     Args:
         tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"].
 
-    Returns:
-        str: 4-column row per TF + Columns header. See spec §2.3.
+    Example call:
+        get_multi_timeframe_snapshot()
+    Example output:
+        === Multi-TF Snapshot (BTC/USDT:USDT) ===
+        Last (ticker @ 14:23:08 UTC): 81870.50
+        MA fast-vs-slow per tf: 5m below | 1h above | 4h above | 1d below
+        Columns: ...
 
-    Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall unavailable only if ALL TFs fail.
+        [5m]  Mom -0.3% (vs MA20) | MA20: 81960 < MA50: 82150 | ATR 0.15% (20p avg 0.18%, 0.83×) | Range pos 65%
+              Last 3 closes (closed @ 2026-05-11 14:20 UTC): 81870→81848→81870
+        ... (3 more tf rows)
+
+    Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall returns header-only error if all TFs fail or ticker fetch fails.
+
+    Related perception tools (factual capability surface, not a calling order):
+        - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
+        - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
     """
     import asyncio
     import pandas as pd
+    from datetime import datetime, timezone
+    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+
     symbol = deps.symbol
     if tfs is None:
         tfs = ["5m", "1h", "4h", "1d"]
 
-    # Fetch current price (from ticker, not per-TF close).
-    # Uses MarketDataService layer for consistency with other perception tools
-    # (get_market_data / get_position). market_data.get_ticker is a no-cache
-    # passthrough wrapper so the behavior is functionally identical to calling
-    # exchange.fetch_ticker directly.
     try:
         ticker = await deps.market_data.get_ticker(symbol)
-        current_price = ticker.last
+        live_price = _live_price(ticker)
     except Exception:
         logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
-        return (
-            f"=== Multi-TF Snapshot ({symbol}) ===\n"
-            f"Error: Temporarily unavailable."
-        )
+        return f"=== Multi-TF Snapshot ({symbol}) ===\nError: Temporarily unavailable."
+
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
         try:
-            df = await deps.market_data.get_ohlcv_dataframe(symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250))
+            df = await deps.market_data.get_ohlcv_dataframe(
+                symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250),
+            )
             return tf, df
         except Exception as e:
             return tf, e
 
-    results = await asyncio.gather(*[_fetch_one(tf) for tf in tfs], return_exceptions=False)
+    results = await asyncio.gather(*[_fetch_one(tf) for tf in tfs])
 
-    # All failed?
     if all(isinstance(r[1], Exception) for r in results):
         return (
             f"=== Multi-TF Snapshot ({symbol}) ===\n"
             f"Error: Temporarily unavailable (all timeframes failed)."
         )
 
+    # First pass: compute MA fast-vs-slow direction tags per tf.
+    direction_tags: list[str] = []
     rows: list[str] = []
+
+    # Fixed seconds per tf, used to derive the "close @ T UTC" timestamp on
+    # the Last 3 closes line. For 1M the fixed 30-day step is an approximation
+    # (real months range 28-31 days) — when df has more than one closed bar
+    # available, the implementation below prefers `df['timestamp'].iloc[-1]`
+    # (the in-progress candle's open = the just-closed candle's close moment)
+    # over this constant, which is exact for all tfs at the cost of one
+    # row's data availability. The constant remains the fallback when the
+    # next-bar timestamp is absent.
+    _TF_SECONDS = {
+        "1m": 60, "5m": 300, "15m": 900, "1h": 3600,
+        "4h": 14400, "1d": 86400, "1w": 7 * 86400, "1M": 30 * 86400,
+    }
+
     for tf, df_or_err in results:
-        primary_ma_n = MULTI_TF_PRIMARY_MA.get(tf, 50)
-        fast, slow = MULTI_TF_STRUCTURE_MAS.get(tf, (50, 200))
+        primary_n = MULTI_TF_PRIMARY_MA.get(tf, 50)
+        fast_n, slow_n = MULTI_TF_STRUCTURE_MAS.get(tf, (50, 200))
         if isinstance(df_or_err, Exception):
-            rows.append(f"{tf}: temporarily unavailable")
+            rows.append(f"[{tf}]  temporarily unavailable")
             continue
         df = df_or_err
-        if df.empty or len(df) < slow:
-            rows.append(f"{tf}: insufficient data (need {slow} candles, got {len(df)})")
+        df_closed = _closed_bars(df)
+        if df_closed.empty or len(df_closed) < max(slow_n, 20) + 1:
+            rows.append(f"[{tf}]  insufficient data (need {slow_n + 1} candles, got {len(df_closed)})")
             continue
-        indicators = deps.technical.compute_indicators(df)
-        atr = indicators.get("atr_14")
-        close = float(df["close"].iloc[-1])
 
-        # Momentum: live ticker price vs primary MA.
-        # Intentional: uses `current_price` (live ticker) NOT `df["close"].iloc[-1]`
-        # so the row answers "where is RIGHT NOW relative to this TF's MA?".
-        # Per-TF close lags by up to one candle period (e.g. 1d close = previous
-        # day's close), which would understate fast-moving intraday moves on
-        # higher TFs. Do not "fix" this to df.close.iloc[-1].
-        primary_ma_val = float(df["close"].rolling(primary_ma_n).mean().iloc[-1])
-        mom_pct = (current_price - primary_ma_val) / primary_ma_val * 100
-        mom_str = f"{mom_pct:+.1f}% vs MA{primary_ma_n}"
+        close = df_closed["close"]
+        ma_fast = float(close.rolling(fast_n).mean().iloc[-1])
+        ma_slow = float(close.rolling(slow_n).mean().iloc[-1])
+        primary_ma = float(close.rolling(primary_n).mean().iloc[-1])
 
-        # Structure: MA(fast) vs MA(slow)
-        ma_fast = float(df["close"].rolling(fast).mean().iloc[-1])
-        ma_slow = float(df["close"].rolling(slow).mean().iloc[-1])
-        diff_pct = abs(ma_fast - ma_slow) / ma_slow * 100
+        direction_tags.append(f"{tf} {'above' if ma_fast > ma_slow else 'below'}")
+
+        mom_pct = (live_price - primary_ma) / primary_ma * 100.0 if primary_ma > 0 else 0.0
+        diff_pct = abs(ma_fast - ma_slow) / ma_slow * 100.0 if ma_slow > 0 else 0.0
         if diff_pct < 0.1:
-            struct_str = f"MA{fast} at MA{slow}"
+            op = "≈"
         elif ma_fast > ma_slow:
-            struct_str = f"MA{fast} above MA{slow}"
+            op = ">"
         else:
-            struct_str = f"MA{fast} below MA{slow}"
-        # (short-structure) marker ONLY for 1w/1M — these are degraded from (50, 200) due to history shortage.
-        # 5m's (MA20, MA50) is its native structure, not a degradation → no marker (spec §2.3 example).
+            op = "<"
+        struct_str = f"MA{fast_n}: {ma_fast:.2f} {op} MA{slow_n}: {ma_slow:.2f}"
+        # 1w/1M use (20, 50) instead of native (50, 200) due to weekly/monthly
+        # history shortage in the MTS 20-bar window context — mark as degraded
+        # so the agent reads them as fact-with-caveat, not as native structure
+        # (spec §5.3; preserved from baseline tools_perception.py:1506-1509).
         if tf in ("1w", "1M"):
             struct_str += " (short-structure)"
 
-        # Volatility
-        atr_pct = (atr / close * 100) if atr is not None else None
-        atr_str = f"ATR {atr_pct:.2f}%" if atr_pct is not None else "ATR N/A"
+        # ATR%, ratio
+        atr_str = "ATR N/A"
+        if len(df_closed) >= 35:
+            atr_series = _atr_series(df_closed, period=14)
+            atr_now = float(atr_series.iloc[-1])
+            atr_avg = float(atr_series.rolling(20).mean().iloc[-1])
+            atr_pct = atr_now / live_price * 100.0
+            atr_ratio = atr_now / atr_avg if atr_avg > 0 else 0.0
+            atr_str = f"ATR {atr_pct:.2f}% (20p avg {atr_avg / live_price * 100:.2f}%, {atr_ratio:.2f}×)"
 
-        # Range position: last 20-bar high/low
-        last_20 = df.iloc[-MULTI_TF_RANGE_PERIODS:]
+        # Range pos (no clamping, per §3.2)
+        last_20 = df_closed.iloc[-MULTI_TF_RANGE_PERIODS:]
         hi = float(last_20["high"].max())
         lo = float(last_20["low"].min())
-        range_pct = 0.0 if hi == lo else (close - lo) / (hi - lo) * 100
+        range_pct = (live_price - lo) / (hi - lo) * 100.0 if hi != lo else 0.0
 
-        rows.append(f"{tf}:  {mom_str:<16} | {struct_str:<40} | {atr_str:<12} | range pos {range_pct:.0f}%")
+        # Last 3 closes line — "closed @ T UTC" anchor. Prefer the in-progress
+        # candle's timestamp (df.iloc[-1]['timestamp']) which equals the
+        # just-closed candle's official close moment exactly; fall back to
+        # last_closed_ts + _TF_SECONDS only if df has no in-progress bar at all.
+        # Exact for 1M (no 30-day approximation drift).
+        if len(df) > len(df_closed):
+            close_dt = datetime.fromtimestamp(
+                int(df["timestamp"].iloc[-1]) / 1000, tz=timezone.utc
+            )
+        else:
+            last_closed_ts_ms = int(df_closed["timestamp"].iloc[-1])
+            close_moment_s = last_closed_ts_ms / 1000 + _TF_SECONDS.get(tf, 0)
+            close_dt = datetime.fromtimestamp(close_moment_s, tz=timezone.utc)
+        closes_3 = df_closed["close"].iloc[-3:].tolist()
+        last3_str = "→".join(f"{c:.2f}" for c in closes_3)
 
-    header = [
+        row1 = (
+            f"[{tf}]  Mom {mom_pct:+.1f}% (vs MA{primary_n}) | {struct_str} | "
+            f"{atr_str} | Range pos {range_pct:.0f}%"
+        )
+        row2 = f"      Last 3 closes (closed @ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC): {last3_str}"
+        rows.append(row1)
+        rows.append(row2)
+        rows.append("")
+
+    header_lines = [
         f"=== Multi-TF Snapshot ({symbol}) ===",
-        f"Current price: {current_price:.2f}",
-        "Columns: Momentum (price vs primary MA) | Structure (MA alignment) | Volatility (ATR as % of price) | Range pos (position within 20-bar high-low, 0%=low / 100%=high)",
+        f"Last (ticker @ {fetch_ts} UTC): {live_price:.2f}",
+        f"MA fast-vs-slow per tf: " + " | ".join(direction_tags) if direction_tags else "MA fast-vs-slow per tf: (no data)",
+        "Columns: Momentum (live ticker vs primary MA, %) | Structure (fast MA value vs slow MA value, with comparison) | Volatility (ATR % of price; ratio vs 20-period ATR avg) | Range pos (live ticker price within 20-bar closed-bar high-low; 0%=Low, 100%=High) | Last 3 closed candle closes",
         "",
     ]
-    return "\n".join(header + rows)
+    return "\n".join(header_lines + rows).rstrip()
 
 
 # === Iter 3 — get_price_pivots helpers ===

@@ -407,14 +407,30 @@ def create_trader_agent(
 
     @tool
     async def get_multi_timeframe_snapshot(ctx: RunContext[TradingDeps], tfs: list[str] | None = None) -> str:
-        """Scan multi-TF alignment in a single call (default 5m/1h/4h/1d).
+        """Multi-timeframe snapshot: ticker (authoritative current price) plus a cross-tf MA fast-vs-slow direction line plus per-tf rows containing momentum (live ticker vs primary MA, %), fast-vs-slow MA structure (MA names with raw values and comparison operator; weekly/monthly tfs use degraded (20, 50) periods marked with " (short-structure)"), volatility (ATR % of price and its ratio vs 20-period ATR average), range position (live ticker price within the last 20 closed-bar high-low, 0% = low / 100% = high), and the most recent 3 closed candle closes with the close timestamp.
 
-        Useful for a once-per-cycle structural overview before committing to
-        a direction. Reports 4 columns per TF: momentum / structure / volatility
-        / range position.
+        All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). Per-tf MA values are rendered inline in the Structure column; the Momentum column shows the percentage from live ticker to the primary MA on each tf.
 
         Args:
-            tfs: list of timeframes; None uses default (5m/1h/4h/1d).
+            tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"].
+
+        Example call:
+            get_multi_timeframe_snapshot()
+        Example output:
+            === Multi-TF Snapshot (BTC/USDT:USDT) ===
+            Last (ticker @ 14:23:08 UTC): 81870.50
+            MA fast-vs-slow per tf: 5m below | 1h above | 4h above | 1d below
+            Columns: ...
+
+            [5m]  Mom -0.3% (vs MA20) | MA20: 81960 < MA50: 82150 | ATR 0.15% (20p avg 0.18%, 0.83×) | Range pos 65%
+                  Last 3 closes (closed @ 2026-05-11 14:20 UTC): 81870→81848→81870
+            ... (3 more tf rows)
+
+        Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall returns header-only error if all TFs fail or ticker fetch fails.
+
+        Related perception tools (factual capability surface, not a calling order):
+            - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
+            - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
         """
         from src.agent.tools_perception import get_multi_timeframe_snapshot as _impl
 

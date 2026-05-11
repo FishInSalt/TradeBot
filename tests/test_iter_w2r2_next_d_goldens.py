@@ -278,3 +278,109 @@ class TestGMDGolden:
         )
         assert f"MA(20): {expected_closed:.2f}" in out, out
         assert f"MA(20): {expected_full:.2f}" not in out, out
+
+
+class TestMTSGolden:
+    @pytest.mark.asyncio
+    async def test_mts_header_uses_last_with_ticker_timestamp(
+        self, fake_ticker_81870, df_5m_130bars, df_1h_250bars,
+        df_4h_250bars, df_1d_250bars,
+    ):
+        from src.agent.tools_perception import get_multi_timeframe_snapshot
+        deps = _build_deps(
+            fake_ticker_81870,
+            {"5m": df_5m_130bars, "1h": df_1h_250bars,
+             "4h": df_4h_250bars, "1d": df_1d_250bars},
+        )
+        out = await get_multi_timeframe_snapshot(deps)
+        assert "=== Multi-TF Snapshot (BTC/USDT:USDT) ===" in out
+        assert "Last (ticker @" in out and "UTC):" in out
+        assert "81870.50" in out
+        # Old "Current price:" label is gone
+        assert "Current price:" not in out
+
+    @pytest.mark.asyncio
+    async def test_mts_ma_fast_vs_slow_direction_summary(
+        self, fake_ticker_81870, df_5m_130bars, df_1h_250bars,
+        df_4h_250bars, df_1d_250bars,
+    ):
+        from src.agent.tools_perception import get_multi_timeframe_snapshot
+        deps = _build_deps(
+            fake_ticker_81870,
+            {"5m": df_5m_130bars, "1h": df_1h_250bars,
+             "4h": df_4h_250bars, "1d": df_1d_250bars},
+        )
+        out = await get_multi_timeframe_snapshot(deps)
+        assert "MA fast-vs-slow per tf:" in out
+
+    @pytest.mark.asyncio
+    async def test_mts_per_tf_row_columns(
+        self, fake_ticker_81870, df_5m_130bars, df_1h_250bars,
+        df_4h_250bars, df_1d_250bars,
+    ):
+        from src.agent.tools_perception import get_multi_timeframe_snapshot
+        deps = _build_deps(
+            fake_ticker_81870,
+            {"5m": df_5m_130bars, "1h": df_1h_250bars,
+             "4h": df_4h_250bars, "1d": df_1d_250bars},
+        )
+        out = await get_multi_timeframe_snapshot(deps)
+        # Mom column with primary-MA reference label
+        assert "(vs MA" in out
+        # Structure column with raw MA values + operator
+        assert "MA20:" in out or "MA50:" in out
+        # ATR column with ratio
+        assert "ATR " in out and "20p avg" in out and "×)" in out
+        # Range pos
+        assert "Range pos " in out
+
+    @pytest.mark.asyncio
+    async def test_mts_last_3_closes_line(
+        self, fake_ticker_81870, df_5m_130bars, df_1h_250bars,
+        df_4h_250bars, df_1d_250bars,
+    ):
+        from src.agent.tools_perception import get_multi_timeframe_snapshot
+        deps = _build_deps(
+            fake_ticker_81870,
+            {"5m": df_5m_130bars, "1h": df_1h_250bars,
+             "4h": df_4h_250bars, "1d": df_1d_250bars},
+        )
+        out = await get_multi_timeframe_snapshot(deps)
+        # Each tf row has a "Last 3 closes (closed @ T UTC): a→b→c" line
+        assert "Last 3 closes (closed @" in out
+        assert "→" in out
+
+    @pytest.mark.asyncio
+    async def test_mts_columns_header_present(
+        self, fake_ticker_81870, df_5m_130bars, df_1h_250bars,
+        df_4h_250bars, df_1d_250bars,
+    ):
+        from src.agent.tools_perception import get_multi_timeframe_snapshot
+        deps = _build_deps(
+            fake_ticker_81870,
+            {"5m": df_5m_130bars, "1h": df_1h_250bars,
+             "4h": df_4h_250bars, "1d": df_1d_250bars},
+        )
+        out = await get_multi_timeframe_snapshot(deps)
+        assert "Columns: Momentum" in out and "Structure" in out
+        assert "Range pos" in out
+
+    @pytest.mark.asyncio
+    async def test_mts_range_pos_no_clamping_when_breakout(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """§3.2 Range pos out-of-bounds: rendered as fact without clamping."""
+        from src.agent.tools_perception import get_multi_timeframe_snapshot
+        from types import SimpleNamespace
+        # Ticker price above the closed-bar 20-bar high → Range pos > 100%
+        hi_ticker = SimpleNamespace(
+            last=99999.0, bid=99998.0, ask=99999.5,
+            high=99999.0, low=80000.0, base_volume=10.0,
+        )
+        deps = _build_deps(hi_ticker, {"5m": df_5m_130bars})
+        out = await get_multi_timeframe_snapshot(deps, tfs=["5m"])
+        import re
+        # Range pos value > 100% in some form (e.g. "Range pos 14523%" or similar)
+        m = re.search(r"Range pos (\-?\d+)%", out)
+        assert m is not None
+        assert int(m.group(1)) > 100, out
