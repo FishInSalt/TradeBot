@@ -1,6 +1,8 @@
 """Tests for cycle display: tool summary parsers and cycle output formatting."""
 from __future__ import annotations
 
+import pytest
+
 
 # === Perception tool summary parsers ===
 
@@ -325,6 +327,34 @@ def test_summarize_set_next_wake():
     assert "30" in result
     assert "min" in result
     assert "Reason" not in result  # reasoning should be truncated
+
+
+def test_summarize_set_next_wake_at():
+    from src.cli.display import summarize_tool
+    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: align 1h close"
+    result = summarize_tool("set_next_wake_at", content)
+    assert "14" in result
+    assert "min" in result
+    assert "Reason" not in result
+
+
+def test_is_tool_error_set_next_wake_at_success():
+    """set_next_wake_at success message must not be flagged as error."""
+    from src.cli.display import is_tool_error
+    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: test"
+    assert is_tool_error("set_next_wake_at", content) is False
+
+
+@pytest.mark.parametrize("reject_msg", [
+    "Invalid target_time format: 'foo'. Expected 'HH:MM' UTC with 2-digit hour and minute (e.g., '10:37' or '03:05').",
+    "Cannot wake at 12:00 UTC: nearest future 2026-05-12 12:00 UTC (in 97 min) exceeds wake_max=60 min for this session.",
+    "Cannot wake at 10:24 UTC: nearest future 2026-05-12 10:24 UTC (in 1 min) below wake_min=2 min.",
+    "Dynamic wake not available",
+])
+def test_is_tool_error_set_next_wake_at_reject(reject_msg):
+    """All 4 reject classes (3 spec + fn=None code path) must be flagged as error."""
+    from src.cli.display import is_tool_error
+    assert is_tool_error("set_next_wake_at", reject_msg) is True
 
 
 # === Memory tool ===
@@ -1439,10 +1469,10 @@ def test_render_perception_tool_fallback_no_header():
 
 
 def test_dg_2_dispatch_sets_partition_all_registered_tools():
-    """T-DG-2: 三层集合 + save_memory branch 互斥 + 完整覆盖 33 registered tools.
+    """T-DG-2: 三层集合 + save_memory branch 互斥 + 完整覆盖 34 registered tools.
 
-    Spec §4.4: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (12) ∪ {save_memory}
-    必须等于 REGISTERED_TOOL_NAMES (33)，且互不重叠。
+    Spec §4.4: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (13) ∪ {save_memory}
+    必须等于 REGISTERED_TOOL_NAMES (34)，且互不重叠。
     _SECTIONED_PERCEPTION_TOOL_NAMES (19) ⊂ _PERCEPTION_TOOL_NAMES（仅 get_memories 例外）。
     """
     from src.cli.display import (
@@ -1466,7 +1496,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     assert perception.isdisjoint(save)
     assert execution.isdisjoint(save)
 
-    # 完整覆盖 33 registered
+    # 完整覆盖 34 registered
     union = perception | execution | save
     declared = set(REGISTERED_TOOL_NAMES)
     assert union == declared, (
@@ -1478,7 +1508,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     # Counts per spec §4.4
     assert len(perception) == 20
     assert len(sectioned) == 19
-    assert len(execution) == 12
+    assert len(execution) == 13
 
 
 def test_ec_11_unregistered_tool_falls_back_with_warning(caplog):

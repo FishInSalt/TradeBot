@@ -708,21 +708,38 @@ async def test_ok_vs_forensic_count(db_engine):
 
 
 async def test_decision_type_distribution_hold_double_meaning(db_engine):
-    """Spec §3.5 caveat 1: hold (pure-observation) vs hold (wake-only)."""
+    """Spec §3.5 caveat 1: hold (pure-observation) vs hold (wake-only).
+    R2-Next-H: wake-only 分类同样包含 set_next_wake_at + 混合 set_next_wake/at。"""
     sid = await make_session(db_engine)
     await make_cycle(db_engine, sid, "c1")  # no trade_action → pure-observation
     await make_cycle(db_engine, sid, "c2")
+    await make_cycle(db_engine, sid, "c3")
+    await make_cycle(db_engine, sid, "c4")
     from sqlalchemy import insert
     from src.storage.models import TradeAction
     async with db_engine.begin() as conn:
-        # c2 only set_next_wake → wake-only
+        # c2: only set_next_wake → wake-only (legacy)
         await conn.execute(insert(TradeAction).values(
             session_id=sid, cycle_id="c2", action="set_next_wake",
             symbol="BTC/USDT:USDT",
         ))
+        # c3: only set_next_wake_at → wake-only (NEW)
+        await conn.execute(insert(TradeAction).values(
+            session_id=sid, cycle_id="c3", action="set_next_wake_at",
+            symbol="BTC/USDT:USDT",
+        ))
+        # c4: both set_next_wake + set_next_wake_at → wake-only (NEW)
+        await conn.execute(insert(TradeAction).values(
+            session_id=sid, cycle_id="c4", action="set_next_wake",
+            symbol="BTC/USDT:USDT",
+        ))
+        await conn.execute(insert(TradeAction).values(
+            session_id=sid, cycle_id="c4", action="set_next_wake_at",
+            symbol="BTC/USDT:USDT",
+        ))
     dist = await decision_type_distribution(db_engine, sid)
     assert dist.get("hold (pure-observation)") == 1
-    assert dist.get("hold (wake-only)") == 1
+    assert dist.get("hold (wake-only)") == 3   # c2 + c3 + c4
 
 
 async def test_decision_type_distribution_excludes_order_filled(db_engine):

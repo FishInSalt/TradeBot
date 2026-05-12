@@ -583,7 +583,7 @@ async def decision_type_distribution(engine, session_id: str) -> dict[str, int]:
         # SQLite ever returned empty/NULL it would split to {""} which doesn't
         # match any priority-list entry and falls through to wake-only branch.
         actions = set((r.actions or "").split(","))
-        if actions == {"set_next_wake"}:
+        if actions <= {"set_next_wake", "set_next_wake_at"} and actions:
             dist["hold (wake-only)"] = dist.get("hold (wake-only)", 0) + 1
             continue
         # Pick primary action by fixed priority (deterministic)

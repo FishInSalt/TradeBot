@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from src.services.tool_call_recorder import note_biz_error
@@ -427,20 +429,85 @@ async def set_next_wake(
     minutes: int,
     reasoning: str,
 ) -> str:
-    """Set the next wake interval (one-shot). Clamped to configured min/max."""
+    """See trader.py wrapper docstring."""
     if deps.set_next_wake_fn is None:
         return "Dynamic wake not available"
-    clamped = max(deps.wake_min_minutes, min(minutes, deps.wake_max_minutes))
-    deps.set_next_wake_fn(clamped)
 
+    if minutes < deps.wake_min_minutes:
+        return (
+            f"Cannot set wake to {minutes} min: "
+            f"below wake_min={deps.wake_min_minutes} min."
+        )
+    if minutes > deps.wake_max_minutes:
+        return (
+            f"Cannot set wake to {minutes} min: "
+            f"exceeds wake_max={deps.wake_max_minutes} min for this session."
+        )
+
+    deps.set_next_wake_fn(minutes)
     await _record_action(
         deps, action="set_next_wake",
-        reasoning=f"interval={clamped}min | {reasoning}",
+        reasoning=f"interval={minutes}min | {reasoning}",
     )
+    return f"Next wake set to {minutes} min. Reason: {reasoning}"
 
-    if clamped != minutes:
-        return f"Next wake set to {clamped} min (clamped from {minutes}). Reason: {reasoning}"
-    return f"Next wake set to {clamped} min. Reason: {reasoning}"
+
+async def set_next_wake_at(
+    deps: TradingDeps,
+    target_time: str,
+    reasoning: str,
+) -> str:
+    """See trader.py wrapper docstring."""
+    if deps.set_next_wake_fn is None:
+        return "Dynamic wake not available"
+
+    # 1. Format validation — strict HH:MM (00:00 - 23:59)
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", target_time)
+    if not match:
+        return (
+            f"Invalid target_time format: {target_time!r}. "
+            f"Expected 'HH:MM' UTC with 2-digit hour and minute "
+            f"(e.g., '10:37' or '03:05')."
+        )
+    h, m = int(match[1]), int(match[2])
+
+    # 2. Future inference — today HH:MM if still ahead, else tomorrow HH:MM
+    now_utc = datetime.now(timezone.utc)
+    candidate = now_utc.replace(hour=h, minute=m, second=0, microsecond=0)
+    if candidate <= now_utc:
+        candidate += timedelta(days=1)
+
+    # 3. Delta + bound validation — ceil to avoid waking before target moment
+    delta_seconds = (candidate - now_utc).total_seconds()
+    delta_minutes = math.ceil(delta_seconds / 60)
+    candidate_label = candidate.strftime("%Y-%m-%d %H:%M")
+
+    if delta_minutes < deps.wake_min_minutes:
+        return (
+            f"Cannot wake at {target_time} UTC: nearest future "
+            f"{candidate_label} UTC (in {delta_minutes} min) "
+            f"below wake_min={deps.wake_min_minutes} min."
+        )
+    if delta_minutes > deps.wake_max_minutes:
+        return (
+            f"Cannot wake at {target_time} UTC: nearest future "
+            f"{candidate_label} UTC (in {delta_minutes} min) "
+            f"exceeds wake_max={deps.wake_max_minutes} min for this session."
+        )
+
+    # 4. Success
+    deps.set_next_wake_fn(delta_minutes)
+    await _record_action(
+        deps, action="set_next_wake_at",
+        reasoning=(
+            f"target={target_time} UTC resolves_to={candidate_label} UTC "
+            f"interval={delta_minutes}min | {reasoning}"
+        ),
+    )
+    return (
+        f"Next wake set for {candidate_label} UTC (in {delta_minutes} min). "
+        f"Reason: {reasoning}"
+    )
 
 
 async def place_limit_order(

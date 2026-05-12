@@ -629,6 +629,7 @@ async def test_get_price_pivots_global_wordlist_fact_only():
     "_invoke_cancel_order",
     "_invoke_add_price_level_alert",
     "_invoke_set_next_wake",
+    "_invoke_set_next_wake_at",
     "_invoke_place_limit_order",
 ])
 async def test_execution_tool_fact_only(invoker, mocker):
@@ -716,6 +717,12 @@ async def _invoke_set_next_wake(deps, mocker):
     """Early return: set_next_wake_fn=None."""
     from src.agent.tools_execution import set_next_wake
     return await set_next_wake(deps, 30, reasoning="test")
+
+
+async def _invoke_set_next_wake_at(deps, mocker):
+    """Early return: set_next_wake_fn=None (MockDeps default)."""
+    from src.agent.tools_execution import set_next_wake_at
+    return await set_next_wake_at(deps, "10:37", reasoning="test")
 
 
 async def _invoke_place_limit_order(deps, mocker):

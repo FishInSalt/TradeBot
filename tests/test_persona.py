@@ -317,8 +317,25 @@ def test_layer1_contains_wake_interval_control_bullet():
     assert "**Wake interval control**" in layer1, \
         "Layer 1 missing Wake interval control bullet header"
     # cross-tool 关系断言（真正的 Layer 1 价值，比 bound 重要）
-    assert "Alerts, fills, and conditional triggers always interrupt sleep regardless of this setting" in layer1, \
+    assert "alerts, fills, and conditional triggers always interrupt sleep" in layer1, \
         "Layer 1 Wake interval control bullet missing cross-tool interrupt clause"
+    assert "scheduled wake-up applies only when no external trigger fires" in layer1, \
+        "Layer 1 missing 'scheduled wake-up applies only when no external trigger fires' anchor"
+
+
+def test_layer1_no_wake_tool_signature_literal():
+    """Spec §6.3 T3.2: Layer 1 must not name either wake tool signature literally.
+
+    L3 抽象 (Iter 4 DRY 反转) — 工具描述交 docstring 自承，Layer 1 仅保留
+    cross-tool behavior + session-aware bound (per Iter 4 PR #25 pattern).
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    runtime = RuntimeConfig()
+    layer1 = _build_layer1(runtime)
+    assert "set_next_wake(minutes)" not in layer1, \
+        "Layer 1 must not name set_next_wake signature; description belongs in docstring"
+    assert "set_next_wake_at(target_time)" not in layer1, \
+        "Layer 1 must not name set_next_wake_at signature; description belongs in docstring"
 
 
 def test_layer1_renders_dynamic_wake_max():
@@ -326,13 +343,13 @@ def test_layer1_renders_dynamic_wake_max():
     from src.agent.persona import _build_layer1, RuntimeConfig
     # sim #4 实证值（30min scheduler 配置下的 wake_max）
     layer1_120 = _build_layer1(RuntimeConfig(wake_max_minutes=120))
-    assert "1-120 min for this session" in layer1_120, \
+    assert "1-120 min from now for this session" in layer1_120, \
         "wake_max=120 not rendered in bullet"
-    assert "1-60 min for this session" not in layer1_120, \
+    assert "1-60 min from now for this session" not in layer1_120, \
         "default 60 leaked when explicit 120 passed"
     # 默认 60（默认 15min scheduler 配置）
     layer1_60 = _build_layer1(RuntimeConfig(wake_max_minutes=60))
-    assert "1-60 min for this session" in layer1_60, \
+    assert "1-60 min from now for this session" in layer1_60, \
         "wake_max=60 not rendered in bullet"
 
 
@@ -345,7 +362,7 @@ def test_generate_system_prompt_default_runtime():
     assert prompt_default == prompt_explicit, \
         "Single-arg call must equal explicit RuntimeConfig() — backwards compat broken"
     # 渲染默认 wake_max=60
-    assert "1-60 min for this session" in prompt_default, \
+    assert "1-60 min from now for this session" in prompt_default, \
         "Default RuntimeConfig() should render 1-60 min"
 
 
@@ -375,38 +392,6 @@ def test_set_next_wake_no_decision_hints_in_description():
         f"set_next_wake description contains banned 'shorten when': {desc!r}"
     assert not re.search(r"\blengthen when\b", desc, re.IGNORECASE), \
         f"set_next_wake description contains banned 'lengthen when': {desc!r}"
-    # Sanity: factual content preserved
-    assert "one-shot" in desc.lower(), \
-        f"set_next_wake description should preserve 'one-shot' fact: {desc!r}"
-
-
-def test_set_next_wake_wrapper_layer1_reference_intact():
-    """R2-5 PR #34 I-1: wrapper docstring "Wake interval control" reference must point
-    to a real Layer 1 bullet by the same name (Single Source of Truth invariant).
-
-    G8 locks Layer 1 bullet header presence; G10 locks wrapper N5 wordlist absence;
-    neither catches an orphan reference if Layer 1 bullet is renamed without updating
-    wrapper Args.minutes. This test links them — both ends must contain the same string.
-
-    API path: parameters_json_schema for per-arg Args descriptions (vs .description for
-    first-paragraph text — see spec §3.6.1 + G10).
-    """
-    from src.agent.persona import _build_layer1, RuntimeConfig
-    from src.agent.trader import create_trader_agent
-    from src.config import PersonaConfig
-
-    bullet_name = "Wake interval control"
-    layer1 = _build_layer1(RuntimeConfig())
-    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
-    minutes_desc = (
-        agent._function_toolset.tools["set_next_wake"]
-        .tool_def.parameters_json_schema["properties"]["minutes"]["description"]
-    )
-
-    assert bullet_name in minutes_desc, \
-        f"wrapper Args.minutes lost reference to {bullet_name!r}: {minutes_desc!r}"
-    assert bullet_name in layer1, \
-        f"Layer 1 missing {bullet_name!r} bullet that wrapper points to"
 
 
 # ─────────── R2-8b: Cycle Closing Summary section drift guards ───────────
