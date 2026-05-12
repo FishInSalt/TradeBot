@@ -8,7 +8,7 @@
 
 任何工具相关的 spec / brainstorm / 议题立项前必读 **`docs/superpowers/principles/tool-design-principles.md`**。
 
-7 条核心原则 + 1 条元原则（基于 sim #8 W2 实证归纳）:
+8 条核心原则 + 1 条元原则（基于 sim #8 W2 实证归纳）:
 
 1. **Fact-provider 不是 guard** — 工具名 + 输出 + docstring 全文都 fact-only；执行类用 explicit reject 不 silent clamp
 2. **工具服务 agent 心智路径** — 从 narrative 提取 agent mental model；docstring 用完整 call→output 示例，不用 "X for Y" 指导语；反复手算 ≥3 次的事实信号是工具化触发条件
@@ -17,6 +17,7 @@
 5. **接口闭环常用 pattern** — 高频 multi-call 拼凑是设计缺陷，应通过 list / preset / batch 让单调用闭环；default 反映实测主流场景
 6. **失败语义区分** — 操作类异常 reject + retry；状态不存在 idempotent + ok with note
 7. **输出与命名的表达友好** — 字段必带标签 / 单位 / 窗口；同名字段不同语义显式区分；sectioning 优于纯 alignment
+8. **信任 agent + 工具优先** — Agent 行为偏差是工具反馈（反思顺序：能力 / 描述 / 默认值 / 接口），不是 prompt 失败；prompt nudge 是 last-resort，不是 fix-all 兜底
 **（元）实证优先于直觉** — 议题立项前必查 sim 数据（args 分布 / 频率 / 多调 / 失败 / narrative grep）
 
 冲突优先级与议题立项 checklist 见详细主档。

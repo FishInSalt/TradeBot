@@ -11,7 +11,7 @@
 
 工具不是"功能集合"，是 **agent 心智路径的延伸**。设计错了不会让 agent 卡住——agent 会自适应——但会暴露在 token 浪费、决策摩擦、心智路径错位上。
 
-7 条核心原则 + 1 条元原则:
+8 条核心原则 + 1 条元原则:
 
 1. **Fact-provider 不是 guard** — 工具名 + 输出 + docstring 全文都 fact-only；执行类 explicit reject 不 silent clamp
 2. **工具服务 agent 心智路径** — 工具对齐 agent 已有心智；docstring 是 call→output 示例不是"X for Y"指导
@@ -20,6 +20,7 @@
 5. **接口闭环常用 pattern** — 高频 multi-call 是设计缺陷
 6. **失败语义区分** — 操作异常 reject / 状态不存在 idempotent
 7. **输出与命名的表达友好** — 字段带标签/单位/窗口；同名字段不同语义显式区分
+8. **信任 agent + 工具优先** — Agent 行为偏差是工具反馈，不是 prompt 失败；prompt nudge 是 last-resort
 **（元）实证优先于直觉** — 议题立项前必查 sim 数据
 
 ---
@@ -44,7 +45,7 @@ agent 自适应力强 → 即使工具设计很差也能完成任务。但代价
 
 ---
 
-## 2. 七条核心原则 + 一条元原则
+## 2. 八条核心原则 + 一条元原则
 
 ### 原则 1：Fact-provider 不是 guard
 
@@ -234,6 +235,29 @@ agent 自适应力强 → 即使工具设计很差也能完成任务。但代价
 - 同 cycle 多个工具给同字段名但语义不同
 - 输出依赖纯空格对齐展示数据（LLM 不需要视觉对齐，需要语义标签）
 
+### 原则 8：信任 agent + 工具优先（agent 行为偏差是工具反馈）
+
+**定义**：工具是 agent 路径的第一性来源。Agent 行为不符预期时，反思顺序是：① 工具能力是否够？② 工具描述是否准确？③ 工具默认值是否对齐主流？④ 接口是否闭环？**仅在四层都验证后，才考虑 persona / system prompt nudge**。Prompt nudge 是 last-resort，不是 fix-all 兜底。
+
+**应用规则**:
+- 工具优化议题立项时，agent 行为偏差先做"工具反思" checklist（①-④），不直接提 prompt nudge 议题
+- W3+ 实测如果验证目标不达标（如 mts 频率 <60%），**第一反应是继续升级工具**（K-line snippet 长度 / alignment 标签 / 默认 tfs / docstring 词汇）而非补 persona nudge
+- `persona.py` Layer-1 应保持极简（per memory `project_n7_layer1_organization` — PR #25 已做过 25→5 bullets 的 DRY 反转，工具描述迁 docstring 由 pydantic-ai/griffe sniff 自动传 LLM）
+- 工具间 cross-reference 在 wrapper docstring 末尾**等同 nudge**，同样属 last-resort
+- 工具 docstring 自身的强度（fact-only / 完整 example / 准确字段标签）> prompt nudge 强度
+
+**证据**:
+- memory `project_n7_layer1_organization`（PR #25）已 land 工具描述迁 docstring 的 DRY 反转 — 项目方向一致
+- sim #8 实测 agent 心智已成熟（"multi-TF alignment" ≥6 次 / "1m primary / 5m confirmation / 1h context"）— 不需要 nudge 教概念，只需路径反转通过工具自身能力实现
+- R2-Next-D 实施反思（2026-05-11）：Cross-ref 嵌入 wrapper docstring 末尾的"Related perception tools"段被识别为 token 冗余 + 心智负担 + 方向存疑（"调 X 时提醒 Y" ≠ "起手时知道用 X"），决定回归"工具能力优先，无 nudge fallback"
+
+**Red flag**:
+- 议题描述"agent 应该 X，加 prompt nudge 让它做"——先检查工具是否能让 X 自然发生
+- 把 prompt nudge 当工具改造的"廉价替代品"
+- 工具能力未充分升级前提 prompt nudge 议题
+- 多个 prompt nudge 累积膨胀 system prompt（违反 N7 DRY 反转方向）
+- wrapper docstring 末尾出现 "Related tools" / "See also" / "Use this when not X" 类 cross-routing 段
+
 ### 元原则：实证优先于直觉
 
 **定义**：设计/优化决策必须看 sim 数据；不要凭"应该这样用"。
@@ -277,6 +301,8 @@ agent 自适应力强 → 即使工具设计很差也能完成任务。但代价
 ↓
 7 表达友好                 ← 显示层（字段 / 单位 / 窗口 / 命名）
 ↓
+8 信任 agent + 工具优先     ← 反思方向（行为偏差是工具反馈，非 prompt 失败）
+↓
 元 实证优先               ← 贯穿所有
 ```
 
@@ -299,6 +325,7 @@ agent 自适应力强 → 即使工具设计很差也能完成任务。但代价
 - [ ] 原则 5 接口闭环：DB 查同 cycle 多调比例 < 10%？default 与实测主流偏离 < 2×？
 - [ ] 原则 6 失败语义：失败分类清晰，事实状态 idempotent，真异常 reject？
 - [ ] 原则 7 表达友好：字段带标签 + 单位 + 窗口；同名字段不同语义显式区分；sectioning？
+- [ ] 原则 8 信任 agent + 工具优先：议题反思顺序"工具能力 → 描述 → 默认值 → 接口" 走完才考虑 prompt nudge？无 wrapper 末尾 cross-routing 段？
 - [ ] 元 实证优先：sim 数据引用充分（args 分布 + 频率 + 多调 + 失败 + narrative grep）？
 ```
 
