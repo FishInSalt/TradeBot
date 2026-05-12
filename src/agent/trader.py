@@ -788,7 +788,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_recent_trades",
     "get_multi_timeframe_snapshot",
     "get_price_pivots",
-    # --- 执行 (12) ---
+    # --- 执行 (13) ---
     "open_position",
     "close_position",
     "set_stop_loss",
