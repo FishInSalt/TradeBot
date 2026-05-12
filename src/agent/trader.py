@@ -595,19 +595,21 @@ def create_trader_agent(
     ) -> str:
         """Cancel a previously-set price level alert by its ID.
 
-        Use this when an alert is no longer relevant — for example, if the
-        structural level it watched has been invalidated by a regime change
-        or if the position context that motivated it has shifted in a way
-        that the auto-clearing on close fill does not cover.
+        Idempotent: if the alert is no longer active (already triggered
+        or auto-cleared by a position-close fill), returns ok with a
+        'Note: Alert {id} no longer active' line rather than emitting a
+        business error. Format-invalid IDs still reject explicitly.
 
-        Note: alerts at SL/TP levels are auto-cleared when a position closes;
-        you usually do not need to call this for that case.
+        Note: alerts at SL/TP levels are auto-cleared when a position
+        closes; you usually do not need to call this for that case.
 
         Args:
-            alert_id: 8-char hex id returned by add_price_level_alert (also visible
-                in get_active_alerts output as 'id=...'). Do not use the position
-                index '#N' from get_active_alerts — that is for display only.
-            reasoning: brief description of why this alert is being cancelled.
+            alert_id: 8-char hex id returned by add_price_level_alert
+                (also visible in get_active_alerts output as 'id=...').
+                Do not use the position index '#N' from get_active_alerts —
+                that is for display only.
+            reasoning: brief description of why this alert is being
+                cancelled.
         """
         from src.agent.tools_execution import cancel_price_level_alert as _impl
 
