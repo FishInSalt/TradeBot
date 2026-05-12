@@ -349,9 +349,10 @@ def test_is_tool_error_set_next_wake_at_success():
     "Invalid target_time format: 'foo'. Expected 'HH:MM' UTC with 2-digit hour and minute (e.g., '10:37' or '03:05').",
     "Cannot wake at 12:00 UTC: nearest future 2026-05-12 12:00 UTC (in 97 min) exceeds wake_max=60 min for this session.",
     "Cannot wake at 10:24 UTC: nearest future 2026-05-12 10:24 UTC (in 1 min) below wake_min=2 min.",
+    "Dynamic wake not available",
 ])
 def test_is_tool_error_set_next_wake_at_reject(reject_msg):
-    """All 3 reject classes must be flagged as error."""
+    """All 4 reject classes (3 spec + fn=None code path) must be flagged as error."""
     from src.cli.display import is_tool_error
     assert is_tool_error("set_next_wake_at", reject_msg) is True
 
