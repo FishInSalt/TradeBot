@@ -646,15 +646,28 @@ def create_trader_agent(
         minutes: int,
         reasoning: str,
     ) -> str:
-        """Set the next scheduler wake-up interval (one-shot; reverts to default after use).
+        """Schedule the next scheduler wake-up after a relative minute interval.
 
         Args:
-            minutes: target minutes until next wake. See "Wake interval control"
-                in the system prompt for valid range and trigger behavior.
+            minutes: minutes from now until the next wake-up. Must fall within
+                [wake_min_minutes, wake_max_minutes]; rejected otherwise.
             reasoning: brief description of your decision logic.
+
+        Returns a confirmation, or a reject message describing the violation.
+
+        Examples:
+            set_next_wake(15, "consolidation phase, check in 15 min")
+            → "Next wake set to 15 min. Reason: ..."
+
+            set_next_wake(90, "...")
+            → "Cannot set wake to 90 min: exceeds wake_max=60 min for this session."
+
+            set_next_wake(0, "...")
+            → "Cannot set wake to 0 min: below wake_min=1 min."
+
+        Alerts, fills, and conditional triggers always interrupt scheduled wake.
         """
         from src.agent.tools_execution import set_next_wake as _impl
-
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
     @tool

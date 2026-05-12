@@ -15,6 +15,7 @@ class MockDeps:
     technical: MagicMock
     memory: AsyncMock
     session_id: str = "test-session"
+    cycle_id: str = "test-cycle"   # ← NEW: _record_action 路径需要
     db_engine: object = None
     approval_gate: object = None
     approval_enabled: bool = False
@@ -341,27 +342,70 @@ async def test_set_next_wake_success(deps):
     assert "10 min" in result
 
 
-async def test_set_next_wake_clamps_to_max(deps):
-    """Minutes above max should be clamped."""
+async def test_set_next_wake_rejects_above_max(deps):
+    """Minutes above wake_max → reject; set_next_wake_fn not called."""
     from src.agent.tools_execution import set_next_wake
     deps.wake_min_minutes = 1
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
-    result = await set_next_wake(deps, 120, reasoning="test")
-    deps.set_next_wake_fn.assert_called_once_with(60)
-    assert "clamped" in result.lower()
-    assert "60 min" in result
+    result = await set_next_wake(deps, 90, reasoning="test")
+    deps.set_next_wake_fn.assert_not_called()
+    assert "Cannot set wake to 90 min" in result
+    assert "exceeds wake_max=60 min" in result
+    assert "for this session" in result
 
 
-async def test_set_next_wake_clamps_to_min(deps):
-    """Minutes below min should be clamped."""
+async def test_set_next_wake_rejects_below_min(deps):
+    """Minutes below wake_min → reject; set_next_wake_fn not called."""
     from src.agent.tools_execution import set_next_wake
     deps.wake_min_minutes = 1
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake(deps, 0, reasoning="test")
-    deps.set_next_wake_fn.assert_called_once_with(1)
-    assert "clamped" in result.lower()
+    deps.set_next_wake_fn.assert_not_called()
+    assert "Cannot set wake to 0 min" in result
+    assert "below wake_min=1 min" in result
+
+
+async def test_set_next_wake_reject_no_trade_action(deps, db_engine):
+    """T2 reject path does not write trade_actions row."""
+    from src.agent.tools_execution import set_next_wake
+    from src.storage.models import TradeAction
+    from sqlalchemy import select
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    deps.db_engine = db_engine
+
+    await set_next_wake(deps, 90, reasoning="reject test")  # exceeds max
+
+    async with db_engine.begin() as conn:
+        rows = (await conn.execute(
+            select(TradeAction).where(TradeAction.action == "set_next_wake")
+        )).scalars().all()
+    assert len(rows) == 0
+
+
+async def test_set_next_wake_boundary_60_ok(deps):
+    """T2.5: minutes=60 (wake_max boundary) → ok, fn called."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 60, reasoning="boundary test")
+    deps.set_next_wake_fn.assert_called_once_with(60)
+    assert "Next wake set to 60 min" in result
+
+
+async def test_set_next_wake_boundary_61_rejects(deps):
+    """T2.4: minutes=61 (wake_max+1) → reject."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake(deps, 61, reasoning="boundary test")
+    deps.set_next_wake_fn.assert_not_called()
+    assert "exceeds wake_max=60 min" in result
 
 
 async def test_set_next_wake_not_available(deps):

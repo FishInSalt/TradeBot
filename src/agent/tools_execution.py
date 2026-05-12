@@ -427,20 +427,27 @@ async def set_next_wake(
     minutes: int,
     reasoning: str,
 ) -> str:
-    """Set the next wake interval (one-shot). Clamped to configured min/max."""
+    """See trader.py wrapper docstring."""
     if deps.set_next_wake_fn is None:
         return "Dynamic wake not available"
-    clamped = max(deps.wake_min_minutes, min(minutes, deps.wake_max_minutes))
-    deps.set_next_wake_fn(clamped)
 
+    if minutes < deps.wake_min_minutes:
+        return (
+            f"Cannot set wake to {minutes} min: "
+            f"below wake_min={deps.wake_min_minutes} min."
+        )
+    if minutes > deps.wake_max_minutes:
+        return (
+            f"Cannot set wake to {minutes} min: "
+            f"exceeds wake_max={deps.wake_max_minutes} min for this session."
+        )
+
+    deps.set_next_wake_fn(minutes)
     await _record_action(
         deps, action="set_next_wake",
-        reasoning=f"interval={clamped}min | {reasoning}",
+        reasoning=f"interval={minutes}min | {reasoning}",
     )
-
-    if clamped != minutes:
-        return f"Next wake set to {clamped} min (clamped from {minutes}). Reason: {reasoning}"
-    return f"Next wake set to {clamped} min. Reason: {reasoning}"
+    return f"Next wake set to {minutes} min. Reason: {reasoning}"
 
 
 async def place_limit_order(
