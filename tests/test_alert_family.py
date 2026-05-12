@@ -435,7 +435,6 @@ def test_update_view_known_orphan_limitation():
 
     # Read the view source and confirm it still filters by the two original
     # literals exclusively (no 'update_price_level_alert' branch added).
-    import inspect as _inspect
     from src.storage import views
 
     view_sql = getattr(views, "V_ALERT_LIFECYCLE_SQL", None)
