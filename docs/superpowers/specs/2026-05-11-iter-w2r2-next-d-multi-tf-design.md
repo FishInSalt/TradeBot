@@ -502,69 +502,27 @@ Per-tf section ≈ 180 tokens; default 2 tfs ≈ 385 tokens (vs status quo singl
 
 ## 6. Cross-cutting
 
-### 6.1 Cross-tool routing — placement via wrapper docstrings, not Layer-1
+### 6.1 Cross-tool routing — REVERTED to "no nudge, tool capability only"
 
-**Layer-1 in `persona.py` is intentionally NOT modified.** Per memory `project_n7_layer1_organization` and PR #25 design discipline, Layer-1 reduced 25 bullets → 5 (current 6) precisely because tool-specific descriptions migrated to wrapper docstrings extracted by pydantic-ai's griffe sniff. Adding a new Layer-1 bullet listing tools by name would:
+**Status**: superseded by tool-design principle 8 ("信任 agent + 工具优先 / agent 行为偏差是工具反馈，不是 prompt 失败"). The wrapper-docstring "Related perception tools" tail described in earlier revisions of this section has been **removed from both `trader.py` wrappers and `tools_perception.py` impl docstrings**. No equivalent nudge added to `persona.py` Layer-1.
 
-1. Break the standing drift-guard `tests/test_persona.py::test_layer1_cross_tool_bullet_count` (`assert bullet_count == 6`).
-2. Violate the standing discipline asserted by `tests/test_persona.py::test_layer1_no_tool_invocation` (Iter 4 / PR #25): "Layer 1 should not contain tool-name invocation patterns — tool descriptions belong in docstrings (DRY)."
+**Why reverted** (R2-Next-D 实施反思, 2026-05-12):
 
-The path-reversal cross-tool signal therefore lives in the **wrapper docstrings** that pydantic-ai surfaces to the agent. Each of the three multi-tf wrapper docstrings ends with a **"Related perception tools"** section that names the other two tools with fact-only capability descriptions:
+1. **Token cost without proportional routing effect** — Each of the three tool descriptions appeared 3× in the LLM-facing tool registry (once as the tool's own description, twice in sibling tools' "Related" sections). LLM tool-selection literature shows selectors primarily attend to the first 1-2 sentences of a tool description; a tail "Related" section pays the token cost of being read by the context loader without proportionally shifting the selection decision.
 
-```python
-# MTS wrapper (trader.py) docstring tail
-"""
-... (existing fact-only docstring per §3.3) ...
+2. **Wrong direction of nudge** — "When invoking X, here are siblings Y / Z" activates an "explore alternatives" reflex at call time, which is the opposite of path-reversal intent. Path reversal needs an "at cycle entry, MTS first" routing — that timing belongs in `persona.py` Layer-1 (system prompt, read once per cycle) or, by principle 8, **in the tool's own capability** (a sufficiently capable MTS pulls itself to the front without external prompting).
 
-Related perception tools (factual capability surface, not a calling order):
-- `get_market_data`: single-timeframe depth output —
-  full RSI / MACD / BB / Volume ratio indicators, market context, a
-  30-candle OHLCV table with anomaly markers, and a period summary
-  (last 5 vs prior 5 closed candles).
-- `get_higher_timeframe_view`: long-term structural anchors output —
-  raw MA50/100/200 values with slopes and MA stack, 100-period range
-  with bars-ago, volume regime, ATR regime, across one or more
-  higher timeframes.
-"""
+3. **Principle 8 supersedes the original rationale** — Tool capability is the first-class routing signal. If W3+ data shows MTS frequency below the §7.2 ≥60% target, the **reflection order is tool-side** (MTS capability sufficient? Default tfs aligned? K-line snippet long enough? docstring fact-only and accurate? Last-3-closes carrying enough cycle-entry information?), not prompt-nudge-side. Adding a "Related" section pre-empted that reflection sequence by inserting a nudge as the implicit fallback — which is exactly the anti-pattern principle 8 names.
 
-# GMD wrapper (trader.py) docstring tail
-"""
-... (existing fact-only docstring per §4.5) ...
+4. **DRY discipline alignment** — Per `project_n7_layer1_organization` (PR #25), tool descriptions live once in each tool's own docstring; cross-references that restate sibling capabilities re-introduce the duplication PR #25 eliminated.
 
-Related perception tools (factual capability surface, not a calling order):
-- `get_multi_timeframe_snapshot`: cross-timeframe alignment overview —
-  authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf
-  momentum / structure with raw MA values / volatility ratio / range
-  position / 3 closed candle closes.
-- `get_higher_timeframe_view`: long-term structural anchors output —
-  raw MA50/100/200 values with slopes and MA stack, 100-period range
-  with bars-ago, volume regime, ATR regime, across one or more
-  higher timeframes.
-"""
+**Implementation state** (as landed):
+- `trader.py` GMD / HTF / MTS wrapper docstrings end at the `Degradation:` line; no "Related perception tools" tail.
+- `tools_perception.py` impl-side docstrings mirror the wrappers; same removal.
+- `persona.py` Layer-1 remains at 6 bullets (drift-guard `test_layer1_cross_tool_bullet_count` unchanged); no multi-tf bullet added.
+- No new drift-guard test required — the absence of the "Related" tail is enforced by tool-design principle 8 red flag (`wrapper docstring 末尾出现 "Related tools" / "See also" / "Use this when not X" 类 cross-routing 段`) and reviewed in `tool-design-principles.md` §4 checklist principle 8 row.
 
-# HTF wrapper (trader.py) docstring tail
-"""
-... (existing fact-only docstring per §5.7) ...
-
-Related perception tools (factual capability surface, not a calling order):
-- `get_multi_timeframe_snapshot`: cross-timeframe alignment overview —
-  authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf
-  momentum / structure with raw MA values / volatility ratio / range
-  position / 3 closed candle closes.
-- `get_market_data`: single-timeframe depth output —
-  full RSI / MACD / BB / Volume ratio indicators, market context, a
-  30-candle OHLCV table with anomaly markers, and a period summary
-  (last 5 vs prior 5 closed candles).
-"""
-```
-
-Rationale:
-- pydantic-ai's griffe sniff treats the entire wrapper docstring as the agent-facing tool description, so the "Related" section surfaces to the LLM as part of each tool's signature presentation.
-- Phrasing is fact-only (no "Use X for Y" / "Useful for Y" patterns; the wording "factual capability surface, not a calling order" is explicit guard against agent interpreting it as prescriptive routing).
-- No regex match in the existing Layer-1 invocation-pattern test (which only inspects Layer-1 text, not wrapper docstrings).
-- DRY: each tool's identity description still lives once in its own docstring; cross-references describe siblings without restating their full surface.
-
-Implementation note: this section is added at the end of each wrapper docstring (after `Args` and any existing `Example` blocks); `tools_perception.py` implementation docstrings should mirror it for dev-facing parity (per §6.2 two-layer convention).
+**W3+ fallback contract**: if MTS frequency target (§7.2) is missed, the next iteration's first move is to revisit the tool itself (capability / default / docstring / interface), per principle 8 reflection order. A prompt-nudge fallback (whether Layer-1 or wrapper-docstring "Related" tail) is **explicitly out of bounds** without principle 8 sign-off.
 
 ### 6.2 docstring rewrite cross-reference
 

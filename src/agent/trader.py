@@ -119,10 +119,6 @@ def create_trader_agent(
             Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
             Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
             Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
-
-        Related perception tools (factual capability surface, not a calling order):
-            - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
-            - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
         """
         from src.agent.tools_perception import get_market_data as _impl
 
@@ -323,10 +319,6 @@ def create_trader_agent(
             ...
 
         Degradation: per-tf "insufficient data (need N candles)" if OHLCV history is shorter than the longest MA period; per-tf "Error: Temporarily unavailable" if the OHLCV fetch for that tf fails; overall returns header-only error if the ticker fetch fails.
-
-        Related perception tools (factual capability surface, not a calling order):
-            - get_multi_timeframe_snapshot: cross-timeframe alignment overview — authoritative ticker, per-tf MA fast-vs-slow direction count, per-tf momentum / structure with raw MA values / volatility ratio / range position / 3 closed candle closes.
-            - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
         """
         from src.agent.tools_perception import get_higher_timeframe_view as _impl
 
@@ -427,10 +419,6 @@ def create_trader_agent(
             ... (3 more tf rows)
 
         Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall returns header-only error if all TFs fail or ticker fetch fails.
-
-        Related perception tools (factual capability surface, not a calling order):
-            - get_market_data: single-timeframe depth output — full RSI / MACD / BB / Volume ratio indicators, market context, a 30-candle OHLCV table with anomaly markers, and a period summary (last 5 vs prior 5 closed candles).
-            - get_higher_timeframe_view: long-term structural anchors output — raw MA50/100/200 values with slopes and MA stack, 100-period range with bars-ago, volume regime, ATR regime, across one or more higher timeframes.
         """
         from src.agent.tools_perception import get_multi_timeframe_snapshot as _impl
 
