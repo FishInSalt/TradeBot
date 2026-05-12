@@ -291,7 +291,17 @@ async def cancel_price_level_alert(
     alert_id: str,
     reasoning: str,
 ) -> str:
-    """Remove a price level alert by ID."""
+    """Cancel a previously-set price level alert by its ID.
+
+    Idempotent: if the alert is no longer active (already triggered or
+    removed via close-fill auto-clear), returns ok with a Note rather
+    than emitting a business error. Format-invalid IDs and unexpected
+    internal exceptions still reject explicitly.
+
+    Args:
+        alert_id: 8-char hex id returned by add_price_level_alert.
+        reasoning: brief rationale for the cancel (audit-only).
+    """
     # 协议层：8-char hex 格式校验（uuid.uuid4()[:8] 生成，[0-9a-f]{8}）
     if not re.fullmatch(r"[0-9a-f]{8}", alert_id):
         note_biz_error("invalid_alert_id_format")
@@ -299,17 +309,36 @@ async def cancel_price_level_alert(
             f"Invalid alert_id format: {alert_id!r}. Expected 8-char hex "
             f"(e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids."
         )
-    # 状态层：格式合法但 sim 中不存在
-    ok = deps.exchange.remove_price_level_alert(alert_id)
-    if ok:
-        await _record_action(
-            deps, action="cancel_price_level_alert",
-            alert_id=alert_id,
-            reasoning=reasoning,
+
+    # Peek before mutate — captures reasoning for F-A3 success-string suffix.
+    alert = _lookup_alert(deps.exchange, alert_id)
+    if alert is None:
+        # 状态不存在 → idempotent ok with note (spec §3.2, §3.4).
+        # Covers both root causes: auto-trigger removal during cascade AND
+        # _clear_stale_alerts_for_full_close on position close (PR #27).
+        return (
+            f"Alert {alert_id} no longer active "
+            f"(already triggered or removed)"
         )
-        return f"Price level alert cancelled (id={alert_id})"
-    note_biz_error("alert_not_found")
-    return f"Alert {alert_id} already triggered or expired"
+
+    ok = deps.exchange.remove_price_level_alert(alert_id)
+    if not ok:
+        # Defensive: lookup and remove are both sync, in-cycle; remove failing
+        # after a successful lookup would indicate a real invariant violation.
+        raise RuntimeError(
+            f"remove_price_level_alert returned False for id={alert_id} "
+            f"that was just present in lookup — invariant violated"
+        )
+
+    await _record_action(
+        deps, action="cancel_price_level_alert",
+        alert_id=alert_id,
+        reasoning=reasoning,
+    )
+    return (
+        f'Price level alert cancelled (id={alert_id}) — '
+        f'"{alert["reasoning"]}"'
+    )
 
 
 async def set_next_wake(
