@@ -322,3 +322,36 @@ async def test_update_immediate_trigger_allowed(engine, session_with_row):
     assert len(rows) == 1
     assert rows[0].status == "ok"
     assert rows[0].error_type is None
+
+
+# ============ Task 5: display.py dispatch surfaces drift guard ============
+
+def test_update_display_dispatch_registered():
+    """Spec §5.1.4 + AC-12 + AC-15: update_price_level_alert must be present in
+    all three display.py dispatch structures (frozenset / parsers / prefixes).
+    """
+    from src.cli.display import (
+        _EXECUTION_PARSERS,
+        _EXECUTION_SUCCESS_PREFIXES,
+        _EXECUTION_TOOL_NAMES,
+    )
+
+    # 5.1.4.1: frozenset membership (required for test_dg_2 partition)
+    assert "update_price_level_alert" in _EXECUTION_TOOL_NAMES
+
+    # 5.1.4.2: parser registered + correctly extracts direction + prices
+    assert "update_price_level_alert" in _EXECUTION_PARSERS
+    parser = _EXECUTION_PARSERS["update_price_level_alert"]
+    sample = (
+        "Price level alert updated (id=a3f2b8c1 → id=d7c2e9f4):\n"
+        "  above 82100.00 → above 82500.00 — \"4h structural high\""
+    )
+    summary = parser(sample)
+    assert "above" in summary
+    assert "$82,100" in summary
+    assert "$82,500" in summary
+
+    # 5.1.4.3: success-prefix entry registered (single string for update)
+    assert _EXECUTION_SUCCESS_PREFIXES["update_price_level_alert"] == (
+        "Price level alert updated"
+    )

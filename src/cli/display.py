@@ -242,6 +242,21 @@ def _summarize_add_price_level_alert(content: str) -> str:
     return _fallback_summary(content)
 
 
+def _summarize_update_price_level_alert(content: str) -> str:
+    # Matches §4.2 step 7 success-return shape:
+    #   "Price level alert updated (id=AAAA → id=BBBB):
+    #      above 82100.00 → above 82500.00 — \"reasoning\""
+    m = re.search(
+        r"(above|below)\s+([\d.]+)\s*→\s*(above|below)\s+([\d.]+)", content
+    )
+    if m:
+        return (
+            f"{m.group(1)} ${float(m.group(2)):,.0f} → "
+            f"${float(m.group(4)):,.0f}"
+        )
+    return _fallback_summary(content)
+
+
 def _summarize_set_next_wake(content: str) -> str:
     m = re.search(r"(\d+)\s*min", content)
     if m:
@@ -259,6 +274,7 @@ _EXECUTION_PARSERS = {
     "cancel_order": _summarize_cancel_order,
     "set_price_alert": _summarize_set_price_alert,
     "add_price_level_alert": _summarize_add_price_level_alert,
+    "update_price_level_alert": _summarize_update_price_level_alert,
     "set_next_wake": _summarize_set_next_wake,
 }
 
@@ -273,7 +289,11 @@ _EXECUTION_SUCCESS_PREFIXES = {
     "cancel_order": "Order cancelled:",
     "set_price_alert": "Price alert updated:",
     "add_price_level_alert": ("Price level alert set:", "Alert set"),
-    "cancel_price_level_alert": "Price level alert cancelled",
+    "cancel_price_level_alert": (
+        "Price level alert cancelled",   # cancel success (real removal)
+        "Alert ",                         # cancel idempotent ok ("Alert {id} no longer active ...")
+    ),
+    "update_price_level_alert": "Price level alert updated",
     "set_next_wake": "Next wake set to",
 }
 
@@ -500,6 +520,7 @@ _EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
     "set_price_alert",
     "add_price_level_alert",
     "cancel_price_level_alert",
+    "update_price_level_alert",
     "set_next_wake",
 })
 

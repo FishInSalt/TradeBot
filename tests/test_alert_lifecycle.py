@@ -647,18 +647,6 @@ def test_is_tool_error_cancel_alert_invalid_format_returns_true():
     assert result is True
 
 
-def test_is_tool_error_cancel_alert_state_not_found_returns_true():
-    """R2-2 T5: 状态错（已触发/过期）信息不命中 success prefix → is_tool_error=True。"""
-    from src.cli.display import is_tool_error
-
-    result = is_tool_error(
-        tool_name="cancel_price_level_alert",
-        content="Alert deadbeef already triggered or expired",
-        outcome="success",
-    )
-    assert result is True
-
-
 def test_registered_tool_names_includes_cancel_alert():
     """Explicit assertion that cancel_price_level_alert is in REGISTERED_TOOL_NAMES.
 
