@@ -273,6 +273,19 @@ async def add_price_level_alert(
     return f"Price level alert set: {direction} {price:.2f} (id={alert_id})"
 
 
+def _lookup_alert(exchange, alert_id: str) -> dict | None:
+    """Peek at the alert dict by id without mutating the alert list.
+
+    Used by cancel (to capture reasoning before remove) and update (to
+    capture direction + reasoning before sequential replace). Returns
+    the full alert dict matching the id, or None if no match.
+    """
+    for alert in exchange.get_price_level_alerts():
+        if alert["id"] == alert_id:
+            return alert
+    return None
+
+
 async def cancel_price_level_alert(
     deps: TradingDeps,
     alert_id: str,
