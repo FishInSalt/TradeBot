@@ -264,6 +264,14 @@ def _summarize_set_next_wake(content: str) -> str:
     return _fallback_summary(content)
 
 
+def _summarize_set_next_wake_at(content: str) -> str:
+    """Parse 'Next wake set for YYYY-MM-DD HH:MM UTC (in N min). Reason: ...'."""
+    m = re.search(r"\(in (\d+)\s*min\)", content)
+    if m:
+        return f"{m.group(1)}min"
+    return _fallback_summary(content)
+
+
 _EXECUTION_PARSERS = {
     "open_position": _summarize_open_position,
     "close_position": _summarize_close_position,
@@ -276,6 +284,7 @@ _EXECUTION_PARSERS = {
     "add_price_level_alert": _summarize_add_price_level_alert,
     "update_price_level_alert": _summarize_update_price_level_alert,
     "set_next_wake": _summarize_set_next_wake,
+    "set_next_wake_at": _summarize_set_next_wake_at,
 }
 
 # Success prefix whitelist for execution tools (business rejection detection)
@@ -295,6 +304,7 @@ _EXECUTION_SUCCESS_PREFIXES = {
     ),
     "update_price_level_alert": "Price level alert updated",
     "set_next_wake": "Next wake set to",
+    "set_next_wake_at": "Next wake set for",
 }
 
 
@@ -522,6 +532,7 @@ _EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
     "cancel_price_level_alert",
     "update_price_level_alert",
     "set_next_wake",
+    "set_next_wake_at",
 })
 
 

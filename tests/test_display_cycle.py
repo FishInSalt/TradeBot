@@ -1,6 +1,8 @@
 """Tests for cycle display: tool summary parsers and cycle output formatting."""
 from __future__ import annotations
 
+import pytest
+
 
 # === Perception tool summary parsers ===
 
@@ -325,6 +327,33 @@ def test_summarize_set_next_wake():
     assert "30" in result
     assert "min" in result
     assert "Reason" not in result  # reasoning should be truncated
+
+
+def test_summarize_set_next_wake_at():
+    from src.cli.display import summarize_tool
+    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: align 1h close"
+    result = summarize_tool("set_next_wake_at", content)
+    assert "14" in result
+    assert "min" in result
+    assert "Reason" not in result
+
+
+def test_is_tool_error_set_next_wake_at_success():
+    """set_next_wake_at success message must not be flagged as error."""
+    from src.cli.display import is_tool_error
+    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: test"
+    assert is_tool_error("set_next_wake_at", content) is False
+
+
+@pytest.mark.parametrize("reject_msg", [
+    "Invalid target_time format: 'foo'. Expected 'HH:MM' UTC with 2-digit hour and minute (e.g., '10:37' or '03:05').",
+    "Cannot wake at 12:00 UTC: nearest future 2026-05-12 12:00 UTC (in 97 min) exceeds wake_max=60 min for this session.",
+    "Cannot wake at 10:24 UTC: nearest future 2026-05-12 10:24 UTC (in 1 min) below wake_min=2 min.",
+])
+def test_is_tool_error_set_next_wake_at_reject(reject_msg):
+    """All 3 reject classes must be flagged as error."""
+    from src.cli.display import is_tool_error
+    assert is_tool_error("set_next_wake_at", reject_msg) is True
 
 
 # === Memory tool ===

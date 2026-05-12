@@ -668,7 +668,49 @@ def create_trader_agent(
         Alerts, fills, and conditional triggers always interrupt scheduled wake.
         """
         from src.agent.tools_execution import set_next_wake as _impl
+
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
+
+    @tool
+    async def set_next_wake_at(
+        ctx: RunContext[TradingDeps],
+        target_time: str,
+        reasoning: str,
+    ) -> str:
+        """Schedule the next scheduler wake-up at an absolute UTC time.
+
+        Args:
+            target_time: future wake time in 'HH:MM' UTC format (e.g., '10:37').
+                Resolves to the nearest future time matching HH:MM (today if
+                HH:MM is still ahead in UTC; otherwise tomorrow). Must fall
+                within [now+wake_min_minutes, now+wake_max_minutes]; rejected
+                otherwise.
+            reasoning: brief description of your decision logic.
+
+        Returns a confirmation containing the resolved date-time, or a reject
+        message describing the violation.
+
+        Examples:
+            set_next_wake_at("10:37", "align with 1h candle close at 11:00 UTC")
+            → "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: ..."
+
+            set_next_wake_at("12:00", "...")
+            → "Cannot wake at 12:00 UTC: nearest future 2026-05-12 12:00 UTC
+               (in 97 min) exceeds wake_max=60 min for this session."
+
+            set_next_wake_at("10:23", "...")  # now=10:23, resolves to tomorrow
+            → "Cannot wake at 10:23 UTC: nearest future 2026-05-13 10:23 UTC
+               (in 1440 min) exceeds wake_max=60 min for this session."
+
+            set_next_wake_at("foo", "...")
+            → "Invalid target_time format: 'foo'. Expected 'HH:MM' UTC
+               with 2-digit hour and minute (e.g., '10:37' or '03:05')."
+
+        Alerts, fills, and conditional triggers always interrupt scheduled wake.
+        """
+        from src.agent.tools_execution import set_next_wake_at as _impl
+
+        return await _impl(ctx.deps, target_time, reasoning=reasoning)
 
     @tool
     async def place_limit_order(
@@ -758,6 +800,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "cancel_price_level_alert",
     "update_price_level_alert",
     "set_next_wake",
+    "set_next_wake_at",
     "place_limit_order",
     # --- memory (1) ---
     "save_memory",

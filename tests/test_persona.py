@@ -319,6 +319,23 @@ def test_layer1_contains_wake_interval_control_bullet():
     # cross-tool 关系断言（真正的 Layer 1 价值，比 bound 重要）
     assert "alerts, fills, and conditional triggers always interrupt sleep" in layer1, \
         "Layer 1 Wake interval control bullet missing cross-tool interrupt clause"
+    assert "scheduled wake-up applies only when no external trigger fires" in layer1, \
+        "Layer 1 missing 'scheduled wake-up applies only when no external trigger fires' anchor"
+
+
+def test_layer1_no_wake_tool_signature_literal():
+    """Spec §6.3 T3.2: Layer 1 must not name either wake tool signature literally.
+
+    L3 抽象 (Iter 4 DRY 反转) — 工具描述交 docstring 自承，Layer 1 仅保留
+    cross-tool behavior + session-aware bound (per Iter 4 PR #25 pattern).
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    runtime = RuntimeConfig()
+    layer1 = _build_layer1(runtime)
+    assert "set_next_wake(minutes)" not in layer1, \
+        "Layer 1 must not name set_next_wake signature; description belongs in docstring"
+    assert "set_next_wake_at(target_time)" not in layer1, \
+        "Layer 1 must not name set_next_wake_at signature; description belongs in docstring"
 
 
 def test_layer1_renders_dynamic_wake_max():
