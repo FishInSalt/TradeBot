@@ -355,3 +355,95 @@ def test_update_display_dispatch_registered():
     assert _EXECUTION_SUCCESS_PREFIXES["update_price_level_alert"] == (
         "Price level alert updated"
     )
+
+
+# ============ Task 6: drift guards — classification + sync invariant ============
+
+def test_cancel_idempotent_not_classified_as_error():
+    """Spec §5.1.4.3 + AC-14: cancel idempotent ok must NOT be misclassified
+    as tool error by is_tool_error (the post-v5 review A1 finding). Without the
+    prefix-tuple fix, the idempotent return string would fail prefix match
+    and is_tool_error would return True, defeating the whole idempotent design.
+    """
+    from src.cli.display import is_tool_error
+
+    # Cancel idempotent ok return — must NOT be error
+    idempotent_ok = "Alert a3f2b8c1 no longer active (already triggered or removed)"
+    assert is_tool_error(
+        "cancel_price_level_alert", idempotent_ok, outcome="success",
+    ) is False
+
+    # Cancel real success — must NOT be error
+    cancel_success = 'Price level alert cancelled (id=a3f2b8c1) — "4h structural high"'
+    assert is_tool_error(
+        "cancel_price_level_alert", cancel_success, outcome="success",
+    ) is False
+
+    # Update success — must NOT be error
+    update_success = (
+        "Price level alert updated (id=a3f2b8c1 → id=d7c2e9f4):\n"
+        "  above 82100.00 → above 82500.00 — \"4h structural high\""
+    )
+    assert is_tool_error(
+        "update_price_level_alert", update_success, outcome="success",
+    ) is False
+
+
+def test_update_atomicity_sync_invariant():
+    """Spec §5.4 test #9 + AC-13: BaseExchange.add_price_level_alert and
+    .remove_price_level_alert must be sync (not async). Pins the §4.2 step 4
+    'no yield points' atomicity invariant.
+    """
+    from src.integrations.exchange.base import BaseExchange
+
+    assert not inspect.iscoroutinefunction(BaseExchange.add_price_level_alert), (
+        "BaseExchange.add_price_level_alert must be sync — "
+        "update_price_level_alert atomicity depends on this invariant"
+    )
+    assert not inspect.iscoroutinefunction(BaseExchange.remove_price_level_alert), (
+        "BaseExchange.remove_price_level_alert must be sync — "
+        "update_price_level_alert atomicity depends on this invariant"
+    )
+
+
+def test_update_view_known_orphan_limitation():
+    """Spec §4.2 step 8 + §9: v_alert_lifecycle view sees neither side of an
+    update — old id stays as final_status='active' orphan (no cancel CTE row)
+    and new id is entirely absent from the view (registers CTE filters
+    action='add_price_level_alert' which doesn't match 'update_price_level_alert').
+
+    This test pins the known limitation. If a future change adds dual-emit
+    _record_action (candidate (a) in §9 follow-up) or extends the view CTEs,
+    the assertion shape changes and the future PR author must consciously
+    update this pin (forcing them to confirm the new contract).
+    """
+    # The action constants documented to NOT trigger view-visibility for update:
+    # - 'add_price_level_alert' (registers CTE filter, views.py:99-100)
+    # - 'cancel_price_level_alert' (cancels CTE filter, views.py:117-118)
+    #
+    # update_price_level_alert writes action='update_price_level_alert' which
+    # is neither — both CTEs filter it out by construction.
+
+    update_action_literal = "update_price_level_alert"
+    add_action_literal = "add_price_level_alert"
+    cancel_action_literal = "cancel_price_level_alert"
+
+    # The contract pinned: update's action_name is distinct from the view's
+    # filter literals, so the view cannot see update rows on either side.
+    assert update_action_literal != add_action_literal
+    assert update_action_literal != cancel_action_literal
+
+    # Read the view source and confirm it still filters by the two original
+    # literals exclusively (no 'update_price_level_alert' branch added).
+    import inspect as _inspect
+    from src.storage import views
+
+    view_sql = getattr(views, "V_ALERT_LIFECYCLE_SQL", None)
+    assert view_sql is not None, "V_ALERT_LIFECYCLE_SQL constant not found"
+    assert f"action='{add_action_literal}'" in view_sql
+    assert f"action='{cancel_action_literal}'" in view_sql
+    assert f"action='{update_action_literal}'" not in view_sql, (
+        "If V_ALERT_LIFECYCLE_SQL now references 'update_price_level_alert', "
+        "the §4.2 step 8 known limitation has been resolved — update this "
+        "pin to assert the new contract (e.g., new CTE or dual-emit rows)."
+    )
