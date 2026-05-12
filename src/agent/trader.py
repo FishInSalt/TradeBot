@@ -614,6 +614,31 @@ def create_trader_agent(
         return await _impl(ctx.deps, alert_id, reasoning=reasoning)
 
     @tool
+    async def update_price_level_alert(
+        ctx: RunContext[TradingDeps],
+        alert_id: str,
+        new_price: float,
+        reasoning: str,
+    ) -> str:
+        """Replace a single existing price level alert with a new price.
+
+        Atomic: cancels the old alert and creates a new one with new_price,
+        preserving the original direction and reasoning text. The direction
+        (above/below) cannot change — to change direction or reasoning
+        materially, use cancel + add. Trail use case: when price moves and
+        you want the same alert at a new level, this preserves identity
+        continuity (the alert is still "the same thing at a new price").
+
+        Args:
+            alert_id: 8-char hex id of the existing alert (see get_active_alerts).
+            new_price: new trigger price.
+            reasoning: brief rationale for the move (audit-only).
+        """
+        from src.agent.tools_execution import update_price_level_alert as _impl
+
+        return await _impl(ctx.deps, alert_id, new_price, reasoning=reasoning)
+
+    @tool
     async def set_next_wake(
         ctx: RunContext[TradingDeps],
         minutes: int,
@@ -706,7 +731,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_recent_trades",
     "get_multi_timeframe_snapshot",
     "get_price_pivots",
-    # --- 执行 (11) ---
+    # --- 执行 (12) ---
     "open_position",
     "close_position",
     "set_stop_loss",
@@ -716,6 +741,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "cancel_order",
     "add_price_level_alert",
     "cancel_price_level_alert",
+    "update_price_level_alert",
     "set_next_wake",
     "place_limit_order",
     # --- memory (1) ---
