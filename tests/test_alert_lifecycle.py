@@ -589,7 +589,11 @@ async def test_cancel_price_level_alert_tool_success():
 
     result = await cancel_price_level_alert(deps, alert_id, "no longer needed")
 
-    assert result == f"Price level alert cancelled (id={alert_id})"
+    # F-A3 (w2r2-next-e): success string now includes original alert reasoning
+    # suffix `— "<reasoning>"`. Substring check tolerates that, preserved from
+    # earlier exact-equality form. Full F-A3 surface assertion lives in
+    # tests/test_alert_family.py::test_cancel_success_includes_reasoning.
+    assert result.startswith(f"Price level alert cancelled (id={alert_id})")
     assert len(sim.get_price_level_alerts()) == 0
 
 
@@ -617,28 +621,6 @@ async def test_cancel_price_level_alert_tool_invalid_format():
         assert repr(bad_id) in result or bad_id in result, f"用户输入回显缺失 for {bad_id!r}: {result!r}"
 
 
-@pytest.mark.asyncio
-async def test_cancel_price_level_alert_tool_state_not_found():
-    """R2-2 T3: 状态错（合法 8-char hex 但 sim 中不存在）→ already triggered or expired。"""
-    from src.agent.tools_execution import cancel_price_level_alert
-
-    sim = make_sim_exchange()
-    deps = MagicMock()
-    deps.exchange = sim
-    deps.db_engine = None
-    deps.session_id = "test-session"
-
-    # 合法 8-char hex 格式（防真碰撞，不与任何活跃 uuid 重合 — sim 中无 alerts）
-    fake_id = "deadbeef"
-    result = await cancel_price_level_alert(deps, fake_id, "test")
-
-    assert "already triggered or expired" in result, f"状态错信息缺失: {result!r}"
-    assert fake_id in result, f"alert_id 回显缺失: {result!r}"
-    # 状态错不应混入"格式错"提示
-    assert "Invalid alert_id format" not in result
-    assert "8-char hex" not in result
-
-
 # ============ display.py is_tool_error coverage ============
 
 def test_is_tool_error_cancel_alert_success_returns_false():
@@ -660,18 +642,6 @@ def test_is_tool_error_cancel_alert_invalid_format_returns_true():
     result = is_tool_error(
         tool_name="cancel_price_level_alert",
         content="Invalid alert_id format: '#1'. Expected 8-char hex (e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids.",
-        outcome="success",
-    )
-    assert result is True
-
-
-def test_is_tool_error_cancel_alert_state_not_found_returns_true():
-    """R2-2 T5: 状态错（已触发/过期）信息不命中 success prefix → is_tool_error=True。"""
-    from src.cli.display import is_tool_error
-
-    result = is_tool_error(
-        tool_name="cancel_price_level_alert",
-        content="Alert deadbeef already triggered or expired",
         outcome="success",
     )
     assert result is True
@@ -757,31 +727,3 @@ async def test_cancel_price_level_alert_invalid_format_records_biz_error(engine,
     assert rows[0].error_type == "invalid_alert_id_format"
 
 
-@pytest.mark.asyncio
-async def test_cancel_price_level_alert_not_found_records_biz_error(engine, session_with_row):
-    """端到端: cancel_price_level_alert 传合法 hex 但 alert 不存在 → biz_error 'alert_not_found'."""
-    from src.agent.tools_execution import cancel_price_level_alert
-    from src.services.tool_call_recorder import ToolCallRecorder
-
-    recorder = ToolCallRecorder()
-    deps = make_deps(engine, session_with_row)
-    deps.exchange.remove_price_level_alert.return_value = False  # 不存在
-
-    async def handler(args):
-        return await cancel_price_level_alert(deps, alert_id="a3f2b8c1", reasoning="t")
-
-    result = await recorder.wrap_tool_execute(
-        make_ctx(deps),
-        call=make_call("cancel_price_level_alert"),
-        tool_def=MagicMock(),
-        args={},
-        handler=handler,
-    )
-
-    assert "already triggered or expired" in result
-
-    async with get_session(engine) as db:
-        rows = (await db.execute(select(ToolCall))).scalars().all()
-    assert len(rows) == 1
-    assert rows[0].status == "biz_error"
-    assert rows[0].error_type == "alert_not_found"

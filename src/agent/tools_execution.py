@@ -273,12 +273,35 @@ async def add_price_level_alert(
     return f"Price level alert set: {direction} {price:.2f} (id={alert_id})"
 
 
+def _lookup_alert(exchange, alert_id: str) -> dict | None:
+    """Peek at the alert dict by id without mutating the alert list.
+
+    Used by cancel (to capture reasoning before remove) and update (to
+    capture direction + reasoning before sequential replace). Returns
+    the full alert dict matching the id, or None if no match.
+    """
+    for alert in exchange.get_price_level_alerts():
+        if alert["id"] == alert_id:
+            return alert
+    return None
+
+
 async def cancel_price_level_alert(
     deps: TradingDeps,
     alert_id: str,
     reasoning: str,
 ) -> str:
-    """Remove a price level alert by ID."""
+    """Cancel a previously-set price level alert by its ID.
+
+    Idempotent: if the alert is no longer active (already triggered or
+    removed via close-fill auto-clear), returns ok with a Note rather
+    than emitting a business error. Format-invalid IDs and unexpected
+    internal exceptions still reject explicitly.
+
+    Args:
+        alert_id: 8-char hex id returned by add_price_level_alert.
+        reasoning: brief rationale for the cancel (audit-only).
+    """
     # 协议层：8-char hex 格式校验（uuid.uuid4()[:8] 生成，[0-9a-f]{8}）
     if not re.fullmatch(r"[0-9a-f]{8}", alert_id):
         note_biz_error("invalid_alert_id_format")
@@ -286,17 +309,117 @@ async def cancel_price_level_alert(
             f"Invalid alert_id format: {alert_id!r}. Expected 8-char hex "
             f"(e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids."
         )
-    # 状态层：格式合法但 sim 中不存在
-    ok = deps.exchange.remove_price_level_alert(alert_id)
-    if ok:
-        await _record_action(
-            deps, action="cancel_price_level_alert",
-            alert_id=alert_id,
-            reasoning=reasoning,
+
+    # Peek before mutate — captures reasoning for F-A3 success-string suffix.
+    alert = _lookup_alert(deps.exchange, alert_id)
+    if alert is None:
+        # 状态不存在 → idempotent ok with note (spec §3.2, §3.4).
+        # Covers both root causes: auto-trigger removal during cascade AND
+        # _clear_stale_alerts_for_full_close on position close (PR #27).
+        return (
+            f"Alert {alert_id} no longer active "
+            f"(already triggered or removed)"
         )
-        return f"Price level alert cancelled (id={alert_id})"
-    note_biz_error("alert_not_found")
-    return f"Alert {alert_id} already triggered or expired"
+
+    ok = deps.exchange.remove_price_level_alert(alert_id)
+    if not ok:
+        # Defensive: lookup and remove are both sync, in-cycle; remove failing
+        # after a successful lookup would indicate a real invariant violation.
+        raise RuntimeError(
+            f"remove_price_level_alert returned False for id={alert_id} "
+            f"that was just present in lookup — invariant violated"
+        )
+
+    await _record_action(
+        deps, action="cancel_price_level_alert",
+        alert_id=alert_id,
+        reasoning=reasoning,
+    )
+    return (
+        f'Price level alert cancelled (id={alert_id}) — '
+        f'"{alert["reasoning"]}"'
+    )
+
+
+async def update_price_level_alert(
+    deps: TradingDeps,
+    alert_id: str,
+    new_price: float,
+    reasoning: str,
+) -> str:
+    """Replace a single existing price level alert with a new price.
+
+    Atomic: cancels the old alert and creates a new one with new_price,
+    preserving the original direction and reasoning text. The direction
+    (above/below) cannot change — to change direction or reasoning
+    materially, use cancel + add. Trail use case: when price moves and
+    you want the same alert at a new level, this preserves identity
+    continuity (the alert is still "the same thing at a new price").
+
+    Args:
+        alert_id: 8-char hex id of the existing alert (see get_active_alerts).
+        new_price: new trigger price.
+        reasoning: brief rationale for the move (audit-only; not stored
+            on the alert).
+    """
+    # Step 1: format validation
+    if not re.fullmatch(r"[0-9a-f]{8}", alert_id):
+        note_biz_error("invalid_alert_id_format")
+        return (
+            f"Invalid alert_id format: {alert_id!r}. Expected 8-char hex "
+            f"(e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids."
+        )
+
+    # Step 2: lookup — capture original direction + reasoning
+    alert = _lookup_alert(deps.exchange, alert_id)
+    if alert is None:
+        note_biz_error("alert_not_found")
+        return (
+            f"Alert {alert_id} not found. "
+            f"To create a new alert, use add_price_level_alert."
+        )
+
+    original_direction = alert["direction"]
+    original_reasoning = alert["reasoning"]
+    old_price = alert["price"]
+
+    # Step 4: sequential replace (single-coroutine, no yield points;
+    # both calls mutate the same in-memory list — atomic by construction).
+    ok = deps.exchange.remove_price_level_alert(alert_id)
+    if not ok:
+        raise RuntimeError(
+            f"remove_price_level_alert returned False for id={alert_id} "
+            f"that was just present in lookup — invariant violated"
+        )
+    new_id = deps.exchange.add_price_level_alert(
+        new_price, original_direction, deps.symbol, original_reasoning,
+    )
+    if new_id is None:
+        # After remove, headroom is necessarily >= 1; add returning None
+        # indicates the cap path was hit, which should be impossible here.
+        raise RuntimeError(
+            f"add_price_level_alert returned None after a successful remove "
+            f"on id={alert_id} — invariant violated (cap check unreachable)"
+        )
+
+    # Step 8: audit row — new id in canonical alert_id column;
+    # old id + direction + old_price folded into reasoning string.
+    await _record_action(
+        deps, action="update_price_level_alert",
+        alert_id=new_id,
+        reasoning=(
+            f"replaces {alert_id} ({original_direction} {old_price}) "
+            f"→ {new_price} | {reasoning}"
+        ),
+    )
+
+    # Step 7: success return
+    return (
+        f"Price level alert updated (id={alert_id} → id={new_id}):\n"
+        f"  {original_direction} {old_price:.2f} → "
+        f"{original_direction} {new_price:.2f} "
+        f'— "{original_reasoning}"'
+    )
 
 
 async def set_next_wake(

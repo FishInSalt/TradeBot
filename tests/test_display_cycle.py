@@ -1439,10 +1439,10 @@ def test_render_perception_tool_fallback_no_header():
 
 
 def test_dg_2_dispatch_sets_partition_all_registered_tools():
-    """T-DG-2: 三层集合 + save_memory branch 互斥 + 完整覆盖 32 registered tools.
+    """T-DG-2: 三层集合 + save_memory branch 互斥 + 完整覆盖 33 registered tools.
 
-    Spec §4.4: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (11) ∪ {save_memory}
-    必须等于 REGISTERED_TOOL_NAMES (32)，且互不重叠。
+    Spec §4.4: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (12) ∪ {save_memory}
+    必须等于 REGISTERED_TOOL_NAMES (33)，且互不重叠。
     _SECTIONED_PERCEPTION_TOOL_NAMES (19) ⊂ _PERCEPTION_TOOL_NAMES（仅 get_memories 例外）。
     """
     from src.cli.display import (
@@ -1466,7 +1466,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     assert perception.isdisjoint(save)
     assert execution.isdisjoint(save)
 
-    # 完整覆盖 32 registered
+    # 完整覆盖 33 registered
     union = perception | execution | save
     declared = set(REGISTERED_TOOL_NAMES)
     assert union == declared, (
@@ -1478,7 +1478,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     # Counts per spec §4.4
     assert len(perception) == 20
     assert len(sectioned) == 19
-    assert len(execution) == 11
+    assert len(execution) == 12
 
 
 def test_ec_11_unregistered_tool_falls_back_with_warning(caplog):
