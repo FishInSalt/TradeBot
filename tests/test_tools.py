@@ -1,9 +1,27 @@
 import pytest
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import numpy as np
 from src.integrations.exchange.base import Ticker, Balance, Position, Order
+
+
+def _patch_now(monkeypatch, year=2026, month=5, day=12, hour=10, minute=23, second=0):
+    """Helper to monkeypatch datetime.now in tools_execution module to a fixed UTC time.
+
+    Pattern匹配 tests/test_av_time_of_day_cache.py:11 (FakeDateTime(datetime) 继承)。
+    """
+    from src.agent import tools_execution as mod
+    fixed = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(mod, "datetime", FakeDateTime)
+    return fixed
 
 
 @dataclass
@@ -414,6 +432,192 @@ async def test_set_next_wake_not_available(deps):
     deps.set_next_wake_fn = None
     result = await set_next_wake(deps, 10, reasoning="test")
     assert "not available" in result.lower()
+
+
+# === set_next_wake_at tests (T1.1-T1.10) — R2-Next-H Task 3 ===
+
+async def test_set_next_wake_at_happy_path(deps, monkeypatch):
+    """T1.1: now=10:23:00, target='10:37' → ok + delta=14 + trade_actions written."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch)  # default 2026-05-12 10:23:00 UTC
+
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "10:37", reasoning="align 1h close")
+    deps.set_next_wake_fn.assert_called_once_with(14)
+    assert "Next wake set for 2026-05-12 10:37 UTC" in result
+    assert "in 14 min" in result
+    assert "align 1h close" in result
+
+
+async def test_set_next_wake_at_cross_day(deps, monkeypatch):
+    """T1.2: now=23:50, target='00:37' → tomorrow 00:37, delta=47."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch, hour=23, minute=50)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "00:37", reasoning="cross-day test")
+    deps.set_next_wake_fn.assert_called_once_with(47)
+    assert "Next wake set for 2026-05-13 00:37 UTC" in result
+    assert "in 47 min" in result
+
+
+async def test_set_next_wake_at_exceeds_wake_max(deps, monkeypatch):
+    """T1.4: target 97 min away → reject, fn not called."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch)  # 10:23:00
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "12:00", reasoning="test")
+    deps.set_next_wake_fn.assert_not_called()
+    assert "Cannot wake at 12:00 UTC" in result
+    assert "nearest future 2026-05-12 12:00 UTC" in result
+    assert "in 97 min" in result
+    assert "exceeds wake_max=60 min for this session" in result
+
+
+async def test_set_next_wake_at_ceil_boundary_ok(deps, monkeypatch):
+    """T1.5: now=10:23:30, target='10:24' → ceil(30/60)=1, ok (not reject)."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch, second=30)  # 10:23:30
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "10:24", reasoning="ceil edge")
+    deps.set_next_wake_fn.assert_called_once_with(1)
+    assert "in 1 min" in result
+
+
+async def test_set_next_wake_at_past_resolves_tomorrow_exceeds_max(deps, monkeypatch):
+    """T1.6: now=10:23:00, target='10:23' (same minute past) → tomorrow → 1440 min → reject."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "10:23", reasoning="past test")
+    deps.set_next_wake_fn.assert_not_called()
+    assert "Cannot wake at 10:23 UTC" in result
+    assert "nearest future 2026-05-13 10:23 UTC" in result
+    assert "in 1440 min" in result
+    assert "exceeds wake_max=60 min" in result
+
+
+async def test_set_next_wake_at_fn_none(deps):
+    """T1.7: deps.set_next_wake_fn=None → 'Dynamic wake not available'."""
+    from src.agent.tools_execution import set_next_wake_at
+    deps.set_next_wake_fn = None
+    result = await set_next_wake_at(deps, "10:37", reasoning="test")
+    assert result == "Dynamic wake not available"
+
+
+async def test_set_next_wake_at_reject_no_trade_action(deps, monkeypatch, db_engine):
+    """T1.10: reject path does not write trade_actions row."""
+    from src.agent.tools_execution import set_next_wake_at
+    from src.storage.models import TradeAction
+    from sqlalchemy import select
+    _patch_now(monkeypatch)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    deps.db_engine = db_engine
+
+    await set_next_wake_at(deps, "12:00", reasoning="test")  # reject (97 min)
+
+    async with db_engine.begin() as conn:
+        rows = (await conn.execute(
+            select(TradeAction).where(TradeAction.action == "set_next_wake_at")
+        )).scalars().all()
+    assert len(rows) == 0
+
+
+@pytest.mark.parametrize("bad_input", ["foo", "25:00", "10:60", "10", "10:37:00", "", "3:05", "10:5"])
+async def test_set_next_wake_at_format_invalid(deps, bad_input):
+    """T1.3a: invalid format → reject with hint."""
+    from src.agent.tools_execution import set_next_wake_at
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, bad_input, reasoning="test")
+    deps.set_next_wake_fn.assert_not_called()
+    assert "Invalid target_time format" in result
+    assert "2-digit hour and minute" in result
+    assert "'10:37'" in result
+
+
+@pytest.mark.parametrize("good_input,now_h,now_m,expected_delta", [
+    ("00:00", 23, 30, 30),  # tomorrow 00:00 from 23:30 → 30 min
+    ("23:59", 23, 0, 59),   # today 23:59 from 23:00 → 59 min
+])
+async def test_set_next_wake_at_format_edge_ok(deps, monkeypatch, good_input, now_h, now_m, expected_delta):
+    """T1.3b: format edge (00:00 / 23:59) accepted by regex."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch, hour=now_h, minute=now_m)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, good_input, reasoning="edge test")
+    deps.set_next_wake_fn.assert_called_once_with(expected_delta)
+
+
+async def test_set_next_wake_at_ceil_drift_guard_59s(deps, monkeypatch):
+    """T1.8: ceil drift guard — now=10:23:01, target='10:24' (delta_sec=59) → ceil=1."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch, second=1)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "10:24", reasoning="drift")
+    deps.set_next_wake_fn.assert_called_once_with(1)
+
+
+async def test_set_next_wake_at_ceil_drift_guard_120s(deps, monkeypatch):
+    """T1.8b: ceil drift guard — integer minute boundary, delta_sec=120 → ceil=2."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "10:25", reasoning="120s boundary")
+    deps.set_next_wake_fn.assert_called_once_with(2)
+
+
+async def test_set_next_wake_at_below_wake_min_custom(deps, monkeypatch):
+    """T1.8c: wake_min=2 fixture — ceil=1 < wake_min=2 → reject."""
+    from src.agent.tools_execution import set_next_wake_at
+    _patch_now(monkeypatch, second=30)
+    deps.wake_min_minutes = 2  # custom
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    result = await set_next_wake_at(deps, "10:24", reasoning="custom wake_min")
+    deps.set_next_wake_fn.assert_not_called()
+    assert "Cannot wake at 10:24 UTC" in result
+    assert "in 1 min" in result
+    assert "below wake_min=2 min" in result
+
+
+async def test_set_next_wake_at_trade_actions_reasoning_prefix(deps, monkeypatch, db_engine):
+    """T1.9: trade_actions row reasoning prefix format."""
+    from src.agent.tools_execution import set_next_wake_at
+    from src.storage.models import TradeAction
+    from sqlalchemy import select
+    _patch_now(monkeypatch)
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    deps.db_engine = db_engine
+
+    await set_next_wake_at(deps, "10:37", reasoning="align 1h close at 11:00 UTC")
+
+    async with db_engine.begin() as conn:
+        reasoning = (await conn.execute(
+            select(TradeAction.reasoning).where(TradeAction.action == "set_next_wake_at")
+        )).scalar_one()
+    expected_prefix = "target=10:37 UTC resolves_to=2026-05-12 10:37 UTC interval=14min | align 1h close at 11:00 UTC"
+    assert reasoning == expected_prefix
 
 
 async def test_open_position_rejects_when_pending(deps):
