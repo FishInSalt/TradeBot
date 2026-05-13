@@ -476,8 +476,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
 
 
 async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
-    """Get trade journal — decision timeline with quick stats summary.
-    Use for reviewing recent decisions and their outcomes."""
+    """Get trade journal — decision timeline with quick stats summary."""
     if deps.db_engine is None:
         return (
             "=== Trade Journal ===\n"
@@ -578,8 +577,7 @@ async def get_active_alerts(deps: TradingDeps) -> str:
 
 
 async def get_performance(deps: TradingDeps) -> str:
-    """Get detailed trading performance statistics.
-    Use for reviewing overall results and evaluating strategy effectiveness."""
+    """Get detailed trading performance statistics."""
     balance = await deps.exchange.fetch_balance()
     ret_usdt = balance.total_usdt - deps.initial_balance
     ret_pct = (ret_usdt / deps.initial_balance) * 100 if deps.initial_balance > 0 else 0.0

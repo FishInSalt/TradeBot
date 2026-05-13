@@ -131,8 +131,7 @@ def create_trader_agent(
         Includes Risk exposure (notional / margin / liquidation distance in
         ATR(1h) multiples — 1h is the fixed baseline regardless of session
         trading style) and Exit orders section (SL/TP distances from both
-        entry and current). Useful both when opening and during ongoing
-        position management.
+        entry and current).
 
         Args:
             symbol: trading symbol (defaults to session symbol).
@@ -146,7 +145,7 @@ def create_trader_agent(
         """Get account balance with return on initial capital.
 
         Output reports total equity, free margin, used margin, and percentage
-        return on initial capital — useful for sizing decisions and risk checks.
+        return on initial capital.
         """
         from src.agent.tools_perception import get_account_balance as _impl
 
@@ -158,8 +157,7 @@ def create_trader_agent(
 
         Lists limit orders, stop loss, and take profit orders, each with their
         price level and distance from current. OCO-paired orders (sharing an
-        algoId on OKX) render with `[OCO]` tag. Useful before placing new
-        orders or when reviewing exposure.
+        algoId on OKX) render with `[OCO]` tag.
         """
         from src.agent.tools_perception import get_open_orders as _impl
 
@@ -169,8 +167,7 @@ def create_trader_agent(
     async def get_trade_journal(ctx: RunContext[TradingDeps]) -> str:
         """Get the trade journal — decision timeline with quick stats summary.
 
-        Use for reviewing recent decisions and their outcomes — pair with
-        get_performance for the quantitative view of the same period.
+        Related: get_performance (quantitative view of the same period).
         """
         from src.agent.tools_perception import get_trade_journal as _impl
 
@@ -192,8 +189,7 @@ def create_trader_agent(
         """Get current alert configuration.
 
         Reports volatility alert parameters (threshold % + time window) and
-        active price level alerts. Useful when reviewing or adjusting your
-        alert setup.
+        active price level alerts.
         """
         from src.agent.tools_perception import get_active_alerts as _impl
 
@@ -204,9 +200,9 @@ def create_trader_agent(
         """Get quantitative trading performance statistics.
 
         Reports return, win rate, drawdown, profit factor, and other
-        quantitative metrics. Use for evaluating strategy effectiveness
-        across the session — pair with get_trade_journal for decision
-        pattern review.
+        quantitative metrics.
+
+        Related: get_trade_journal (decision timeline).
         """
         from src.agent.tools_perception import get_performance as _impl
 
@@ -221,8 +217,7 @@ def create_trader_agent(
 
         Returns up to 10 headlines total (up to 5 symbol-specific, remainder
         general crypto); total may be fewer if upstream has limited recent posts.
-        Usually call without news_filter; use 'positive' / 'negative' / 'neutral'
-        when you want a specific sentiment lens. Output ~500-700 tokens.
+        Default: latest mix (no sentiment filter).
 
         Args:
             news_filter: 'positive', 'negative', 'neutral', or None for latest mix.
@@ -238,8 +233,7 @@ def create_trader_agent(
     ) -> str:
         """Get recent exchange announcements (maintenance, delistings, parameter changes).
 
-        Call before trading or when investigating unexpected price moves. Output
-        ~50-200 tokens (often empty when no recent announcements).
+        Often empty when no recent announcements.
 
         Args:
             lookback_hours: how far back to scan for announcements (default 24h).
@@ -255,10 +249,9 @@ def create_trader_agent(
     ) -> str:
         """Get upcoming macro events (FOMC, CPI, NFP) with impact level.
 
-        Call before trading or when assessing forward-looking risk. Macro calendar
-        covers the current week only — Friday evening / weekend calls may miss
-        next week's early events. Output ~50-250 tokens (often empty when no
-        scheduled events in window).
+        Macro calendar covers the current week only — Friday evening / weekend
+        calls may miss next week's early events. Often empty when no scheduled
+        events in window.
 
         Args:
             lookahead_hours: how far ahead to scan for events (default 12h).
@@ -282,7 +275,7 @@ def create_trader_agent(
         the current value. Anchor labels correspond to OKX 1H-bar boundaries
         and may differ from wall-clock 1h/24h offsets by 0-60 minutes when the
         latest bar is still in progress. Long/short ratio is the ratio of long
-        vs short account positions. Output ~180-260 tokens.
+        vs short account positions.
 
         Args:
             symbol: trading symbol; None uses the currently traded pair.
@@ -340,7 +333,7 @@ def create_trader_agent(
         they usually move in the same direction), VIX, 10Y Treasury yield,
         2s10s spread, 10Y inflation expectation (FRED), and SPY/QQQ closing
         quotes (Alpha Vantage). FRED data has daily granularity; SPY/QQQ are
-        equity ETFs with NYSE trading-hour quotes. Output ~200 tokens.
+        equity ETFs with NYSE trading-hour quotes.
         """
         from src.agent.tools_perception import get_macro_context as _impl
 
@@ -350,7 +343,7 @@ def create_trader_agent(
     async def get_etf_flows(ctx: RunContext[TradingDeps], days: int = 7) -> str:
         """Get US BTC + ETH spot ETF daily net flows + cumulative AUM.
 
-        Today's value may be revised T+1. Output ~300 tokens.
+        Today's value may be revised T+1.
 
         Args:
             days: lookback days (1-14, default 7).
@@ -363,7 +356,7 @@ def create_trader_agent(
     async def get_stablecoin_supply(ctx: RunContext[TradingDeps]) -> str:
         """Get USDT + USDC current total supply and 7-day changes.
 
-        Data sourced from DefiLlama (on-chain circulating supply). Output ~80 tokens.
+        Data sourced from DefiLlama (on-chain circulating supply).
         """
         from src.agent.tools_perception import get_stablecoin_supply as _impl
 
@@ -374,8 +367,7 @@ def create_trader_agent(
         """Return top-N order book depth with concentrated-level breakdown.
 
         Reports best bid/ask, cumulative depth, bid/ask share, and concentrated
-        levels (size > 3× same-side median). Use to evaluate liquidity, slippage
-        risk, or concentrated levels near current price.
+        levels (size > 3× same-side median).
 
         Args:
             depth: levels per side to fetch (default 20).
@@ -454,8 +446,9 @@ def create_trader_agent(
         """Open a new market-order position.
 
         Position fills via market order; you will receive a fill notification
-        when execution completes. Set stop loss and take profit only after the
-        fill notification arrives (separate trigger, not in the same cycle).
+        when execution completes (separate trigger, not in the same cycle).
+        Stop loss and take profit place against an existing position, so they
+        require the fill notification.
 
         Args:
             side: 'long' or 'short'.
@@ -522,7 +515,6 @@ def create_trader_agent(
         """Adjust leverage multiplier.
 
         Cannot be changed while holding a position — close first, then adjust.
-        Higher leverage amplifies both gains and losses, including liquidation risk.
 
         Args:
             leverage: new leverage multiplier.
@@ -541,9 +533,7 @@ def create_trader_agent(
     ) -> str:
         """Adjust volatility alert sensitivity.
 
-        Tighten in quiet markets to catch early moves; widen in volatile
-        conditions to reduce noise. Pair with get_active_alerts to review
-        current configuration.
+        Related: get_active_alerts (current volatility + price-level alert state).
 
         Args:
             threshold_pct: alert threshold percent (min 0.1, max 50).
@@ -557,10 +547,6 @@ def create_trader_agent(
     @tool
     async def cancel_order(ctx: RunContext[TradingDeps], order_id: str, reasoning: str) -> str:
         """Cancel a pending order (limit, stop loss, or take profit).
-
-        Use to remove stale limit orders when the market has moved away from
-        your intended entry. Leaving outdated orders risks an unintended fill
-        at a price that no longer makes sense.
 
         Args:
             order_id: id of the order to cancel.
@@ -579,7 +565,6 @@ def create_trader_agent(
     ) -> str:
         """Set a one-shot alert at a specific price level.
 
-        Useful for support/resistance levels you want to be notified about.
         Triggers once when reached, then auto-removes. You will be woken up
         when the level is hit.
 
@@ -727,9 +712,6 @@ def create_trader_agent(
         reasoning: str,
     ) -> str:
         """Place a limit order at a specific price (e.g., buy at support level).
-
-        Not every entry needs to be a market order — limit orders let you
-        target specific levels without paying the spread.
 
         Args:
             side: 'long' or 'short'.
