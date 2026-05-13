@@ -271,7 +271,7 @@ async def test_records_biz_error_when_note_biz_error_called(engine, session_with
 
     result = await recorder.wrap_tool_execute(
         make_ctx(deps),
-        call=make_call("set_price_alert"),
+        call=make_call("set_price_volatility_alert"),
         tool_def=MagicMock(),
         args={},
         handler=handler,

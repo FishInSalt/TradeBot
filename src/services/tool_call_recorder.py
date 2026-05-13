@@ -55,7 +55,7 @@ _biz_error_type: ContextVar[str | None] = ContextVar(
 )
 
 BIZ_ERROR_TYPES: frozenset[str] = frozenset({
-    "invalid_threshold_range",        # set_price_alert 阈值越界
+    "invalid_threshold_range",        # set_price_volatility_alert 阈值越界
     "invalid_alert_id_format",        # cancel_price_level_alert 协议错（非 8-char hex）
     "alert_not_found",                # update_price_level_alert 状态错（已触发 / 已被 close-fill 清理 / 未注册）
 })

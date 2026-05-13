@@ -625,7 +625,7 @@ async def test_get_price_pivots_global_wordlist_fact_only():
     "_invoke_set_stop_loss",
     "_invoke_set_take_profit",
     "_invoke_adjust_leverage",
-    "_invoke_set_price_alert",
+    "_invoke_set_price_volatility_alert",
     "_invoke_cancel_order",
     "_invoke_add_price_level_alert",
     "_invoke_set_next_wake",
@@ -698,11 +698,11 @@ async def _invoke_adjust_leverage(deps, mocker):
     return await adjust_leverage(deps, 5, reasoning="test")
 
 
-async def _invoke_set_price_alert(deps, mocker):
+async def _invoke_set_price_volatility_alert(deps, mocker):
     """Early return: alerts disabled."""
-    from src.agent.tools_execution import set_price_alert
+    from src.agent.tools_execution import set_price_volatility_alert
     deps.exchange.get_alert_params = mocker.Mock(return_value=None)
-    return await set_price_alert(deps, 1.5, 30, reasoning="test")
+    return await set_price_volatility_alert(deps, 1.5, 30, reasoning="test")
 
 
 async def _invoke_cancel_order(deps, mocker):

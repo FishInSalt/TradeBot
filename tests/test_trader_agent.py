@@ -196,8 +196,8 @@ def test_missing_args_with_require_descriptions_triggers_fail():
             return str(x)
 
 
-def test_set_price_alert_schema_exposes_threshold_range():
-    """R2-1 drift guard: set_price_alert tool schema must expose threshold_pct and
+def test_set_price_volatility_alert_schema_exposes_threshold_range():
+    """R2-1 drift guard: set_price_volatility_alert tool schema must expose threshold_pct and
     window_minutes range to LLM via pydantic-ai docstring sniffing.
 
     First-of-kind drift guard走 .tool_def.<attr> 二级 attr 路径（Iter 5 既有 drift
@@ -207,7 +207,7 @@ def test_set_price_alert_schema_exposes_threshold_range():
     from src.config import PersonaConfig
 
     agent = create_trader_agent(model="test", persona_config=PersonaConfig())
-    tool = agent._function_toolset.tools["set_price_alert"]
+    tool = agent._function_toolset.tools["set_price_volatility_alert"]
     schema = tool.tool_def.parameters_json_schema
 
     threshold_desc = schema["properties"]["threshold_pct"]["description"]

@@ -562,7 +562,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
 
 
 async def get_active_alerts(deps: TradingDeps) -> str:
-    """Get current alert configuration: volatility alert params and active price level alerts."""
+    """Get current alert configuration: price volatility alert params and price level alerts."""
     from datetime import datetime, timezone
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     sections: list[str] = []
@@ -571,14 +571,14 @@ async def get_active_alerts(deps: TradingDeps) -> str:
     params = deps.exchange.get_alert_params()
     if params is not None:
         threshold, window = params
-        sections.append(f"=== Price Alert Settings (@ {fetch_ts} UTC) ===\nVolatility alert: {threshold}% in {window}min window")
+        sections.append(f"=== Price Volatility Alert (@ {fetch_ts} UTC) ===\n{threshold}% in {window}min window")
     else:
-        sections.append(f"=== Price Alert Settings (@ {fetch_ts} UTC) ===\nVolatility alert: OFF")
+        sections.append(f"=== Price Volatility Alert (@ {fetch_ts} UTC) ===\nOFF")
 
     # Price level alerts
     alerts = deps.exchange.get_price_level_alerts()
     count = len(alerts)
-    lines = [f"=== Active Price Level Alerts ({count}/20) ==="]
+    lines = [f"=== Price Level Alerts ({count}/20) (@ {fetch_ts} UTC) ==="]
     if alerts:
         for i, a in enumerate(alerts, 1):
             lines.append(f'  #{i} (id={a["id"]}) {a["direction"]} {a["price"]:.2f} — "{a["reasoning"]}"')
