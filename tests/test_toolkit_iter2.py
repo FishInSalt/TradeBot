@@ -85,8 +85,9 @@ async def test_order_book_service_failure():
     deps.market_data.get_order_book.side_effect = Exception("connection reset")
     result = await get_order_book(deps)
     # R2-8c §4.2.20 — L2 Option D form (inline Error: prefix)
+    # iter-tool-opt-error-metadata: exception class name appended in parentheses
     assert re.search(rf"=== Order Book \(BTC/USDT:USDT {_AS_OF_TS}\) ===", result), result[:200]
-    assert "Error: Temporarily unavailable." in result
+    assert "Error: Temporarily unavailable (Exception)." in result
 
 
 @pytest.mark.asyncio
@@ -191,8 +192,9 @@ async def test_recent_trades_service_failure():
     deps = MockDeps()
     deps.market_data.get_recent_trades.side_effect = Exception("timeout")
     result = await get_recent_trades(deps)
+    # iter-tool-opt-error-metadata: exception class name appended in parentheses
     assert re.search(rf"=== Recent Trades \(BTC/USDT:USDT {_AS_OF_TS}\) ===", result), result[:200]
-    assert "Error: Temporarily unavailable." in result
+    assert "Error: Temporarily unavailable (Exception)." in result
 
 
 @pytest.mark.asyncio
@@ -675,8 +677,9 @@ async def test_get_position_phase2_hard_failure_degradation(mocker):
     assert "Duration:" in result
     assert "Duration: N/A" not in result
     # Degradation: Risk Exposure + Exit Orders sections present with (unavailable) body
-    assert "=== Risk Exposure ===\n(unavailable)" in result
-    assert "=== Exit Orders ===\n(unavailable)" in result
+    # iter-tool-opt-error-metadata: exception class name appended (unavailable: ClassName)
+    assert "=== Risk Exposure ===\n(unavailable: Exception)" in result
+    assert "=== Exit Orders ===\n(unavailable: Exception)" in result
     # Enhanced numeric fields absent (hard-failure collapse)
     assert "Notional value:" not in result
     assert "Stop loss:" not in result

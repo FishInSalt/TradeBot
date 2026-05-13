@@ -311,11 +311,11 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             deps.exchange.get_contract_size(symbol),
             return_exceptions=False,
         )
-    except Exception:
+    except Exception as e:
         logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
         sections = _render_position_core()
-        sections.append("=== Risk Exposure ===\n(unavailable)")
-        sections.append("=== Exit Orders ===\n(unavailable)")
+        sections.append(f"=== Risk Exposure ===\n(unavailable: {e.__class__.__name__})")
+        sections.append(f"=== Exit Orders ===\n(unavailable: {e.__class__.__name__})")
         return "\n\n".join(sections)
 
     # ATR(1h) — may be None if OHLCV failed
@@ -433,7 +433,7 @@ def _render_single_order(o, current: float) -> str:
             pts = o.price - current
             price_str = f"@ {o.price:.2f} ({dist:+.2f}% / {pts:+.1f} pts from current)"
         else:
-            price_str = f"@ {o.price:.2f}"
+            price_str = f"@ {o.price:.2f} (ticker unavailable, distance N/A)"
     return f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}"
 
 
@@ -466,12 +466,12 @@ async def get_open_orders(deps: TradingDeps) -> str:
             sl_dist = (
                 f" ({(sl.price - current) / current * 100:+.2f}%"
                 f" / {sl.price - current:+.1f} pts from current)"
-                if current > 0 else ""
+                if current > 0 else " (ticker unavailable)"
             )
             tp_dist = (
                 f" ({(tp.price - current) / current * 100:+.2f}%"
                 f" / {tp.price - current:+.1f} pts from current)"
-                if current > 0 else ""
+                if current > 0 else " (ticker unavailable)"
             )
             lines.append(
                 f"  [OCO] {sl.side} {sl.amount} "
@@ -765,15 +765,18 @@ async def get_exchange_announcements(
             "Error: News service not configured."
         )
 
+    exc_class_name: str | None = None
     try:
         announcements = await deps.news.get_announcements(lookback_hours)
-    except Exception:
+    except Exception as e:
         announcements = None
+        exc_class_name = e.__class__.__name__
 
     if announcements is None:
+        suffix = f" ({exc_class_name})" if exc_class_name else ""
         return (
             f"=== Exchange Announcements (past {lookback_hours}h @ {fetch_ts} UTC) ===\n"
-            "Error: Exchange announcements service temporarily unavailable."
+            f"Error: Exchange announcements service temporarily unavailable{suffix}."
         )
     if announcements:
         lines = [e.timestamp.strftime("[%Y-%m-%d %H:%M] ") + e.title for e in announcements]
@@ -1476,11 +1479,11 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     base_currency = symbol.split("/")[0]
     try:
         ob = await deps.market_data.get_order_book(symbol, depth=depth)
-    except Exception:
+    except Exception as e:
         logger.exception("get_order_book failed for %s", symbol)
         return (
             f"=== Order Book ({symbol} @ {fetch_ts} UTC) ===\n"
-            "Error: Temporarily unavailable."
+            f"Error: Temporarily unavailable ({e.__class__.__name__})."
         )
 
     actual = min(len(ob.bids), len(ob.asks))
@@ -1593,11 +1596,11 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
     base_currency = symbol.split("/")[0]
     try:
         trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
-    except Exception:
+    except Exception as e:
         logger.exception("get_recent_trades failed for %s", symbol)
         return (
             f"=== Recent Trades ({symbol} @ {fetch_ts} UTC) ===\n"
-            f"Error: Temporarily unavailable."
+            f"Error: Temporarily unavailable ({e.__class__.__name__})."
         )
 
     if not trades:
