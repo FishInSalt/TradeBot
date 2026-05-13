@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -196,6 +197,7 @@ class BaseExchange(ABC):
         self._price_level_alerts.append({
             "id": alert_id, "price": price, "direction": direction,
             "symbol": symbol, "reasoning": reasoning,
+            "created_at": time.time(),
         })
         return alert_id
 
