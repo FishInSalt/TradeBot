@@ -39,7 +39,20 @@ async def test_order_book_typical_output_format():
     assert "Best ask:" in result
     assert "Spread:" in result
     assert "Bid share:" in result
-    assert "=== Depth (top 20 each side) ===" in result
+    # iter-tool-opt-order-book-default: default depth lowered 20 → 15 (sim modal 84%)
+    assert "=== Depth (top 15 each side) ===" in result
+
+
+def test_get_order_book_default_depth_is_15():
+    """iter-tool-opt-order-book-default: sim modal 84% justifies depth=15 default.
+
+    sim #8 31 calls: depth=15×26 (84%) / 20×3 (10%) / 30×1 / 10×1. Current default
+    20 matched only 10% of agent calls; agent overrode 90% of the time to 15.
+    Lineage R2-Next-D §4 GMD (50→30) but stronger — GMD modal cluster was diffuse
+    ([10,20,30]~17% each), OB modal is monomodal 84%.
+    """
+    from src.agent.tools_perception import ORDER_BOOK_DEPTH_DEFAULT
+    assert ORDER_BOOK_DEPTH_DEFAULT == 15
 
 
 @pytest.mark.asyncio

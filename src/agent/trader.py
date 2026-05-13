@@ -363,14 +363,14 @@ def create_trader_agent(
         return await _impl(ctx.deps)
 
     @tool
-    async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 20) -> str:
+    async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 15) -> str:
         """Return top-N order book depth with concentrated-level breakdown.
 
         Reports best bid/ask, cumulative depth, bid/ask share, and concentrated
         levels (size > 3× same-side median).
 
         Args:
-            depth: levels per side to fetch (default 20).
+            depth: levels per side to fetch (default 15).
 
         Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)"
         if book is empty/short; "Order book ({symbol}): temporarily unavailable" on

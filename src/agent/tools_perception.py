@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # get_order_book
 ORDER_BOOK_CONCENTRATION_MULTIPLIER = 3.0
 ORDER_BOOK_MAX_CONCENTRATED_LEVELS = 10
-ORDER_BOOK_DEPTH_DEFAULT = 20
+ORDER_BOOK_DEPTH_DEFAULT = 15
 ORDER_BOOK_BALANCED_THRESHOLD_PCT = 5.0
 
 # get_recent_trades
@@ -1432,7 +1432,7 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     """Return top-N order book depth with concentrated-level breakdown.
 
     Args:
-        depth: Levels per side to fetch. Default 20.
+        depth: Levels per side to fetch. Default 15.
 
     Returns:
         str: Multi-line fact-only text (best bid/ask + cumulative depth + bid share + concentrated levels). See spec §2.1.
