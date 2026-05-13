@@ -19,7 +19,7 @@ sim #8 (178 cycles / 1818 tool calls) shows the alert family suffers from a name
 
 The two tools share the `price_alert` prefix, but their semantics differ: the first tunes a *volatility-sensitivity* parameter (% change in N minutes), the second registers an *individual price-level* one-shot trigger. The shared prefix forces the agent to disambiguate via docstring at every selection, biasing toward the more-frequently-used `add_price_level_alert` even when volatility tuning is the actual intent.
 
-This spec hard-renames `set_price_alert` → `set_price_volatility_alert` and aligns `get_active_alerts` section headers (`Price Volatility Alert` / `Price Level Alerts`) so the family becomes name-disambiguated end-to-end. As a same-PR follow-on, it also completes the `iter-tool-opt-as-of-header` (commit b31ffc3) sweep — the second section of `get_active_alerts` was the only remaining one without the inline `(@ HH:MM:SS UTC)` timestamp. No alias is kept. `REGISTERED_TOOL_NAMES` count stays at 32.
+This spec hard-renames `set_price_alert` → `set_price_volatility_alert` and aligns `get_active_alerts` section headers (`Price Volatility Alert` / `Price Level Alerts`) so the family becomes name-disambiguated end-to-end. As a same-PR follow-on, it also completes the `iter-tool-opt-as-of-header` (commit b31ffc3) sweep — the second section of `get_active_alerts` was the only remaining one without the inline `(@ HH:MM:SS UTC)` timestamp. No alias is kept. `REGISTERED_TOOL_NAMES` count stays at 34.
 
 The change is scoped to **name + section-header text + name-induced fact-alignment in adjacent impl docstrings/comments**. Schema, parameters, behavior, biz_error keys, and Layer-1 persona are untouched (principle 8 — name and docstring are the levers, not prompt nudges).
 
@@ -43,7 +43,7 @@ The change is scoped to **name + section-header text + name-induced fact-alignme
 
 ### 1.3 Implication
 
-The fix is name-level (principle 4: tool count is selection latency — but name disambiguation in a 32-tool list is the dominant lever for low-frequency tools). Hard rename has clean semantics; an alias would dilute the ergonomic gain by leaving two names in the selection pool (both names pay the principle-4 cost; only one carries forward).
+The fix is name-level (principle 4: tool count is selection latency — but name disambiguation in a 34-tool list is the dominant lever for low-frequency tools). Hard rename has clean semantics; an alias would dilute the ergonomic gain by leaving two names in the selection pool (both names pay the principle-4 cost; only one carries forward).
 
 ---
 
@@ -60,7 +60,7 @@ The fix is name-level (principle 4: tool count is selection latency — but name
 
 ### 2.2 Tool count invariant
 
-`REGISTERED_TOOL_NAMES` stays at **32** entries:
+`REGISTERED_TOOL_NAMES` stays at **34** entries (20 perception + 13 execution + 1 memory):
 
 - 1 entry removed: `"set_price_alert"`
 - 1 entry added: `"set_price_volatility_alert"`
@@ -78,7 +78,7 @@ The fix is name-level (principle 4: tool count is selection latency — but name
 ### 2.4 Principle reconciliation
 
 - **Principle 1 (fact-only)**: old name `set_price_alert` is misleading — "price alert" is too generic for a tool that adjusts volatility-sensitivity parameters. New name is fact-disambiguating.
-- **Principle 4 (tool count)**: net-zero (32 → 32). Hard rename does not inflate the selection pool.
+- **Principle 4 (tool count)**: net-zero (34 → 34). Hard rename does not inflate the selection pool.
 - **Principle 5 (closure pattern)**: not the dominant principle here; the rename is a name-disambiguation, not a multi-call closure.
 - **Principle 8 (trust agent + tool surface)**: no Layer-1 nudge added; the new name + the existing docstring is the lever.
 
