@@ -1132,3 +1132,78 @@ async def test_cancel_order_tool_routes_is_algo_false_for_plain_order():
         else (call.args[2] if len(call.args) > 2 else False)
     )
     assert is_algo_actual is False
+
+
+# --- iter-tool-opt-open-orders-distance-pts: distance shows % + pts ---
+# First principle-2 implicit-fact promote per
+# docs/superpowers/principles/tool-design-principles.md §2 — narrative ≥3
+# hand-calc threshold met (sim #8 ≥7 cycles compute "X pts from current").
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_distance_shows_percent_and_pts():
+    """Single (non-OCO) order: distance suffix shows both % and pts.
+
+    iter-tool-opt-open-orders-distance-pts: D promote per principle 2
+    narrative ≥7 hand-calc (e.g. cycle dc9e15a7 "SL at 81,920 is only
+    ~105 pts from current").
+
+    current = 82175.0; limit buy @ 82750.00
+    expected dist = (82750-82175)/82175*100 = +0.6996... → +0.70%
+    expected pts  = 82750 - 82175 = +575.0
+    """
+    from src.agent.tools_perception import get_open_orders
+    orders = [
+        Order(id="p1", symbol="BTC/USDT:USDT", side="buy",
+              order_type="limit", amount=0.001, price=82750.0,
+              status="open", is_algo=False),
+    ]
+    out = await get_open_orders(_make_oco_deps(orders, ticker_last=82175.0))
+    assert "@ 82750.00 (+0.70% / +575.0 pts from current)" in out, (
+        f"distance suffix missing or wrong format:\n{out}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_single_order_negative_pts():
+    """Single stop order below current: pts must be negative (signed)."""
+    from src.agent.tools_perception import get_open_orders
+    # current = 82175.0; sell stop @ 81600.00
+    # dist = (81600-82175)/82175*100 = -575/82175*100 = -0.6996... → -0.70%
+    # pts  = -575.0
+    orders = [
+        Order(id="s1", symbol="BTC/USDT:USDT", side="sell",
+              order_type="stop", amount=0.001, price=81600.0,
+              status="open", is_algo=True),
+    ]
+    out = await get_open_orders(_make_oco_deps(orders, ticker_last=82175.0))
+    assert "@ 81600.00 (-0.70% / -575.0 pts from current)" in out, (
+        f"signed pts suffix missing:\n{out}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_oco_shows_percent_and_pts():
+    """OCO 双 leg 各自显示 % + pts (signed both sides).
+
+    current = 82200.0
+    SL @ 81920 → dist = -0.3406...% → -0.34%, pts = -280.0
+    TP @ 83000 → dist = +0.9732...% → +0.97%, pts = +800.0
+    """
+    from src.agent.tools_perception import get_open_orders
+    oco_id = "algo_pts_1"
+    orders = [
+        Order(id=oco_id, symbol="BTC/USDT:USDT", side="sell",
+              order_type="stop", amount=1.0, price=81920.0,
+              status="open", fee=None, is_algo=True),
+        Order(id=oco_id, symbol="BTC/USDT:USDT", side="sell",
+              order_type="take_profit", amount=1.0, price=83000.0,
+              status="open", fee=None, is_algo=True),
+    ]
+    out = await get_open_orders(_make_oco_deps(orders, ticker_last=82200.0))
+    assert "stop 81920.00 (-0.34% / -280.0 pts from current)" in out, (
+        f"OCO SL leg suffix missing:\n{out}"
+    )
+    assert "tp 83000.00 (+0.97% / +800.0 pts from current)" in out, (
+        f"OCO TP leg suffix missing:\n{out}"
+    )

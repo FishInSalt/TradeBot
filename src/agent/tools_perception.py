@@ -426,7 +426,8 @@ def _render_single_order(o, current: float) -> str:
             label = f"[{o.order_type.upper()}]"
         if current > 0:
             dist = (o.price - current) / current * 100
-            price_str = f"@ {o.price:.2f} ({dist:+.2f}% from current)"
+            pts = o.price - current
+            price_str = f"@ {o.price:.2f} ({dist:+.2f}% / {pts:+.1f} pts from current)"
         else:
             price_str = f"@ {o.price:.2f}"
     return f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}"
@@ -457,11 +458,13 @@ async def get_open_orders(deps: TradingDeps) -> str:
             sl = next(o for o in group if o.order_type == "stop")
             tp = next(o for o in group if o.order_type == "take_profit")
             sl_dist = (
-                f" ({(sl.price - current) / current * 100:+.2f}% from current)"
+                f" ({(sl.price - current) / current * 100:+.2f}%"
+                f" / {sl.price - current:+.1f} pts from current)"
                 if current > 0 else ""
             )
             tp_dist = (
-                f" ({(tp.price - current) / current * 100:+.2f}% from current)"
+                f" ({(tp.price - current) / current * 100:+.2f}%"
+                f" / {tp.price - current:+.1f} pts from current)"
                 if current > 0 else ""
             )
             lines.append(
