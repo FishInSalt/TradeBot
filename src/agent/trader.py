@@ -272,12 +272,17 @@ def create_trader_agent(
         ctx: RunContext[TradingDeps],
         symbol: str | None = None,
     ) -> str:
-        """Get derivatives market data: funding rate, open interest, long/short ratio.
+        """Get derivatives market data: funding rate, open interest (with 1h/24h
+        anchors and percent change), and long/short ratio.
 
         Positive funding rate means longs pay shorts; negative means shorts pay
         longs (settlement interval varies by contract — see next settlement time
-        in output). Open interest is total outstanding contracts. Long/short
-        ratio is the ratio of long vs short account positions. Output ~150-250 tokens.
+        in output). Open interest is total outstanding contracts in USD, rendered
+        with anchor values from 1h ago and 24h ago and the percent change to
+        the current value. Anchor labels correspond to OKX 1H-bar boundaries
+        and may differ from wall-clock 1h/24h offsets by 0-60 minutes when the
+        latest bar is still in progress. Long/short ratio is the ratio of long
+        vs short account positions. Output ~180-260 tokens.
 
         Args:
             symbol: trading symbol; None uses the currently traded pair.

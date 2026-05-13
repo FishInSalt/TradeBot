@@ -308,3 +308,136 @@ def test_oi_render_anchor_zero_skipped():
     result = _derive_oi_anchors(points, points[-1])
     assert "1h ago" in result
     assert "24h ago" not in result
+
+
+# ---------------------------------------------------------------------------
+# Task 7: get_derivatives_data wired to OI history — failure path tests
+# ---------------------------------------------------------------------------
+
+
+def _async_mock(value):
+    """Build AsyncMock: raise if value is Exception, else return value."""
+    if isinstance(value, Exception):
+        return AsyncMock(side_effect=value)
+    return AsyncMock(return_value=value)
+
+
+def _mock_deps_for_derivs(oi_hist_value, funding_value=None, lsr_value=None):
+    """Build a minimal TradingDeps mock for get_derivatives_data tests.
+
+    Each *_value: either the success payload (e.g., list[OpenInterestHistoryPoint],
+    FundingRate, LongShortRatio) OR an Exception instance (raised by the AsyncMock).
+    funding_value / lsr_value default to a sane stub if None.
+    """
+    from src.integrations.exchange.base import FundingRate, LongShortRatio
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.market_data = MagicMock()
+
+    if funding_value is None:
+        funding_value = FundingRate(
+            symbol="BTC/USDT:USDT", rate=0.000014,
+            next_funding_time=1778660000000, timestamp=1778645000000,
+        )
+    if lsr_value is None:
+        lsr_value = LongShortRatio(
+            symbol="BTC/USDT:USDT", long_short_ratio=0.66,
+            long_ratio=0.399, short_ratio=0.601, timestamp=1778645000000,
+        )
+    deps.market_data.get_funding_rate = _async_mock(funding_value)
+    deps.market_data.get_open_interest_history = _async_mock(oi_hist_value)
+    deps.market_data.get_long_short_ratio = _async_mock(lsr_value)
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_derivs_oi_history_happy_full_anchors():
+    from src.agent.tools_perception import get_derivatives_data
+    vals = [2_900_000_000.0] * 26
+    vals[-25] = 2_910_000_000.0
+    vals[-2] = 2_930_000_000.0
+    vals[-1] = 2_920_000_000.0
+    deps = _mock_deps_for_derivs(_make_points(vals))
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "Open Interest: $2.92B (1h ago $2.93B" in out
+    assert "24h ago $2.91B" in out
+    assert "Funding Rate:" in out
+    assert "Long/Short Ratio:" in out
+
+
+@pytest.mark.asyncio
+async def test_derivs_oi_history_rate_limit():
+    from src.agent.tools_perception import get_derivatives_data
+    from src.utils.cache import RateLimitHit
+    deps = _mock_deps_for_derivs(RateLimitHit("429"))
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "Open Interest: (unavailable)" in out
+    assert "Funding Rate:" in out  # other fields still rendered
+    assert "Long/Short Ratio:" in out
+
+
+@pytest.mark.asyncio
+async def test_derivs_oi_history_empty_list():
+    from src.agent.tools_perception import get_derivatives_data
+    deps = _mock_deps_for_derivs([])
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "Open Interest: (unavailable)" in out
+
+
+@pytest.mark.asyncio
+async def test_derivs_oi_history_one_record_no_anchor():
+    from src.agent.tools_perception import get_derivatives_data
+    deps = _mock_deps_for_derivs(_make_points([2_920_000_000.0]))
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "Open Interest: $2.92B\n" in out  # single-point form (no anchor paren)
+    assert "1h ago" not in out
+    assert "24h ago" not in out
+
+
+@pytest.mark.asyncio
+async def test_derivs_oi_history_two_records_1h_only():
+    from src.agent.tools_perception import get_derivatives_data
+    deps = _mock_deps_for_derivs(_make_points([2_930_000_000.0, 2_920_000_000.0]))
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "Open Interest: $2.92B (1h ago $2.93B" in out
+    assert "24h ago" not in out
+
+
+@pytest.mark.asyncio
+async def test_derivs_oi_history_anchor_zero_skipped():
+    """points[-25].open_interest_value=0 — 24h anchor skipped, 1h preserved."""
+    from src.agent.tools_perception import get_derivatives_data
+    # len = 25; vals[-25]=vals[0]=0 (24h-ago zero)
+    vals = [0.0] + [2_900_000_000.0] * 22 + [2_930_000_000.0, 2_920_000_000.0]
+    deps = _mock_deps_for_derivs(_make_points(vals))
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "1h ago $2.93B" in out
+    assert "24h ago" not in out
+
+
+@pytest.mark.asyncio
+async def test_derivs_all_three_sources_fail_single_error_line():
+    """R2-8c L2 全失败 fallback: single Error: line."""
+    from src.agent.tools_perception import get_derivatives_data
+    from src.utils.cache import RateLimitHit
+    deps = _mock_deps_for_derivs(
+        oi_hist_value=RateLimitHit("oi"),
+        funding_value=RateLimitHit("funding"),
+        lsr_value=RateLimitHit("lsr"),
+    )
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "Error: Temporarily unavailable" in out
+    assert "Open Interest:" not in out  # per-field lines suppressed by L2
+
+
+@pytest.mark.asyncio
+async def test_derivs_oi_history_fail_others_ok():
+    """OI fails alone → only OI line gets (unavailable); other two intact."""
+    from src.agent.tools_perception import get_derivatives_data
+    from src.utils.cache import RateLimitHit
+    deps = _mock_deps_for_derivs(RateLimitHit("oi only"))
+    out = await get_derivatives_data(deps, "BTC/USDT:USDT")
+    assert "Open Interest: (unavailable)" in out
+    assert "Funding Rate:" in out
+    assert "longs pay shorts" in out or "shorts pay longs" in out
+    assert "Long/Short Ratio:" in out
