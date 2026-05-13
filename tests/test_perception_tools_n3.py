@@ -1,4 +1,5 @@
 """Tests for the 4 N3 perception tools."""
+import re
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,20 @@ from src.integrations.macro.models import (
     EquityQuote, FREDObservation, MacroSnapshot,
 )
 from src.integrations.onchain.models import StablecoinSnapshot, StablecoinTotal
+
+
+# iter-tool-opt-as-of-header: helper for asserting first-section headers carry
+# the inline "@ HH:MM:SS UTC" fetch timestamp added per iter-8.
+_AS_OF_RE = re.compile(r"@ \d{2}:\d{2}:\d{2} UTC")
+
+
+def _re_has_as_of_header(text: str, section_name_substr: str) -> bool:
+    """Return True if `text` contains a === ... === header line whose body
+    starts with section_name_substr and includes "@ HH:MM:SS UTC"."""
+    for line in text.split("\n"):
+        if line.startswith("=== ") and section_name_substr in line and _AS_OF_RE.search(line):
+            return True
+    return False
 
 
 @dataclass
@@ -310,7 +325,8 @@ async def test_macro_full_snapshot_rendering():
     deps = _make_deps(macro=macro_svc)
     result = await get_macro_context(deps)
 
-    assert "=== Crypto Market ===" in result
+    # iter-tool-opt-as-of-header: first-section header now carries inline fetch timestamp
+    assert _re_has_as_of_header(result, "Crypto Market"), result[:200]
     assert "BTC.D: 57.31%" in result
     assert "ETH.D: 10.79%" in result
     assert "$2.69T" in result
@@ -349,7 +365,8 @@ async def test_macro_cg_section_unavailable_when_all_cg_fields_none():
     deps = _make_deps(macro=macro_svc)
     result = await get_macro_context(deps)
 
-    assert "=== Crypto Market ===" in result
+    # iter-tool-opt-as-of-header: first-section header carries inline fetch timestamp
+    assert _re_has_as_of_header(result, "Crypto Market"), result[:200]
     assert "temporarily unavailable" in result.lower()
     # But FRED + AV should still render
     assert "VIX: 17.94" in result
@@ -419,7 +436,9 @@ async def test_etf_btc_and_eth_format():
     deps = _make_deps(crypto_etf=svc)
     result = await get_etf_flows(deps, days=7)
 
-    assert "=== BTC Spot ETF Flows (US) ===" in result
+    # iter-tool-opt-as-of-header: BTC (first section) header now includes
+    # "@ HH:MM:SS UTC"; ETH (second section) header remains plain.
+    assert _re_has_as_of_header(result, "BTC Spot ETF Flows"), result[:300]
     assert "=== ETH Spot ETF Flows (US) ===" in result
     assert "2026-04-17:" in result
     assert "7-day net:" in result

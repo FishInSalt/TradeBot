@@ -104,7 +104,12 @@ async def test_get_position(deps):
     from src.agent.tools_perception import get_position
 
     result = await get_position(deps, "BTC/USDT:USDT")
-    assert "=== Position (BTC/USDT:USDT) ===" in result
+    # iter-tool-opt-as-of-header: header now includes inline "@ HH:MM:SS UTC"
+    import re as _re
+    assert _re.search(
+        r"=== Position \(BTC/USDT:USDT @ \d{2}:\d{2}:\d{2} UTC\) ===",
+        result,
+    ), result[:200]
     assert "Side: Long" in result
     assert "64,000" in result or "64000" in result
 

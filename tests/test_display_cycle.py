@@ -3124,7 +3124,8 @@ async def test_dg_1c_path_b_critical_fields_present(tool_name):
     # convention preserved.
     ("get_higher_timeframe_view",
      r"=== Higher Timeframe View \(BTC/USDT:USDT @ \d{2}:\d{2}:\d{2} UTC\) ==="),
-    ("get_price_pivots", r"=== Price Pivots \(BTC/USDT:USDT, main TF: \w+\) ==="),
+    # iter-tool-opt-as-of-header: main_tf now followed by " @ HH:MM:SS UTC"
+    ("get_price_pivots", r"=== Price Pivots \(BTC/USDT:USDT, main TF: \w+ @ \d{2}:\d{2}:\d{2} UTC\) ==="),
 ])
 async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
     """T-DG-1d: §4.1.1 multi-arg header param order — symbol-first convention."""
@@ -3132,4 +3133,59 @@ async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
     assert _re_dg.search(expected_pattern, out), (
         f"{tool_name} header param order violates §4.1.1: pattern {expected_pattern!r} "
         f"not found in:\n{out[:400]!r}"
+    )
+
+
+# === T-DG-1e: as-of header timestamp (iter-tool-opt-as-of-header) ===
+# 14 perception tools must carry inline "@ HH:MM:SS UTC" in their first section
+# header (UTC-only). Aligns with get_market_data / get_higher_timeframe_view
+# existing pattern and set_next_wake_at PR #48 UTC anchor.
+_AS_OF_HEADER_RE = _re_dg.compile(r"^=== [^=]*@ \d{2}:\d{2}:\d{2} UTC[^=]*===")
+
+# Tools whose first-section render lives behind Path A (service=None / empty
+# state — early return). These do NOT need market_data/exchange happy mocks.
+_AS_OF_PATH_A_TOOLS = [
+    "get_active_alerts",
+    "get_position",  # No open positions branch
+    "get_market_news",
+    "get_exchange_announcements",
+    "get_macro_calendar",
+    "get_macro_context",
+    "get_etf_flows",
+    "get_trade_journal",
+    "get_performance",
+]
+
+# Tools whose first-section render lives behind Path B (minimum happy/L2 mock).
+_AS_OF_PATH_B_TOOLS = [
+    "get_open_orders",
+    "get_recent_trades",
+    "get_order_book",
+    "get_price_pivots",
+    "get_account_balance",
+]
+
+
+@pytest.mark.parametrize("tool_name", _AS_OF_PATH_A_TOOLS)
+async def test_dg_1e_path_a_first_section_has_as_of_timestamp(tool_name):
+    """T-DG-1e Path A: first section header carries inline `@ HH:MM:SS UTC`."""
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    deps = _MockDeps(exchange=_mock_exchange_minimal())
+    out = await fn(deps)
+    first_header = out.split("\n", 1)[0]
+    assert _AS_OF_HEADER_RE.match(first_header), (
+        f"{tool_name} first section header missing `@ HH:MM:SS UTC`:\n{first_header!r}\n"
+        f"(full output prefix: {out[:300]!r})"
+    )
+
+
+@pytest.mark.parametrize("tool_name", _AS_OF_PATH_B_TOOLS)
+async def test_dg_1e_path_b_first_section_has_as_of_timestamp(tool_name):
+    """T-DG-1e Path B: first section header (happy / L2) carries `@ HH:MM:SS UTC`."""
+    out = await _invoke_path_b(tool_name)
+    first_header = out.split("\n", 1)[0]
+    assert _AS_OF_HEADER_RE.match(first_header), (
+        f"{tool_name} first section header missing `@ HH:MM:SS UTC`:\n{first_header!r}\n"
+        f"(full output prefix: {out[:300]!r})"
     )

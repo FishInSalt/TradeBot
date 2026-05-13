@@ -320,10 +320,13 @@ async def test_pivots_ticker_failure_short_circuits():
     out = await get_price_pivots(deps)
 
     # R2-8c §4.2.4 Option D form for ticker-failure short-circuit.
-    assert out == (
-        "=== Price Pivots (BTC/USDT:USDT, main TF: 5m) ===\n"
-        "Error: Temporarily unavailable."
-    )
+    # iter-tool-opt-as-of-header: header now includes inline "@ HH:MM:SS UTC".
+    import re
+    assert re.fullmatch(
+        r"=== Price Pivots \(BTC/USDT:USDT, main TF: 5m @ \d{2}:\d{2}:\d{2} UTC\) ===\n"
+        r"Error: Temporarily unavailable\.",
+        out,
+    ), out
     deps.market_data.get_ohlcv_dataframe.assert_not_called()
 
 

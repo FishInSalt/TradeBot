@@ -530,7 +530,12 @@ async def test_get_position_enhanced():
     )
 
     result = await get_position(deps)
-    assert "=== Position (BTC/USDT:USDT) ===" in result
+    # iter-tool-opt-as-of-header: position header includes inline fetch timestamp
+    import re as _re
+    assert _re.search(
+        r"=== Position \(BTC/USDT:USDT @ \d{2}:\d{2}:\d{2} UTC\) ===",
+        result,
+    ), result[:200]
     assert "Side: Long" in result
     assert "74761.10" in result or "74,761.10" in result
     # PnL percentage of initial capital
@@ -629,9 +634,15 @@ async def test_get_trade_journal_with_summary(tmp_path):
 
     result = await get_trade_journal(deps)
     # Should have Performance Summary section before Trade Journal
+    # iter-tool-opt-as-of-header: Trade Journal header now includes "@ HH:MM:SS UTC"
+    # (Performance Summary stays plain — only the per-task target sections are tagged).
     assert "=== Performance Summary ===" in result
     assert "Win:" in result
-    assert "=== Trade Journal ===" in result
+    import re as _re
+    assert _re.search(
+        r"=== Trade Journal \(@ \d{2}:\d{2}:\d{2} UTC\) ===",
+        result,
+    ), result[:300]
     await engine.dispose()
 
 
@@ -818,7 +829,12 @@ async def test_get_active_alerts_with_data():
     ])
 
     result = await get_active_alerts(deps)
-    assert "=== Price Alert Settings ===" in result
+    # iter-tool-opt-as-of-header: first-section header now carries inline fetch timestamp
+    import re as _re
+    assert _re.search(
+        r"=== Price Alert Settings \(@ \d{2}:\d{2}:\d{2} UTC\) ===",
+        result,
+    ), result[:200]
     assert "5.0%" in result
     assert "60min" in result
     assert "=== Active Price Level Alerts" in result
@@ -867,7 +883,12 @@ async def test_get_performance_with_trades(tmp_path):
     deps.exchange.fetch_balance.return_value = Balance(10023.0, 9023.0, 1000.0)
 
     result = await get_performance(deps)
-    assert "=== Trading Performance ===" in result
+    # iter-tool-opt-as-of-header: first-section header now carries inline fetch timestamp
+    import re as _re
+    assert _re.search(
+        r"=== Trading Performance \(@ \d{2}:\d{2}:\d{2} UTC\) ===",
+        result,
+    ), result[:200]
     assert "Total Trades: 2" in result
     assert "Win: 1" in result
     assert "Profit Factor:" in result
@@ -951,7 +972,12 @@ async def test_get_open_orders_merges_oco_into_single_line():
     out = await get_open_orders(_make_oco_deps(orders))
     lines = out.splitlines()
     # Only one rendered row besides the header (R2-8c explicit section header)
-    assert lines[0] == "=== Pending Orders ==="
+    # iter-tool-opt-as-of-header: header now includes inline "@ HH:MM:SS UTC"
+    import re as _re
+    assert _re.fullmatch(
+        r"=== Pending Orders \(@ \d{2}:\d{2}:\d{2} UTC\) ===",
+        lines[0],
+    ), lines[0]
     data_lines = [l for l in lines[1:] if l.strip()]
     assert len(data_lines) == 1, f"expected 1 merged OCO line, got {data_lines}"
     row = data_lines[0]

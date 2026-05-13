@@ -7,6 +7,12 @@ from unittest.mock import AsyncMock
 from src.integrations.exchange.base import OrderBook, OrderBookLevel, Trade, Ticker, Balance, Position, Order
 
 
+# iter-tool-opt-as-of-header: 14 perception tools now carry inline "@ HH:MM:SS UTC"
+# in their first section header. Tests assert via regex rather than byte-equal
+# substring to remain deterministic w/o freezing the clock.
+_AS_OF_TS = r"@ \d{2}:\d{2}:\d{2} UTC"
+
+
 @dataclass
 class MockDeps:
     symbol: str = "BTC/USDT:USDT"
@@ -65,7 +71,7 @@ async def test_order_book_empty_insufficient():
     )
     result = await get_order_book(deps, depth=20)
     # R2-8c §4.2.20 — L2 Option D form (inline Error: prefix)
-    assert "=== Order Book (BTC/USDT:USDT) ===" in result
+    assert re.search(rf"=== Order Book \(BTC/USDT:USDT {_AS_OF_TS}\) ===", result), result[:200]
     assert "Error: Insufficient data" in result
     assert "requested depth 20" in result
     assert "got 0" in result
@@ -79,7 +85,7 @@ async def test_order_book_service_failure():
     deps.market_data.get_order_book.side_effect = Exception("connection reset")
     result = await get_order_book(deps)
     # R2-8c §4.2.20 — L2 Option D form (inline Error: prefix)
-    assert "=== Order Book (BTC/USDT:USDT) ===" in result
+    assert re.search(rf"=== Order Book \(BTC/USDT:USDT {_AS_OF_TS}\) ===", result), result[:200]
     assert "Error: Temporarily unavailable." in result
 
 
@@ -173,7 +179,7 @@ async def test_recent_trades_empty_cold_market():
     deps.market_data.get_recent_trades.return_value = []
     result = await get_recent_trades(deps, window_seconds=300)
     # R2-8c §4.2.9: single-section empty-state (NOT Error: prefix).
-    assert "=== Recent Trades (BTC/USDT:USDT, last 300s) ===" in result
+    assert re.search(rf"=== Recent Trades \(BTC/USDT:USDT, last 300s {_AS_OF_TS}\) ===", result), result[:200]
     assert "No trades in last 300s." in result
     assert "Error:" not in result
 
@@ -185,7 +191,7 @@ async def test_recent_trades_service_failure():
     deps = MockDeps()
     deps.market_data.get_recent_trades.side_effect = Exception("timeout")
     result = await get_recent_trades(deps)
-    assert "=== Recent Trades (BTC/USDT:USDT) ===" in result
+    assert re.search(rf"=== Recent Trades \(BTC/USDT:USDT {_AS_OF_TS}\) ===", result), result[:200]
     assert "Error: Temporarily unavailable." in result
 
 
@@ -448,7 +454,11 @@ async def test_get_position_empty_short_circuit(mocker):
     deps.exchange.fetch_positions = AsyncMock(return_value=[])
     result = await get_position(deps)
     # R2-8c §4.2.11 — sectioned empty-state
-    assert result == "=== Position ===\nNo open positions."
+    # iter-tool-opt-as-of-header: header now carries inline "@ HH:MM:SS UTC"
+    assert re.fullmatch(
+        rf"=== Position \(BTC/USDT:USDT {_AS_OF_TS}\) ===\nNo open positions\.",
+        result,
+    ), result
     # Verify other IOs never called
     deps.exchange.fetch_balance.assert_not_called()
 
@@ -649,7 +659,8 @@ async def test_get_position_phase2_hard_failure_degradation(mocker):
 
     result = await get_position(deps)
     # Core position lines preserved (R2-8c sectioned form)
-    assert "=== Position (BTC/USDT:USDT) ===" in result
+    # iter-tool-opt-as-of-header: header now carries inline "@ HH:MM:SS UTC"
+    assert re.search(rf"=== Position \(BTC/USDT:USDT {_AS_OF_TS}\) ===", result), result[:200]
     assert "Side: Long" in result
     assert "64,000.00" in result or "64000.00" in result
     # PnL preserved (Phase-1 data only)
