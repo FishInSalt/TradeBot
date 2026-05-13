@@ -17,7 +17,6 @@ from src.integrations.exchange.base import (
     FillEvent,
     FundingRate,
     LongShortRatio,
-    OpenInterest,
     OpenInterestHistoryPoint,
     Order,
     OrderBook,
@@ -721,19 +720,6 @@ class OKXExchange(BaseExchange):
             symbol=data["symbol"],
             rate=float(data["fundingRate"]),
             next_funding_time=int(data.get("fundingTimestamp") or 0),
-            timestamp=int(data.get("timestamp") or 0),
-        )
-
-    @_retry()
-    async def fetch_open_interest(self, symbol: str) -> OpenInterest:
-        try:
-            data = await self._client.fetch_open_interest(symbol)
-        except ccxt.RateLimitExceeded as e:
-            raise RateLimitHit(f"OKX open interest: {e}") from e
-        return OpenInterest(
-            symbol=data["symbol"],
-            open_interest=float(data.get("openInterestAmount") or 0),
-            open_interest_value=float(data.get("openInterestValue") or 0),
             timestamp=int(data.get("timestamp") or 0),
         )
 

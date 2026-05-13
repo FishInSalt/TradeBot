@@ -2,7 +2,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from src.integrations.exchange.base import FundingRate, OpenInterest, LongShortRatio
+from src.integrations.exchange.base import FundingRate, LongShortRatio
 
 
 # --- Dataclass tests ---
@@ -14,14 +14,6 @@ def test_funding_rate_fields():
     )
     assert fr.rate == 0.000125
     assert fr.symbol == "BTC/USDT:USDT"
-
-
-def test_open_interest_fields():
-    oi = OpenInterest(
-        symbol="BTC/USDT:USDT", open_interest=12345.0,
-        open_interest_value=4_820_000_000.0, timestamp=1713261600000,
-    )
-    assert oi.open_interest_value == 4_820_000_000.0
 
 
 def test_long_short_ratio_fields():
@@ -51,22 +43,6 @@ async def test_okx_fetch_funding_rate():
     assert isinstance(result, FundingRate)
     assert result.rate == 0.000125
     assert result.next_funding_time == 1713265200000
-
-
-async def test_okx_fetch_open_interest():
-    from src.integrations.exchange.okx import OKXExchange
-
-    exchange = OKXExchange.__new__(OKXExchange)
-    exchange._client = AsyncMock()
-    exchange._client.fetch_open_interest.return_value = {
-        "symbol": "BTC/USDT:USDT",
-        "openInterestAmount": 12345.0,
-        "openInterestValue": 4_820_000_000.0,
-        "timestamp": 1713261600000,
-    }
-    result = await exchange.fetch_open_interest("BTC/USDT:USDT")
-    assert isinstance(result, OpenInterest)
-    assert result.open_interest_value == 4_820_000_000.0
 
 
 async def test_okx_fetch_long_short_ratio():
@@ -116,19 +92,6 @@ async def test_okx_funding_rate_converts_rate_limit_exceeded():
         await exchange.fetch_funding_rate("BTC/USDT:USDT")
     # _retry() must NOT have retried — one call, then surfaced RateLimitHit.
     assert exchange._client.fetch_funding_rate.call_count == 1
-
-
-async def test_okx_open_interest_converts_rate_limit_exceeded():
-    import ccxt.async_support as ccxt
-    from src.integrations.exchange.okx import OKXExchange
-    from src.utils.cache import RateLimitHit
-
-    exchange = OKXExchange.__new__(OKXExchange)
-    exchange._client = AsyncMock()
-    exchange._client.fetch_open_interest.side_effect = ccxt.RateLimitExceeded("429")
-    with pytest.raises(RateLimitHit):
-        await exchange.fetch_open_interest("BTC/USDT:USDT")
-    assert exchange._client.fetch_open_interest.call_count == 1
 
 
 async def test_okx_long_short_ratio_converts_rate_limit_exceeded():
@@ -187,19 +150,6 @@ async def test_sim_fetch_funding_rate():
     assert result.rate == -0.0003
 
 
-async def test_sim_fetch_open_interest():
-    ex = _make_sim_exchange()
-    ex._ccxt.fetch_open_interest.return_value = {
-        "symbol": "BTC/USDT:USDT",
-        "openInterestAmount": 9000.0,
-        "openInterestValue": 855_000_000.0,
-        "timestamp": 1713261600000,
-    }
-    result = await ex.fetch_open_interest("BTC/USDT:USDT")
-    assert isinstance(result, OpenInterest)
-    assert result.open_interest_value == 855_000_000.0
-
-
 async def test_sim_fetch_long_short_ratio():
     ex = _make_sim_exchange()
     ex._ccxt.fetch_long_short_ratio_history.return_value = [
@@ -252,19 +202,6 @@ async def test_market_data_get_funding_rate():
     result = await svc.get_funding_rate("BTC/USDT:USDT")
     assert result.rate == 0.0001
     exchange.fetch_funding_rate.assert_called_once_with("BTC/USDT:USDT")
-
-
-async def test_market_data_get_open_interest():
-    from src.integrations.market_data import MarketDataService
-
-    exchange = AsyncMock()
-    exchange.fetch_open_interest.return_value = OpenInterest(
-        symbol="BTC/USDT:USDT", open_interest=12345.0,
-        open_interest_value=4_820_000_000.0, timestamp=1713261600000,
-    )
-    svc = MarketDataService(exchange)
-    result = await svc.get_open_interest("BTC/USDT:USDT")
-    assert result.open_interest_value == 4_820_000_000.0
 
 
 async def test_market_data_get_long_short_ratio():

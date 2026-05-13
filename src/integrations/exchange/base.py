@@ -135,8 +135,6 @@ class BaseExchange(ABC):
     @abstractmethod
     async def fetch_funding_rate(self, symbol: str) -> 'FundingRate': ...
     @abstractmethod
-    async def fetch_open_interest(self, symbol: str) -> 'OpenInterest': ...
-    @abstractmethod
     async def fetch_open_interest_history(
         self,
         symbol: str,
@@ -315,23 +313,12 @@ class FundingRate:
 
 
 @dataclass
-class OpenInterest:
-    symbol: str
-    open_interest: float  # base-currency amount (per ccxt unified `openInterestAmount`)
-    open_interest_value: float  # USD value
-    timestamp: int
-
-
-@dataclass
 class OpenInterestHistoryPoint:
     """One historical OI snapshot at a given timestamp.
 
-    open_interest_value is USD-denominated and shares semantics with
-    OpenInterest.open_interest_value (same single-contract scope, just a
-    point in time). Unlike the sibling dataclasses (OpenInterest /
-    FundingRate / LongShortRatio), no `symbol` field is carried — a list
-    of history points always belongs to one symbol and the caller holds
-    that context.
+    open_interest_value is USD-denominated. No `symbol` field is carried —
+    a list of history points always belongs to one symbol and the caller
+    holds that context.
     """
     timestamp: int
     open_interest: float  # base-currency amount

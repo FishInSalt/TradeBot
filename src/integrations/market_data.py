@@ -1,7 +1,7 @@
 from __future__ import annotations
 import pandas as pd
 from typing import Literal
-from src.integrations.exchange.base import BaseExchange, FundingRate, LongShortRatio, OpenInterest, OpenInterestHistoryPoint, OrderBook, Ticker, Trade
+from src.integrations.exchange.base import BaseExchange, FundingRate, LongShortRatio, OpenInterestHistoryPoint, OrderBook, Ticker, Trade
 from src.utils.cache import TTLCache
 
 _DERIVATIVES_TTL = 180.0  # 3 minutes
@@ -37,12 +37,6 @@ class MarketDataService:
         return await self._derivatives_cache.get_or_fetch(
             f"funding:{symbol}", _DERIVATIVES_TTL,
             lambda: self._exchange.fetch_funding_rate(symbol),
-        )
-
-    async def get_open_interest(self, symbol: str) -> OpenInterest:
-        return await self._derivatives_cache.get_or_fetch(
-            f"oi:{symbol}", _DERIVATIVES_TTL,
-            lambda: self._exchange.fetch_open_interest(symbol),
         )
 
     async def get_open_interest_history(
