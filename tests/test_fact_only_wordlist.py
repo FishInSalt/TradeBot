@@ -802,3 +802,63 @@ async def test_place_limit_order_return_no_decision_label(mocker):
     result = await _invoke_place_limit_order_happy(deps, mocker)
     hits = _scan(result)
     assert hits == [], f"banned regex hits: {hits}"
+
+
+async def _invoke_place_limit_order_with_position(deps, mocker, position_leverage: int, requested_leverage: int):
+    """iter-tool-opt-limit-order-leverage-override helper: place limit order
+    with an existing position at `position_leverage`, requesting `requested_leverage`.
+    """
+    from src.agent.tools_execution import place_limit_order
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.1, entry_price=80000.0,
+        unrealized_pnl=0.0, leverage=position_leverage, liquidation_price=None,
+    )])
+    deps.exchange.set_leverage = AsyncMock(return_value=None)
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10000.0, free_usdt=8000.0, used_usdt=2000.0,
+    ))
+    deps.exchange.amount_to_precision = mocker.Mock(return_value=0.05)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="abc12345-6789-0123-4567-89abcdef0123",
+        symbol="BTC/USDT:USDT", side="buy", order_type="limit",
+        amount=0.05, price=80000.0, status="open",
+    ))
+    return await place_limit_order(
+        deps, "long", 80000.0, 10.0, requested_leverage, reasoning="test entry",
+    )
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_explicit_override_when_position_diff_leverage(mocker):
+    """iter-tool-opt-limit-order-leverage-override: principle 1 fact-provider —
+    silent override of requested leverage by position's leverage must be surfaced.
+    """
+    deps = MockDeps()
+    result = await _invoke_place_limit_order_with_position(
+        deps, mocker, position_leverage=5, requested_leverage=10,
+    )
+    assert "5x (matched existing position; requested 10x ignored)" in result, \
+        f"expected explicit override suffix, got: {result}"
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_no_override_msg_when_leverage_matches(mocker):
+    """No suffix when requested leverage matches existing position's leverage."""
+    deps = MockDeps()
+    result = await _invoke_place_limit_order_with_position(
+        deps, mocker, position_leverage=5, requested_leverage=5,
+    )
+    assert "5x" in result
+    assert "matched existing position" not in result, \
+        f"spurious override suffix when leverage matches, got: {result}"
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_no_override_msg_when_empty_position(mocker):
+    """No suffix when no existing position — requested leverage is the actual leverage."""
+    deps = MockDeps()
+    result = await _invoke_place_limit_order_happy(deps, mocker)
+    # _invoke_place_limit_order_happy uses fetch_positions=[] and requested_leverage=5
+    assert "5x" in result
+    assert "matched existing position" not in result, \
+        f"spurious override suffix when no position, got: {result}"

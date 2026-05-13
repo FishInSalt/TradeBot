@@ -564,9 +564,12 @@ async def place_limit_order(
         side=side, price=price, reasoning=reasoning,
     )
 
+    leverage_suffix = ""
+    if positions and leverage != actual_leverage:
+        leverage_suffix = f" (matched existing position; requested {leverage}x ignored)"
     return (
         f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, "
-        f"{actual_leverage}x | ID: {order.id}\n"
+        f"{actual_leverage}x{leverage_suffix} | ID: {order.id}\n"
         "Note: This tool only submits the order — it does not mean the order has been filled."
     )
 
