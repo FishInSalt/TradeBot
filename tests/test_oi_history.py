@@ -21,3 +21,16 @@ def test_oi_history_point_dataclass_fields():
 def test_okx_oi_period_mapping():
     from src.integrations.exchange.base import _OKX_OI_PERIOD
     assert _OKX_OI_PERIOD == {"5m": "5m", "1h": "1H", "1d": "1D"}
+
+
+def test_base_exchange_has_fetch_open_interest_history_abstractmethod():
+    import inspect
+    from src.integrations.exchange.base import BaseExchange
+    assert hasattr(BaseExchange, "fetch_open_interest_history")
+    method = BaseExchange.fetch_open_interest_history
+    sig = inspect.signature(method)
+    assert "symbol" in sig.parameters
+    assert "period" in sig.parameters
+    assert "limit" in sig.parameters
+    assert sig.parameters["period"].default == "1h"
+    assert sig.parameters["limit"].default == 26

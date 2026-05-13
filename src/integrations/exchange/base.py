@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,13 @@ class BaseExchange(ABC):
     async def fetch_funding_rate(self, symbol: str) -> 'FundingRate': ...
     @abstractmethod
     async def fetch_open_interest(self, symbol: str) -> 'OpenInterest': ...
+    @abstractmethod
+    async def fetch_open_interest_history(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "1d"] = "1h",
+        limit: int = 26,
+    ) -> list["OpenInterestHistoryPoint"]: ...
     @abstractmethod
     async def fetch_long_short_ratio(self, symbol: str) -> 'LongShortRatio': ...
     @abstractmethod
