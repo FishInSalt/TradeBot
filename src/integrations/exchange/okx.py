@@ -6,7 +6,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, Literal, ParamSpec, TypeVar
 
 import ccxt.async_support as ccxt
 
@@ -18,12 +18,14 @@ from src.integrations.exchange.base import (
     FundingRate,
     LongShortRatio,
     OpenInterest,
+    OpenInterestHistoryPoint,
     Order,
     OrderBook,
     OrderBookLevel,
     Position,
     Ticker,
     Trade,
+    _OKX_OI_PERIOD,
 )
 from src.utils.cache import RateLimitHit
 
@@ -734,6 +736,36 @@ class OKXExchange(BaseExchange):
             open_interest_value=float(data.get("openInterestValue") or 0),
             timestamp=int(data.get("timestamp") or 0),
         )
+
+    @_retry()
+    async def fetch_open_interest_history(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "1d"] = "1h",
+        limit: int = 26,
+    ) -> list[OpenInterestHistoryPoint]:
+        inst_id = self._client.market(symbol)["id"]  # BTC/USDT:USDT -> BTC-USDT-SWAP
+        try:
+            raw = await self._client.public_get_rubik_stat_contracts_open_interest_history({
+                "instId": inst_id,
+                "period": _OKX_OI_PERIOD[period],
+                "limit": str(limit),
+            })
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX open interest history: {e}") from e
+        rows = raw.get("data") or []
+        # OKX rubik 4-col schema: [ts_ms, oi_contracts, oi_base, oi_usd].
+        # r[1] (contract count) intentionally not consumed — agent uses USD anchor only.
+        points = [
+            OpenInterestHistoryPoint(
+                timestamp=int(r[0]),
+                open_interest=float(r[2]),        # oi_base (base-currency amount)
+                open_interest_value=float(r[3]),  # oi_usd (USD value)
+            )
+            for r in rows
+        ]
+        points.reverse()  # OKX returns newest-first; flip to oldest-first
+        return points
 
     @_retry()
     async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
