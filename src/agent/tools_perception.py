@@ -761,7 +761,7 @@ async def get_exchange_announcements(
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     if deps.news is None:
         return (
-            f"=== Exchange Announcements (@ {fetch_ts} UTC) ===\n"
+            f"=== Exchange Announcements (past {lookback_hours}h @ {fetch_ts} UTC) ===\n"
             "Error: News service not configured."
         )
 
@@ -804,7 +804,7 @@ async def get_macro_calendar(
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     if deps.news is None:
         return (
-            f"=== Upcoming Macro Events (@ {fetch_ts} UTC) ===\n"
+            f"=== Upcoming Macro Events (next {lookahead_hours}h @ {fetch_ts} UTC) ===\n"
             "Error: News service not configured."
         )
 
@@ -1599,7 +1599,7 @@ async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRAD
     except Exception as e:
         logger.exception("get_recent_trades failed for %s", symbol)
         return (
-            f"=== Recent Trades ({symbol} @ {fetch_ts} UTC) ===\n"
+            f"=== Recent Trades ({symbol}, last {window_seconds}s @ {fetch_ts} UTC) ===\n"
             f"Error: Temporarily unavailable ({e.__class__.__name__})."
         )
 

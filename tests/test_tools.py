@@ -143,9 +143,13 @@ async def test_open_position_too_small(deps):
     assert "too small" in result.lower()
 
 
-async def test_open_position_accepts_long_and_short(deps):
-    """iter-tool-opt-open-position-side-literal: Literal narrow allows the two
-    valid values; pydantic-ai layer rejects others.
+async def test_open_position_runtime_happy_path_both_sides(deps):
+    """Runtime happy path for the two Literal-valid sides — covers impl branches
+    (order_side="buy" for "long" / "sell" for "short" at impl line 93).
+
+    Schema-level rejection of invalid values is asserted separately by
+    test_open_position_schema_rejects_invalid_side_at_agent_layer, since
+    direct impl invocation here bypasses pydantic-ai's enum validation.
     """
     from src.agent.tools_execution import open_position
     # side="long" — should resolve order_side="buy" via impl line 93
@@ -172,6 +176,9 @@ def test_open_position_schema_rejects_invalid_side_at_agent_layer():
     from src.config import PersonaConfig
 
     agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    # `_function_toolset` is pydantic-ai private API; depended on intentionally
+    # here as the only path to inspect the LLM-visible tool schema. Breakage on
+    # pydantic-ai upgrade is acceptable — surfaces a real contract change.
     tool = agent._function_toolset.tools["open_position"]
     # pydantic-ai wraps the user function; resolve hints from the underlying
     # callable so we read the on-source annotation, not a Pydantic-rewritten one.

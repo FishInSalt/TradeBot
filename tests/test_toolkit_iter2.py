@@ -193,7 +193,8 @@ async def test_recent_trades_service_failure():
     deps.market_data.get_recent_trades.side_effect = Exception("timeout")
     result = await get_recent_trades(deps)
     # iter-tool-opt-error-metadata: exception class name appended in parentheses
-    assert re.search(rf"=== Recent Trades \(BTC/USDT:USDT {_AS_OF_TS}\) ===", result), result[:200]
+    # review-followup I2: error-path header now carries `last Xs` window field
+    assert re.search(rf"=== Recent Trades \(BTC/USDT:USDT, last \d+s {_AS_OF_TS}\) ===", result), result[:200]
     assert "Error: Temporarily unavailable (Exception)." in result
 
 

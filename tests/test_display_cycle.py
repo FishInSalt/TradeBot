@@ -3189,3 +3189,41 @@ async def test_dg_1e_path_b_first_section_has_as_of_timestamp(tool_name):
         f"{tool_name} first section header missing `@ HH:MM:SS UTC`:\n{first_header!r}\n"
         f"(full output prefix: {out[:300]!r})"
     )
+
+
+# === T-DG-1f: window-bearing tools must carry window field across all paths ===
+# Drift guard for review report I2: T-DG-1e alone accepts any `@ HH:MM:SS UTC`
+# header but does NOT enforce that window-bearing tools (recent_trades / macro
+# calendar / exchange announcements) preserve their window field (`last Xs`,
+# `next Xh`, `past Xh`) in degenerate paths (service-None, exception). Without
+# this guard a future edit can silently drop the window from an error-path
+# header and agent loses context about which window query failed.
+_WINDOW_BEARING_FIRST_HEADER_PATTERNS = {
+    "get_recent_trades": r"=== Recent Trades \([^@]*last \d+s[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
+    "get_macro_calendar": r"=== Upcoming Macro Events \([^@]*next \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
+    "get_exchange_announcements": r"=== Exchange Announcements \([^@]*past \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
+}
+
+
+@pytest.mark.parametrize("tool_name,header_pattern", _WINDOW_BEARING_FIRST_HEADER_PATTERNS.items())
+async def test_dg_1f_window_bearing_tool_degenerate_path(tool_name, header_pattern):
+    """T-DG-1f: service-None / exception paths preserve window field in first header."""
+    import src.agent.tools_perception as tp
+    fn = getattr(tp, tool_name)
+    if tool_name == "get_recent_trades":
+        # No news dep — degenerate path = exception during market_data fetch.
+        from unittest.mock import AsyncMock
+        deps = _MockDeps(exchange=_mock_exchange_minimal())
+        deps.market_data = AsyncMock()
+        deps.market_data.get_recent_trades.side_effect = Exception("boom")
+        out = await fn(deps)
+    else:
+        # service-None branch: news service not configured.
+        deps = _MockDeps(exchange=_mock_exchange_minimal())
+        deps.news = None
+        out = await fn(deps)
+    first_header = out.split("\n", 1)[0]
+    assert _re_dg.match(header_pattern, first_header), (
+        f"{tool_name} degenerate-path first header dropped window field "
+        f"(expected pattern {header_pattern!r}):\n{first_header!r}"
+    )
