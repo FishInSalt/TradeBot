@@ -309,3 +309,105 @@ def test_fmt_age_humanized_float_truncates():
     from src.agent.tools_perception import _fmt_age_humanized
     assert _fmt_age_humanized(59.9) == "just now"  # int(59.9) == 59
     assert _fmt_age_humanized(60.5) == "1m ago"
+
+
+# ============ Task 6: get_active_alerts age rendering ============
+
+
+@pytest.mark.asyncio
+async def test_get_active_alerts_renders_age_suffix(monkeypatch):
+    """Spec §5.3.2 + AC-8: each level-alert line ends with a humanized age
+    suffix like ' (5m ago)' or ' (just now)'.
+    """
+    from src.agent.tools_perception import get_active_alerts
+
+    # Both modules expose `time.time`; patch both.
+    monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700005000.0)
+    monkeypatch.setattr("src.agent.tools_perception.time.time", lambda: 1700005000.0)
+
+    deps = MagicMock()
+    deps.exchange = MagicMock()
+    deps.exchange.get_alert_params.return_value = (0.5, 30)
+    # Two alerts: one set "now" (just now), one set 300s ago (5m ago).
+    deps.exchange.get_price_level_alerts.return_value = [
+        {
+            "id": "a3f2b8c1", "price": 82100.0, "direction": "above",
+            "symbol": "BTC/USDT:USDT", "reasoning": "R1 level",
+            "created_at": 1700005000.0,  # just now
+        },
+        {
+            "id": "d7c2e9f4", "price": 81000.0, "direction": "below",
+            "symbol": "BTC/USDT:USDT", "reasoning": "S1 level",
+            "created_at": 1700004700.0,  # 300s ago
+        },
+    ]
+
+    output = await get_active_alerts(deps)
+
+    # Header carries the b31ffc3 (@ HH:MM:SS UTC) anchor; body rows carry age.
+    age_pat = re.compile(r"\((?:just now|\d+m ago|\d+h \d+m ago|\d+d \d+h ago)\)")
+    body_lines = [ln for ln in output.splitlines() if ln.strip().startswith("#")]
+    assert len(body_lines) == 2
+    for ln in body_lines:
+        assert age_pat.search(ln), f"missing age suffix in: {ln!r}"
+
+    # Specific anchors
+    assert "(just now)" in output
+    assert "(5m ago)" in output
+
+
+@pytest.mark.asyncio
+async def test_get_active_alerts_age_uses_single_now_baseline(monkeypatch):
+    """Spec §5.3.2 + AC-9: time.time() is called exactly once per render —
+    all level alerts use the same `now` baseline. tools_perception.fetch_ts uses
+    datetime.now(timezone.utc), NOT time.time, so the body baseline `now =
+    time.time()` is the only call into `time.time` during a render. A loop that
+    re-queried time.time per row would push this above 1.
+    """
+    from src.agent.tools_perception import get_active_alerts
+
+    call_count = {"n": 0}
+
+    def fake_now():
+        call_count["n"] += 1
+        return 1700005000.0
+
+    monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700005000.0)
+    monkeypatch.setattr("src.agent.tools_perception.time.time", fake_now)
+
+    deps = MagicMock()
+    deps.exchange = MagicMock()
+    deps.exchange.get_alert_params.return_value = (0.5, 30)
+    deps.exchange.get_price_level_alerts.return_value = [
+        {"id": f"{i:08x}", "price": 82000.0 + i, "direction": "above",
+         "symbol": "BTC/USDT:USDT", "reasoning": f"#{i}",
+         "created_at": 1700004700.0}
+        for i in range(4)
+    ]
+
+    await get_active_alerts(deps)
+
+    assert call_count["n"] == 1, (
+        f"expected exactly 1 time.time() call (single body baseline), "
+        f"got {call_count['n']} — likely re-querying inside the loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_active_alerts_disabled_state_unchanged(monkeypatch):
+    """Disabled state is unchanged — no level alerts to render, no age."""
+    from src.agent.tools_perception import get_active_alerts
+
+    monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700005000.0)
+    monkeypatch.setattr("src.agent.tools_perception.time.time", lambda: 1700005000.0)
+
+    deps = MagicMock()
+    deps.exchange = MagicMock()
+    deps.exchange.get_alert_params.return_value = None  # disabled
+    deps.exchange.get_price_level_alerts.return_value = []
+
+    output = await get_active_alerts(deps)
+    assert "OFF" in output
+    assert "No active alerts" in output
+    # No age suffix anywhere
+    assert "ago)" not in output

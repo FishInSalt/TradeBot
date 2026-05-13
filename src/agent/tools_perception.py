@@ -581,8 +581,13 @@ async def get_active_alerts(deps: TradingDeps) -> str:
     count = len(alerts)
     lines = [f"=== Price Level Alerts ({count}/20) (@ {fetch_ts} UTC) ==="]
     if alerts:
+        now = time.time()  # single baseline for all rows
         for i, a in enumerate(alerts, 1):
-            lines.append(f'  #{i} (id={a["id"]}) {a["direction"]} {a["price"]:.2f} — "{a["reasoning"]}"')
+            age = _fmt_age_humanized(now - a["created_at"])
+            lines.append(
+                f'  #{i} (id={a["id"]}) {a["direction"]} {a["price"]:.2f} '
+                f'— "{a["reasoning"]}" ({age})'
+            )
     else:
         lines.append("  No active alerts.")
     sections.append("\n".join(lines))

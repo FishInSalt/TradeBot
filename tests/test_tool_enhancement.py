@@ -818,14 +818,19 @@ async def test_cancel_order_market_rejected():
 
 # --- Task 11: New tools ---
 
-async def test_get_active_alerts_with_data():
+async def test_get_active_alerts_with_data(monkeypatch):
     from src.agent.tools_perception import get_active_alerts
+
+    monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700000000.0)
+    monkeypatch.setattr("src.agent.tools_perception.time.time", lambda: 1700000000.0)
 
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
     deps.exchange.get_price_level_alerts = MagicMock(return_value=[
-        {"id": "a1", "price": 75000.0, "direction": "above", "reasoning": "key resistance breakout"},
-        {"id": "a2", "price": 74000.0, "direction": "below", "reasoning": "support breakdown"},
+        {"id": "a1", "price": 75000.0, "direction": "above", "reasoning": "key resistance breakout",
+         "created_at": 1700000000.0},
+        {"id": "a2", "price": 74000.0, "direction": "below", "reasoning": "support breakdown",
+         "created_at": 1700000000.0},
     ])
 
     result = await get_active_alerts(deps)
@@ -865,17 +870,20 @@ def test_set_price_volatility_alert_in_registered_tool_names():
     assert "set_price_alert" not in REGISTERED_TOOL_NAMES
 
 
-async def test_get_active_alerts_section_headers_renamed():
+async def test_get_active_alerts_section_headers_renamed(monkeypatch):
     """Drift guard (iter-10): section headers renamed from
     Price Alert Settings / Active Price Level Alerts
     to Price Volatility Alert / Price Level Alerts."""
     from src.agent.tools_perception import get_active_alerts
 
+    monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700000000.0)
+    monkeypatch.setattr("src.agent.tools_perception.time.time", lambda: 1700000000.0)
+
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=(2.5, 30))
     deps.exchange.get_price_level_alerts = MagicMock(return_value=[
         {"id": "abc12345", "price": 75000.0, "direction": "above",
-         "reasoning": "drift-guard fixture"},
+         "reasoning": "drift-guard fixture", "created_at": 1700000000.0},
     ])
 
     output = await get_active_alerts(deps)
