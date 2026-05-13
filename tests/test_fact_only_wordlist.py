@@ -687,8 +687,13 @@ async def _invoke_set_take_profit(deps, mocker):
 
 
 async def _invoke_adjust_leverage(deps, mocker):
-    """Happy path: set_leverage no-op + record_action skipped (db_engine=None)."""
+    """Happy path: no position -> set_leverage no-op + record_action skipped (db_engine=None).
+
+    Empty fetch_positions required since iter-tool-opt-adjust-leverage-guard
+    added an explicit reject when holding (was phantom guard).
+    """
     from src.agent.tools_execution import adjust_leverage
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
     deps.exchange.set_leverage = AsyncMock(return_value=None)
     return await adjust_leverage(deps, 5, reasoning="test")
 

@@ -170,10 +170,29 @@ async def test_set_take_profit(deps):
     assert "68000" in result
 
 
-async def test_adjust_leverage(deps):
+async def test_adjust_leverage_rejects_when_holding_position(deps):
+    """iter-tool-opt-adjust-leverage-guard: wrapper docstring claims 'cannot
+    change while holding a position'; impl must enforce it (was phantom guard).
+
+    Fixture's default fetch_positions returns one Position(..., leverage=3);
+    impl must short-circuit before set_leverage and surface the current
+    leverage in the reject string.
+    """
     from src.agent.tools_execution import adjust_leverage
+    # Default fixture has one held position with leverage=3 (see deps fixture).
+    result = await adjust_leverage(deps, 5, reasoning="raise lev")
+    assert "Cannot adjust leverage while holding a position" in result
+    assert "3x" in result  # current leverage echoed
+    deps.exchange.set_leverage.assert_not_called()
+
+
+async def test_adjust_leverage_succeeds_when_no_position(deps):
+    """Empty positions list -> proceeds with set_leverage (happy path)."""
+    from src.agent.tools_execution import adjust_leverage
+    deps.exchange.fetch_positions.return_value = []
     result = await adjust_leverage(deps, 5, reasoning="reducing risk")
     assert "5" in result
+    deps.exchange.set_leverage.assert_called_once_with("BTC/USDT:USDT", 5)
 
 
 async def test_get_open_orders(deps):

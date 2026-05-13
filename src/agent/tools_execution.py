@@ -200,7 +200,18 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
 
 
 async def adjust_leverage(deps: TradingDeps, leverage: int, reasoning: str) -> str:
-    """Adjust leverage for the trading symbol."""
+    """Adjust leverage for the trading symbol.
+
+    Rejects with current leverage in the message when a position is held
+    (wrapper docstring promises this constraint; impl enforces it — was
+    phantom guard prior to iter-tool-opt-adjust-leverage-guard).
+    """
+    positions = await deps.exchange.fetch_positions(deps.symbol)
+    if positions:
+        return (
+            f"Cannot adjust leverage while holding a position "
+            f"(current: {positions[0].leverage}x). Close position first, then adjust."
+        )
     await deps.exchange.set_leverage(deps.symbol, leverage)
     await _record_action(
         deps, action="adjust_leverage",
