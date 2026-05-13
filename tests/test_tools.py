@@ -348,43 +348,43 @@ async def test_get_trade_journal_order_fetch_failure(tmp_path):
     await engine.dispose()
 
 
-async def test_set_price_alert_valid(deps):
-    """set_price_alert 参数合法时应调用 exchange.update_alert_params。"""
-    from src.agent.tools_execution import set_price_alert
+async def test_set_price_volatility_alert_valid(deps):
+    """set_price_volatility_alert 参数合法时应调用 exchange.update_alert_params。"""
+    from src.agent.tools_execution import set_price_volatility_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 2.0, 5, reasoning="high volatility")
+    result = await set_price_volatility_alert(deps, 2.0, 5, reasoning="high volatility")
     assert "updated" in result.lower() or "set" in result.lower()
     deps.exchange.update_alert_params.assert_called_once_with(2.0, 5)
 
 
-async def test_set_price_alert_threshold_too_low(deps):
+async def test_set_price_volatility_alert_threshold_too_low(deps):
     """threshold_pct < 0.1 时应返回错误，不调用 update。"""
-    from src.agent.tools_execution import set_price_alert
+    from src.agent.tools_execution import set_price_volatility_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 0.05, 5, reasoning="test")
+    result = await set_price_volatility_alert(deps, 0.05, 5, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
 
 
-async def test_set_price_alert_threshold_too_high(deps):
+async def test_set_price_volatility_alert_threshold_too_high(deps):
     """threshold_pct > 50 时应返回错误。"""
-    from src.agent.tools_execution import set_price_alert
+    from src.agent.tools_execution import set_price_volatility_alert
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, 55.0, 5, reasoning="test")
+    result = await set_price_volatility_alert(deps, 55.0, 5, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
 
 
-async def test_set_price_alert_window_out_of_range(deps):
+async def test_set_price_volatility_alert_window_out_of_range(deps):
     """window_minutes 超出 1-240 范围时应返回错误。"""
-    from src.agent.tools_execution import set_price_alert
+    from src.agent.tools_execution import set_price_volatility_alert
     deps.exchange.update_alert_params = MagicMock()
     # Lower bound
-    result = await set_price_alert(deps, 3.0, 0, reasoning="test")
+    result = await set_price_volatility_alert(deps, 3.0, 0, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
     # Upper bound
-    result = await set_price_alert(deps, 3.0, 250, reasoning="test")
+    result = await set_price_volatility_alert(deps, 3.0, 250, reasoning="test")
     assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
     deps.exchange.update_alert_params.assert_not_called()
 

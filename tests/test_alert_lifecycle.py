@@ -668,9 +668,9 @@ def test_registered_tool_names_includes_cancel_alert():
 
 
 @pytest.mark.asyncio
-async def test_set_price_alert_invalid_threshold_records_biz_error(engine, session_with_row):
-    """端到端: set_price_alert 传 0.05 越界 → tool_calls 行 status='biz_error'."""
-    from src.agent.tools_execution import set_price_alert
+async def test_set_price_volatility_alert_invalid_threshold_records_biz_error(engine, session_with_row):
+    """端到端: set_price_volatility_alert 传 0.05 越界 → tool_calls 行 status='biz_error'."""
+    from src.agent.tools_execution import set_price_volatility_alert
     from src.services.tool_call_recorder import ToolCallRecorder
 
     recorder = ToolCallRecorder()
@@ -678,11 +678,11 @@ async def test_set_price_alert_invalid_threshold_records_biz_error(engine, sessi
     deps.exchange.get_alert_params.return_value = (1.0, 60)  # alerts enabled
 
     async def handler(args):
-        return await set_price_alert(deps, threshold_pct=0.05, window_minutes=60, reasoning="t")
+        return await set_price_volatility_alert(deps, threshold_pct=0.05, window_minutes=60, reasoning="t")
 
     result = await recorder.wrap_tool_execute(
         make_ctx(deps),
-        call=make_call("set_price_alert"),
+        call=make_call("set_price_volatility_alert"),
         tool_def=MagicMock(),
         args={},
         handler=handler,

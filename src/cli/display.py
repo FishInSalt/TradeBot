@@ -228,7 +228,7 @@ def _summarize_cancel_order(content: str) -> str:
     return _fallback_summary(content)
 
 
-def _summarize_set_price_alert(content: str) -> str:
+def _summarize_set_price_volatility_alert(content: str) -> str:
     m = re.search(r"threshold=([\d.]+)%.*window=(\d+)min", content)
     if m:
         return f"threshold={m.group(1)}%, window={m.group(2)}min"
@@ -280,7 +280,7 @@ _EXECUTION_PARSERS = {
     "adjust_leverage": _summarize_adjust_leverage,
     "place_limit_order": _summarize_place_limit_order,
     "cancel_order": _summarize_cancel_order,
-    "set_price_alert": _summarize_set_price_alert,
+    "set_price_volatility_alert": _summarize_set_price_volatility_alert,
     "add_price_level_alert": _summarize_add_price_level_alert,
     "update_price_level_alert": _summarize_update_price_level_alert,
     "set_next_wake": _summarize_set_next_wake,
@@ -296,7 +296,7 @@ _EXECUTION_SUCCESS_PREFIXES = {
     "adjust_leverage": "Leverage adjusted to",
     "place_limit_order": "Limit order placed:",
     "cancel_order": "Order cancelled:",
-    "set_price_alert": "Price alert updated:",
+    "set_price_volatility_alert": "Price volatility alert updated:",
     "add_price_level_alert": ("Price level alert set:", "Alert set"),
     "cancel_price_level_alert": (
         "Price level alert cancelled",   # cancel success (real removal)
@@ -527,7 +527,7 @@ _EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
     "adjust_leverage",
     "place_limit_order",
     "cancel_order",
-    "set_price_alert",
+    "set_price_volatility_alert",
     "add_price_level_alert",
     "cancel_price_level_alert",
     "update_price_level_alert",

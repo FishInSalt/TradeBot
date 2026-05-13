@@ -717,45 +717,45 @@ async def test_set_take_profit_distance():
     assert "% from current" in result or "from current" in result
 
 
-async def test_set_price_alert_disabled():
-    from src.agent.tools_execution import set_price_alert
+async def test_set_price_volatility_alert_disabled():
+    from src.agent.tools_execution import set_price_volatility_alert
 
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=None)
 
-    result = await set_price_alert(deps, 5.0, 60, reasoning="test")
+    result = await set_price_volatility_alert(deps, 5.0, 60, reasoning="test")
     assert "disabled" in result.lower() or "Alerts are disabled" in result
 
 
-async def test_set_price_alert_enabled():
-    from src.agent.tools_execution import set_price_alert
+async def test_set_price_volatility_alert_enabled():
+    from src.agent.tools_execution import set_price_volatility_alert
 
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
     deps.exchange.update_alert_params = MagicMock()
 
-    result = await set_price_alert(deps, 3.0, 30, reasoning="tighter alert")
+    result = await set_price_volatility_alert(deps, 3.0, 30, reasoning="tighter alert")
     assert "updated" in result.lower() or "3.0%" in result
 
 
-async def test_set_price_alert_accepts_threshold_0_1():
+async def test_set_price_volatility_alert_accepts_threshold_0_1():
     """R2-1 T4: tool layer accepts threshold_pct=0.1 (new lower bound)."""
-    from src.agent.tools_execution import set_price_alert
+    from src.agent.tools_execution import set_price_volatility_alert
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, threshold_pct=0.1, window_minutes=15, reasoning="test")
-    assert "Price alert updated" in result
+    result = await set_price_volatility_alert(deps, threshold_pct=0.1, window_minutes=15, reasoning="test")
+    assert "Price volatility alert updated" in result
     assert "threshold=0.1%" in result  # `%` 锁尾防 0.15 子串误命中（spec P2-1）
 
 
-async def test_set_price_alert_rejects_threshold_below_0_1():
+async def test_set_price_volatility_alert_rejects_threshold_below_0_1():
     """R2-1 T5: tool layer rejects threshold_pct=0.05 with new error message."""
-    from src.agent.tools_execution import set_price_alert
+    from src.agent.tools_execution import set_price_volatility_alert
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
     deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_alert(deps, threshold_pct=0.05, window_minutes=15, reasoning="test")
+    result = await set_price_volatility_alert(deps, threshold_pct=0.05, window_minutes=15, reasoning="test")
     assert "Invalid threshold_pct: must be 0.1-50.0" in result
 
 
@@ -832,12 +832,12 @@ async def test_get_active_alerts_with_data():
     # iter-tool-opt-as-of-header: first-section header now carries inline fetch timestamp
     import re as _re
     assert _re.search(
-        r"=== Price Alert Settings \(@ \d{2}:\d{2}:\d{2} UTC\) ===",
+        r"=== Price Volatility Alert \(@ \d{2}:\d{2}:\d{2} UTC\) ===",
         result,
     ), result[:200]
     assert "5.0%" in result
     assert "60min" in result
-    assert "=== Active Price Level Alerts" in result
+    assert "=== Price Level Alerts" in result
     assert "2/20" in result
     assert "75000" in result
     assert "above" in result
@@ -854,6 +854,36 @@ async def test_get_active_alerts_disabled():
     result = await get_active_alerts(deps)
     assert "OFF" in result
     assert "0/20" in result
+
+
+def test_set_price_volatility_alert_in_registered_tool_names():
+    """Drift guard (iter-10): set_price_volatility_alert renamed from set_price_alert.
+    Hard rename — old name must be absent."""
+    from src.agent.trader import REGISTERED_TOOL_NAMES
+
+    assert "set_price_volatility_alert" in REGISTERED_TOOL_NAMES
+    assert "set_price_alert" not in REGISTERED_TOOL_NAMES
+
+
+async def test_get_active_alerts_section_headers_renamed():
+    """Drift guard (iter-10): section headers renamed from
+    Price Alert Settings / Active Price Level Alerts
+    to Price Volatility Alert / Price Level Alerts."""
+    from src.agent.tools_perception import get_active_alerts
+
+    deps = _make_deps()
+    deps.exchange.get_alert_params = MagicMock(return_value=(2.5, 30))
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[
+        {"id": "abc12345", "price": 75000.0, "direction": "above",
+         "reasoning": "drift-guard fixture"},
+    ])
+
+    output = await get_active_alerts(deps)
+
+    assert "=== Price Volatility Alert (@" in output
+    assert "=== Price Level Alerts (1/20) (@" in output
+    assert "Price Alert Settings" not in output
+    assert "Active Price Level Alerts" not in output
 
 
 async def test_get_performance_with_trades(tmp_path):

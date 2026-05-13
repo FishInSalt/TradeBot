@@ -151,9 +151,9 @@ def test_summarize_get_memories_none():
 def test_summarize_get_active_alerts():
     from src.cli.display import summarize_tool
     content = (
-        "=== Price Alert Settings ===\n"
-        "Volatility alert: 5.0% in 60min window\n\n"
-        "=== Active Price Level Alerts (2/20) ===\n"
+        "=== Price Volatility Alert ===\n"
+        "5.0% in 60min window\n\n"
+        "=== Price Level Alerts (2/20) ===\n"
         '  #1 above 86000.00 — "Resistance breakout"\n'
         '  #2 below 81000.00 — "Support breakdown"'
     )
@@ -304,10 +304,10 @@ def test_summarize_cancel_order():
     assert "81,500" in result or "81500" in result
 
 
-def test_summarize_set_price_alert():
+def test_summarize_set_price_volatility_alert():
     from src.cli.display import summarize_tool
-    content = "Price alert updated: threshold=5.0%, window=60min"
-    result = summarize_tool("set_price_alert", content)
+    content = "Price volatility alert updated: threshold=5.0%, window=60min"
+    result = summarize_tool("set_price_volatility_alert", content)
     assert "5.0" in result
     assert "60" in result
 
@@ -2229,19 +2229,19 @@ def test_snapshot_get_order_book_l2_unavailable():
 def test_snapshot_get_active_alerts_with_alerts():
     """Snapshot — active alerts vol param + 2 price level alerts (§4.1.1 verified-no-change)."""
     content = (
-        "=== Price Alert Settings ===\n"
-        "Volatility alert: 1.5% in 10min window\n"
+        "=== Price Volatility Alert ===\n"
+        "1.5% in 10min window\n"
         "\n"
-        "=== Active Price Level Alerts (2/20) ===\n"
+        "=== Price Level Alerts (2/20) ===\n"
         '  #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
         '  #2 (id=alert-2) below 74000.00 — "support break"'
     )
     expected = (
         "  ⚙ get_active_alerts\n"
-        "    === Price Alert Settings ===\n"
-        "    Volatility alert: 1.5% in 10min window\n"
+        "    === Price Volatility Alert ===\n"
+        "    1.5% in 10min window\n"
         "\n"
-        "    === Active Price Level Alerts (2/20) ===\n"
+        "    === Price Level Alerts (2/20) ===\n"
         '      #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
         '      #2 (id=alert-2) below 74000.00 — "support break"'
     )
@@ -3086,7 +3086,7 @@ _CRITICAL_FIELDS_PATH_A: dict[str, list[str]] = {
     "get_stablecoin_supply": ["Stablecoin Supply", "Error:", "not configured"],
     "get_trade_journal": ["Trade Journal", "No trade journal entries yet"],
     "get_performance": ["Trading Performance", "Initial Balance", "Current Balance"],
-    "get_active_alerts": ["Price Alert Settings", "Volatility alert"],
+    "get_active_alerts": ["Price Volatility Alert", "OFF"],
     "get_position": ["Position", "No open positions"],
 }
 

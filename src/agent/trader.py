@@ -525,7 +525,7 @@ def create_trader_agent(
         return await _impl(ctx.deps, leverage, reasoning=reasoning)
 
     @tool
-    async def set_price_alert(
+    async def set_price_volatility_alert(
         ctx: RunContext[TradingDeps],
         threshold_pct: float,
         window_minutes: int,
@@ -540,7 +540,7 @@ def create_trader_agent(
             window_minutes: time window in minutes (min 1, max 240).
             reasoning: brief description of your decision logic.
         """
-        from src.agent.tools_execution import set_price_alert as _impl
+        from src.agent.tools_execution import set_price_volatility_alert as _impl
 
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
 
@@ -781,7 +781,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "set_stop_loss",
     "set_take_profit",
     "adjust_leverage",
-    "set_price_alert",
+    "set_price_volatility_alert",
     "cancel_order",
     "add_price_level_alert",
     "cancel_price_level_alert",

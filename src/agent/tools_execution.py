@@ -220,13 +220,13 @@ async def adjust_leverage(deps: TradingDeps, leverage: int, reasoning: str) -> s
     return f"Leverage adjusted to {leverage}x for {deps.symbol}"
 
 
-async def set_price_alert(
+async def set_price_volatility_alert(
     deps: TradingDeps,
     threshold_pct: float,
     window_minutes: int,
     reasoning: str,
 ) -> str:
-    """Adjust price alert parameters. threshold_pct: min 0.1, max 50, window_minutes: min 1, max 240."""
+    """Adjust price volatility alert parameters. threshold_pct: min 0.1, max 50, window_minutes: min 1, max 240."""
     # Check if alerts are enabled
     if deps.exchange.get_alert_params() is None:
         return "Alerts are disabled for this session. Enable alerts in wizard to use this feature."
@@ -241,12 +241,12 @@ async def set_price_alert(
     deps.exchange.update_alert_params(threshold_pct, window_minutes)
 
     await _record_action(
-        deps, action="set_price_alert",
+        deps, action="set_price_volatility_alert",
         reasoning=f"threshold={threshold_pct}%, window={window_minutes}min | {reasoning}",
     )
 
     return (
-        f"Price alert updated: threshold={threshold_pct}%, "
+        f"Price volatility alert updated: threshold={threshold_pct}%, "
         f"window={window_minutes}min"
     )
 
