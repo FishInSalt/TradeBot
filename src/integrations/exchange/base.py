@@ -208,6 +208,22 @@ class BaseExchange(ABC):
                 return True
         return False
 
+    def update_price_level_alert(self, alert_id: str, new_price: float,
+                                  new_reasoning: str) -> bool:
+        """In-place update of an existing price level alert.
+
+        Overwrites price, reasoning, and created_at on the matching alert dict;
+        preserves id, direction, and symbol. Returns True if a matching alert
+        was found and updated, False otherwise.
+        """
+        for alert in self._price_level_alerts:
+            if alert["id"] == alert_id:
+                alert["price"] = new_price
+                alert["reasoning"] = new_reasoning
+                alert["created_at"] = time.time()
+                return True
+        return False
+
     def _check_price_levels(self, current_price: float,
                              timestamp: int) -> list['PriceLevelAlertInfo']:
         triggered = []
