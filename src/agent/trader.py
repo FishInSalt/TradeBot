@@ -438,7 +438,7 @@ def create_trader_agent(
     @tool
     async def open_position(
         ctx: RunContext[TradingDeps],
-        side: str,
+        side: Literal["long", "short"],
         position_pct: float,
         leverage: int,
         reasoning: str,

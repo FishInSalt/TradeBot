@@ -4,7 +4,7 @@ import logging
 import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.services.tool_call_recorder import note_biz_error
 
@@ -65,7 +65,7 @@ async def _check_approval(deps: TradingDeps, action: str, action_desc: str,
 
 async def open_position(
     deps: TradingDeps,
-    side: str,
+    side: Literal["long", "short"],
     position_pct: float,
     leverage: int,
     reasoning: str,

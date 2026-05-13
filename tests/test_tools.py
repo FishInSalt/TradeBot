@@ -138,6 +138,53 @@ async def test_open_position_too_small(deps):
     assert "too small" in result.lower()
 
 
+async def test_open_position_accepts_long_and_short(deps):
+    """iter-tool-opt-open-position-side-literal: Literal narrow allows the two
+    valid values; pydantic-ai layer rejects others.
+    """
+    from src.agent.tools_execution import open_position
+    # side="long" — should resolve order_side="buy" via impl line 93
+    result_long = await open_position(deps, "long", 20.0, 3, reasoning="long entry")
+    assert "submitted" in result_long.lower()
+
+    # Reset call tracking for second invocation
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    # side="short" — should resolve order_side="sell" via impl line 93
+    result_short = await open_position(deps, "short", 20.0, 3, reasoning="short entry")
+    assert "submitted" in result_short.lower()
+
+
+def test_open_position_schema_rejects_invalid_side_at_agent_layer():
+    """Schema-level validation: pydantic-ai inspects signature; invalid
+    values surface as ToolCallError before impl runs.
+
+    Drift guard — if signature regresses to `side: str`, silent fallthrough
+    to short (impl line 93: `"buy" if side == "long" else "sell"`) returns,
+    which is wrong execution per principle 1 (fact-provider, not guard).
+    """
+    from typing import Literal, get_type_hints
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["open_position"]
+    # pydantic-ai wraps the user function; resolve hints from the underlying
+    # callable so we read the on-source annotation, not a Pydantic-rewritten one.
+    hints = get_type_hints(tool.function)
+    assert hints["side"] == Literal["long", "short"], (
+        f"open_position side annotation drifted to {hints['side']!r}; "
+        "expected Literal['long', 'short'] — wider type allows silent "
+        "wrong execution (any non-'long' value falls through to short)."
+    )
+    # LLM-visible schema must surface the enum so pydantic-ai rejects
+    # invalid values before impl runs (drift guard mirrors R2-1 pattern).
+    schema = tool.tool_def.parameters_json_schema
+    assert schema["properties"]["side"].get("enum") == ["long", "short"], (
+        f"open_position side enum missing from LLM-visible schema: "
+        f"{schema['properties']['side']!r}"
+    )
+
+
 async def test_close_position(deps):
     from src.agent.tools_execution import close_position
     result = await close_position(deps, reasoning="MACD death cross")
