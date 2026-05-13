@@ -204,3 +204,107 @@ async def test_market_data_get_oi_history_distinct_keys_per_args():
     await svc.get_open_interest_history("BTC/USDT:USDT", "1h", 26)
     await svc.get_open_interest_history("BTC/USDT:USDT", "1h", 5)
     assert exchange.fetch_open_interest_history.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 6: _format_oi_usd + _derive_oi_anchors render helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_points(values_usd):
+    """Helper: build N points with monotonic timestamps and given USD values.
+    Returns oldest-first to match exchange.fetch_open_interest_history convention."""
+    from src.integrations.exchange.base import OpenInterestHistoryPoint
+    return [
+        OpenInterestHistoryPoint(timestamp=i, open_interest=v / 80000.0, open_interest_value=v)
+        for i, v in enumerate(values_usd)
+    ]
+
+
+def test_format_oi_usd_billion_scale():
+    from src.agent.tools_perception import _format_oi_usd
+    assert _format_oi_usd(2_920_000_000.0) == "$2.92B"
+
+
+def test_format_oi_usd_million_scale():
+    from src.agent.tools_perception import _format_oi_usd
+    assert _format_oi_usd(850_000_000.0) == "$850.00M"
+
+
+def test_format_oi_usd_below_million():
+    from src.agent.tools_perception import _format_oi_usd
+    assert _format_oi_usd(123_456.0) == "$123,456"
+
+
+def test_oi_render_happy_path_inline_26_records():
+    """26 records: 1h anchor = points[-2], 24h anchor = points[-25].
+    Current $2.92B; 1h-ago $2.93B (-0.34%); 24h-ago $2.91B (+0.34%)."""
+    from src.agent.tools_perception import _derive_oi_anchors
+    # Build 26 records, oldest first. Index 0..23 don't matter; -25=$2.91B; -2=$2.93B; -1=$2.92B.
+    vals = [2_900_000_000.0] * 26
+    vals[-25] = 2_910_000_000.0   # 24h ago
+    vals[-2] = 2_930_000_000.0    # 1h ago
+    vals[-1] = 2_920_000_000.0    # current
+    points = _make_points(vals)
+    result = _derive_oi_anchors(points, points[-1])
+    assert "1h ago $2.93B, -0.3%" in result
+    assert "24h ago $2.91B, +0.3%" in result
+    assert "; " in result
+
+
+def test_oi_render_positive_deltas():
+    from src.agent.tools_perception import _derive_oi_anchors
+    vals = [2_500_000_000.0] * 26
+    vals[-1] = 2_920_000_000.0
+    points = _make_points(vals)
+    result = _derive_oi_anchors(points, points[-1])
+    assert "24h ago $2.50B, +16.8%" in result
+
+
+def test_oi_render_zero_delta_when_anchors_equal_current():
+    from src.agent.tools_perception import _derive_oi_anchors
+    vals = [2_920_000_000.0] * 26
+    points = _make_points(vals)
+    result = _derive_oi_anchors(points, points[-1])
+    assert "+0.0%" in result
+
+
+def test_oi_render_exactly_25_records():
+    """24h-anchor minimum boundary: len(points)=25, points[-25]=points[0] available."""
+    from src.agent.tools_perception import _derive_oi_anchors
+    # len = 1 + 22 + 2 = 25; vals[-25]=vals[0]=$2.91B; vals[-2]=$2.93B; vals[-1]=$2.92B (current)
+    vals = [2_910_000_000.0] + [2_900_000_000.0] * 22 + [2_930_000_000.0, 2_920_000_000.0]
+    assert len(vals) == 25  # tripwire — guard the 24h-anchor index math
+    points = _make_points(vals)
+    result = _derive_oi_anchors(points, points[-1])
+    assert "1h ago" in result
+    assert "24h ago $2.91B" in result
+
+
+def test_oi_render_exactly_2_records():
+    """1h-anchor minimum boundary: only 1h shown, no 24h."""
+    from src.agent.tools_perception import _derive_oi_anchors
+    points = _make_points([2_930_000_000.0, 2_920_000_000.0])
+    result = _derive_oi_anchors(points, points[-1])
+    assert "1h ago $2.93B" in result
+    assert "24h ago" not in result
+
+
+def test_oi_render_1_record():
+    """Below 1h anchor boundary: empty string."""
+    from src.agent.tools_perception import _derive_oi_anchors
+    points = _make_points([2_920_000_000.0])
+    result = _derive_oi_anchors(points, points[-1])
+    assert result == ""
+
+
+def test_oi_render_anchor_zero_skipped():
+    """Defensive: anchor with open_interest_value <= 0 must be skipped (div-by-zero)."""
+    from src.agent.tools_perception import _derive_oi_anchors
+    # len = 1 + 22 + 2 = 25; vals[-25]=vals[0]=0 (24h-ago zero) → skip 24h fragment
+    vals = [0.0] + [2_900_000_000.0] * 22 + [2_930_000_000.0, 2_920_000_000.0]
+    assert len(vals) == 25 and vals[-25] == 0.0  # tripwire — guard zero placement
+    points = _make_points(vals)
+    result = _derive_oi_anchors(points, points[-1])
+    assert "1h ago" in result
+    assert "24h ago" not in result

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
-    from src.integrations.exchange.base import Trade
+    from src.integrations.exchange.base import OpenInterestHistoryPoint, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -826,6 +826,38 @@ async def get_macro_calendar(
         )
 
     return "\n\n".join(sections)
+
+
+def _format_oi_usd(v: float) -> str:
+    """Format OI USD value with auto-scale unit (B / M / raw)."""
+    if v >= 1e9:
+        return f"${v / 1e9:.2f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.2f}M"
+    return f"${v:,.0f}"
+
+
+def _derive_oi_anchors(
+    points: list[OpenInterestHistoryPoint],
+    current: OpenInterestHistoryPoint,
+) -> str:
+    """Render '1h ago $X.XXB, +Y.Y%; 24h ago $X.XXB, -Y.Y%' fragments.
+
+    Anchor indices measured from end (points[-1] = current). Partial-history
+    degrades gracefully: insufficient or zero-value anchors are skipped.
+    """
+    fragments: list[str] = []
+    for label, idx_from_end in [("1h ago", 2), ("24h ago", 25)]:
+        if len(points) < idx_from_end:
+            continue
+        anchor = points[-idx_from_end]
+        if anchor.open_interest_value <= 0:
+            continue
+        delta_pct = (current.open_interest_value / anchor.open_interest_value - 1) * 100
+        fragments.append(
+            f"{label} {_format_oi_usd(anchor.open_interest_value)}, {delta_pct:+.1f}%"
+        )
+    return "; ".join(fragments)
 
 
 async def get_derivatives_data(
