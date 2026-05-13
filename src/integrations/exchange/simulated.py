@@ -6,7 +6,7 @@ import math
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, Literal
 
 import ccxt.async_support as ccxt  # new top-level import (for RateLimitExceeded)
 
@@ -18,12 +18,14 @@ from src.integrations.exchange.base import (
     FundingRate,
     LongShortRatio,
     OpenInterest,
+    OpenInterestHistoryPoint,
     Order,
     OrderBook,
     OrderBookLevel,
     Position,
     Ticker,
     Trade,
+    _OKX_OI_PERIOD,
 )
 from src.utils.cache import RateLimitHit
 
@@ -1022,6 +1024,35 @@ class SimulatedExchange(BaseExchange):
             open_interest_value=float(data.get("openInterestValue") or 0),
             timestamp=int(data.get("timestamp") or 0),
         )
+
+    async def fetch_open_interest_history(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "1d"] = "1h",
+        limit: int = 26,
+    ) -> list[OpenInterestHistoryPoint]:
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            raw = await self._ccxt.public_get_rubik_stat_contracts_open_interest_history({
+                "instId": self._ccxt.market(symbol)["id"],
+                "period": _OKX_OI_PERIOD[period],
+                "limit": str(limit),
+            })
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim open interest history: {e}") from e
+        rows = raw.get("data") or []
+        points = [
+            OpenInterestHistoryPoint(
+                timestamp=int(r[0]),
+                open_interest=float(r[2]),
+                open_interest_value=float(r[3]),
+            )
+            for r in rows
+        ]
+        points.reverse()
+        return points
 
     async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
         self._validate_symbol(symbol)

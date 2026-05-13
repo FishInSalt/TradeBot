@@ -104,3 +104,62 @@ async def test_okx_fetch_oi_history_missing_data_key():
     )
     points = await ex.fetch_open_interest_history("BTC/USDT:USDT", "1h", 26)
     assert points == []
+
+
+@pytest.mark.asyncio
+async def test_simulated_fetch_oi_history_validates_symbol():
+    """Guard 1: invalid symbol must raise ValueError before any network call."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    ex = SimulatedExchange.__new__(SimulatedExchange)
+    ex._symbol = "BTC/USDT:USDT"
+    ex._ccxt = MagicMock()  # would explode if called
+    with pytest.raises(ValueError):
+        await ex.fetch_open_interest_history("WRONG/SYMBOL", "1h", 26)
+
+
+@pytest.mark.asyncio
+async def test_simulated_fetch_oi_history_requires_started():
+    """Guard 2: must raise RuntimeError if start() has not been called."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    ex = SimulatedExchange.__new__(SimulatedExchange)
+    ex._symbol = "BTC/USDT:USDT"
+    # _ccxt intentionally not set
+    with pytest.raises(RuntimeError, match="Exchange not started"):
+        await ex.fetch_open_interest_history("BTC/USDT:USDT", "1h", 26)
+
+
+@pytest.mark.asyncio
+async def test_simulated_fetch_oi_history_wraps_rate_limit():
+    """Guard 3: ccxt.RateLimitExceeded must be re-raised as RateLimitHit."""
+    import ccxt
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.utils.cache import RateLimitHit
+    ex = SimulatedExchange.__new__(SimulatedExchange)
+    ex._symbol = "BTC/USDT:USDT"
+    ex._ccxt = MagicMock()
+    ex._ccxt.market.return_value = {"id": "BTC-USDT-SWAP"}
+    ex._ccxt.public_get_rubik_stat_contracts_open_interest_history = AsyncMock(
+        side_effect=ccxt.RateLimitExceeded("429 too many")
+    )
+    with pytest.raises(RateLimitHit, match="Sim open interest history"):
+        await ex.fetch_open_interest_history("BTC/USDT:USDT", "1h", 26)
+
+
+@pytest.mark.asyncio
+async def test_simulated_fetch_oi_history_parses_raw():
+    """Happy path: raw response parsed, reversed, returned."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    ex = SimulatedExchange.__new__(SimulatedExchange)
+    ex._symbol = "BTC/USDT:USDT"
+    ex._ccxt = MagicMock()
+    ex._ccxt.market.return_value = {"id": "BTC-USDT-SWAP"}
+    ex._ccxt.public_get_rubik_stat_contracts_open_interest_history = AsyncMock(
+        return_value={"code": "0", "data": [
+            ["1778644800000", "3317425.09", "33174.25", "2693065783.51"],
+            ["1778641200000", "3325484.92", "33254.85", "2693785781.05"],
+        ], "msg": ""}
+    )
+    points = await ex.fetch_open_interest_history("BTC/USDT:USDT", "1h", 26)
+    assert len(points) == 2
+    assert points[0].timestamp == 1778641200000  # oldest first after reverse
+    assert points[-1].open_interest_value == pytest.approx(2693065783.51)
