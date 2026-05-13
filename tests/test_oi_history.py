@@ -163,3 +163,44 @@ async def test_simulated_fetch_oi_history_parses_raw():
     assert len(points) == 2
     assert points[0].timestamp == 1778641200000  # oldest first after reverse
     assert points[-1].open_interest_value == pytest.approx(2693065783.51)
+
+
+@pytest.mark.asyncio
+async def test_market_data_get_oi_history_delegates_first_call():
+    from src.integrations.market_data import MarketDataService
+    from src.integrations.exchange.base import OpenInterestHistoryPoint
+    exchange = AsyncMock()
+    exchange.fetch_open_interest_history.return_value = [
+        OpenInterestHistoryPoint(1, 100.0, 1_000_000.0),
+        OpenInterestHistoryPoint(2, 101.0, 1_010_000.0),
+    ]
+    svc = MarketDataService(exchange)
+    points = await svc.get_open_interest_history("BTC/USDT:USDT", "1h", 26)
+    assert len(points) == 2
+    exchange.fetch_open_interest_history.assert_called_once_with("BTC/USDT:USDT", "1h", 26)
+
+
+@pytest.mark.asyncio
+async def test_market_data_get_oi_history_cache_hit_skips_exchange():
+    """Second call within TTL must not invoke exchange again."""
+    from src.integrations.market_data import MarketDataService
+    from src.integrations.exchange.base import OpenInterestHistoryPoint
+    exchange = AsyncMock()
+    exchange.fetch_open_interest_history.return_value = [OpenInterestHistoryPoint(1, 100.0, 1_000_000.0)]
+    svc = MarketDataService(exchange)
+    await svc.get_open_interest_history("BTC/USDT:USDT", "1h", 26)
+    await svc.get_open_interest_history("BTC/USDT:USDT", "1h", 26)
+    assert exchange.fetch_open_interest_history.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_get_oi_history_distinct_keys_per_args():
+    """Different (period, limit) tuples must not share cache."""
+    from src.integrations.market_data import MarketDataService
+    from src.integrations.exchange.base import OpenInterestHistoryPoint
+    exchange = AsyncMock()
+    exchange.fetch_open_interest_history.return_value = [OpenInterestHistoryPoint(1, 100.0, 1_000_000.0)]
+    svc = MarketDataService(exchange)
+    await svc.get_open_interest_history("BTC/USDT:USDT", "1h", 26)
+    await svc.get_open_interest_history("BTC/USDT:USDT", "1h", 5)
+    assert exchange.fetch_open_interest_history.call_count == 2
