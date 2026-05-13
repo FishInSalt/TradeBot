@@ -585,7 +585,14 @@ async def cancel_order(
             break
 
     if target is None:
-        return f"Order not found or already filled: {order_id}"
+        # 状态不存在 → idempotent ok with note (principle 6, aligned with
+        # cancel_price_level_alert R2-Next-E PR #47). Order may have filled
+        # or been cancelled by another path between the agent's perception
+        # and this call.
+        return (
+            f"Order {order_id} no longer active "
+            f"(already filled or cancelled)"
+        )
 
     if target.order_type == "market":
         return "Cannot cancel market orders"

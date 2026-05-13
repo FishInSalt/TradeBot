@@ -768,7 +768,30 @@ async def test_cancel_order_not_found():
     deps.exchange.fetch_open_orders.return_value = []
 
     result = await cancel_order(deps, "nonexistent", reasoning="cleanup")
-    assert "not found" in result.lower() or "already filled" in result.lower()
+    # iter-tool-opt-cancel-order-idempotent: new ok-with-note format
+    # aligned with cancel_price_level_alert (R2-Next-E PR #47).
+    assert "no longer active" in result
+    assert "already filled or cancelled" in result
+
+
+async def test_cancel_order_idempotent_when_already_filled():
+    """iter-tool-opt-cancel-order-idempotent: R2-Next-E (PR #47) alignment —
+    cancel_order returns ok-with-note when order no longer in book
+    (filled / cancelled by another path), matching cancel_price_level_alert.
+    """
+    from src.agent.tools_execution import cancel_order
+
+    deps = _make_deps()
+    # fetch_open_orders returns empty (target order already filled / cancelled).
+    deps.exchange.fetch_open_orders.return_value = []
+
+    result = await cancel_order(deps, "filled_order_id", reasoning="cleanup")
+
+    # New ok-with-note format (idempotent, principle 6 state-not-exist).
+    assert "Order filled_order_id no longer active" in result
+    assert "(already filled or cancelled)" in result
+    # Old reject-like format must be gone.
+    assert "Order not found or already filled:" not in result
 
 
 async def test_cancel_order_market_rejected():
