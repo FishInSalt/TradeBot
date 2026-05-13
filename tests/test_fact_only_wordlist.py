@@ -536,7 +536,7 @@ async def test_get_derivatives_data_fact_only():
     from src.agent.tools_perception import get_derivatives_data
     deps = MockDeps()
     deps.market_data.get_funding_rate = AsyncMock(side_effect=Exception("down"))
-    deps.market_data.get_open_interest = AsyncMock(side_effect=Exception("down"))
+    deps.market_data.get_open_interest_history = AsyncMock(side_effect=Exception("down"))
     deps.market_data.get_long_short_ratio = AsyncMock(side_effect=Exception("down"))
     output = await get_derivatives_data(deps)
     hits = _scan(output)
