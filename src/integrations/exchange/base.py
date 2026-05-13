@@ -9,6 +9,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# OKX rubik stat endpoint requires uppercase '1H' / '1D'; project convention exposes
+# lowercase across abstractions (matches fetch_ohlcv(timeframe='1h')). The mapping
+# below is the only translation layer.
+_OKX_OI_PERIOD = {"5m": "5m", "1h": "1H", "1d": "1D"}
+
 
 @dataclass
 class Ticker:
@@ -308,6 +313,22 @@ class OpenInterest:
     open_interest: float  # base-currency amount (per ccxt unified `openInterestAmount`)
     open_interest_value: float  # USD value
     timestamp: int
+
+
+@dataclass
+class OpenInterestHistoryPoint:
+    """One historical OI snapshot at a given timestamp.
+
+    open_interest_value is USD-denominated and shares semantics with
+    OpenInterest.open_interest_value (same single-contract scope, just a
+    point in time). Unlike the sibling dataclasses (OpenInterest /
+    FundingRate / LongShortRatio), no `symbol` field is carried — a list
+    of history points always belongs to one symbol and the caller holds
+    that context.
+    """
+    timestamp: int
+    open_interest: float  # base-currency amount
+    open_interest_value: float  # USD value
 
 
 @dataclass
