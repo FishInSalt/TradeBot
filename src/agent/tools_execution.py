@@ -290,8 +290,9 @@ def _lookup_alert(exchange, alert_id: str) -> dict | None:
     """Peek at the alert dict by id without mutating the alert list.
 
     Used by cancel (to capture reasoning before remove) and update (to
-    capture direction + reasoning before sequential replace). Returns
-    the full alert dict matching the id, or None if no match.
+    capture direction + old_price for the success return string before
+    the in-place mutation). Returns the full alert dict matching the id,
+    or None if no match.
     """
     for alert in exchange.get_price_level_alerts():
         if alert["id"] == alert_id:
@@ -360,20 +361,14 @@ async def update_price_level_alert(
     new_price: float,
     reasoning: str,
 ) -> str:
-    """Replace a single existing price level alert with a new price.
-
-    Atomic: cancels the old alert and creates a new one with new_price,
-    preserving the original direction and reasoning text. The direction
-    (above/below) cannot change — to change direction or reasoning
-    materially, use cancel + add. Trail use case: when price moves and
-    you want the same alert at a new level, this preserves identity
-    continuity (the alert is still "the same thing at a new price").
+    """Update an existing price level alert in place: change its trigger price
+    and reasoning. The direction (above/below) cannot change — to flip
+    direction, cancel and add a new alert. The alert's id stays the same.
 
     Args:
         alert_id: 8-char hex id of the existing alert (see get_active_alerts).
         new_price: new trigger price.
-        reasoning: brief rationale for the move (audit-only; not stored
-            on the alert).
+        reasoning: new rationale text; overwrites the alert's stored reasoning.
     """
     # Step 1: format validation
     if not re.fullmatch(r"[0-9a-f]{8}", alert_id):
@@ -383,7 +378,8 @@ async def update_price_level_alert(
             f"(e.g. 'a3f2b8c1'). Use get_active_alerts to see current ids."
         )
 
-    # Step 2: lookup — capture original direction + reasoning
+    # Step 2: lookup — capture direction + old_price for the success return.
+    # (new_reasoning is the caller's arg; old_reasoning is not needed.)
     alert = _lookup_alert(deps.exchange, alert_id)
     if alert is None:
         note_biz_error("alert_not_found")
@@ -391,47 +387,30 @@ async def update_price_level_alert(
             f"Alert {alert_id} not found. "
             f"To create a new alert, use add_price_level_alert."
         )
-
-    original_direction = alert["direction"]
-    original_reasoning = alert["reasoning"]
+    direction = alert["direction"]
     old_price = alert["price"]
 
-    # Step 4: sequential replace (single-coroutine, no yield points;
-    # both calls mutate the same in-memory list — atomic by construction).
-    ok = deps.exchange.remove_price_level_alert(alert_id)
+    # Step 3: in-place update via the new BaseExchange method
+    ok = deps.exchange.update_price_level_alert(alert_id, new_price, reasoning)
     if not ok:
+        # Defensive: lookup just succeeded; in-place update should not fail.
         raise RuntimeError(
-            f"remove_price_level_alert returned False for id={alert_id} "
+            f"update_price_level_alert returned False for id={alert_id} "
             f"that was just present in lookup — invariant violated"
         )
-    new_id = deps.exchange.add_price_level_alert(
-        new_price, original_direction, deps.symbol, original_reasoning,
-    )
-    if new_id is None:
-        # After remove, headroom is necessarily >= 1; add returning None
-        # indicates the cap path was hit, which should be impossible here.
-        raise RuntimeError(
-            f"add_price_level_alert returned None after a successful remove "
-            f"on id={alert_id} — invariant violated (cap check unreachable)"
-        )
 
-    # Step 8: audit row — new id in canonical alert_id column;
-    # old id + direction + old_price folded into reasoning string.
+    # Step 4: audit row — single alert_id; reasoning records the move
     await _record_action(
         deps, action="update_price_level_alert",
-        alert_id=new_id,
-        reasoning=(
-            f"replaces {alert_id} ({original_direction} {old_price}) "
-            f"→ {new_price} | {reasoning}"
-        ),
+        alert_id=alert_id,
+        reasoning=f"price {old_price:.2f} → {new_price:.2f} | {reasoning}",
     )
 
-    # Step 7: success return
+    # Step 5: success return — new single-direction shape
     return (
-        f"Price level alert updated (id={alert_id} → id={new_id}):\n"
-        f"  {original_direction} {old_price:.2f} → "
-        f"{original_direction} {new_price:.2f} "
-        f'— "{original_reasoning}"'
+        f"Price level alert updated (id={alert_id}): "
+        f"{direction} {old_price:.2f} → {new_price:.2f} "
+        f'— "{reasoning}"'
     )
 
 

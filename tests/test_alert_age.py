@@ -166,3 +166,104 @@ def test_update_price_level_alert_not_found_returns_false(monkeypatch):
 
     after = ex.get_price_level_alerts()
     assert after == before  # unchanged
+
+
+# ============ Task 3: update_price_level_alert tool layer ============
+
+
+@pytest.mark.asyncio
+async def test_update_tool_return_string_shape(engine, session_with_row):
+    """Spec §5.2 + AC-4: tool layer success returns the new single-direction shape:
+    'Price level alert updated (id={alert_id}): {direction} {old_price} → {new_price} — "{new_reasoning}"'
+    """
+    from src.agent.tools_execution import update_price_level_alert
+    from src.services.tool_call_recorder import ToolCallRecorder
+    from tests.test_tool_call_recorder import make_call, make_ctx, make_deps
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+    deps.exchange.get_price_level_alerts.return_value = [{
+        "id": "a3f2b8c1", "price": 82100.0, "direction": "above",
+        "symbol": "BTC/USDT:USDT", "reasoning": "4h structural high",
+        "created_at": 1700000000.0,
+    }]
+    deps.exchange.update_price_level_alert.return_value = True
+
+    async def handler(args):
+        return await update_price_level_alert(
+            deps, alert_id="a3f2b8c1", new_price=82500.0,
+            reasoning="trail up after breakout",
+        )
+
+    result = await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("update_price_level_alert"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler,
+    )
+
+    # Shape: 'Price level alert updated (id=AAAA): above 82100.00 → 82500.00 — "..."'
+    pattern = re.compile(
+        r'^Price level alert updated \(id=[0-9a-f]{8}\): '
+        r'(above|below) [\d.]+ → [\d.]+ '
+        r'— ".+"$',
+        re.DOTALL,
+    )
+    assert pattern.match(result), f"unexpected shape: {result!r}"
+
+    # Anchored content: single id, preserved direction, new reasoning carried.
+    assert "id=a3f2b8c1" in result
+    assert "above 82100.00 → 82500.00" in result
+    assert '— "trail up after breakout"' in result
+
+    # New shape must NOT contain double direction or id transition.
+    assert "→ above" not in result
+    assert "id=a3f2b8c1 → id=" not in result
+
+    # Exchange method called once with the new in-place signature.
+    deps.exchange.update_price_level_alert.assert_called_once_with(
+        "a3f2b8c1", 82500.0, "trail up after breakout",
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_tool_emits_biz_error_alert_not_found(engine, session_with_row):
+    """Spec §5.2 + AC-5: tool layer on not-found emits biz_error alert_not_found
+    and returns directive text. Behavior preserved from R2-Next-E."""
+    from src.agent.tools_execution import update_price_level_alert
+    from src.services.tool_call_recorder import ToolCallRecorder
+    from src.storage.database import get_session
+    from src.storage.models import ToolCall
+    from sqlalchemy import select
+    from tests.test_tool_call_recorder import make_call, make_ctx, make_deps
+
+    recorder = ToolCallRecorder()
+    deps = make_deps(engine, session_with_row)
+    deps.exchange.get_price_level_alerts.return_value = []  # absent
+
+    async def handler(args):
+        return await update_price_level_alert(
+            deps, alert_id="a3f2b8c1", new_price=82500.0,
+            reasoning="trail",
+        )
+
+    result = await recorder.wrap_tool_execute(
+        make_ctx(deps),
+        call=make_call("update_price_level_alert"),
+        tool_def=MagicMock(),
+        args={},
+        handler=handler,
+    )
+
+    assert "Alert a3f2b8c1 not found" in result
+    assert "add_price_level_alert" in result  # directive
+
+    async with get_session(engine) as db:
+        rows = (await db.execute(select(ToolCall))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].status == "biz_error"
+    assert rows[0].error_type == "alert_not_found"
+
+    # No mutation
+    deps.exchange.update_price_level_alert.assert_not_called()
