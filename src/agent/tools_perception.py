@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -1897,6 +1898,29 @@ def _bars_ago_fmt(n: int) -> str:
     if n == 1:
         return "1 bar ago"
     return f"{n} bars ago"
+
+
+def _fmt_age_humanized(seconds: float) -> str:
+    """Render a wall-clock duration as a humanized 'X ago' suffix.
+
+    Thresholds:
+      < 60s    → 'just now'
+      < 60min  → 'Nm ago'         (e.g. '5m ago')
+      < 24h    → 'Hh Mm ago'      (e.g. '2h 15m ago')
+      >= 24h   → 'Dd Hh ago'      (e.g. '1d 4h ago')
+
+    seconds is non-negative; negative input (clock skew) clamps to 0.
+    """
+    s = max(0, int(seconds))
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{s // 60}m ago"
+    if s < 86400:
+        h, rem = divmod(s, 3600)
+        return f"{h}h {rem // 60}m ago"
+    d, rem = divmod(s, 86400)
+    return f"{d}d {rem // 3600}h ago"
 
 
 def _render_pivot_rows(

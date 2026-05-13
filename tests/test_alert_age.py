@@ -267,3 +267,45 @@ async def test_update_tool_emits_biz_error_alert_not_found(engine, session_with_
 
     # No mutation
     deps.exchange.update_price_level_alert.assert_not_called()
+
+
+# ============ Task 5: _fmt_age_humanized helper ============
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (0, "just now"),
+    (30, "just now"),
+    (59, "just now"),
+    (60, "1m ago"),
+    (61, "1m ago"),
+    (119, "1m ago"),
+    (120, "2m ago"),
+    (3599, "59m ago"),
+    (3600, "1h 0m ago"),
+    (3660, "1h 1m ago"),
+    (7259, "2h 0m ago"),
+    (7261, "2h 1m ago"),
+    (86399, "23h 59m ago"),
+    (86400, "1d 0h ago"),
+    (86401, "1d 0h ago"),
+    (90000, "1d 1h ago"),
+    (172800, "2d 0h ago"),
+])
+def test_fmt_age_humanized_thresholds(seconds, expected):
+    """Spec §5.3.1 + AC-6: humanized duration boundary cases."""
+    from src.agent.tools_perception import _fmt_age_humanized
+    assert _fmt_age_humanized(seconds) == expected
+
+
+def test_fmt_age_humanized_negative_clamps_to_just_now():
+    """Spec §5.3.1 + AC-7: negative input (clock skew) clamps to 'just now'."""
+    from src.agent.tools_perception import _fmt_age_humanized
+    assert _fmt_age_humanized(-5) == "just now"
+    assert _fmt_age_humanized(-1000) == "just now"
+
+
+def test_fmt_age_humanized_float_truncates():
+    """Spec §5.3.1: fractional seconds truncate via int() — 59.9s is 'just now'."""
+    from src.agent.tools_perception import _fmt_age_humanized
+    assert _fmt_age_humanized(59.9) == "just now"  # int(59.9) == 59
+    assert _fmt_age_humanized(60.5) == "1m ago"
