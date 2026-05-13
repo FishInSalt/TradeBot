@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
-    from src.integrations.exchange.base import Trade
+    from src.integrations.exchange.base import OpenInterestHistoryPoint, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -828,6 +828,38 @@ async def get_macro_calendar(
     return "\n\n".join(sections)
 
 
+def _format_oi_usd(v: float) -> str:
+    """Format OI USD value with auto-scale unit (B / M / raw)."""
+    if v >= 1e9:
+        return f"${v / 1e9:.2f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.2f}M"
+    return f"${v:,.0f}"
+
+
+def _derive_oi_anchors(
+    points: list[OpenInterestHistoryPoint],
+    current: OpenInterestHistoryPoint,
+) -> str:
+    """Render '1h ago $X.XXB, +Y.Y%; 24h ago $X.XXB, -Y.Y%' fragments.
+
+    Anchor indices measured from end (points[-1] = current). Partial-history
+    degrades gracefully: insufficient or zero-value anchors are skipped.
+    """
+    fragments: list[str] = []
+    for label, idx_from_end in [("1h ago", 2), ("24h ago", 25)]:
+        if len(points) < idx_from_end:
+            continue
+        anchor = points[-idx_from_end]
+        if anchor.open_interest_value <= 0:
+            continue
+        delta_pct = (current.open_interest_value / anchor.open_interest_value - 1) * 100
+        fragments.append(
+            f"{label} {_format_oi_usd(anchor.open_interest_value)}, {delta_pct:+.1f}%"
+        )
+    return "; ".join(fragments)
+
+
 async def get_derivatives_data(
     deps: TradingDeps,
     symbol: str | None = None,
@@ -842,9 +874,9 @@ async def get_derivatives_data(
 
     # Fetch all three concurrently — each has independent cache + upstream.
     # gather(return_exceptions=True) gives us per-method success/failure.
-    funding, oi, lsr = await asyncio.gather(
+    funding, oi_hist, lsr = await asyncio.gather(
         deps.market_data.get_funding_rate(symbol),
-        deps.market_data.get_open_interest(symbol),
+        deps.market_data.get_open_interest_history(symbol, "1h", 26),
         deps.market_data.get_long_short_ratio(symbol),
         return_exceptions=True,
     )
@@ -852,7 +884,7 @@ async def get_derivatives_data(
     # All-3-failed L2: emit single Error section.
     if (
         isinstance(funding, Exception)
-        and isinstance(oi, Exception)
+        and isinstance(oi_hist, Exception)
         and isinstance(lsr, Exception)
     ):
         return (
@@ -877,19 +909,19 @@ async def get_derivatives_data(
         if funding.timestamp:
             timestamps_ms.append(funding.timestamp)
 
-    # Open interest
-    if isinstance(oi, Exception):
+    # Open interest history (replaces single-point fetch — see spec §2.5).
+    if isinstance(oi_hist, Exception) or not oi_hist:
         field_lines.append("Open Interest: (unavailable)")
     else:
-        if oi.open_interest_value >= 1e9:
-            oi_str = f"${oi.open_interest_value / 1e9:.2f}B"
-        elif oi.open_interest_value >= 1e6:
-            oi_str = f"${oi.open_interest_value / 1e6:.2f}M"
+        current = oi_hist[-1]  # newest, after .reverse() in fetch
+        oi_str = _format_oi_usd(current.open_interest_value)
+        anchors = _derive_oi_anchors(oi_hist, current)
+        if anchors:
+            field_lines.append(f"Open Interest: {oi_str} ({anchors})")
         else:
-            oi_str = f"${oi.open_interest_value:,.0f}"
-        field_lines.append(f"Open Interest: {oi_str}")
-        if oi.timestamp:
-            timestamps_ms.append(oi.timestamp)
+            field_lines.append(f"Open Interest: {oi_str}")
+        if current.timestamp:
+            timestamps_ms.append(current.timestamp)
 
     # Long/short ratio
     if isinstance(lsr, Exception):

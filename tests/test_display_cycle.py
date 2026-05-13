@@ -2965,7 +2965,7 @@ async def _invoke_path_b(tool_name: str) -> str:
         # Force all-3-failure → L2 inline `Error:` form (Option D)
         market_data = _AsyncMock_dg()
         market_data.get_funding_rate.side_effect = Exception()
-        market_data.get_open_interest.side_effect = Exception()
+        market_data.get_open_interest_history.side_effect = Exception()
         market_data.get_long_short_ratio.side_effect = Exception()
         return await fn(_MockDeps(market_data=market_data))
 

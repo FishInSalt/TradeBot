@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-from src.integrations.exchange.base import FundingRate, LongShortRatio, OpenInterest, Ticker
+from src.integrations.exchange.base import FundingRate, LongShortRatio, OpenInterestHistoryPoint, Ticker
 from src.integrations.news.models import InformationEvent
 
 
@@ -321,10 +321,9 @@ async def test_derivatives_data_format():
         next_funding_time=int((datetime.now(timezone.utc) + timedelta(hours=3, minutes=42)).timestamp() * 1000),
         timestamp=ts_ms,
     )
-    market_data.get_open_interest.return_value = OpenInterest(
-        symbol="BTC/USDT:USDT", open_interest=12345.0,
-        open_interest_value=4_820_000_000.0, timestamp=ts_ms,
-    )
+    market_data.get_open_interest_history.return_value = [
+        OpenInterestHistoryPoint(timestamp=ts_ms, open_interest=12345.0, open_interest_value=4_820_000_000.0),
+    ]
     market_data.get_long_short_ratio.return_value = LongShortRatio(
         symbol="BTC/USDT:USDT", long_short_ratio=1.35,
         long_ratio=0.574, short_ratio=0.426, timestamp=ts_ms,
@@ -355,9 +354,9 @@ async def test_derivatives_data_negative_funding():
         next_funding_time=int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp() * 1000),
         timestamp=0,
     )
-    market_data.get_open_interest.return_value = OpenInterest(
-        symbol="BTC/USDT:USDT", open_interest=0, open_interest_value=500_000_000.0, timestamp=0,
-    )
+    market_data.get_open_interest_history.return_value = [
+        OpenInterestHistoryPoint(timestamp=0, open_interest=0, open_interest_value=500_000_000.0),
+    ]
     market_data.get_long_short_ratio.return_value = LongShortRatio(
         symbol="BTC/USDT:USDT", long_short_ratio=0.8,
         long_ratio=0.444, short_ratio=0.556, timestamp=0,
@@ -374,9 +373,9 @@ async def test_derivatives_data_partial_failure():
 
     market_data = AsyncMock()
     market_data.get_funding_rate.side_effect = Exception("API down")
-    market_data.get_open_interest.return_value = OpenInterest(
-        symbol="BTC/USDT:USDT", open_interest=0, open_interest_value=1_000_000_000.0, timestamp=0,
-    )
+    market_data.get_open_interest_history.return_value = [
+        OpenInterestHistoryPoint(timestamp=0, open_interest=0, open_interest_value=1_000_000_000.0),
+    ]
     market_data.get_long_short_ratio.side_effect = Exception("timeout")
 
     deps = _make_deps(market_data=market_data)
@@ -394,7 +393,9 @@ async def test_derivatives_data_custom_symbol():
 
     market_data = AsyncMock()
     market_data.get_funding_rate.return_value = FundingRate("ETH/USDT:USDT", 0.0001, 0, 0)
-    market_data.get_open_interest.return_value = OpenInterest("ETH/USDT:USDT", 0, 100_000_000.0, 0)
+    market_data.get_open_interest_history.return_value = [
+        OpenInterestHistoryPoint(timestamp=0, open_interest=0, open_interest_value=100_000_000.0),
+    ]
     market_data.get_long_short_ratio.return_value = LongShortRatio("ETH/USDT:USDT", 1.0, 0.5, 0.5, 0)
 
     deps = _make_deps(market_data=market_data)

@@ -5,9 +5,14 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+# OKX rubik stat endpoint requires uppercase '1H' / '1D'; project convention exposes
+# lowercase across abstractions (matches fetch_ohlcv(timeframe='1h')). The mapping
+# below is the only translation layer.
+_OKX_OI_PERIOD = {"5m": "5m", "1h": "1H", "1d": "1D"}
 
 
 @dataclass
@@ -130,7 +135,12 @@ class BaseExchange(ABC):
     @abstractmethod
     async def fetch_funding_rate(self, symbol: str) -> 'FundingRate': ...
     @abstractmethod
-    async def fetch_open_interest(self, symbol: str) -> 'OpenInterest': ...
+    async def fetch_open_interest_history(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "1d"] = "1h",
+        limit: int = 26,
+    ) -> list["OpenInterestHistoryPoint"]: ...
     @abstractmethod
     async def fetch_long_short_ratio(self, symbol: str) -> 'LongShortRatio': ...
     @abstractmethod
@@ -303,11 +313,16 @@ class FundingRate:
 
 
 @dataclass
-class OpenInterest:
-    symbol: str
-    open_interest: float  # base-currency amount (per ccxt unified `openInterestAmount`)
-    open_interest_value: float  # USD value
+class OpenInterestHistoryPoint:
+    """One historical OI snapshot at a given timestamp.
+
+    open_interest_value is USD-denominated. No `symbol` field is carried —
+    a list of history points always belongs to one symbol and the caller
+    holds that context.
+    """
     timestamp: int
+    open_interest: float  # base-currency amount
+    open_interest_value: float  # USD value
 
 
 @dataclass
