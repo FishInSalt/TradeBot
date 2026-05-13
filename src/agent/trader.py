@@ -612,19 +612,17 @@ def create_trader_agent(
         new_price: float,
         reasoning: str,
     ) -> str:
-        """Replace a single existing price level alert with a new price.
-
-        Atomic: cancels the old alert and creates a new one with new_price,
-        preserving the original direction and reasoning text. The direction
-        (above/below) cannot change — to change direction or reasoning
-        materially, use cancel + add. Trail use case: when price moves and
-        you want the same alert at a new level, this preserves identity
-        continuity (the alert is still "the same thing at a new price").
+        """Update an existing price level alert in place: change its trigger
+        price and reasoning. The direction (above/below) cannot change —
+        to flip direction, cancel and add a new alert. The alert's id stays
+        the same. Trail use case: when price moves and you want the same
+        alert at a new level, this preserves identity (id, direction) while
+        refreshing the price and reasoning.
 
         Args:
             alert_id: 8-char hex id of the existing alert (see get_active_alerts).
             new_price: new trigger price.
-            reasoning: brief rationale for the move (audit-only).
+            reasoning: new rationale text; overwrites the alert's stored reasoning.
         """
         from src.agent.tools_execution import update_price_level_alert as _impl
 

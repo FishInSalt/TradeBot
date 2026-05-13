@@ -157,9 +157,12 @@ async def test_cancel_success_includes_reasoning(engine, session_with_row):
 # ============ Task 3: update_price_level_alert new tool ============
 
 @pytest.mark.asyncio
-async def test_update_success_preserves_direction_and_reasoning(engine, session_with_row):
-    """Spec §4.2 step 5+6 + AC-4: update preserves original direction and reasoning
-    on the new alert; return string shows id transition and original reasoning.
+async def test_update_success_overwrites_price_and_reasoning_keeps_direction_and_id(
+    engine, session_with_row,
+):
+    """Spec amend §3.3 + AC-4: update is in-place — id preserved, direction
+    preserved, price + reasoning overwritten. The tool calls
+    BaseExchange.update_price_level_alert once with the new in-place signature.
     """
     from src.agent.tools_execution import update_price_level_alert
     from src.services.tool_call_recorder import ToolCallRecorder
@@ -169,9 +172,9 @@ async def test_update_success_preserves_direction_and_reasoning(engine, session_
     deps.exchange.get_price_level_alerts.return_value = [{
         "id": "a3f2b8c1", "price": 82100.0, "direction": "above",
         "symbol": "BTC/USDT:USDT", "reasoning": "4h structural high",
+        "created_at": 1700000000.0,
     }]
-    deps.exchange.remove_price_level_alert.return_value = True
-    deps.exchange.add_price_level_alert.return_value = "d7c2e9f4"
+    deps.exchange.update_price_level_alert.return_value = True
 
     async def handler(args):
         return await update_price_level_alert(
@@ -188,25 +191,29 @@ async def test_update_success_preserves_direction_and_reasoning(engine, session_
     )
 
     assert "Price level alert updated" in result
+    # Single id (no transition) — id-stability.
     assert "id=a3f2b8c1" in result
-    assert "id=d7c2e9f4" in result
-    # Direction preserved (still "above")
-    assert "above 82100.00 → above 82500.00" in result
-    # Reasoning preserved
-    assert '— "4h structural high"' in result
+    assert "id=a3f2b8c1 → id=" not in result
+    # Direction preserved (still "above"), single direction token.
+    assert "above 82100.00 → 82500.00" in result
+    # New reasoning carried — overwrite semantics.
+    assert '— "trail up after breakout"' in result
 
-    # Exchange add was called with original_direction + original_reasoning
-    call_kwargs_args = deps.exchange.add_price_level_alert.call_args.args
-    # signature: add_price_level_alert(price, direction, symbol, reasoning)
-    assert call_kwargs_args[0] == 82500.0
-    assert call_kwargs_args[1] == "above"
-    assert call_kwargs_args[3] == "4h structural high"
+    # BaseExchange.update_price_level_alert called once with the new signature.
+    deps.exchange.update_price_level_alert.assert_called_once_with(
+        "a3f2b8c1", 82500.0, "trail up after breakout",
+    )
+    # The old remove+add path must NOT be used.
+    deps.exchange.remove_price_level_alert.assert_not_called()
+    deps.exchange.add_price_level_alert.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_update_not_found_rejects(engine, session_with_row):
-    """Spec §4.2 step 2 + AC-5: update of absent alert_id returns biz_error
+    """Spec amend §3.3 + AC-5: update of absent alert_id returns biz_error
     'alert_not_found' with directive to use add_price_level_alert.
+
+    The not-found rejection short-circuits before any BaseExchange mutation.
     """
     from src.agent.tools_execution import update_price_level_alert
     from src.services.tool_call_recorder import ToolCallRecorder
@@ -230,7 +237,7 @@ async def test_update_not_found_rejects(engine, session_with_row):
     )
 
     assert "Alert a3f2b8c1 not found" in result
-    assert "add_price_level_alert" in result  # directive present
+    assert "add_price_level_alert" in result
 
     async with get_session(engine) as db:
         rows = (await db.execute(select(ToolCall))).scalars().all()
@@ -238,7 +245,8 @@ async def test_update_not_found_rejects(engine, session_with_row):
     assert rows[0].status == "biz_error"
     assert rows[0].error_type == "alert_not_found"
 
-    # No mutation on the exchange
+    # No exchange-level mutation on either the new path or the legacy path.
+    deps.exchange.update_price_level_alert.assert_not_called()
     deps.exchange.remove_price_level_alert.assert_not_called()
     deps.exchange.add_price_level_alert.assert_not_called()
 
@@ -273,30 +281,31 @@ async def test_update_format_invalid(engine, session_with_row):
     assert rows[0].status == "biz_error"
     assert rows[0].error_type == "invalid_alert_id_format"
 
+    # No exchange-level mutation
+    deps.exchange.update_price_level_alert.assert_not_called()
+    deps.exchange.remove_price_level_alert.assert_not_called()
+    deps.exchange.add_price_level_alert.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_update_immediate_trigger_allowed(engine, session_with_row):
-    """Spec §4.3 + AC-7: new_price on the trigger-side of current is accepted
-    without warning/block (per §1.4 audit — agent strategic re-wake).
-    Above-alert moved to a price that would trigger immediately on next tick
-    must not produce a warning string. Acts as a drift guard against future
-    addition of immediate-trigger warning logic in this tool: current impl
-    has no distance/position check on new_price, so this test reads as a
-    'no warning was added' invariant.
+    """Spec amend §3.3 + AC-7: new_price on the trigger-side of current is accepted
+    without warning/block (the agent uses immediate-trigger as a strategic re-wake;
+    see R2-Next-E §1.4 audit). This is also a drift guard against future addition
+    of an immediate-trigger warning in this tool.
     """
     from src.agent.tools_execution import update_price_level_alert
     from src.services.tool_call_recorder import ToolCallRecorder
 
     recorder = ToolCallRecorder()
     deps = make_deps(engine, session_with_row)
-    # Original above-alert at 82,100; move to 82,200 — if anyone adds a
-    # vs-current-price warning, this assertion fires.
+    # Above-alert at 82,100; move to 82,200.
     deps.exchange.get_price_level_alerts.return_value = [{
         "id": "a3f2b8c1", "price": 82100.0, "direction": "above",
         "symbol": "BTC/USDT:USDT", "reasoning": "spring breakout",
+        "created_at": 1700000000.0,
     }]
-    deps.exchange.remove_price_level_alert.return_value = True
-    deps.exchange.add_price_level_alert.return_value = "d7c2e9f4"
+    deps.exchange.update_price_level_alert.return_value = True
 
     async def handler(args):
         return await update_price_level_alert(
@@ -314,7 +323,7 @@ async def test_update_immediate_trigger_allowed(engine, session_with_row):
 
     # No warning / block — return is plain success
     assert "Price level alert updated" in result
-    assert "may trigger immediately" not in result  # no warning
+    assert "may trigger immediately" not in result
     assert "WARNING" not in result
 
     async with get_session(engine) as db:
@@ -342,9 +351,11 @@ def test_update_display_dispatch_registered():
     # 5.1.4.2: parser registered + correctly extracts direction + prices
     assert "update_price_level_alert" in _EXECUTION_PARSERS
     parser = _EXECUTION_PARSERS["update_price_level_alert"]
+    # New return shape (post iter-tool-opt-alert-age):
+    #   "Price level alert updated (id=AAAA): above 82100.00 → 82500.00 — \"reason\""
     sample = (
-        "Price level alert updated (id=a3f2b8c1 → id=d7c2e9f4):\n"
-        "  above 82100.00 → above 82500.00 — \"4h structural high\""
+        'Price level alert updated (id=a3f2b8c1): '
+        'above 82100.00 → 82500.00 — "4h structural high"'
     )
     summary = parser(sample)
     assert "above" in summary
@@ -379,70 +390,90 @@ def test_cancel_idempotent_not_classified_as_error():
         "cancel_price_level_alert", cancel_success, outcome="success",
     ) is False
 
-    # Update success — must NOT be error
+    # Update success — must NOT be error (new in-place return shape)
     update_success = (
-        "Price level alert updated (id=a3f2b8c1 → id=d7c2e9f4):\n"
-        "  above 82100.00 → above 82500.00 — \"4h structural high\""
+        'Price level alert updated (id=a3f2b8c1): '
+        'above 82100.00 → 82500.00 — "4h structural high"'
     )
     assert is_tool_error(
         "update_price_level_alert", update_success, outcome="success",
     ) is False
 
 
-def test_update_atomicity_sync_invariant():
-    """Spec §5.4 test #9 + AC-13: BaseExchange.add_price_level_alert and
-    .remove_price_level_alert must be sync (not async). Pins the §4.2 step 4
-    'no yield points' atomicity invariant.
+@pytest.mark.asyncio
+async def test_update_view_chain_connected_after_id_stability(engine, session_with_row):
+    """Spec amend §3.3 + AC-11: id-stability in update_price_level_alert means
+    the v_alert_lifecycle view naturally connects add → update → cancel via the
+    stable alert_id — the view's registers CTE catches the add row, the cancels
+    CTE catches the cancel row, and they join cleanly. No orphan branch.
+
+    The view SQL is unchanged in this iter; the resolution is structural
+    (the same alert_id flows through both CTEs because update preserves the id).
     """
-    from src.integrations.exchange.base import BaseExchange
-
-    assert not inspect.iscoroutinefunction(BaseExchange.add_price_level_alert), (
-        "BaseExchange.add_price_level_alert must be sync — "
-        "update_price_level_alert atomicity depends on this invariant"
-    )
-    assert not inspect.iscoroutinefunction(BaseExchange.remove_price_level_alert), (
-        "BaseExchange.remove_price_level_alert must be sync — "
-        "update_price_level_alert atomicity depends on this invariant"
-    )
-
-
-def test_update_view_known_orphan_limitation():
-    """Spec §4.2 step 8 + §9: v_alert_lifecycle view sees neither side of an
-    update — old id stays as final_status='active' orphan (no cancel CTE row)
-    and new id is entirely absent from the view (registers CTE filters
-    action='add_price_level_alert' which doesn't match 'update_price_level_alert').
-
-    This test pins the known limitation. If a future change adds dual-emit
-    _record_action (candidate (a) in §9 follow-up) or extends the view CTEs,
-    the assertion shape changes and the future PR author must consciously
-    update this pin (forcing them to confirm the new contract).
-    """
-    # The action constants documented to NOT trigger view-visibility for update:
-    # - 'add_price_level_alert' (registers CTE filter, views.py:99-100)
-    # - 'cancel_price_level_alert' (cancels CTE filter, views.py:117-118)
-    #
-    # update_price_level_alert writes action='update_price_level_alert' which
-    # is neither — both CTEs filter it out by construction.
-
-    update_action_literal = "update_price_level_alert"
-    add_action_literal = "add_price_level_alert"
-    cancel_action_literal = "cancel_price_level_alert"
-
-    # The contract pinned: update's action_name is distinct from the view's
-    # filter literals, so the view cannot see update rows on either side.
-    assert update_action_literal != add_action_literal
-    assert update_action_literal != cancel_action_literal
-
-    # Read the view source and confirm it still filters by the two original
-    # literals exclusively (no 'update_price_level_alert' branch added).
+    from sqlalchemy import text
     from src.storage import views
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
 
+    # Structural confirmation: the view still filters by the two original
+    # action literals (no special update branch was added).
     view_sql = getattr(views, "V_ALERT_LIFECYCLE_SQL", None)
-    assert view_sql is not None, "V_ALERT_LIFECYCLE_SQL constant not found"
-    assert f"action='{add_action_literal}'" in view_sql
-    assert f"action='{cancel_action_literal}'" in view_sql
-    assert f"action='{update_action_literal}'" not in view_sql, (
-        "If V_ALERT_LIFECYCLE_SQL now references 'update_price_level_alert', "
-        "the §4.2 step 8 known limitation has been resolved — update this "
-        "pin to assert the new contract (e.g., new CTE or dual-emit rows)."
-    )
+    assert view_sql is not None
+    assert "action='add_price_level_alert'" in view_sql
+    assert "action='cancel_price_level_alert'" in view_sql
+    # No update-specific CTE branch needed because id stays the same.
+    assert "action='update_price_level_alert'" not in view_sql
+
+    # End-to-end chain assertion: same alert_id across add → update → cancel
+    # appears as a single row in the view with final_status='cancelled'.
+    #
+    # TradeAction schema (verified against src/storage/models.py:59-77):
+    #   - session_id: str (FK to sessions.id; session_with_row fixture
+    #     returns the str "sess-test" directly — see tests/conftest.py:33-40)
+    #   - cycle_id: str | None (per-cycle correlation; nullable)
+    #   - action: str (literal action name)
+    #   - alert_id: str | None (8-char hex)
+    #   - symbol: str (NOT NULL, no default — must be provided)
+    #   - reasoning: str | None
+    #   - created_at: datetime with default=_utcnow — omit kwarg to use default
+    alert_id = "a3f2b8c1"
+    async with get_session(engine) as db:
+        db.add(TradeAction(
+            session_id=session_with_row,
+            cycle_id="cyc-test-1",
+            action="add_price_level_alert",
+            alert_id=alert_id,
+            symbol="BTC/USDT:USDT",
+            reasoning="above 82100 | initial",
+        ))
+        db.add(TradeAction(
+            session_id=session_with_row,
+            cycle_id="cyc-test-2",
+            action="update_price_level_alert",
+            alert_id=alert_id,
+            symbol="BTC/USDT:USDT",
+            reasoning="price 82100 → 82500 | tighten",
+        ))
+        db.add(TradeAction(
+            session_id=session_with_row,
+            cycle_id="cyc-test-3",
+            action="cancel_price_level_alert",
+            alert_id=alert_id,
+            symbol="BTC/USDT:USDT",
+            reasoning="thesis invalidated",
+        ))
+        await db.commit()
+
+    async with get_session(engine) as db:
+        result = await db.execute(
+            text(
+                "SELECT alert_id, final_status FROM v_alert_lifecycle "
+                "WHERE session_id = :sid"
+            ),
+            {"sid": session_with_row},
+        )
+        rows = result.fetchall()
+
+    assert len(rows) == 1
+    assert rows[0][0] == alert_id
+    assert rows[0][1] == "cancelled"

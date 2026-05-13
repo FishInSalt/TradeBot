@@ -2233,8 +2233,8 @@ def test_snapshot_get_active_alerts_with_alerts():
         "1.5% in 10min window\n"
         "\n"
         "=== Price Level Alerts (2/20) ===\n"
-        '  #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
-        '  #2 (id=alert-2) below 74000.00 — "support break"'
+        '  #1 (id=alert-1) above 76500.00 — "tactical resistance" (just now)\n'
+        '  #2 (id=alert-2) below 74000.00 — "support break" (just now)'
     )
     expected = (
         "  ⚙ get_active_alerts\n"
@@ -2242,8 +2242,8 @@ def test_snapshot_get_active_alerts_with_alerts():
         "    1.5% in 10min window\n"
         "\n"
         "    === Price Level Alerts (2/20) ===\n"
-        '      #1 (id=alert-1) above 76500.00 — "tactical resistance"\n'
-        '      #2 (id=alert-2) below 74000.00 — "support break"'
+        '      #1 (id=alert-1) above 76500.00 — "tactical resistance" (just now)\n'
+        '      #2 (id=alert-2) below 74000.00 — "support break" (just now)'
     )
     _assert_perception_render("get_active_alerts", content, expected)
 

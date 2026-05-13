@@ -243,16 +243,13 @@ def _summarize_add_price_level_alert(content: str) -> str:
 
 
 def _summarize_update_price_level_alert(content: str) -> str:
-    # Matches §4.2 step 7 success-return shape:
-    #   "Price level alert updated (id=AAAA → id=BBBB):
-    #      above 82100.00 → above 82500.00 — \"reasoning\""
-    m = re.search(
-        r"(above|below)\s+([\d.]+)\s*→\s*(above|below)\s+([\d.]+)", content
-    )
+    # Matches success-return shape (post iter-tool-opt-alert-age):
+    #   "Price level alert updated (id=AAAA): above 82100.00 → 82500.00 — \"reasoning\""
+    m = re.search(r"(above|below)\s+([\d.]+)\s*→\s*([\d.]+)", content)
     if m:
         return (
             f"{m.group(1)} ${float(m.group(2)):,.0f} → "
-            f"${float(m.group(4)):,.0f}"
+            f"${float(m.group(3)):,.0f}"
         )
     return _fallback_summary(content)
 
