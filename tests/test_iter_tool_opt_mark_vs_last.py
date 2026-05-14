@@ -333,3 +333,67 @@ async def test_get_open_orders_oco_pair_uses_last_price():
     # Both legs use the trigger_ref label
     assert out.count("from last price") == 2
     assert "from current" not in out
+
+
+# ============ Task 7: set_stop_loss + set_take_profit message swap ============
+
+@pytest.mark.asyncio
+async def test_set_stop_loss_message_uses_last_price():
+    """Spec §3.1 SL-2: success message swaps 'from current' → 'from
+    {trigger_ref} price' (default 'last').
+    """
+    from src.agent.tools_execution import set_stop_loss
+    from src.integrations.exchange.base import Order, Position, Ticker
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.db_engine = None
+    deps.exchange.algo_trigger_reference = "last"
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(symbol="BTC/USDT:USDT", side="long", contracts=0.5,
+                 entry_price=80_000.0, unrealized_pnl=500.0, leverage=10,
+                 liquidation_price=51_000.0, created_at=None),
+    ])
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="sl-1", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+        amount=0.5, price=78_000.0, status="open", is_algo=True,
+    ))
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=80_000.0, bid=79_995.0, ask=80_005.0,
+        high=82_000.0, low=79_500.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+
+    out = await set_stop_loss(deps, price=78_000.0, reasoning="below MA50")
+    assert "from last price" in out
+    assert "from current" not in out
+
+
+@pytest.mark.asyncio
+async def test_set_take_profit_message_uses_last_price():
+    """Spec §3.1 TP-2: mirror of SL-2 for take_profit."""
+    from src.agent.tools_execution import set_take_profit
+    from src.integrations.exchange.base import Order, Position, Ticker
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.db_engine = None
+    deps.exchange.algo_trigger_reference = "last"
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(symbol="BTC/USDT:USDT", side="long", contracts=0.5,
+                 entry_price=80_000.0, unrealized_pnl=500.0, leverage=10,
+                 liquidation_price=51_000.0, created_at=None),
+    ])
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="tp-1", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+        amount=0.5, price=82_000.0, status="open", is_algo=True,
+    ))
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=80_000.0, bid=79_995.0, ask=80_005.0,
+        high=82_000.0, low=79_500.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+
+    out = await set_take_profit(deps, price=82_000.0, reasoning="resistance ceiling")
+    assert "from last price" in out
+    assert "from current" not in out
