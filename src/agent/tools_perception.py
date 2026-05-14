@@ -263,6 +263,13 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             logger.exception("get_position: 1h OHLCV fetch failed")
             return None
 
+    async def _safe_mark_price():
+        try:
+            return await deps.exchange.get_mark_price(symbol)
+        except Exception:
+            logger.exception("get_position: mark price fetch failed")
+            return 0.0
+
     def _render_position_core() -> list[str]:
         """Render Position + PnL sections (Phase-1 fields only).
 
@@ -304,12 +311,13 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         return ["\n".join(pos_lines), "\n".join(pnl_lines)]
 
     try:
-        ticker, balance, ohlcv_df, open_orders, contract_size = await asyncio.gather(
+        ticker, balance, ohlcv_df, open_orders, contract_size, mark_price = await asyncio.gather(
             deps.market_data.get_ticker(symbol),
             deps.exchange.fetch_balance(),
             _safe_ohlcv(),
             deps.exchange.fetch_open_orders(symbol),
             deps.exchange.get_contract_size(symbol),
+            _safe_mark_price(),
             return_exceptions=False,
         )
     except Exception as e:
@@ -339,13 +347,33 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     risk_lines = ["=== Risk Exposure ==="]
     risk_lines.append(f"Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
     risk_lines.append(f"Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
-    if p.liquidation_price is not None and current_price > 0:
-        liq_dist_pct = abs(current_price - p.liquidation_price) / current_price * 100
-        if atr_pct_1h is not None and atr_pct_1h > 0:
-            atr_mult = liq_dist_pct / atr_pct_1h
-            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
+    # Risk Exposure: Mark + Liquidation
+    if mark_price > 0:
+        if current_price > 0:
+            drift_pct = (current_price - mark_price) / mark_price * 100
+            risk_lines.append(
+                f"Mark: {mark_price:.2f} (Last: {current_price:.2f}, drift {drift_pct:+.2f}%)"
+            )
         else:
-            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+            risk_lines.append(f"Mark: {mark_price:.2f} (Last: unavailable)")
+
+        if p.liquidation_price is not None:
+            liq_dist_pct = abs(mark_price - p.liquidation_price) / mark_price * 100
+            if atr_pct_1h is not None and atr_pct_1h > 0:
+                atr_mult = liq_dist_pct / atr_pct_1h
+                risk_lines.append(
+                    f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.2f}% away = {atr_mult:.1f}× ATR(1h))"
+                )
+            else:
+                risk_lines.append(
+                    f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.2f}% away)"
+                )
+    else:
+        # mark fetch failed → omit Mark line, Liquidation falls back without distance
+        if p.liquidation_price is not None:
+            risk_lines.append(
+                f"Liquidation: {p.liquidation_price:.2f} (distance unavailable: mark fetch failed)"
+            )
     sections.append("\n".join(risk_lines))
 
     # === Exit Orders ===
@@ -365,7 +393,11 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         key=lambda o: o.price,
     )
     exit_lines = ["=== Exit Orders ==="]
+    trigger_ref = deps.exchange.algo_trigger_reference
 
+    # Exit Orders distance is intentionally last-anchored (current_price = ticker.last),
+    # matching OKX's algo trigger reference. The Risk Exposure Mark line above is for
+    # the Liquidation row only — different anchor, different physical purpose.
     def _fmt_exit(o, kind: str) -> str:
         dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100
         dist_curr_pct = (o.price - current_price) / current_price * 100 if current_price > 0 else 0.0
@@ -375,7 +407,12 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         if atr_pct_1h is not None and atr_pct_1h > 0:
             atr_mult = abs(dist_curr_pct) / atr_pct_1h
             suffix = f" = {atr_mult:.1f}× ATR(1h)"
-        return f"  {kind}: {o.price:.2f} ({abs(dist_entry_pct):.1f}% {direction_entry} entry, {abs(dist_curr_pct):.1f}% {direction_curr} current{suffix})  [{o.amount} contracts]"
+        return (
+            f"  {kind}: {o.price:.2f} "
+            f"({abs(dist_entry_pct):.1f}% {direction_entry} entry, "
+            f"{abs(dist_curr_pct):.1f}% {direction_curr} {trigger_ref} price{suffix})  "
+            f"[{o.amount} contracts]"
+        )
 
     if sl_orders:
         for o in sl_orders:
@@ -414,12 +451,15 @@ async def get_memories(deps: TradingDeps) -> str:
     return await deps.memory.format_for_prompt()
 
 
-def _render_single_order(o, current: float) -> str:
-    """Render a single (non-OCO) order line — preserves pre-Iter-2b rendering exactly.
+def _render_single_order(o, current: float, trigger_ref: str) -> str:
+    """Render a single (non-OCO) order line.
 
-    Preserves the current > 0 branch: no crash on abnormal ticker. Label/distance/ID
-    suffix format matches original tools_perception.py exactly to satisfy spec §6
-    "zero byte-level regression".
+    `trigger_ref` is the exchange's algo trigger reference word (default
+    "last" for OKX); used in the distance-label suffix.
+
+    Preserves the current > 0 branch: no crash on abnormal ticker. Label /
+    distance / ID suffix format matches the pre-iter-tool-opt-mark-vs-last
+    rendering except for the trailing "{trigger_ref} price" swap.
     """
     if o.order_type == "market" or o.price is None:
         label = "[PENDING]" if o.order_type == "market" else f"[{o.order_type.upper()}]"
@@ -432,14 +472,14 @@ def _render_single_order(o, current: float) -> str:
         if current > 0:
             dist = (o.price - current) / current * 100
             pts = o.price - current
-            price_str = f"@ {o.price:.2f} ({dist:+.2f}% / {pts:+.1f} pts from current)"
+            price_str = f"@ {o.price:.2f} ({dist:+.2f}% / {pts:+.1f} pts from {trigger_ref} price)"
         else:
             price_str = f"@ {o.price:.2f} (ticker unavailable, distance N/A)"
     return f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}"
 
 
 async def get_open_orders(deps: TradingDeps) -> str:
-    """Get all pending orders with distance from current price."""
+    """Get all pending orders with distance from last price."""
     from datetime import datetime, timezone
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     orders = await deps.exchange.fetch_open_orders(deps.symbol)
@@ -448,6 +488,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     current = ticker.last
+    trigger_ref = deps.exchange.algo_trigger_reference
 
     # Group by id: OCO's two same-id legs share id + is_algo=True
     by_id: dict[str, list] = {}
@@ -466,12 +507,12 @@ async def get_open_orders(deps: TradingDeps) -> str:
             tp = next(o for o in group if o.order_type == "take_profit")
             sl_dist = (
                 f" ({(sl.price - current) / current * 100:+.2f}%"
-                f" / {sl.price - current:+.1f} pts from current)"
+                f" / {sl.price - current:+.1f} pts from {trigger_ref} price)"
                 if current > 0 else " (ticker unavailable)"
             )
             tp_dist = (
                 f" ({(tp.price - current) / current * 100:+.2f}%"
-                f" / {tp.price - current:+.1f} pts from current)"
+                f" / {tp.price - current:+.1f} pts from {trigger_ref} price)"
                 if current > 0 else " (ticker unavailable)"
             )
             lines.append(
@@ -481,7 +522,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
             )
         else:
             for o in group:
-                lines.append(_render_single_order(o, current))
+                lines.append(_render_single_order(o, current, trigger_ref))
     return "\n".join(lines)
 
 

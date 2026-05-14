@@ -452,6 +452,7 @@ class TestPositionLiquidationDedup:
         )
         deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
         deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+        deps.exchange.get_mark_price = AsyncMock(return_value=81870.50)
         deps.market_data = MagicMock()
         deps.market_data.get_ticker = AsyncMock(
             return_value=SimpleNamespace(last=81870.50, bid=81870.4, ask=81870.6,

@@ -203,10 +203,12 @@ async def scenario_1A_market_close(ex: OKXExchange) -> bool:
 async def _fetch_mark_price(ex: OKXExchange) -> float:
     """Fetch OKX mark price via raw public endpoint.
 
-    Demo ticker.last drifts up to 1.67% from mark price (verified via
-    iter6_diag_ticker.py); OKX algo trigger validation uses mark price
-    despite the 51280 error message saying "last price". Always compute
-    triggers from mark price.
+    OKX algo trigger validation uses last price (V5 docs + CCXT 4.5.47
+    verified per memory project_okx_demo_mark_vs_last_drift, 校准 2026-04-28).
+    Demo workaround: mark is 1.67% below last in demo env, so triggers
+    computed from mark sit well below OKX's last-reference comparison and
+    reliably bypass 51280 errors. In production (drift typically <0.05%),
+    this workaround offers negligible buffer over last-anchored triggers.
     """
     raw = await ex._client.public_get_public_mark_price(
         {"instType": "SWAP", "instId": "BTC-USDT-SWAP"}
@@ -219,8 +221,9 @@ async def _fetch_mark_price(ex: OKXExchange) -> float:
 async def _place_algo(ex: OKXExchange, side: str, order_type: str, pct: float):
     """Place algo order with single attempt at given buffer percentage.
 
-    Trigger computed from mark price (NOT ticker.last) because OKX algo
-    validation uses mark price internally. Buffer 0.6% chosen empirically.
+    Trigger computed from mark price (NOT ticker.last) as a demo workaround —
+    see _fetch_mark_price docstring above for the 校准 rationale. Buffer 0.6%
+    chosen empirically.
     """
     mark = await _fetch_mark_price(ex)
     ticker = await ex.fetch_ticker(SYMBOL)

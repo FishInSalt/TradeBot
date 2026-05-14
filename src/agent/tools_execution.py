@@ -163,9 +163,10 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
     )
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
+    trigger_ref = deps.exchange.algo_trigger_reference
     if ticker.last > 0:
         dist_pct = (price - ticker.last) / ticker.last * 100
-        return f"Stop loss set at {price:.2f} ({dist_pct:+.2f}% from current {ticker.last:.2f}) | Order: {order.id}"
+        return f"Stop loss set at {price:.2f} ({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
     return f"Stop loss set at {price:.2f} | Order: {order.id}"
 
 
@@ -193,9 +194,10 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
     )
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
+    trigger_ref = deps.exchange.algo_trigger_reference
     if ticker.last > 0:
         dist_pct = (price - ticker.last) / ticker.last * 100
-        return f"Take profit set at {price:.2f} ({dist_pct:+.2f}% from current {ticker.last:.2f}) | Order: {order.id}"
+        return f"Take profit set at {price:.2f} ({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
     return f"Take profit set at {price:.2f} | Order: {order.id}"
 
 

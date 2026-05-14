@@ -80,8 +80,8 @@ def test_summarize_get_open_orders_with_orders():
     from src.cli.display import summarize_tool
     content = (
         "Pending Orders:\n"
-        "  [STOP] sell 0.500 @ 81500.00 (-3.21% from current) | ID: abc\n"
-        "  [TAKE_PROFIT] sell 0.500 @ 86000.00 (+2.14% from current) | ID: def"
+        "  [STOP] sell 0.500 @ 81500.00 (-3.21% from last price) | ID: abc\n"
+        "  [TAKE_PROFIT] sell 0.500 @ 86000.00 (+2.14% from last price) | ID: def"
     )
     result = summarize_tool("get_open_orders", content)
     assert "2" in result
@@ -94,7 +94,7 @@ def test_summarize_get_open_orders_mixed_with_market():
     from src.cli.display import summarize_tool
     content = (
         "Pending Orders:\n"
-        "  [STOP] sell 0.500 @ 81500.00 (-3.21% from current) | ID: abc\n"
+        "  [STOP] sell 0.500 @ 81500.00 (-3.21% from last price) | ID: abc\n"
         "  [PENDING] buy 0.100 market price | ID: xyz"
     )
     result = summarize_tool("get_open_orders", content)
@@ -258,7 +258,7 @@ def test_summarize_close_position():
 
 def test_summarize_set_stop_loss():
     from src.cli.display import summarize_tool
-    content = "Stop loss set at 81500.00 (-3.21% from current 84200.00) | Order: abc"
+    content = "Stop loss set at 81500.00 (-3.21% from last price 84200.00) | Order: abc"
     result = summarize_tool("set_stop_loss", content)
     assert "SL" in result
     assert "81500" in result or "81,500" in result
@@ -266,7 +266,7 @@ def test_summarize_set_stop_loss():
 
 def test_summarize_set_take_profit():
     from src.cli.display import summarize_tool
-    content = "Take profit set at 87000.00 (+3.33% from current 84200.00) | Order: def"
+    content = "Take profit set at 87000.00 (+3.33% from last price 84200.00) | Order: def"
     result = summarize_tool("set_take_profit", content)
     assert "TP" in result
     assert "87000" in result or "87,000" in result
@@ -2011,16 +2011,16 @@ def test_snapshot_get_open_orders_with_orders():
     """Snapshot — pending orders 1 OCO leg + 1 limit (§4.2.14)."""
     content = (
         "=== Pending Orders ===\n"
-        "  [OCO] sell 0.025 stop 74000.00 (-1.60% from current) / "
-        "tp 76500.00 (+1.73% from current) | algoId: oco-1 (cancel removes both legs)\n"
-        "  [LIMIT] buy 0.025 @ 74500.00 (-0.93% from current) | ID: lim-1"
+        "  [OCO] sell 0.025 stop 74000.00 (-1.60% from last price) / "
+        "tp 76500.00 (+1.73% from last price) | algoId: oco-1 (cancel removes both legs)\n"
+        "  [LIMIT] buy 0.025 @ 74500.00 (-0.93% from last price) | ID: lim-1"
     )
     expected = (
         "  ⚙ get_open_orders\n"
         "    === Pending Orders ===\n"
-        "      [OCO] sell 0.025 stop 74000.00 (-1.60% from current) / "
-        "tp 76500.00 (+1.73% from current) | algoId: oco-1 (cancel removes both legs)\n"
-        "      [LIMIT] buy 0.025 @ 74500.00 (-0.93% from current) | ID: lim-1"
+        "      [OCO] sell 0.025 stop 74000.00 (-1.60% from last price) / "
+        "tp 76500.00 (+1.73% from last price) | algoId: oco-1 (cancel removes both legs)\n"
+        "      [LIMIT] buy 0.025 @ 74500.00 (-0.93% from last price) | ID: lim-1"
     )
     _assert_perception_render("get_open_orders", content, expected)
 
