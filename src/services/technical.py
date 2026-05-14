@@ -14,7 +14,13 @@ class TechnicalAnalysisService:
         ma_20 = ta.sma(close, length=20)  # type: ignore[attr-defined]
         ma_50 = ta.sma(close, length=50)  # type: ignore[attr-defined]
         macd_df = ta.macd(close)  # type: ignore[attr-defined]
-        bb_df = ta.bbands(close, length=20)  # type: ignore[attr-defined]
+        # ddof=0 (population stdev) aligns with TradingView / TA-Lib. pandas_ta's
+        # pure-pandas path defaults to ddof=1 (sample stdev) which inflates band
+        # width by √(N/(N-1)) ≈ 1.026 at N=20; the TA-Lib path ignores `ddof`
+        # entirely (uses population stdev internally), so explicit ddof=0 also
+        # locks behavior across dev (no TA-Lib) vs prod (with TA-Lib).
+        # G-calc-rigor-audit §G-5.
+        bb_df = ta.bbands(close, length=20, ddof=0)  # type: ignore[attr-defined]
         atr = ta.atr(high, low, close, length=14)  # type: ignore[attr-defined]
         # Volume ratio intentionally not surfaced here — GMD/HTF inline their own
         # "Last bar vol (X× SMA(20) avg)" rendering with a different numerator
