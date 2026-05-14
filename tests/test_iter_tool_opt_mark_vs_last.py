@@ -247,3 +247,31 @@ async def test_get_position_mark_fetch_failure_isolated_to_liquidation(mock_deps
     assert "Margin used:" in out
     # (d) Exit Orders section still present (empty in this fixture but rendered)
     assert "=== Exit Orders ===" in out
+
+
+# ============ Task 5: get_position Exit Orders label swap ============
+
+@pytest.mark.asyncio
+async def test_get_position_exit_orders_label_last_price(mock_deps_for_position):
+    """Spec §3.1 POS-5 (Exit Orders): _fmt_exit swaps "current" → trigger_ref
+    word (which is "last" for OKX default + Sim). Substring assertion because
+    line contains variable order price / amount.
+    """
+    from src.agent.tools_perception import get_position
+    from src.integrations.exchange.base import Order
+
+    mock_deps_for_position.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="abc1", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.5, price=78_000.0, status="open", is_algo=True,
+              trigger_price=78_000.0),
+        Order(id="abc2", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.5, price=82_000.0, status="open", is_algo=True,
+              trigger_price=82_000.0),
+    ])
+
+    out = await get_position(mock_deps_for_position)
+    # Substring guard: SL/TP exit lines mention "last price" not "current"
+    assert "below last price" in out  # SL below current
+    assert "above last price" in out  # TP above current
+    assert "below current" not in out
+    assert "above current" not in out

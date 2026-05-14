@@ -393,6 +393,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         key=lambda o: o.price,
     )
     exit_lines = ["=== Exit Orders ==="]
+    trigger_ref = deps.exchange.algo_trigger_reference
 
     def _fmt_exit(o, kind: str) -> str:
         dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100
@@ -403,7 +404,12 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         if atr_pct_1h is not None and atr_pct_1h > 0:
             atr_mult = abs(dist_curr_pct) / atr_pct_1h
             suffix = f" = {atr_mult:.1f}× ATR(1h)"
-        return f"  {kind}: {o.price:.2f} ({abs(dist_entry_pct):.1f}% {direction_entry} entry, {abs(dist_curr_pct):.1f}% {direction_curr} current{suffix})  [{o.amount} contracts]"
+        return (
+            f"  {kind}: {o.price:.2f} "
+            f"({abs(dist_entry_pct):.1f}% {direction_entry} entry, "
+            f"{abs(dist_curr_pct):.1f}% {direction_curr} {trigger_ref} price{suffix})  "
+            f"[{o.amount} contracts]"
+        )
 
     if sl_orders:
         for o in sl_orders:
