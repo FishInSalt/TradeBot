@@ -476,7 +476,7 @@ def _render_single_order(o, current: float, trigger_ref: str) -> str:
 
 
 async def get_open_orders(deps: TradingDeps) -> str:
-    """Get all pending orders with distance from current price."""
+    """Get all pending orders with distance from last price."""
     from datetime import datetime, timezone
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     orders = await deps.exchange.fetch_open_orders(deps.symbol)
