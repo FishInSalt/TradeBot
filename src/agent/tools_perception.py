@@ -1902,6 +1902,11 @@ def _compute_swing_pivots(
     Equality at any neighbor disqualifies the pivot — prevents flat-plateau false
     signals. Confirmed pivots only — last n bars excluded due to incomplete
     right window, so min returned bars_ago = n.
+
+    Caller contract: `df` must be closed-bars-only (no in-progress final bar) —
+    bars_ago=0 anchors at the most-recent closed bar. Otherwise neighbors of
+    near-end candidates leak in-progress high/low into the pivot test (see
+    G-calc-rigor-audit §G-2).
     """
     if len(df) < 2 * n + 1:
         return [], []
@@ -2034,6 +2039,9 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     """
     import asyncio  # local import — matches existing convention (e.g. tools_perception.py:1320)
     from datetime import datetime, timezone
+
+    from src.utils.ohlcv_utils import _closed_bars
+
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     symbol = deps.symbol
@@ -2055,8 +2063,12 @@ async def get_price_pivots(deps: TradingDeps) -> str:
         except Exception as e:
             return e
 
+    # Main-TF: fetch 101 so that after stripping the in-progress final bar via
+    # _closed_bars (G-calc-rigor-audit §G-2), the swing-pivot window is exactly
+    # 100 closed bars. Prior-period TFs (daily/weekly/monthly) intentionally
+    # take iloc[-2] downstream — that is already the closed prior period.
     main_df_or_err, daily_or_err, weekly_or_err, monthly_or_err = await asyncio.gather(
-        _fetch(main_tf, 100),
+        _fetch(main_tf, 101),
         _fetch("1d", 2),
         _fetch("1w", 2),
         _fetch("1M", 2),
@@ -2067,20 +2079,23 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     swing_lows: list[tuple[int, float]] = []
     if isinstance(main_df_or_err, Exception):
         swing_status = "Swing pivots: temporarily unavailable"
-    elif main_df_or_err is None or main_df_or_err.empty or len(main_df_or_err) < 11:
-        got_bars = 0 if (main_df_or_err is None or main_df_or_err.empty) else len(main_df_or_err)
-        swing_status = f"Swing pivots: insufficient data (need 11+ bars, got {got_bars})"
+    elif main_df_or_err is None or main_df_or_err.empty:
+        swing_status = "Swing pivots: insufficient data (need 11+ bars, got 0)"
     else:
-        bar_count = len(main_df_or_err)
-        swing_highs, swing_lows = _compute_swing_pivots(main_df_or_err, n=5)
-        no_pivot = not swing_highs and not swing_lows
-        if no_pivot and bar_count >= 100:
-            swing_status = "(No swing pivots in 100-bar window)"
-        elif no_pivot and bar_count < 100:
-            swing_status = f"(Window: {bar_count} bars, less than 100 — no swing pivots found)"
-        elif bar_count < 100:
-            swing_status = f"(Window: {bar_count} bars, less than 100)"
-        # else: 100 bars + ≥1 pivot → swing_status stays None
+        main_df_closed = _closed_bars(main_df_or_err)
+        bar_count = len(main_df_closed)
+        if bar_count < 11:
+            swing_status = f"Swing pivots: insufficient data (need 11+ bars, got {bar_count})"
+        else:
+            swing_highs, swing_lows = _compute_swing_pivots(main_df_closed, n=5)
+            no_pivot = not swing_highs and not swing_lows
+            if no_pivot and bar_count >= 100:
+                swing_status = "(No swing pivots in 100-bar window)"
+            elif no_pivot and bar_count < 100:
+                swing_status = f"(Window: {bar_count} bars, less than 100 — no swing pivots found)"
+            elif bar_count < 100:
+                swing_status = f"(Window: {bar_count} bars, less than 100)"
+            # else: 100 bars + ≥1 pivot → swing_status stays None
 
     prior_d = _get_prior_period_hl(daily_or_err)
     prior_w = _get_prior_period_hl(weekly_or_err)
