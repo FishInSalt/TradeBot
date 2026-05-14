@@ -66,6 +66,9 @@ def test_base_exchange_alert_consolidation():
         async def get_contract_size(self, symbol):
             return 1.0
 
+        async def get_mark_price(self, symbol):
+            return 0.0
+
     ex = _TestExchange()
 
     # No alert service → get_alert_params returns None
@@ -113,6 +116,9 @@ def test_base_exchange_get_price_level_alerts():
 
         async def get_contract_size(self, symbol):
             return 1.0
+
+        async def get_mark_price(self, symbol):
+            return 0.0
 
     ex = _TestExchange()
     assert ex.get_price_level_alerts() == []
@@ -308,6 +314,8 @@ def _make_deps():
         "o1", "BTC/USDT:USDT", "buy", "market", 0.01, 65000.0, "closed",
     ))
     d.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    d.exchange.get_mark_price = AsyncMock(return_value=0.0)
+    d.exchange.algo_trigger_reference = "last"
     # Default: OHLCV fetch fails → _safe_ohlcv returns None → atr_1h stays None → ATR-multiple suffix omitted.
     # Tests that want to exercise the ATR path should override this per-test.
     d.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("default: no OHLCV in _make_deps"))
@@ -528,6 +536,7 @@ async def test_get_position_enhanced():
     deps.market_data.get_ticker.return_value = Ticker(
         "BTC/USDT:USDT", 74500.0, 74499.0, 74501.0, 75200.0, 73800.0, 100.0, 1000,
     )
+    deps.exchange.get_mark_price = AsyncMock(return_value=74500.0)
 
     result = await get_position(deps)
     # iter-tool-opt-as-of-header: position header includes inline fetch timestamp
@@ -672,7 +681,7 @@ async def test_get_open_orders_with_distance():
 
     result = await get_open_orders(deps)
     # Stop and TP should show distance
-    assert "% from current" in result or "from current" in result
+    assert "% from last price" in result or "from last price" in result
     # Market order should show "market price" without distance
     assert "market price" in result
 
@@ -695,7 +704,7 @@ async def test_set_stop_loss_distance():
 
     result = await set_stop_loss(deps, 72500.0, reasoning="protect capital")
     assert "72500" in result
-    assert "% from current" in result or "from current" in result
+    assert "% from last price" in result or "from last price" in result
 
 
 async def test_set_take_profit_distance():
@@ -714,7 +723,7 @@ async def test_set_take_profit_distance():
 
     result = await set_take_profit(deps, 79200.0, reasoning="target resistance")
     assert "79200" in result
-    assert "% from current" in result or "from current" in result
+    assert "% from last price" in result or "from last price" in result
 
 
 async def test_set_price_volatility_alert_disabled():
@@ -986,6 +995,7 @@ def _make_oco_deps(orders: list[Order], ticker_last: float = 70000.0):
     deps.symbol = "BTC/USDT:USDT"
     deps.exchange = MagicMock()
     deps.exchange.fetch_open_orders = AsyncMock(return_value=orders)
+    deps.exchange.algo_trigger_reference = "last"
     deps.market_data = MagicMock()
     deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=ticker_last, bid=ticker_last - 1,
@@ -1246,7 +1256,7 @@ async def test_get_open_orders_distance_shows_percent_and_pts():
               status="open", is_algo=False),
     ]
     out = await get_open_orders(_make_oco_deps(orders, ticker_last=82175.0))
-    assert "@ 82750.00 (+0.70% / +575.0 pts from current)" in out, (
+    assert "@ 82750.00 (+0.70% / +575.0 pts from last price)" in out, (
         f"distance suffix missing or wrong format:\n{out}"
     )
 
@@ -1264,7 +1274,7 @@ async def test_get_open_orders_single_order_negative_pts():
               status="open", is_algo=True),
     ]
     out = await get_open_orders(_make_oco_deps(orders, ticker_last=82175.0))
-    assert "@ 81600.00 (-0.70% / -575.0 pts from current)" in out, (
+    assert "@ 81600.00 (-0.70% / -575.0 pts from last price)" in out, (
         f"signed pts suffix missing:\n{out}"
     )
 
@@ -1288,9 +1298,9 @@ async def test_get_open_orders_oco_shows_percent_and_pts():
               status="open", fee=None, is_algo=True),
     ]
     out = await get_open_orders(_make_oco_deps(orders, ticker_last=82200.0))
-    assert "stop 81920.00 (-0.34% / -280.0 pts from current)" in out, (
+    assert "stop 81920.00 (-0.34% / -280.0 pts from last price)" in out, (
         f"OCO SL leg suffix missing:\n{out}"
     )
-    assert "tp 83000.00 (+0.97% / +800.0 pts from current)" in out, (
+    assert "tp 83000.00 (+0.97% / +800.0 pts from last price)" in out, (
         f"OCO TP leg suffix missing:\n{out}"
     )
