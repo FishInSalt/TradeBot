@@ -235,6 +235,9 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     """
     import asyncio
     from datetime import datetime, timezone
+
+    from src.utils.ohlcv_utils import _closed_bars
+
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     symbol = symbol or deps.symbol
 
@@ -327,11 +330,14 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         sections.append(f"=== Exit Orders ===\n(unavailable: {e.__class__.__name__})")
         return "\n\n".join(sections)
 
-    # ATR(1h) — may be None if OHLCV failed
+    # ATR(1h) — closed-bars-only per algorithm-lock invariant (R2-Next-D §6.4):
+    # atr_14 here must match GMD/HTF/MTS atr_14 on the same TF.
     atr_1h = None
     if ohlcv_df is not None and not ohlcv_df.empty:
-        indicators = deps.technical.compute_indicators(ohlcv_df)
-        atr_1h = indicators.get("atr_14")
+        df_closed = _closed_bars(ohlcv_df)
+        if not df_closed.empty:
+            indicators = deps.technical.compute_indicators(df_closed)
+            atr_1h = indicators.get("atr_14")
     current_price = ticker.last
 
     sections = _render_position_core()
