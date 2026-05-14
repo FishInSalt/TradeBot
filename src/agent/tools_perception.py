@@ -263,6 +263,13 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             logger.exception("get_position: 1h OHLCV fetch failed")
             return None
 
+    async def _safe_mark_price():
+        try:
+            return await deps.exchange.get_mark_price(symbol)
+        except Exception:
+            logger.exception("get_position: mark price fetch failed")
+            return 0.0
+
     def _render_position_core() -> list[str]:
         """Render Position + PnL sections (Phase-1 fields only).
 
@@ -304,12 +311,13 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         return ["\n".join(pos_lines), "\n".join(pnl_lines)]
 
     try:
-        ticker, balance, ohlcv_df, open_orders, contract_size = await asyncio.gather(
+        ticker, balance, ohlcv_df, open_orders, contract_size, mark_price = await asyncio.gather(
             deps.market_data.get_ticker(symbol),
             deps.exchange.fetch_balance(),
             _safe_ohlcv(),
             deps.exchange.fetch_open_orders(symbol),
             deps.exchange.get_contract_size(symbol),
+            _safe_mark_price(),
             return_exceptions=False,
         )
     except Exception as e:
@@ -339,13 +347,33 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     risk_lines = ["=== Risk Exposure ==="]
     risk_lines.append(f"Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
     risk_lines.append(f"Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
-    if p.liquidation_price is not None and current_price > 0:
-        liq_dist_pct = abs(current_price - p.liquidation_price) / current_price * 100
-        if atr_pct_1h is not None and atr_pct_1h > 0:
-            atr_mult = liq_dist_pct / atr_pct_1h
-            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away = {atr_mult:.1f}× ATR(1h))")
+    # Risk Exposure: Mark + Liquidation
+    if mark_price > 0:
+        if current_price > 0:
+            drift_pct = (current_price - mark_price) / mark_price * 100
+            risk_lines.append(
+                f"Mark: {mark_price:.2f} (Last: {current_price:.2f}, drift {drift_pct:+.2f}%)"
+            )
         else:
-            risk_lines.append(f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.1f}% away)")
+            risk_lines.append(f"Mark: {mark_price:.2f} (Last: unavailable)")
+
+        if p.liquidation_price is not None:
+            liq_dist_pct = abs(mark_price - p.liquidation_price) / mark_price * 100
+            if atr_pct_1h is not None and atr_pct_1h > 0:
+                atr_mult = liq_dist_pct / atr_pct_1h
+                risk_lines.append(
+                    f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.2f}% away = {atr_mult:.1f}× ATR(1h))"
+                )
+            else:
+                risk_lines.append(
+                    f"Liquidation: {p.liquidation_price:.2f} ({liq_dist_pct:.2f}% away)"
+                )
+    else:
+        # mark fetch failed → omit Mark line, Liquidation falls back without distance
+        if p.liquidation_price is not None:
+            risk_lines.append(
+                f"Liquidation: {p.liquidation_price:.2f} (distance unavailable: mark fetch failed)"
+            )
     sections.append("\n".join(risk_lines))
 
     # === Exit Orders ===

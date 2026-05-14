@@ -116,3 +116,134 @@ async def test_okx_get_mark_price_uses_inst_id_conversion():
     ex._client.public_get_public_mark_price.assert_awaited_once_with({
         "instType": "SWAP", "instId": "BTC-USDT-SWAP",
     })
+
+
+# ============ Task 4: get_position mark integration ============
+
+@pytest.fixture
+def mock_deps_for_position():
+    """Build a minimal `deps` mock with all IO returning fixture values."""
+    import pandas as pd
+    from src.integrations.exchange.base import Ticker, Position, Balance
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.initial_balance = 10_000.0
+
+    # Position: long with 0.5 contracts entry 80000, liq 51000
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(symbol="BTC/USDT:USDT", side="long", contracts=0.5,
+                 entry_price=80_000.0, unrealized_pnl=500.0, leverage=10,
+                 liquidation_price=51_000.0, created_at=None),
+    ])
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10_500.0, free_usdt=8_000.0, used_usdt=2_500.0,
+    ))
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.get_contract_size = AsyncMock(return_value=0.01)
+    deps.exchange.get_mark_price = AsyncMock(return_value=80_000.0)
+    deps.exchange.algo_trigger_reference = "last"
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=80_048.0, bid=80_040.0, ask=80_056.0,
+        high=82_000.0, low=79_000.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+    # Empty OHLCV → no ATR suffix; cleaner assertions
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=pd.DataFrame())
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_get_position_mark_line_byte_equal(mock_deps_for_position):
+    """Spec §3.1 POS-5 Mark line variant (i) happy path: byte-equal Mark line
+    rendering with explicit drift formula (last - mark) / mark * 100.
+    """
+    from src.agent.tools_perception import get_position
+
+    # Fixture math: mark=80000, last=80048 → drift = (80048-80000)/80000*100 = +0.06%
+    out = await get_position(mock_deps_for_position)
+    assert "Mark: 80000.00 (Last: 80048.00, drift +0.06%)" in out
+
+
+@pytest.mark.asyncio
+async def test_get_position_drift_positive_sign_demo_magnitude(mock_deps_for_position):
+    """Spec §5.1: demo-magnitude fixture using memory `project_okx_demo_mark_vs_last_drift`
+    values. Note: memory writes -1.67% under (mark-last)/last convention;
+    spec §4.1 uses (last-mark)/mark which gives +1.7033% → rounded +1.70%.
+    Same physical observation; sign flips AND magnitude shifts ~0.03pp because
+    denominator changes from last to mark. Test docstring reproduces this note
+    to prevent future contributors from "fixing" the convention discrepancy.
+    """
+    from src.agent.tools_perception import get_position
+    from src.integrations.exchange.base import Ticker
+
+    mock_deps_for_position.exchange.get_mark_price = AsyncMock(return_value=76_680.30)
+    mock_deps_for_position.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=77_986.30, bid=77_980.0, ask=77_990.0,
+        high=78_500.0, low=77_000.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+
+    out = await get_position(mock_deps_for_position)
+    assert "Mark: 76680.30 (Last: 77986.30, drift +1.70%)" in out
+
+
+@pytest.mark.asyncio
+async def test_get_position_drift_negative_sign(mock_deps_for_position):
+    """Spec §5.1: synthetic negative-sign guard. mark > last → drift negative.
+    No claim of matching demo direction.
+    """
+    from src.agent.tools_perception import get_position
+    from src.integrations.exchange.base import Ticker
+
+    mock_deps_for_position.exchange.get_mark_price = AsyncMock(return_value=80_048.0)
+    mock_deps_for_position.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=80_000.0, bid=79_990.0, ask=80_010.0,
+        high=82_000.0, low=79_500.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+
+    out = await get_position(mock_deps_for_position)
+    assert "drift -0.06%" in out
+
+
+@pytest.mark.asyncio
+async def test_get_position_liquidation_distance_uses_mark(mock_deps_for_position):
+    """Spec §5.1: distance anchor is mark, not last. Fixture: mark=80000,
+    last=82000, liq=51000 → mark-anchored = (80000-51000)/80000 = 36.25%.
+    Last-anchored would give (82000-51000)/82000 ≈ 37.80% — assertion
+    verifies the mark-anchored value, so a regression to last-anchored fails.
+    """
+    from src.agent.tools_perception import get_position
+    from src.integrations.exchange.base import Ticker
+
+    mock_deps_for_position.exchange.get_mark_price = AsyncMock(return_value=80_000.0)
+    mock_deps_for_position.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=82_000.0, bid=81_990.0, ask=82_010.0,
+        high=82_500.0, low=80_000.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+
+    out = await get_position(mock_deps_for_position)
+    assert "Liquidation: 51000.00 (36.25% away)" in out
+
+
+@pytest.mark.asyncio
+async def test_get_position_mark_fetch_failure_isolated_to_liquidation(mock_deps_for_position):
+    """Spec §5.1: mark fetch failure → Mark line omitted, Liquidation falls
+    back to "(distance unavailable: mark fetch failed)", but Notional / Margin
+    / Exit Orders all render normally (Exit Orders is anchored to ticker.last,
+    independent of mark).
+    """
+    from src.agent.tools_perception import get_position
+
+    mock_deps_for_position.exchange.get_mark_price = AsyncMock(
+        side_effect=RuntimeError("mark price fetch returned empty for BTC/USDT:USDT"),
+    )
+
+    out = await get_position(mock_deps_for_position)
+    # (a) Mark line omitted
+    assert "Mark:" not in out
+    # (b) Liquidation fallback
+    assert "Liquidation: 51000.00 (distance unavailable: mark fetch failed)" in out
+    # (c) Notional + Margin render normally
+    assert "Notional value:" in out
+    assert "Margin used:" in out
+    # (d) Exit Orders section still present (empty in this fixture but rendered)
+    assert "=== Exit Orders ===" in out
