@@ -79,7 +79,7 @@ async def main():
                 print(f"  ts: {mp.get('ts')}")
                 if ticker1.last:
                     diff_pct = (ticker1.last - float(mp.get('markPx', 0))) / float(mp.get('markPx', 0)) * 100
-                    print(f"  last vs mark drift (last - mark / mark): {diff_pct:+.4f}%")
+                    print(f"  last vs mark drift ((last - mark) / mark): {diff_pct:+.4f}%")
         except Exception as e:
             print(f"  mark price fetch failed: {e}")
 

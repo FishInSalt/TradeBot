@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move `get_position` Liquidation distance off `ticker.last` onto mark price via a new `BaseExchange.get_mark_price()` abstract method; introduce a `BaseExchange.algo_trigger_reference: str = "last"` class attribute that drives the distance-label wording at four output sites (`get_position` Exit Orders / `get_open_orders` single + OCO / `set_stop_loss` / `set_take_profit`); display a `Mark: X (Last: Y, drift ±Z%)` line in the Risk Exposure section; sync three trader-wrapper docstrings and校准 the iter6 demo-script docstring family.
+**Goal:** Move `get_position` Liquidation distance off `ticker.last` onto mark price via a new `BaseExchange.get_mark_price()` abstract method; introduce a `BaseExchange.algo_trigger_reference: str = "last"` class attribute that drives the distance-label wording at five output sites — six emit points, OCO renders 2 — (`get_position` Exit Orders / `get_open_orders` single / `get_open_orders` OCO / `set_stop_loss` / `set_take_profit`); display a `Mark: X (Last: Y, drift ±Z%)` line in the Risk Exposure section; sync three trader-wrapper docstrings and校准 the iter6 demo-script docstring family.
 
-**Architecture:** Mark fetch is the 6th member of `get_position`'s existing `asyncio.gather` 5-tuple, wrapped with a `_safe_mark_price` helper (parallel pattern to `_safe_ohlcv` at `tools_perception.py:259-264`). On mark fetch failure the helper returns `0.0`; the downstream `mark_price > 0` gate degrades the Mark line (omitted) and Liquidation line (fallback to "distance unavailable: mark fetch failed"). Exit Orders + Notional/Margin lines are anchored to `ticker.last` (matches OKX algo trigger reference per project default) and are unaffected by mark fetch failure. The four distance-label sites read `deps.exchange.algo_trigger_reference` at render time, ensuring single-source-of-truth for the trigger reference word.
+**Architecture:** Mark fetch is the 6th member of `get_position`'s existing `asyncio.gather` 5-tuple, wrapped with a `_safe_mark_price` helper (parallel pattern to `_safe_ohlcv` at `tools_perception.py:259-264`). On mark fetch failure the helper returns `0.0`; the downstream `mark_price > 0` gate degrades the Mark line (omitted) and Liquidation line (fallback to "distance unavailable: mark fetch failed"). Exit Orders + Notional/Margin lines are anchored to `ticker.last` (matches OKX algo trigger reference per project default) and are unaffected by mark fetch failure. The five distance-label sites read `deps.exchange.algo_trigger_reference` at render time, ensuring single-source-of-truth for the trigger reference word.
 
 **Tech Stack:** Python 3, pytest (existing), pydantic-ai (existing), CCXT 4.5.47 `okx` for the new mark-price endpoint call (`public_get_public_mark_price`), `asyncio.gather` for concurrent IO (already in get_position).
 
@@ -89,7 +89,7 @@ In `class BaseExchange(ABC):` (line 97), after `__init__` and before `@abstractm
 
 ```python
     algo_trigger_reference: str = "last"
-    """Word used in distance-label rendering at the four sites listed in
+    """Word used in distance-label rendering at the five sites listed in
     docs/superpowers/specs/2026-05-14-iter-tool-opt-mark-vs-last-design.md §3.1.
     OKX algo orders default trigger reference is last (project does not set
     triggerPxType). Override in subclasses for exchanges whose default differs
@@ -126,7 +126,7 @@ git add src/integrations/exchange/base.py tests/test_iter_tool_opt_mark_vs_last.
 git commit -m "iter-tool-opt-mark-vs-last: add BaseExchange.algo_trigger_reference + abstract get_mark_price
 
 Class attribute defaults to \"last\" — drives the trigger-reference word in
-distance-label rendering at four output sites. Subclasses override for
+distance-label rendering at five output sites. Subclasses override for
 exchanges whose default differs. Abstract method get_mark_price returns
 mark price for liquidation-distance calculation."
 ```
@@ -964,7 +964,7 @@ the OKX algo trigger reference."
 **Files:**
 - Test: `tests/test_iter_tool_opt_mark_vs_last.py` (append; no source code changes)
 
-This task adds the "sentinel" test that locks all four label sites to the `algo_trigger_reference` attribute. If a future contributor hardcodes `"last"` at any site, this test fails loudly.
+This task adds the "sentinel" test that locks all five label sites to the `algo_trigger_reference` attribute. If a future contributor hardcodes `"last"` at any site, this test fails loudly.
 
 - [ ] **Step 1: Append sentinel test**
 
@@ -974,14 +974,14 @@ This task adds the "sentinel" test that locks all four label sites to the `algo_
 @pytest.mark.asyncio
 async def test_algo_trigger_reference_drives_label_text(monkeypatch):
     """Spec §5.1 sentinel: monkey-patch BaseExchange.algo_trigger_reference to
-    "mark" and verify all FOUR label sites emit "from mark price" — confirms
+    "mark" and verify all FIVE label sites emit "from mark price" — confirms
     single-source-of-truth wiring. Failure of this test indicates a future
     contributor has hardcoded "last" at one or more sites.
 
-    Sites under test:
+    Sites under test (5 sites, 6 emit points — OCO renders 2):
       (a) get_position Exit Orders _fmt_exit
       (b) get_open_orders _render_single_order (non-OCO)
-      (c) get_open_orders OCO inline branch
+      (c) get_open_orders OCO inline branch (sl_dist + tp_dist = 2 emits)
       (d) set_stop_loss success message
       (e) set_take_profit success message
     """
@@ -1403,7 +1403,7 @@ grep -nE "from current\b|OKX algo trigger validation uses mark|OKX algo validati
 
 Expected: zero matches. (The phrase `"current position"` in `set_stop_loss` / `set_take_profit` docstrings refers to position state, not the anchor word — unaffected.)
 
-- [ ] **Step 3: Verify the four label sites all flow through `algo_trigger_reference`**
+- [ ] **Step 3: Verify the five label sites all flow through `algo_trigger_reference`**
 
 Run:
 ```bash

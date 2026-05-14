@@ -404,14 +404,14 @@ async def test_set_take_profit_message_uses_last_price():
 @pytest.mark.asyncio
 async def test_algo_trigger_reference_drives_label_text(monkeypatch):
     """Spec §5.1 sentinel: monkey-patch BaseExchange.algo_trigger_reference to
-    "mark" and verify all FOUR label sites emit "from mark price" — confirms
+    "mark" and verify all FIVE label sites emit "from mark price" — confirms
     single-source-of-truth wiring. Failure of this test indicates a future
     contributor has hardcoded "last" at one or more sites.
 
-    Sites under test:
+    Sites under test (5 sites, 6 emit points — OCO renders 2):
       (a) get_position Exit Orders _fmt_exit
       (b) get_open_orders _render_single_order (non-OCO)
-      (c) get_open_orders OCO inline branch
+      (c) get_open_orders OCO inline branch (sl_dist + tp_dist = 2 emits)
       (d) set_stop_loss success message
       (e) set_take_profit success message
     """

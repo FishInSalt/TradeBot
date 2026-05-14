@@ -96,7 +96,7 @@ class Position:
 
 class BaseExchange(ABC):
     algo_trigger_reference: str = "last"
-    """Word used in distance-label rendering at the four sites listed in
+    """Word used in distance-label rendering at the five sites listed in
     docs/superpowers/specs/2026-05-14-iter-tool-opt-mark-vs-last-design.md §3.1.
     OKX algo orders default trigger reference is last (project does not set
     triggerPxType). Subclasses for exchanges whose default differs override

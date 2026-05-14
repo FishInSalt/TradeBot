@@ -395,6 +395,9 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     exit_lines = ["=== Exit Orders ==="]
     trigger_ref = deps.exchange.algo_trigger_reference
 
+    # Exit Orders distance is intentionally last-anchored (current_price = ticker.last),
+    # matching OKX's algo trigger reference. The Risk Exposure Mark line above is for
+    # the Liquidation row only — different anchor, different physical purpose.
     def _fmt_exit(o, kind: str) -> str:
         dist_entry_pct = (o.price - p.entry_price) / p.entry_price * 100
         dist_curr_pct = (o.price - current_price) / current_price * 100 if current_price > 0 else 0.0
