@@ -448,12 +448,15 @@ async def get_memories(deps: TradingDeps) -> str:
     return await deps.memory.format_for_prompt()
 
 
-def _render_single_order(o, current: float) -> str:
-    """Render a single (non-OCO) order line — preserves pre-Iter-2b rendering exactly.
+def _render_single_order(o, current: float, trigger_ref: str) -> str:
+    """Render a single (non-OCO) order line.
 
-    Preserves the current > 0 branch: no crash on abnormal ticker. Label/distance/ID
-    suffix format matches original tools_perception.py exactly to satisfy spec §6
-    "zero byte-level regression".
+    `trigger_ref` is the exchange's algo trigger reference word (default
+    "last" for OKX); used in the distance-label suffix.
+
+    Preserves the current > 0 branch: no crash on abnormal ticker. Label /
+    distance / ID suffix format matches the pre-iter-tool-opt-mark-vs-last
+    rendering except for the trailing "{trigger_ref} price" swap.
     """
     if o.order_type == "market" or o.price is None:
         label = "[PENDING]" if o.order_type == "market" else f"[{o.order_type.upper()}]"
@@ -466,7 +469,7 @@ def _render_single_order(o, current: float) -> str:
         if current > 0:
             dist = (o.price - current) / current * 100
             pts = o.price - current
-            price_str = f"@ {o.price:.2f} ({dist:+.2f}% / {pts:+.1f} pts from current)"
+            price_str = f"@ {o.price:.2f} ({dist:+.2f}% / {pts:+.1f} pts from {trigger_ref} price)"
         else:
             price_str = f"@ {o.price:.2f} (ticker unavailable, distance N/A)"
     return f"  {label} {o.side} {o.amount} {price_str} | ID: {o.id}"
@@ -482,6 +485,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     current = ticker.last
+    trigger_ref = deps.exchange.algo_trigger_reference
 
     # Group by id: OCO's two same-id legs share id + is_algo=True
     by_id: dict[str, list] = {}
@@ -500,12 +504,12 @@ async def get_open_orders(deps: TradingDeps) -> str:
             tp = next(o for o in group if o.order_type == "take_profit")
             sl_dist = (
                 f" ({(sl.price - current) / current * 100:+.2f}%"
-                f" / {sl.price - current:+.1f} pts from current)"
+                f" / {sl.price - current:+.1f} pts from {trigger_ref} price)"
                 if current > 0 else " (ticker unavailable)"
             )
             tp_dist = (
                 f" ({(tp.price - current) / current * 100:+.2f}%"
-                f" / {tp.price - current:+.1f} pts from current)"
+                f" / {tp.price - current:+.1f} pts from {trigger_ref} price)"
                 if current > 0 else " (ticker unavailable)"
             )
             lines.append(
@@ -515,7 +519,7 @@ async def get_open_orders(deps: TradingDeps) -> str:
             )
         else:
             for o in group:
-                lines.append(_render_single_order(o, current))
+                lines.append(_render_single_order(o, current, trigger_ref))
     return "\n".join(lines)
 
 

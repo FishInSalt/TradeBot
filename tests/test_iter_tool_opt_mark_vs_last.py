@@ -275,3 +275,61 @@ async def test_get_position_exit_orders_label_last_price(mock_deps_for_position)
     assert "above last price" in out  # TP above current
     assert "below current" not in out
     assert "above current" not in out
+
+
+# ============ Task 6: get_open_orders single + OCO label swap ============
+
+@pytest.mark.asyncio
+async def test_get_open_orders_single_order_uses_last_price():
+    """Spec §3.1 OO-7 non-OCO: _render_single_order takes a trigger_ref
+    parameter; label uses "{trigger_ref} price" instead of "current".
+    """
+    from src.agent.tools_perception import get_open_orders
+    from src.integrations.exchange.base import Order, Ticker
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.exchange.algo_trigger_reference = "last"
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="ord-1", symbol="BTC/USDT:USDT", side="buy", order_type="limit",
+              amount=0.5, price=79_000.0, status="open", is_algo=False,
+              trigger_price=None),
+    ])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=80_000.0, bid=79_995.0, ask=80_005.0,
+        high=82_000.0, low=79_500.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+
+    out = await get_open_orders(deps)
+    assert "from last price" in out
+    assert "from current" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_oco_pair_uses_last_price():
+    """Spec §3.1 OO-7 OCO: same-id stop + take_profit pair via inline render
+    branch — both sl_dist and tp_dist suffixes use "{trigger_ref} price".
+    """
+    from src.agent.tools_perception import get_open_orders
+    from src.integrations.exchange.base import Order, Ticker
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.exchange.algo_trigger_reference = "last"
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="oco-1", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.5, price=78_000.0, status="open", is_algo=True,
+              trigger_price=78_000.0),
+        Order(id="oco-1", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.5, price=82_000.0, status="open", is_algo=True,
+              trigger_price=82_000.0),
+    ])
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=80_000.0, bid=79_995.0, ask=80_005.0,
+        high=82_000.0, low=79_500.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+
+    out = await get_open_orders(deps)
+    # Both legs use the trigger_ref label
+    assert out.count("from last price") == 2
+    assert "from current" not in out
