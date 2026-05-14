@@ -30,3 +30,26 @@ def test_base_algo_trigger_reference_default_last():
     assert BaseExchange.algo_trigger_reference == "last"
     assert OKXExchange.algo_trigger_reference == "last"
     assert SimulatedExchange.algo_trigger_reference == "last"
+
+
+# ============ Task 2: SimulatedExchange.get_mark_price ============
+
+@pytest.mark.asyncio
+async def test_sim_get_mark_price_returns_ticker_last():
+    """Spec §3.1 SimulatedExchange row: get_mark_price returns the cached
+    ticker.last. Sim has a single price source — mark = last. fetch_ticker is
+    observation-only (no internal tick advance), so back-to-back invocation
+    inside get_position's 6-tuple gather is safe.
+    """
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.base import Ticker
+
+    cfg = MagicMock(fee_rate=0.0005, precision={})
+    ex = SimulatedExchange(config=cfg, db_engine=None, session_id="sid", symbol="BTC/USDT:USDT")
+    ex._latest_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=80_000.0, bid=79_995.0, ask=80_005.0,
+        high=82_000.0, low=79_500.0, base_volume=12_345.0, timestamp=1_715_040_000_000,
+    )
+
+    mark = await ex.get_mark_price("BTC/USDT:USDT")
+    assert mark == 80_000.0
