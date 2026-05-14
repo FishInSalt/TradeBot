@@ -1097,7 +1097,7 @@ async def test_get_open_orders_oco_handles_zero_ticker_without_dist_suffix():
     assert "[OCO]" in row
     assert "60000.00" in row and "80000.00" in row
     # dist suffix must not appear
-    assert "% from current" not in row
+    assert "% from last price" not in row
 
 
 # --- Task 7 (Iter 2b): tools_execution forwards is_algo to cancel_order ---
