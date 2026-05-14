@@ -4,7 +4,7 @@ End-to-end assertions: capture the prompt passed to agent.run via a
 mock_run side-effect, then assert that:
   - First cycle in a session: NO 'Your prior cycle summaries' header.
   - 2+ cycle: header + N=min(3, available) blocks present.
-  - Injection appears AFTER trigger context, BEFORE memory_context.
+  - Injection appears AFTER trigger context (memory_context removed in iter-w2r3-memory-disable).
   - DB or render error: cycle still completes; no header in prompt.
 """
 from __future__ import annotations
@@ -165,14 +165,12 @@ async def test_subsequent_cycle_injects_prior_summaries_with_header():
     )
 
 
-async def test_injection_appears_before_memory_context():
-    """T4.3: order in prompt is trigger intro → recent summaries → memory."""
+async def test_injection_appears_after_trigger_no_memory():
+    """T4.3 (iter-w2r3-memory-disable): order in prompt is trigger intro → recent summaries; memory injection removed."""
     from src.cli.app import TokenBudget, run_agent_cycle
 
     deps, engine = await _make_deps_engine_with_capture_mocks("sess-t4-3")
-    deps.memory = AsyncMock(
-        format_for_prompt=AsyncMock(return_value="lesson-X-marker"),
-    )
+    # deps.memory remains an AsyncMock per fixture; format_for_prompt should not be called
     await _seed_prior_cycles(engine, "sess-t4-3", count=1)
     budget = TokenBudget(daily_max=500_000)
     agent, captured = _make_capturing_agent()
@@ -184,11 +182,12 @@ async def test_injection_appears_before_memory_context():
 
     prompt = captured["prompt"]
     pos_recent = prompt.index("Your prior cycle summaries")
-    pos_memory = prompt.index("Your memories:")
     pos_intro = prompt.index("Assess the situation")
-    assert pos_intro < pos_recent < pos_memory, (
-        f"Order broken: intro={pos_intro} recent={pos_recent} memory={pos_memory}\n"
-        f"prompt:\n{prompt}"
+    assert pos_intro < pos_recent, (
+        f"Order broken: intro={pos_intro} recent={pos_recent}\nprompt:\n{prompt}"
+    )
+    assert "Your memories:" not in prompt, (
+        f"memory injection regression: 'Your memories:' in prompt\n{prompt[:500]}"
     )
 
 

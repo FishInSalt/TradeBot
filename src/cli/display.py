@@ -499,7 +499,6 @@ _PERCEPTION_TOOL_NAMES: frozenset[str] = frozenset({
     "get_macro_context",
     "get_position",
     "get_account_balance",
-    "get_memories",
     "get_open_orders",
     "get_trade_journal",
     "get_active_alerts",
@@ -510,11 +509,7 @@ _PERCEPTION_TOOL_NAMES: frozenset[str] = frozenset({
     "get_stablecoin_supply",
 })
 
-_SECTIONED_PERCEPTION_TOOL_NAMES: frozenset[str] = (
-    _PERCEPTION_TOOL_NAMES - frozenset({"get_memories"})
-)
-# get_memories 是 backend-dependent format 例外（spec §4.2.13 / §8.8）;
-# T-DG-1 sectioning lint 跳过此工具。
+_SECTIONED_PERCEPTION_TOOL_NAMES: frozenset[str] = _PERCEPTION_TOOL_NAMES
 
 _EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
     "open_position",
@@ -546,6 +541,7 @@ def resolve_tool_display(
     """
     if is_tool_error(tool_name, content, outcome):
         return "✗", _fallback_summary(content)
+    # Retired tool: iter-w2r3-memory-disable — dispatch branch kept for revert path.
     if tool_name == "save_memory":
         if args and isinstance(args, dict):
             return "✎", summarize_save_memory(args)
