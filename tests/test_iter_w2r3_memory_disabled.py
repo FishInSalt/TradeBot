@@ -11,8 +11,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 
 def test_a_memory_tools_unregistered():
     """(a) save_memory / get_memories must be absent from agent toolset."""
