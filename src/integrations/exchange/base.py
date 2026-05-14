@@ -95,6 +95,14 @@ class Position:
 
 
 class BaseExchange(ABC):
+    algo_trigger_reference: str = "last"
+    """Word used in distance-label rendering at the four sites listed in
+    docs/superpowers/specs/2026-05-14-iter-tool-opt-mark-vs-last-design.md §3.1.
+    OKX algo orders default trigger reference is last (project does not set
+    triggerPxType). Override in subclasses for exchanges whose default differs
+    (e.g., Bybit V5 — must be set explicitly; Hyperliquid — "mark" or "oracle").
+    """
+
     def __init__(self):
         self._price_level_alerts: list[dict] = []
         self._latest_price: float | None = None
@@ -103,6 +111,15 @@ class BaseExchange(ABC):
 
     @abstractmethod
     async def fetch_ticker(self, symbol: str) -> Ticker: ...
+
+    @abstractmethod
+    async def get_mark_price(self, symbol: str) -> float:
+        """Fetch mark price for the symbol. Used by get_position for
+        liquidation-distance calculation. Implementations should raise on
+        endpoint failure / empty response (no silent fallback).
+        """
+        ...
+
     @abstractmethod
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]: ...
     @abstractmethod
