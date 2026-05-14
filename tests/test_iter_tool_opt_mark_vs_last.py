@@ -397,3 +397,96 @@ async def test_set_take_profit_message_uses_last_price():
     out = await set_take_profit(deps, price=82_000.0, reasoning="resistance ceiling")
     assert "from last price" in out
     assert "from current" not in out
+
+
+# ============ Task 8: algo_trigger_reference single-source-of-truth ============
+
+@pytest.mark.asyncio
+async def test_algo_trigger_reference_drives_label_text(monkeypatch):
+    """Spec §5.1 sentinel: monkey-patch BaseExchange.algo_trigger_reference to
+    "mark" and verify all FOUR label sites emit "from mark price" — confirms
+    single-source-of-truth wiring. Failure of this test indicates a future
+    contributor has hardcoded "last" at one or more sites.
+
+    Sites under test:
+      (a) get_position Exit Orders _fmt_exit
+      (b) get_open_orders _render_single_order (non-OCO)
+      (c) get_open_orders OCO inline branch
+      (d) set_stop_loss success message
+      (e) set_take_profit success message
+    """
+    from src.integrations.exchange.base import BaseExchange, Order, Position, Ticker
+    from src.agent.tools_perception import get_position, get_open_orders
+    from src.agent.tools_execution import set_stop_loss, set_take_profit
+    import pandas as pd
+
+    monkeypatch.setattr(BaseExchange, "algo_trigger_reference", "mark")
+
+    # Common deps fixture
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.initial_balance = 10_000.0
+    deps.db_engine = None
+    deps.exchange.algo_trigger_reference = "mark"
+    deps.exchange.fetch_balance = AsyncMock(return_value=MagicMock(
+        total_usdt=10_500.0, free_usdt=8_000.0, used_usdt=2_500.0,
+    ))
+    deps.exchange.get_contract_size = AsyncMock(return_value=0.01)
+    deps.exchange.get_mark_price = AsyncMock(return_value=80_000.0)
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=80_000.0, bid=79_995.0, ask=80_005.0,
+        high=82_000.0, low=79_500.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
+    ))
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=pd.DataFrame())
+
+    # (a) get_position Exit Orders + (b/c covered separately)
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(symbol="BTC/USDT:USDT", side="long", contracts=0.5,
+                 entry_price=80_000.0, unrealized_pnl=0.0, leverage=10,
+                 liquidation_price=51_000.0, created_at=None),
+    ])
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="sl-1", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.5, price=78_000.0, status="open", is_algo=True,
+              trigger_price=78_000.0),
+    ])
+    out_pos = await get_position(deps)
+    assert "below mark price" in out_pos or "above mark price" in out_pos
+
+    # (b) get_open_orders non-OCO
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="ord-1", symbol="BTC/USDT:USDT", side="buy", order_type="limit",
+              amount=0.5, price=79_000.0, status="open", is_algo=False,
+              trigger_price=None),
+    ])
+    out_oo = await get_open_orders(deps)
+    assert "from mark price" in out_oo
+
+    # (c) get_open_orders OCO
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[
+        Order(id="oco-1", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+              amount=0.5, price=78_000.0, status="open", is_algo=True,
+              trigger_price=78_000.0),
+        Order(id="oco-1", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+              amount=0.5, price=82_000.0, status="open", is_algo=True,
+              trigger_price=82_000.0),
+    ])
+    out_oco = await get_open_orders(deps)
+    assert out_oco.count("from mark price") == 2
+
+    # (d) set_stop_loss
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="sl-2", symbol="BTC/USDT:USDT", side="sell", order_type="stop",
+        amount=0.5, price=78_000.0, status="open", is_algo=True,
+    ))
+    out_sl = await set_stop_loss(deps, price=78_000.0, reasoning="x")
+    assert "from mark price" in out_sl
+
+    # (e) set_take_profit
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="tp-2", symbol="BTC/USDT:USDT", side="sell", order_type="take_profit",
+        amount=0.5, price=82_000.0, status="open", is_algo=True,
+    ))
+    out_tp = await set_take_profit(deps, price=82_000.0, reasoning="x")
+    assert "from mark price" in out_tp
