@@ -175,17 +175,6 @@ def create_trader_agent(
         return await _impl(ctx.deps)
 
     @tool
-    async def get_memories(ctx: RunContext[TradingDeps]) -> str:
-        """Get long-term memories (lessons, patterns, trade reviews).
-
-        Check past memories before making decisions to avoid repeating mistakes
-        and apply pattern recognitions that proved correct previously.
-        """
-        from src.agent.tools_perception import get_memories as _impl
-
-        return await _impl(ctx.deps)
-
-    @tool
     async def get_active_alerts(ctx: RunContext[TradingDeps]) -> str:
         """Get current alert configuration.
 
@@ -723,43 +712,20 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, side, price, position_pct, leverage, reasoning=reasoning)
 
-    # === Memory Tools ===
-
-    @tool
-    async def save_memory(
-        ctx: RunContext[TradingDeps], category: str, content: str, importance: float = 0.5
-    ) -> str:
-        """Save a learning or observation to long-term memory.
-
-        Save memories that your future self would find actionable — trade
-        outcomes, pattern recognitions that proved correct or incorrect, and
-        mistakes to avoid. Routine observations like "market is quiet" are
-        not worth saving.
-
-        Args:
-            category: 'trade_review', 'market_pattern', or 'lesson'.
-            content: the memory content to save.
-            importance: weight 0-1 (default 0.5).
-        """
-        from src.agent.tools_memory import save_memory as _impl
-
-        return await _impl(ctx.deps, category, content, importance)
-
     return agent
 
 
-# REGISTERED_TOOL_NAMES: 与 `@agent.tool` 装饰顺序保持一致（感知 → 执行 → memory）。
+# REGISTERED_TOOL_NAMES: 与 `@agent.tool` 装饰顺序保持一致（感知 → 执行）。
 # 供 scheduler 日志、scripts/tool_call_summary.py 脚本、漂移防护测试统一引用。
 # 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
 # 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
 REGISTERED_TOOL_NAMES: list[str] = [
-    # --- 感知 (20) ---
+    # --- 感知 (19) ---
     "get_market_data",
     "get_position",
     "get_account_balance",
     "get_open_orders",
     "get_trade_journal",
-    "get_memories",
     "get_active_alerts",
     "get_performance",
     "get_market_news",
@@ -788,6 +754,4 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "set_next_wake",
     "set_next_wake_at",
     "place_limit_order",
-    # --- memory (1) ---
-    "save_memory",
 ]

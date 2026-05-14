@@ -86,7 +86,7 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 
 - **Fill timing**: After submitting a market order, you will be notified when it fills via a separate trigger. Set stop loss and take profit only after receiving fill confirmation — do not attempt in the same cycle as order submission.
 - **Open fill response**: When woken by an order fill notification (conditional trigger) that opened a position, identify your stop loss and take profit levels and set them. Use market data to inform these levels.
-- **Close fill response**: When woken by a fill that closed a position (stop loss, take profit, or manual close), review the trade outcome: what worked, what didn't, and what you would do differently. Save actionable lessons to memory.
+- **Close fill response**: When woken by a fill that closed a position (stop loss, take profit, or manual close), review the trade outcome: what worked, what didn't, and what you would do differently.
 - **Alert response**: When woken by a price alert, assess whether the price move changes your thesis. For a price level alert, evaluate whether the level held or broke and what that implies. For a volatility alert, determine if the move is the start of a trend or just noise before acting.
 - **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after.
 - **Wake interval control**: scheduled wake-up applies only when no external trigger fires; alerts, fills, and conditional triggers always interrupt sleep. Allowed range: next 1-{runtime.wake_max_minutes} min from now for this session.
@@ -132,7 +132,7 @@ What is the risk-to-reward ratio of this potential trade? Where is the logical s
 How much capital is currently at risk? Is there a reason to scale in or scale out? Should stops be trailed as the trade develops? Is the position sized appropriately for the conviction level?
 
 **Self-Review**
-What happened in similar market conditions before? Are there relevant lessons in your memory? What can you learn from this cycle, regardless of whether you take a trade?
+What happened in similar market conditions before? What can you learn from this cycle, regardless of whether you take a trade?
 
 You do not need to address every dimension in every cycle. If the market is quiet and you have no position, a brief structural overview and a decision to wait may be sufficient. If you have an active position in a volatile market, focus on position management and risk. A position that is developing according to plan does not need intervention every cycle."""
 

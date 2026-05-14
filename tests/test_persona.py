@@ -30,7 +30,7 @@ def test_prompt_contains_fill_response_guidance():
     # Open fill: set SL/TP using chart structure
     assert "open fill" in prompt_lower or "opened a position" in prompt_lower
     assert "stop loss" in prompt_lower and "take profit" in prompt_lower
-    # Close fill: review outcome, save memory
+    # Close fill: review outcome
     assert "close fill" in prompt_lower or "closed a position" in prompt_lower
     assert "review" in prompt_lower and "outcome" in prompt_lower
 
@@ -43,14 +43,6 @@ def test_prompt_contains_alert_response_guidance():
     assert "price level alert" in prompt_lower
     assert "volatility alert" in prompt_lower
     assert "trend" in prompt_lower or "noise" in prompt_lower
-
-
-def test_prompt_contains_memory_quality_guidance():
-    """L28 retained-bullet guard: 'Save actionable lessons to memory.' (spec §2.1)."""
-    from src.agent.persona import generate_system_prompt
-    prompt = generate_system_prompt(PersonaConfig())
-    prompt_lower = prompt.lower()
-    assert "actionable" in prompt_lower
 
 
 def test_prompt_contains_anti_overtrading():

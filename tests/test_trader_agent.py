@@ -24,15 +24,12 @@ def test_trader_agent_has_all_tools():
     assert "get_account_balance" in tool_names
     assert "get_open_orders" in tool_names
     assert "get_trade_journal" in tool_names
-    assert "get_memories" in tool_names
     # 执行类
     assert "open_position" in tool_names
     assert "close_position" in tool_names
     assert "set_stop_loss" in tool_names
     assert "set_take_profit" in tool_names
     assert "adjust_leverage" in tool_names
-    # 记忆类
-    assert "save_memory" in tool_names
     assert "add_price_level_alert" in tool_names
     assert "set_next_wake" in tool_names
     # N2 market intelligence tools
@@ -82,8 +79,8 @@ def test_registered_tool_names_matches_agent_tools():
         f"  In agent but not in REGISTERED_TOOL_NAMES: {actual - declared}\n"
         f"  In REGISTERED_TOOL_NAMES but not in agent: {declared - actual}"
     )
-    assert len(REGISTERED_TOOL_NAMES) == 34, (
-        f"Expected 34 tools (20+13+1), got {len(REGISTERED_TOOL_NAMES)}"
+    assert len(REGISTERED_TOOL_NAMES) == 32, (
+        f"Expected 32 tools (19+13), got {len(REGISTERED_TOOL_NAMES)}"
     )
     # 无重复
     assert len(REGISTERED_TOOL_NAMES) == len(set(REGISTERED_TOOL_NAMES)), \

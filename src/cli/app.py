@@ -492,7 +492,7 @@ async def run_agent_cycle(
             )
 
     # R2-8b: inject most recent N=3 cycle summaries from this session
-    # (D-D-E injection position: trigger context → recent → memory).
+    # (D-D-E injection position: trigger context → recent).
     # _build_recent_summaries_block is fail-isolated (review F3) — any
     # error returns "" and lets the cycle proceed.
     recent_block = await _build_recent_summaries_block(
@@ -500,10 +500,6 @@ async def run_agent_cycle(
     )
     if recent_block:
         prompt += f"\n\n{recent_block}"
-
-    memory_context = await deps.memory.format_for_prompt()
-    if memory_context != "No relevant memories.":
-        prompt += f"\n\nYour memories:\n{memory_context}"
 
     # P4 (obs roadmap Phase 3): capture full user_prompt for forensic snapshot. String
     # reference assignment cannot raise — see spec §5.3 (cycle-level new
