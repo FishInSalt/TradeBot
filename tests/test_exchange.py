@@ -260,6 +260,9 @@ async def test_base_exchange_start_default_noop():
         async def get_contract_size(self, symbol):
             return 1.0
 
+        async def get_mark_price(self, symbol):
+            return 0.0
+
     ex = DummyExchange()
     await ex.start()  # 不应抛异常
 
@@ -294,6 +297,9 @@ def test_base_exchange_on_fill_default_noop():
 
         async def get_contract_size(self, symbol):
             return 1.0
+
+        async def get_mark_price(self, symbol):
+            return 0.0
 
     ex = DummyExchange()
     callback = AsyncMock()
@@ -331,6 +337,9 @@ def test_base_exchange_on_alert_default_noop():
         async def get_contract_size(self, symbol):
             return 1.0
 
+        async def get_mark_price(self, symbol):
+            return 0.0
+
     ex = DummyExchange()
     callback = AsyncMock()
     ex.on_alert(callback)  # 不应抛异常
@@ -367,6 +376,9 @@ def test_base_exchange_set_alert_service_default_noop():
         async def get_contract_size(self, symbol):
             return 1.0
 
+        async def get_mark_price(self, symbol):
+            return 0.0
+
     ex = DummyExchange()
     ex.set_alert_service(object())  # 不应抛异常
 
@@ -402,6 +414,9 @@ def test_base_exchange_update_alert_params_default_noop():
         async def get_contract_size(self, symbol):
             return 1.0
 
+        async def get_mark_price(self, symbol):
+            return 0.0
+
     ex = DummyExchange()
     ex.update_alert_params(3.0, 5)  # 不应抛异常
 
@@ -435,6 +450,10 @@ async def test_base_exchange_has_pending_market_order_default():
 
         async def get_contract_size(self, symbol):
             return 1.0
+
+        async def get_mark_price(self, symbol):
+            return 0.0
+
     stub = _Stub()
     assert stub.has_pending_market_order("BTC/USDT:USDT") is False
     assert stub.has_pending_market_order("BTC/USDT:USDT", side="buy") is False

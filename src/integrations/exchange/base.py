@@ -99,8 +99,9 @@ class BaseExchange(ABC):
     """Word used in distance-label rendering at the four sites listed in
     docs/superpowers/specs/2026-05-14-iter-tool-opt-mark-vs-last-design.md §3.1.
     OKX algo orders default trigger reference is last (project does not set
-    triggerPxType). Override in subclasses for exchanges whose default differs
-    (e.g., Bybit V5 — must be set explicitly; Hyperliquid — "mark" or "oracle").
+    triggerPxType). Subclasses for exchanges whose default differs override
+    this attribute (e.g., Bybit V5 requires explicit triggerBy; Hyperliquid
+    uses mark or oracle uniformly).
     """
 
     def __init__(self):
@@ -115,8 +116,8 @@ class BaseExchange(ABC):
     @abstractmethod
     async def get_mark_price(self, symbol: str) -> float:
         """Fetch mark price for the symbol. Used by get_position for
-        liquidation-distance calculation. Implementations should raise on
-        endpoint failure / empty response (no silent fallback).
+        liquidation-distance calculation. Raises on endpoint failure or empty
+        response (no silent fallback).
         """
         ...
 

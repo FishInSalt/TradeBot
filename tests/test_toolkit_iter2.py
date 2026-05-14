@@ -492,6 +492,7 @@ async def test_get_position_enhanced_output(mocker):
               amount=0.01, price=68000.0, status="open"),
     ])
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.get_mark_price = AsyncMock(return_value=64100.0)
 
     result = await get_position(deps)
     # R2-8c §4.2.11 — promoted to explicit section headers
@@ -524,6 +525,7 @@ async def test_get_position_no_sl_tp_naked_warning(mocker):
     deps.technical.compute_indicators = mocker.Mock(return_value={"atr_14": 88.0})
     deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.get_mark_price = AsyncMock(return_value=64100.0)
 
     result = await get_position(deps)
     assert "Stop loss: not set" in result
@@ -548,6 +550,7 @@ async def test_get_position_atr_unavailable_degrade(mocker):
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=Exception("no OHLCV"))
     deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.get_mark_price = AsyncMock(return_value=64100.0)
 
     result = await get_position(deps)
     # R2-8c §4.2.11 — promoted to explicit section header
@@ -584,6 +587,7 @@ async def test_get_position_multi_tp_sorted(mocker):
               amount=0.01, price=68000.0, status="open"),
     ])
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.get_mark_price = AsyncMock(return_value=64100.0)
 
     result = await get_position(deps)
     # All 3 TPs rendered
@@ -623,6 +627,7 @@ async def test_get_position_filters_none_price_exit_orders(mocker):
               amount=0.01, price=None, status="open"),
     ])
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.get_mark_price = AsyncMock(return_value=64100.0)
 
     # Should not crash; only the priced order renders
     result = await get_position(deps)

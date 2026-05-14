@@ -37,6 +37,9 @@ def _make_exchange():
         async def get_contract_size(self, symbol):
             return 1.0
 
+        async def get_mark_price(self, symbol):
+            return 0.0
+
     return _TestExchange()
 
 

@@ -203,6 +203,7 @@ async def test_get_position_fact_only(mocker):
               amount=0.01, price=62000.0, status="open"),
     ])
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.get_mark_price = AsyncMock(return_value=64100.0)
     outputs.append(await get_position(deps))
 
     # No SL/TP
