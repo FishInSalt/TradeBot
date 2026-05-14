@@ -128,10 +128,11 @@ def create_trader_agent(
     async def get_position(ctx: RunContext[TradingDeps], symbol: str | None = None) -> str:
         """Get current position details with risk exposure context.
 
-        Includes Risk exposure (notional / margin / liquidation distance in
-        ATR(1h) multiples — 1h is the fixed baseline regardless of session
-        trading style) and Exit orders section (SL/TP distances from both
-        entry and current).
+        Includes Risk exposure (notional / margin / mark price / liquidation
+        distance in ATR(1h) multiples — 1h is the fixed baseline regardless of
+        session trading style) and Exit orders section (SL/TP distances from
+        both entry and last price). Liquidation distance is computed against
+        mark price.
 
         Args:
             symbol: trading symbol (defaults to session symbol).
@@ -153,11 +154,11 @@ def create_trader_agent(
 
     @tool
     async def get_open_orders(ctx: RunContext[TradingDeps]) -> str:
-        """Get all pending orders with distance from current price.
+        """Get all pending orders with distance from last price.
 
         Lists limit orders, stop loss, and take profit orders, each with their
-        price level and distance from current. OCO-paired orders (sharing an
-        algoId on OKX) render with `[OCO]` tag.
+        price level and distance from last price. OCO-paired orders (sharing
+        an algoId on OKX) render with `[OCO]` tag.
         """
         from src.agent.tools_perception import get_open_orders as _impl
 
