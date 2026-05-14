@@ -45,7 +45,6 @@ def test_compute_indicators_keys(sample_ohlcv):
         assert key in indicators
     # New keys
     assert "atr_14" in indicators
-    assert "volume_ratio" in indicators
 
 
 def test_compute_indicators_bb_order(sample_ohlcv):
@@ -73,14 +72,6 @@ def test_compute_indicators_atr_positive(sample_ohlcv):
     indicators = service.compute_indicators(sample_ohlcv)
     assert indicators["atr_14"] is not None
     assert indicators["atr_14"] > 0
-
-
-def test_compute_indicators_volume_ratio(sample_ohlcv):
-    from src.services.technical import TechnicalAnalysisService
-    service = TechnicalAnalysisService()
-    indicators = service.compute_indicators(sample_ohlcv)
-    assert indicators["volume_ratio"] is not None
-    assert indicators["volume_ratio"] > 0
 
 
 def test_compute_indicators_short_data(short_ohlcv):
@@ -132,7 +123,7 @@ def test_format_for_llm_bb_position_at_lower_band():
         "rsi_14": 50.0, "ma_20": 100.0, "ma_50": 100.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 110.0, "bb_middle": 100.0, "bb_lower": 90.0,
-        "atr_14": None, "volume_ratio": None,
+        "atr_14": None,
     }
     text = service.format_for_llm(indicators, current_price=90.0, timeframe="5m")
     # BB line must mention 0% position
@@ -150,7 +141,7 @@ def test_format_for_llm_bb_position_at_upper_band():
         "rsi_14": 50.0, "ma_20": 100.0, "ma_50": 100.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 110.0, "bb_middle": 100.0, "bb_lower": 90.0,
-        "atr_14": None, "volume_ratio": None,
+        "atr_14": None,
     }
     text = service.format_for_llm(indicators, current_price=110.0, timeframe="5m")
     bb_line = next(line for line in text.split("\n") if line.startswith("BB(20,2):"))
@@ -173,7 +164,7 @@ def test_format_for_llm_bb_position_edge_case_equal_bands():
         "rsi_14": 50.0, "ma_20": 100.0, "ma_50": 100.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 100.0, "bb_middle": 100.0, "bb_lower": 100.0,
-        "atr_14": None, "volume_ratio": None,
+        "atr_14": None,
     }
     text = service.format_for_llm(indicators, current_price=100.0, timeframe="5m")
     bb_line = next(line for line in text.split("\n") if line.startswith("BB(20,2):"))

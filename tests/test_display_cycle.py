@@ -2916,7 +2916,7 @@ async def _invoke_path_b(tool_name: str) -> str:
         market_data.get_ticker.return_value = ticker
         market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(150)
         technical = _MagicMock_dg()
-        technical.compute_indicators.return_value = {"atr_14": 100.0, "volume_ratio": 1.0}
+        technical.compute_indicators.return_value = {"atr_14": 100.0}
         technical.format_for_llm.return_value = "RSI(14): 50.0\nMACD: bullish"
         deps = _MockDeps(market_data=market_data, technical=technical)
         return await fn(deps)

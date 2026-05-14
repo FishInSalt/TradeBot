@@ -136,10 +136,7 @@ async def get_market_data(
     # F-O3: Last bar vol with SMA(20) period explicit.
     # Window: "last 20 closed bars including the latest" — identical to HTF
     # (spec §5.5), so the same market state renders the same ratio in both
-    # tools. Note: the bar in the numerator (df_closed.iloc[-1]) is the most
-    # recent closed bar, which differs from TechnicalAnalysisService
-    # compute_indicators.volume_ratio (uses iloc[-2]); only the SMA window
-    # matches across tools, not the numerator-bar selection.
+    # tools. Numerator = df_closed.iloc[-1] (most-recent closed bar).
     if len(df_closed) >= 20:
         vol_now = float(df_closed["volume"].iloc[-1])
         vol_avg = float(df_closed["volume"].iloc[-20:].mean())
@@ -235,6 +232,9 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     """
     import asyncio
     from datetime import datetime, timezone
+
+    from src.utils.ohlcv_utils import _closed_bars
+
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     symbol = symbol or deps.symbol
 
@@ -327,11 +327,14 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         sections.append(f"=== Exit Orders ===\n(unavailable: {e.__class__.__name__})")
         return "\n\n".join(sections)
 
-    # ATR(1h) — may be None if OHLCV failed
+    # ATR(1h) — closed-bars-only per algorithm-lock invariant (R2-Next-D §6.4):
+    # atr_14 here must match GMD/HTF/MTS atr_14 on the same TF.
     atr_1h = None
     if ohlcv_df is not None and not ohlcv_df.empty:
-        indicators = deps.technical.compute_indicators(ohlcv_df)
-        atr_1h = indicators.get("atr_14")
+        df_closed = _closed_bars(ohlcv_df)
+        if not df_closed.empty:
+            indicators = deps.technical.compute_indicators(df_closed)
+            atr_1h = indicators.get("atr_14")
     current_price = ticker.last
 
     sections = _render_position_core()
@@ -908,25 +911,51 @@ def _format_oi_usd(v: float) -> str:
 
 def _derive_oi_anchors(
     points: list[OpenInterestHistoryPoint],
-    current: OpenInterestHistoryPoint,
-) -> str:
-    """Render '1h ago $X.XXB, +Y.Y%; 24h ago $X.XXB, -Y.Y%' fragments.
+    *,
+    now_ms: int,
+    period_ms: int = 3600 * 1000,
+) -> tuple[OpenInterestHistoryPoint | None, str, bool]:
+    """Resolve closed-only OI anchors and render delta fragments.
 
-    Anchor indices measured from end (points[-1] = current). Partial-history
-    degrades gracefully: insufficient or zero-value anchors are skipped.
+    Detects in-progress final bucket via `newest.timestamp + period_ms > now_ms`
+    (OKX rubik returns the partial current 1H bucket as the newest row; verified
+    by .working/tool-optimization/probe_okx_oi_phase.py). When in-progress, all
+    anchor indices shift forward by 1 so deltas remain closed-on-closed
+    (G-calc-rigor-audit §G-6).
+
+    Returns (current_closed_bucket, anchors_fragments_str, was_shifted):
+      - current_closed_bucket: None if `points` lacks enough history; else the
+        most-recent closed bucket (points[-2] when in-progress, points[-1]
+        when newest is already closed).
+      - anchors_fragments_str: "1h ago $X.XXB, +Y.Y%; 24h ago $X.XXB, -Y.Y%"
+        (partial degradation: insufficient/zero anchors skipped silently).
+      - was_shifted: True iff newest was in-progress (caller renders header
+        disclosure).
     """
+    if not points:
+        return None, "", False
+    newest = points[-1]
+    is_in_progress = newest.timestamp + period_ms > now_ms
+    base_offset = 2 if is_in_progress else 1
+    if len(points) < base_offset:
+        return None, "", is_in_progress
+    current_closed = points[-base_offset]
+
     fragments: list[str] = []
-    for label, idx_from_end in [("1h ago", 2), ("24h ago", 25)]:
+    for label, hour_offset in [("1h ago", 1), ("24h ago", 24)]:
+        idx_from_end = base_offset + hour_offset
         if len(points) < idx_from_end:
             continue
         anchor = points[-idx_from_end]
         if anchor.open_interest_value <= 0:
             continue
-        delta_pct = (current.open_interest_value / anchor.open_interest_value - 1) * 100
+        delta_pct = (
+            current_closed.open_interest_value / anchor.open_interest_value - 1
+        ) * 100
         fragments.append(
             f"{label} {_format_oi_usd(anchor.open_interest_value)}, {delta_pct:+.1f}%"
         )
-    return "; ".join(fragments)
+    return current_closed, "; ".join(fragments), is_in_progress
 
 
 async def get_derivatives_data(
@@ -978,19 +1007,34 @@ async def get_derivatives_data(
         if funding.timestamp:
             timestamps_ms.append(funding.timestamp)
 
-    # Open interest history (replaces single-point fetch — see spec §2.5).
+    # Open interest history (closed-only anchors per G-calc-rigor-audit §G-6).
     if isinstance(oi_hist, Exception) or not oi_hist:
         field_lines.append("Open Interest: (unavailable)")
     else:
-        current = oi_hist[-1]  # newest, after .reverse() in fetch
-        oi_str = _format_oi_usd(current.open_interest_value)
-        anchors = _derive_oi_anchors(oi_hist, current)
-        if anchors:
-            field_lines.append(f"Open Interest: {oi_str} ({anchors})")
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        current, anchors, was_shifted = _derive_oi_anchors(oi_hist, now_ms=now_ms)
+        if current is None:
+            field_lines.append("Open Interest: (unavailable)")
         else:
-            field_lines.append(f"Open Interest: {oi_str}")
-        if current.timestamp:
-            timestamps_ms.append(current.timestamp)
+            oi_str = _format_oi_usd(current.open_interest_value)
+            # OKX rubik `ts` is bucket open time; show close time explicitly so
+            # narrative cannot read HH:MM as a snapshot timestamp (review f/u §2).
+            bucket_close_dt = datetime.fromtimestamp(
+                (current.timestamp + 3600 * 1000) / 1000, tz=timezone.utc,
+            )
+            bucket_close_label = bucket_close_dt.strftime("%H:%M UTC")
+            ref = f"last 1H bucket closed at {bucket_close_label}"
+            suffix_parts = [ref] if was_shifted else []
+            if anchors:
+                suffix_parts.append(anchors)
+            if suffix_parts:
+                field_lines.append(
+                    f"Open Interest: {oi_str} ({'; '.join(suffix_parts)})"
+                )
+            else:
+                field_lines.append(f"Open Interest: {oi_str}")
+            if current.timestamp:
+                timestamps_ms.append(current.timestamp)
 
     # Long/short ratio
     if isinstance(lsr, Exception):
@@ -1896,6 +1940,11 @@ def _compute_swing_pivots(
     Equality at any neighbor disqualifies the pivot — prevents flat-plateau false
     signals. Confirmed pivots only — last n bars excluded due to incomplete
     right window, so min returned bars_ago = n.
+
+    Caller contract: `df` must be closed-bars-only (no in-progress final bar) —
+    bars_ago=0 anchors at the most-recent closed bar. Otherwise neighbors of
+    near-end candidates leak in-progress high/low into the pivot test (see
+    G-calc-rigor-audit §G-2).
     """
     if len(df) < 2 * n + 1:
         return [], []
@@ -2028,6 +2077,9 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     """
     import asyncio  # local import — matches existing convention (e.g. tools_perception.py:1320)
     from datetime import datetime, timezone
+
+    from src.utils.ohlcv_utils import _closed_bars
+
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     symbol = deps.symbol
@@ -2049,8 +2101,12 @@ async def get_price_pivots(deps: TradingDeps) -> str:
         except Exception as e:
             return e
 
+    # Main-TF: fetch 101 so that after stripping the in-progress final bar via
+    # _closed_bars (G-calc-rigor-audit §G-2), the swing-pivot window is exactly
+    # 100 closed bars. Prior-period TFs (daily/weekly/monthly) intentionally
+    # take iloc[-2] downstream — that is already the closed prior period.
     main_df_or_err, daily_or_err, weekly_or_err, monthly_or_err = await asyncio.gather(
-        _fetch(main_tf, 100),
+        _fetch(main_tf, 101),
         _fetch("1d", 2),
         _fetch("1w", 2),
         _fetch("1M", 2),
@@ -2061,20 +2117,23 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     swing_lows: list[tuple[int, float]] = []
     if isinstance(main_df_or_err, Exception):
         swing_status = "Swing pivots: temporarily unavailable"
-    elif main_df_or_err is None or main_df_or_err.empty or len(main_df_or_err) < 11:
-        got_bars = 0 if (main_df_or_err is None or main_df_or_err.empty) else len(main_df_or_err)
-        swing_status = f"Swing pivots: insufficient data (need 11+ bars, got {got_bars})"
+    elif main_df_or_err is None or main_df_or_err.empty:
+        swing_status = "Swing pivots: insufficient data (need 11+ bars, got 0)"
     else:
-        bar_count = len(main_df_or_err)
-        swing_highs, swing_lows = _compute_swing_pivots(main_df_or_err, n=5)
-        no_pivot = not swing_highs and not swing_lows
-        if no_pivot and bar_count >= 100:
-            swing_status = "(No swing pivots in 100-bar window)"
-        elif no_pivot and bar_count < 100:
-            swing_status = f"(Window: {bar_count} bars, less than 100 — no swing pivots found)"
-        elif bar_count < 100:
-            swing_status = f"(Window: {bar_count} bars, less than 100)"
-        # else: 100 bars + ≥1 pivot → swing_status stays None
+        main_df_closed = _closed_bars(main_df_or_err)
+        bar_count = len(main_df_closed)
+        if bar_count < 11:
+            swing_status = f"Swing pivots: insufficient data (need 11+ bars, got {bar_count})"
+        else:
+            swing_highs, swing_lows = _compute_swing_pivots(main_df_closed, n=5)
+            no_pivot = not swing_highs and not swing_lows
+            if no_pivot and bar_count >= 100:
+                swing_status = "(No swing pivots in 100-bar window)"
+            elif no_pivot and bar_count < 100:
+                swing_status = f"(Window: {bar_count} bars, less than 100 — no swing pivots found)"
+            elif bar_count < 100:
+                swing_status = f"(Window: {bar_count} bars, less than 100)"
+            # else: 100 bars + ≥1 pivot → swing_status stays None
 
     prior_d = _get_prior_period_hl(daily_or_err)
     prior_w = _get_prior_period_hl(weekly_or_err)

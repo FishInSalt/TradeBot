@@ -158,7 +158,7 @@
 ## 4. 本地技术指标计算（pandas_ta）
 
 - **接入点**：`src/services/technical.py`（`pandas_ta` 库）
-- **数据范围**：RSI / MA / MACD / BB / ATR / volume_ratio（全部本地计算，不调用外部）
+- **数据范围**：RSI / MA / MACD / BB / ATR（全部本地计算，不调用外部）
 - **数据性质**：衍生计算（本地）
 
 **可操纵难度**：🟢 高 — 计算完全本地，操纵需篡改代码或库。但**库自身 bug** 是独立于"操纵"的风险维度。

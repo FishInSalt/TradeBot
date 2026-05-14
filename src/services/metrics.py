@@ -87,17 +87,17 @@ class MetricsService:
         gross_profit = sum(winning_pnls) if winning_pnls else 0.0
         gross_loss = abs(sum(losing_pnls)) if losing_pnls else 0.0
 
-        # Max drawdown
-        cumulative = 0.0
-        peak = 0.0
-        max_dd = 0.0
+        # Max drawdown — equity-peak-based (matches scripts/_sim_metrics.max_drawdown_pct
+        # algorithm; G-calc-rigor-audit §G-3). equity_t = initial_balance + cumulative PnL;
+        # peak_t = running max; dd_t = (peak_t - equity_t) / peak_t.
+        equity = self._initial_balance
+        peak_equity = self._initial_balance
+        max_dd_ratio = 0.0
         for p in pnls:
-            cumulative += p
-            if cumulative > peak:
-                peak = cumulative
-            dd = peak - cumulative
-            if dd > max_dd:
-                max_dd = dd
+            equity += p
+            peak_equity = max(peak_equity, equity)
+            if peak_equity > 0:
+                max_dd_ratio = max(max_dd_ratio, (peak_equity - equity) / peak_equity)
 
         # Recent summary: last N trades
         n = min(5, len(pnls))
@@ -111,7 +111,7 @@ class MetricsService:
             total_return_pct=(total_pnl / self._initial_balance) * 100 if self._initial_balance > 0 else 0.0,
             total_pnl=total_pnl,
             win_rate=len(winning_pnls) / len(pnls),
-            max_drawdown_pct=(max_dd / self._initial_balance) * 100 if self._initial_balance > 0 else 0.0,
+            max_drawdown_pct=max_dd_ratio * 100.0,
             profit_factor=gross_profit / gross_loss if gross_loss > 0 else float("inf"),
             total_trades=len(pnls),
             winning_trades=len(winning_pnls),

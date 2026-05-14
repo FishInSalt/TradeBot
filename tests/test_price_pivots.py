@@ -353,10 +353,15 @@ async def test_pivots_main_tf_error_three_priors_ok():
 
 @pytest.mark.asyncio
 async def test_pivots_short_window_with_insufficient_priors():
-    """50 bar main TF (with pivots) + all priors len<2 → window-note + 3 insufficient footers."""
+    """51 raw bars → 50 closed bars window-note + 3 insufficient footers.
+
+    Fixture size is one more than the asserted window: the main_tf fetch
+    now strips the in-progress final bar before the swing computation
+    (G-calc-rigor-audit §G-2).
+    """
     deps = _PivotsDeps()
     deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
-    main_df = _df_n_bars(50, with_pivots=True)
+    main_df = _df_n_bars(51, with_pivots=True)
     short_df = _df([100.0], [99.0])  # len 1 → insufficient
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({
         "5m": main_df, "1d": short_df, "1w": short_df, "1M": short_df,
@@ -376,10 +381,10 @@ async def test_pivots_short_window_with_insufficient_priors():
 
 @pytest.mark.asyncio
 async def test_pivots_short_window_with_prior_exceptions():
-    """50 bar main TF + 3 priors raise → window-note + 3 unavailable footers (separate from #3 path)."""
+    """51 raw → 50 closed window-note + 3 unavailable footers (separate from #3 path)."""
     deps = _PivotsDeps()
     deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
-    main_df = _df_n_bars(50, with_pivots=True)
+    main_df = _df_n_bars(51, with_pivots=True)
     err = RuntimeError("api glitch")
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({
         "5m": main_df, "1d": err, "1w": err, "1M": err,
@@ -415,12 +420,12 @@ async def test_pivots_main_tf_empty_with_prior_exceptions():
 
 @pytest.mark.asyncio
 async def test_pivots_full_main_tf_one_prior_failure_spacing():
-    """100 bar main TF + 2 priors ok + 1 prior fails → swing_status None,
+    """101 raw → 100 closed bar main TF + 2 priors ok + 1 prior fails → swing_status None,
     Prior Period H/L conditional section header (spec §4.2.4) precedes the
     failing-prior footer rows with a blank line separator."""
     deps = _PivotsDeps()
     deps.market_data.get_ticker = AsyncMock(return_value=_ticker())
-    main_df = _df_n_bars(100, with_pivots=True)
+    main_df = _df_n_bars(101, with_pivots=True)
     daily = _df([67234.0, 67100.0], [65500.0, 65400.0])
     monthly = _df([71200.0, 71100.0], [60800.0, 60700.0])
     deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv_side_effect({

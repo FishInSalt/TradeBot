@@ -68,7 +68,7 @@ def test_format_for_llm_bb_label_uses_full_words_and_explicit_periods():
         "ma_20": 81700.0, "ma_50": 81800.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 81960.0, "bb_middle": 81727.0, "bb_lower": 81494.0,
-        "atr_14": 122.5, "volume_ratio": 1.1,
+        "atr_14": 122.5,
     }
     out = TechnicalAnalysisService().format_for_llm(indicators, current_price=81870.50)
     assert "BB(20,2):" in out, out
