@@ -109,8 +109,9 @@ async def test_compute_metrics_max_drawdown(metrics_db):
 
     service = MetricsService(engine=metrics_db, session_id="test-session", initial_balance=10000.0)
     metrics = await service.compute()
-    # Peak at 100, then drops by 80 → 0.8% of 10000
-    assert metrics.max_drawdown_pct == pytest.approx(0.8)
+    # Equity-peak-based (G-3): equity series [10100, 10050, 10020, 10220], peak=10100
+    # at step 1; trough=10020 at step 3 → max_dd_ratio = 80/10100; pct ≈ 0.7921.
+    assert metrics.max_drawdown_pct == pytest.approx(80 / 10100 * 100)
 
 
 # --- Tool-call summary tests ---
