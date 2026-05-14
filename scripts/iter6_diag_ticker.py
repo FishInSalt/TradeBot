@@ -10,7 +10,7 @@ Compares:
 Helps determine whether 51280 race is:
   (a) ticker data source mismatch (demo vs mainnet)
   (b) demo ticker has refresh lag vs trade engine
-  (c) trigger validation uses mark price not last price
+  (c) trigger validation uses last price; demo mark/last drift offers buffer (see project memory okx-demo-mark-vs-last-drift)
 """
 from __future__ import annotations
 
@@ -78,8 +78,8 @@ async def main():
                 print(f"  mark_price: {mp.get('markPx')}")
                 print(f"  ts: {mp.get('ts')}")
                 if ticker1.last:
-                    diff_pct = (float(mp.get('markPx', 0)) - ticker1.last) / ticker1.last * 100
-                    print(f"  mark vs ticker.last drift: {diff_pct:+.4f}%")
+                    diff_pct = (ticker1.last - float(mp.get('markPx', 0))) / float(mp.get('markPx', 0)) * 100
+                    print(f"  last vs mark drift (last - mark / mark): {diff_pct:+.4f}%")
         except Exception as e:
             print(f"  mark price fetch failed: {e}")
 
