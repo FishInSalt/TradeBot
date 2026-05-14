@@ -147,7 +147,7 @@ async def test_derivs_oi_in_progress_renders_disclosure_label():
     oi_line = next(ln for ln in out.splitlines() if ln.startswith("Open Interest:"))
 
     assert "$2.92B" in oi_line  # current is points[-2], not points[-1]
-    assert "as of last closed 1H bucket" in oi_line
+    assert "last 1H bucket closed at" in oi_line  # disclosure label (close-time, review f/u §2)
     assert "1h ago $2.93B" in oi_line
     assert "24h ago $2.91B" in oi_line
     # Make sure the in-progress bucket value ($9.99B) is NOT rendered as current.

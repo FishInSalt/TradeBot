@@ -1017,9 +1017,13 @@ async def get_derivatives_data(
             field_lines.append("Open Interest: (unavailable)")
         else:
             oi_str = _format_oi_usd(current.open_interest_value)
-            bucket_dt = datetime.fromtimestamp(current.timestamp / 1000, tz=timezone.utc)
-            bucket_label = bucket_dt.strftime("%H:%M UTC")
-            ref = f"as of last closed 1H bucket {bucket_label}"
+            # OKX rubik `ts` is bucket open time; show close time explicitly so
+            # narrative cannot read HH:MM as a snapshot timestamp (review f/u §2).
+            bucket_close_dt = datetime.fromtimestamp(
+                (current.timestamp + 3600 * 1000) / 1000, tz=timezone.utc,
+            )
+            bucket_close_label = bucket_close_dt.strftime("%H:%M UTC")
+            ref = f"last 1H bucket closed at {bucket_close_label}"
             suffix_parts = [ref] if was_shifted else []
             if anchors:
                 suffix_parts.append(anchors)
