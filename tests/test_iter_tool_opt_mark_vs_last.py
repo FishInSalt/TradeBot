@@ -53,3 +53,66 @@ async def test_sim_get_mark_price_returns_ticker_last():
 
     mark = await ex.get_mark_price("BTC/USDT:USDT")
     assert mark == 80_000.0
+
+
+# ============ Task 3: OKXExchange.get_mark_price ============
+
+@pytest.mark.asyncio
+async def test_okx_get_mark_price_fetches_endpoint():
+    """Spec §3.1: OKXExchange.get_mark_price hits public_get_public_mark_price
+    and parses markPx as float. Mock response uses full V5 envelope per
+    project_iter2_mock_fidelity_lesson.
+    """
+    from src.integrations.exchange.okx import OKXExchange
+
+    ex = OKXExchange.__new__(OKXExchange)
+    ex._client = MagicMock()
+    ex._client.public_get_public_mark_price = AsyncMock(return_value={
+        "code": "0", "msg": "",
+        "data": [{"instId": "BTC-USDT-SWAP", "instType": "SWAP",
+                  "markPx": "81920.10", "ts": "1715040000000"}],
+    })
+    ex._client.market = MagicMock(return_value={"id": "BTC-USDT-SWAP"})
+
+    mark = await ex.get_mark_price("BTC/USDT:USDT")
+    assert mark == 81920.10
+    assert isinstance(mark, float)
+
+
+@pytest.mark.asyncio
+async def test_okx_get_mark_price_raises_on_empty_data():
+    """Spec §3.1: empty `data` array → RuntimeError (no silent fallback)."""
+    from src.integrations.exchange.okx import OKXExchange
+
+    ex = OKXExchange.__new__(OKXExchange)
+    ex._client = MagicMock()
+    ex._client.public_get_public_mark_price = AsyncMock(return_value={
+        "code": "0", "msg": "", "data": [],
+    })
+    ex._client.market = MagicMock(return_value={"id": "BTC-USDT-SWAP"})
+
+    with pytest.raises(RuntimeError, match="mark price fetch returned empty"):
+        await ex.get_mark_price("BTC/USDT:USDT")
+
+
+@pytest.mark.asyncio
+async def test_okx_get_mark_price_uses_inst_id_conversion():
+    """Spec §3.1: instId is derived via self._client.market(symbol)["id"]
+    (CCXT-unified symbol → OKX instId). For BTC/USDT:USDT this yields
+    BTC-USDT-SWAP.
+    """
+    from src.integrations.exchange.okx import OKXExchange
+
+    ex = OKXExchange.__new__(OKXExchange)
+    ex._client = MagicMock()
+    ex._client.public_get_public_mark_price = AsyncMock(return_value={
+        "code": "0", "msg": "",
+        "data": [{"instId": "BTC-USDT-SWAP", "instType": "SWAP",
+                  "markPx": "81920.10", "ts": "1715040000000"}],
+    })
+    ex._client.market = MagicMock(return_value={"id": "BTC-USDT-SWAP"})
+
+    await ex.get_mark_price("BTC/USDT:USDT")
+    ex._client.public_get_public_mark_price.assert_awaited_once_with({
+        "instType": "SWAP", "instId": "BTC-USDT-SWAP",
+    })

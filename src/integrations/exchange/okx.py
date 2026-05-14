@@ -436,6 +436,24 @@ class OKXExchange(BaseExchange):
         )
 
     @_retry()
+    async def get_mark_price(self, symbol: str) -> float:
+        """Fetch OKX mark price via public_get_public_mark_price endpoint.
+
+        OKX uses mark price for perpetual liquidation calculation. Algo
+        trigger reference defaults to last (project does not set
+        triggerPxType), so callers wanting trigger-side distance should use
+        fetch_ticker().last instead.
+        """
+        inst_id = self._client.market(symbol)["id"]
+        raw = await self._client.public_get_public_mark_price({
+            "instType": "SWAP", "instId": inst_id,
+        })
+        data = raw.get("data") or []
+        if not data:
+            raise RuntimeError(f"mark price fetch returned empty for {symbol}")
+        return float(data[0]["markPx"])
+
+    @_retry()
     async def fetch_ohlcv(  # type: ignore[override]
         self, symbol: str, timeframe: str, limit: int = 100
     ) -> list[Candle]:
