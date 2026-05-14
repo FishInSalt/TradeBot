@@ -795,7 +795,7 @@ def _render_action(
     Dispatch (mutually exclusive, full coverage of 32 registered tools per T-DG-2):
       1. ret None → R2-8a `[no return captured]` line (orphan tool_call_id)
       2. is_tool_error → R2-8a `✗` single-line (L1 failure path)
-      3. tool_name == 'save_memory' → R2-8a `✎` single-line + summarize_save_memory
+      3. tool_name == 'save_memory' → R2-8a `✎` single-line + summarize_save_memory (retired tool: iter-w2r3-memory-disable, branch kept for revert path)
       4. tool_name in _EXECUTION_TOOL_NAMES → R2-8a `⚙` single-line + <22 padding
       5. tool_name in _PERCEPTION_TOOL_NAMES → multi-line _render_perception_tool
       6. else → R2-8a single-line + warning log (drift signal, T-EC-11)
@@ -824,7 +824,7 @@ def _render_action(
             )
             continue
 
-        # Branch 3: save_memory (R2-8a single-line + ✎)
+        # Branch 3: save_memory (R2-8a single-line + ✎) — retired tool: iter-w2r3-memory-disable, branch kept for revert path
         if tcp.tool_name == "save_memory":
             try:
                 args = tcp.args_as_dict()
@@ -848,15 +848,14 @@ def _render_action(
             lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
             continue
 
-        # Branch 5: perception (multi-line section render, includes get_memories
-        # backend-dependent fallback path via _parse_sections)
+        # Branch 5: perception (multi-line section render)
         if tcp.tool_name in _PERCEPTION_TOOL_NAMES:
             lines.append(_render_perception_tool(tcp.tool_name, content_str))
             continue
 
         # Branch 6: drift — unregistered tool name (T-EC-11)
         logger.warning(
-            "tool_name %s not in _PERCEPTION_TOOL_NAMES / _EXECUTION_TOOL_NAMES / save_memory "
+            "tool_name %s not in _PERCEPTION_TOOL_NAMES / _EXECUTION_TOOL_NAMES "
             "— falling back to R2-8a single-line",
             tcp.tool_name,
         )

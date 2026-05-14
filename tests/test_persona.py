@@ -44,6 +44,7 @@ def test_prompt_contains_alert_response_guidance():
     assert "volatility alert" in prompt_lower
     assert "trend" in prompt_lower or "noise" in prompt_lower
 
+
 def test_prompt_contains_anti_overtrading():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
