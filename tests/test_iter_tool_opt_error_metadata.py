@@ -239,7 +239,7 @@ async def test_get_open_orders_fallback_single_order_surfaces_ticker_unavailable
 
     assert "ticker unavailable" in result, f"fallback hint missing in: {result!r}"
     # Distance percent must not appear since current<=0
-    assert "% from current" not in result
+    assert "% from last price" not in result
 
 
 @pytest.mark.asyncio
@@ -266,7 +266,7 @@ async def test_get_open_orders_fallback_oco_surfaces_ticker_unavailable():
     assert result.count("ticker unavailable") >= 2, (
         f"expected per-leg ticker-unavailable annotation in: {result!r}"
     )
-    assert "% from current" not in result
+    assert "% from last price" not in result
 
 
 @pytest.mark.asyncio
