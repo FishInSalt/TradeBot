@@ -7,6 +7,7 @@ Covers spec sections:
   §2.5 render helpers + get_derivatives_data wire
   §5.2 19 unit tests + §5.3 simulated integration + §5.4 drift guard
 """
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -246,7 +247,7 @@ def test_oi_render_happy_path_inline_26_records():
     vals[-2] = 2_930_000_000.0    # 1h ago
     vals[-1] = 2_920_000_000.0    # current
     points = _make_points(vals)
-    result = _derive_oi_anchors(points, points[-1])
+    _, result, _ = _derive_oi_anchors(points, now_ms=int(time.time() * 1000))
     assert "1h ago $2.93B, -0.3%" in result
     assert "24h ago $2.91B, +0.3%" in result
     assert "; " in result
@@ -257,7 +258,7 @@ def test_oi_render_positive_deltas():
     vals = [2_500_000_000.0] * 26
     vals[-1] = 2_920_000_000.0
     points = _make_points(vals)
-    result = _derive_oi_anchors(points, points[-1])
+    _, result, _ = _derive_oi_anchors(points, now_ms=int(time.time() * 1000))
     assert "24h ago $2.50B, +16.8%" in result
 
 
@@ -265,7 +266,7 @@ def test_oi_render_zero_delta_when_anchors_equal_current():
     from src.agent.tools_perception import _derive_oi_anchors
     vals = [2_920_000_000.0] * 26
     points = _make_points(vals)
-    result = _derive_oi_anchors(points, points[-1])
+    _, result, _ = _derive_oi_anchors(points, now_ms=int(time.time() * 1000))
     assert "+0.0%" in result
 
 
@@ -276,7 +277,7 @@ def test_oi_render_exactly_25_records():
     vals = [2_910_000_000.0] + [2_900_000_000.0] * 22 + [2_930_000_000.0, 2_920_000_000.0]
     assert len(vals) == 25  # tripwire — guard the 24h-anchor index math
     points = _make_points(vals)
-    result = _derive_oi_anchors(points, points[-1])
+    _, result, _ = _derive_oi_anchors(points, now_ms=int(time.time() * 1000))
     assert "1h ago" in result
     assert "24h ago $2.91B" in result
 
@@ -285,7 +286,7 @@ def test_oi_render_exactly_2_records():
     """1h-anchor minimum boundary: only 1h shown, no 24h."""
     from src.agent.tools_perception import _derive_oi_anchors
     points = _make_points([2_930_000_000.0, 2_920_000_000.0])
-    result = _derive_oi_anchors(points, points[-1])
+    _, result, _ = _derive_oi_anchors(points, now_ms=int(time.time() * 1000))
     assert "1h ago $2.93B" in result
     assert "24h ago" not in result
 
@@ -294,7 +295,7 @@ def test_oi_render_1_record():
     """Below 1h anchor boundary: empty string."""
     from src.agent.tools_perception import _derive_oi_anchors
     points = _make_points([2_920_000_000.0])
-    result = _derive_oi_anchors(points, points[-1])
+    _, result, _ = _derive_oi_anchors(points, now_ms=int(time.time() * 1000))
     assert result == ""
 
 
@@ -305,7 +306,7 @@ def test_oi_render_anchor_zero_skipped():
     vals = [0.0] + [2_900_000_000.0] * 22 + [2_930_000_000.0, 2_920_000_000.0]
     assert len(vals) == 25 and vals[-25] == 0.0  # tripwire — guard zero placement
     points = _make_points(vals)
-    result = _derive_oi_anchors(points, points[-1])
+    _, result, _ = _derive_oi_anchors(points, now_ms=int(time.time() * 1000))
     assert "1h ago" in result
     assert "24h ago" not in result
 

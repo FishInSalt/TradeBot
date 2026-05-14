@@ -911,25 +911,51 @@ def _format_oi_usd(v: float) -> str:
 
 def _derive_oi_anchors(
     points: list[OpenInterestHistoryPoint],
-    current: OpenInterestHistoryPoint,
-) -> str:
-    """Render '1h ago $X.XXB, +Y.Y%; 24h ago $X.XXB, -Y.Y%' fragments.
+    *,
+    now_ms: int,
+    period_ms: int = 3600 * 1000,
+) -> tuple[OpenInterestHistoryPoint | None, str, bool]:
+    """Resolve closed-only OI anchors and render delta fragments.
 
-    Anchor indices measured from end (points[-1] = current). Partial-history
-    degrades gracefully: insufficient or zero-value anchors are skipped.
+    Detects in-progress final bucket via `newest.timestamp + period_ms > now_ms`
+    (OKX rubik returns the partial current 1H bucket as the newest row; verified
+    by .working/tool-optimization/probe_okx_oi_phase.py). When in-progress, all
+    anchor indices shift forward by 1 so deltas remain closed-on-closed
+    (G-calc-rigor-audit §G-6).
+
+    Returns (current_closed_bucket, anchors_fragments_str, was_shifted):
+      - current_closed_bucket: None if `points` lacks enough history; else the
+        most-recent closed bucket (points[-2] when in-progress, points[-1]
+        when newest is already closed).
+      - anchors_fragments_str: "1h ago $X.XXB, +Y.Y%; 24h ago $X.XXB, -Y.Y%"
+        (partial degradation: insufficient/zero anchors skipped silently).
+      - was_shifted: True iff newest was in-progress (caller renders header
+        disclosure).
     """
+    if not points:
+        return None, "", False
+    newest = points[-1]
+    is_in_progress = newest.timestamp + period_ms > now_ms
+    base_offset = 2 if is_in_progress else 1
+    if len(points) < base_offset:
+        return None, "", is_in_progress
+    current_closed = points[-base_offset]
+
     fragments: list[str] = []
-    for label, idx_from_end in [("1h ago", 2), ("24h ago", 25)]:
+    for label, hour_offset in [("1h ago", 1), ("24h ago", 24)]:
+        idx_from_end = base_offset + hour_offset
         if len(points) < idx_from_end:
             continue
         anchor = points[-idx_from_end]
         if anchor.open_interest_value <= 0:
             continue
-        delta_pct = (current.open_interest_value / anchor.open_interest_value - 1) * 100
+        delta_pct = (
+            current_closed.open_interest_value / anchor.open_interest_value - 1
+        ) * 100
         fragments.append(
             f"{label} {_format_oi_usd(anchor.open_interest_value)}, {delta_pct:+.1f}%"
         )
-    return "; ".join(fragments)
+    return current_closed, "; ".join(fragments), is_in_progress
 
 
 async def get_derivatives_data(
@@ -981,19 +1007,30 @@ async def get_derivatives_data(
         if funding.timestamp:
             timestamps_ms.append(funding.timestamp)
 
-    # Open interest history (replaces single-point fetch — see spec §2.5).
+    # Open interest history (closed-only anchors per G-calc-rigor-audit §G-6).
     if isinstance(oi_hist, Exception) or not oi_hist:
         field_lines.append("Open Interest: (unavailable)")
     else:
-        current = oi_hist[-1]  # newest, after .reverse() in fetch
-        oi_str = _format_oi_usd(current.open_interest_value)
-        anchors = _derive_oi_anchors(oi_hist, current)
-        if anchors:
-            field_lines.append(f"Open Interest: {oi_str} ({anchors})")
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        current, anchors, was_shifted = _derive_oi_anchors(oi_hist, now_ms=now_ms)
+        if current is None:
+            field_lines.append("Open Interest: (unavailable)")
         else:
-            field_lines.append(f"Open Interest: {oi_str}")
-        if current.timestamp:
-            timestamps_ms.append(current.timestamp)
+            oi_str = _format_oi_usd(current.open_interest_value)
+            bucket_dt = datetime.fromtimestamp(current.timestamp / 1000, tz=timezone.utc)
+            bucket_label = bucket_dt.strftime("%H:%M UTC")
+            ref = f"as of last closed 1H bucket {bucket_label}"
+            suffix_parts = [ref] if was_shifted else []
+            if anchors:
+                suffix_parts.append(anchors)
+            if suffix_parts:
+                field_lines.append(
+                    f"Open Interest: {oi_str} ({'; '.join(suffix_parts)})"
+                )
+            else:
+                field_lines.append(f"Open Interest: {oi_str}")
+            if current.timestamp:
+                timestamps_ms.append(current.timestamp)
 
     # Long/short ratio
     if isinstance(lsr, Exception):
