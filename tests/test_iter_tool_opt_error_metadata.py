@@ -212,6 +212,7 @@ def _make_oo_deps(orders: list[Order], ticker_last: float):
     deps.symbol = "BTC/USDT:USDT"
     deps.exchange = MagicMock()
     deps.exchange.fetch_open_orders = AsyncMock(return_value=orders)
+    deps.exchange.algo_trigger_reference = "last"
     deps.market_data = MagicMock()
     deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=ticker_last,
@@ -283,5 +284,5 @@ async def test_get_open_orders_happy_path_no_ticker_unavailable_annotation():
     result = await get_open_orders(deps)
 
     assert "ticker unavailable" not in result
-    # iter-3 promoted distance to `% / Z.Z pts from current` form
-    assert "pts from current" in result
+    # iter-3 promoted distance to `% / Z.Z pts from last price` form
+    assert "pts from last price" in result
