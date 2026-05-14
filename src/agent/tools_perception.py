@@ -136,10 +136,7 @@ async def get_market_data(
     # F-O3: Last bar vol with SMA(20) period explicit.
     # Window: "last 20 closed bars including the latest" — identical to HTF
     # (spec §5.5), so the same market state renders the same ratio in both
-    # tools. Note: the bar in the numerator (df_closed.iloc[-1]) is the most
-    # recent closed bar, which differs from TechnicalAnalysisService
-    # compute_indicators.volume_ratio (uses iloc[-2]); only the SMA window
-    # matches across tools, not the numerator-bar selection.
+    # tools. Numerator = df_closed.iloc[-1] (most-recent closed bar).
     if len(df_closed) >= 20:
         vol_now = float(df_closed["volume"].iloc[-1])
         vol_avg = float(df_closed["volume"].iloc[-20:].mean())

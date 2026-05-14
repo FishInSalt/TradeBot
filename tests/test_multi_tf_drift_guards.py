@@ -8,8 +8,7 @@ Seven invariants:
 5. test_mts_htf_overlap_values_match (§2.2.1)
 6. test_atr_series_last_value_equals_compute_indicators_atr_14 (§6.4.2)
 7. test_gmd_htf_last_bar_vol_ratio_match — GMD/HTF "Last bar vol: X
-   (Y× SMA(20) avg)" use the same SMA(20) window formula
-   (spec §5.5; matches baseline compute_indicators.volume_ratio)
+   (Y× SMA(20) avg)" use the same SMA(20) window formula (spec §5.5)
 
 These tests purposely use mocked deps and hand-crafted OHLCV fixtures
 so the invariants can be asserted bit-for-bit, without the runtime
@@ -212,8 +211,7 @@ async def test_gmd_htf_last_bar_vol_ratio_match(
     """GMD and HTF both surface "Last bar vol: X (Y× SMA(20) avg)"; the
     SMA(20) window formula must be identical across the two tools
     (spec §5.5: `df.iloc[:-1]['volume'].rolling(20).mean().iloc[-1]`,
-    equivalent to `df_closed['volume'].iloc[-20:].mean()`; matches
-    baseline `compute_indicators.volume_ratio` at services/technical.py:36-41).
+    equivalent to `df_closed['volume'].iloc[-20:].mean()`).
 
     End-to-end test: feed the same df_4h_recent_vol_spike fixture into
     both GMD (with timeframe="4h") and HTF (with timeframes=["4h"]),

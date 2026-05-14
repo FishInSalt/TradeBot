@@ -9,7 +9,6 @@ class TechnicalAnalysisService:
         close = df["close"]
         high = df["high"]
         low = df["low"]
-        volume = df["volume"]
 
         rsi = ta.rsi(close, length=14)  # type: ignore[attr-defined]
         ma_20 = ta.sma(close, length=20)  # type: ignore[attr-defined]
@@ -17,7 +16,10 @@ class TechnicalAnalysisService:
         macd_df = ta.macd(close)  # type: ignore[attr-defined]
         bb_df = ta.bbands(close, length=20)  # type: ignore[attr-defined]
         atr = ta.atr(high, low, close, length=14)  # type: ignore[attr-defined]
-        vol_sma = ta.sma(volume, length=20)  # type: ignore[attr-defined]
+        # Volume ratio intentionally not surfaced here — GMD/HTF inline their own
+        # "Last bar vol (X× SMA(20) avg)" rendering with a different numerator
+        # (most-recent closed bar) than the historical baseline (second-to-last
+        # closed bar). G-calc-rigor-audit §G-4.
 
         def _last(series: pd.Series | None) -> float | None:
             if series is None or series.empty or pd.isna(series.iloc[-1]):
@@ -32,14 +34,6 @@ class TechnicalAnalysisService:
                 return None
             return cols.iloc[:, 0]
 
-        # Volume ratio: use iloc[-2] (last completed candle) for both numerator and denominator
-        volume_ratio: float | None = None
-        if vol_sma is not None and len(volume) >= 2 and len(vol_sma) >= 2:
-            sma_val = vol_sma.iloc[-2] if not pd.isna(vol_sma.iloc[-2]) else None
-            vol_val = volume.iloc[-2]
-            if sma_val is not None and sma_val > 0:
-                volume_ratio = float(vol_val / sma_val)
-
         return {
             "rsi_14": _last(rsi),
             "ma_20": _last(ma_20),
@@ -51,7 +45,6 @@ class TechnicalAnalysisService:
             "bb_middle": _last(_col(bb_df, "BBM_")),
             "bb_lower": _last(_col(bb_df, "BBL_")),
             "atr_14": _last(atr),
-            "volume_ratio": volume_ratio,
         }
 
     def format_for_llm(

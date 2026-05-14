@@ -341,7 +341,7 @@ async def test_get_market_data_four_segments():
         "rsi_14": 52.88, "ma_20": 74750.0, "ma_50": 74500.0,
         "macd": 12.5, "macd_signal": 8.3, "macd_histogram": 4.2,
         "bb_upper": 75100.0, "bb_middle": 74750.0, "bb_lower": 74400.0,
-        "atr_14": 85.2, "volume_ratio": 1.35,
+        "atr_14": 85.2,
     }
     deps.technical.format_for_llm.return_value = "RSI(14): 52.88\nMA(20): 74750.00 (price vs MA: +0.2%)"
 
@@ -378,7 +378,7 @@ async def test_get_market_data_default_params():
         "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
-        "atr_14": 80.0, "volume_ratio": 1.0,
+        "atr_14": 80.0,
     }
     deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
@@ -406,7 +406,7 @@ async def test_get_market_data_1h_atr_no_qualitative_label():
         "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
-        "atr_14": 850.0, "volume_ratio": 1.0,
+        "atr_14": 850.0,
     }
     deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
@@ -443,7 +443,7 @@ async def test_get_market_data_5m_atr_no_qualitative_label():
         "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
-        "atr_14": 85.2, "volume_ratio": 1.0,
+        "atr_14": 85.2,
     }
     deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
@@ -485,7 +485,7 @@ async def test_get_market_data_truncated_data():
         "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": None,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
-        "atr_14": 80.0, "volume_ratio": 1.0,
+        "atr_14": 80.0,
     }
     deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
@@ -512,7 +512,7 @@ async def test_get_market_data_candle_count_clamp():
         "rsi_14": 50.0, "ma_20": 74750.0, "ma_50": 74500.0,
         "macd": 0.0, "macd_signal": 0.0, "macd_histogram": 0.0,
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
-        "atr_14": 80.0, "volume_ratio": 1.0,
+        "atr_14": 80.0,
     }
     deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
 
