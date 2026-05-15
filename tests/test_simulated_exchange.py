@@ -1524,3 +1524,67 @@ async def test_fill_market_close_includes_entry_price_in_event():
     close_fills = [f for f in fills if f.pnl is not None]
     assert len(close_fills) == 1
     assert close_fills[0].entry_price == entry_before_close  # captured before _close_position_core
+
+
+@pytest.mark.asyncio
+async def test_execute_fill_includes_entry_price_for_stop_trigger():
+    """sim SL trigger fill event carries position weighted-avg entry."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    # Open long at ~95010 (ask price from _tick default)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open; entry_price = 95010.0
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    expected_entry = positions[0].entry_price  # 95010.0
+
+    # Place SL below current price
+    await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Tick that triggers the stop (bid crosses below 90000)
+    drop_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=89500.0, bid=89490.0, ask=89510.0,
+        high=96000.0, low=88000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(drop_ticker)
+
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "stop"
+    assert fills[0].entry_price == expected_entry
+
+
+@pytest.mark.asyncio
+async def test_execute_fill_includes_entry_price_for_take_profit_trigger():
+    """sim TP trigger fill event carries position weighted-avg entry."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    # Open long at ~95010 (ask price from _tick default)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open; entry_price = 95010.0
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    expected_entry = positions[0].entry_price  # 95010.0
+
+    # Place TP above current price
+    await ex.create_order("BTC/USDT:USDT", "sell", "take_profit", 0.001, price=97000.0)
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Tick that triggers the take profit (bid crosses above 97000)
+    up_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=97500.0, bid=97490.0, ask=97510.0,
+        high=98000.0, low=94000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(up_ticker)
+
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "take_profit"
+    assert fills[0].entry_price == expected_entry

@@ -530,6 +530,7 @@ class SimulatedExchange(BaseExchange):
         pos = self._positions[order.symbol]
         actual_amount = min(order.amount, pos.contracts)
         fill_price = ticker.bid if pos.side == "long" else ticker.ask
+        captured_entry = pos.entry_price  # capture BEFORE close (pos may be popped from self._positions in _close_position_core)
         pnl, fee, _ = self._close_position_core(
             order.symbol, pos.side, actual_amount, fill_price,
         )
@@ -542,6 +543,7 @@ class SimulatedExchange(BaseExchange):
             pnl=pnl,
             timestamp=now_ms,
             is_full_close=is_full_close,
+            entry_price=captured_entry,
         )
 
     def _execute_limit_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
