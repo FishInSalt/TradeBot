@@ -706,4 +706,5 @@ def test_wizard_summary_shows_fee_for_okx_path(mock_confirm):
     }
     _show_summary(data, console)
     output = console.file.getvalue()
-    assert "0.05%" in output
+    # .3f matches system prompt Layer 1 rendering (avoids 0.075% → 0.08% drift)
+    assert "0.050%" in output

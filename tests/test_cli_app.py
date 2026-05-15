@@ -41,6 +41,7 @@ async def _make_deps_engine(session_id: str):
     ))
     exchange.fetch_open_orders = AsyncMock(return_value=[])
     exchange.get_price_level_alerts = MagicMock(return_value=[])
+    exchange.get_contract_size = AsyncMock(return_value=1.0)
 
     market_data = MagicMock()
     market_data.get_ticker = AsyncMock(return_value=Ticker(

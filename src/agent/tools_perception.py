@@ -310,47 +310,10 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             pnl_lines.append("Duration: N/A")
         return ["\n".join(pos_lines), "\n".join(pnl_lines)]
 
-    # Phase 2a: core render + Fee & Breakeven section (Phase-1 fields only).
-    # These sections are computed before the main IO gather so they survive
+    # Phase 2a: core render (Position + PnL Phase-1 fields).
+    # Computed before the main IO gather so PnL + Duration survive
     # ticker/balance/orders failure in the degradation branch below.
     sections = _render_position_core()
-
-    # Fee & Breakeven section — depends only on p.entry_price + deps.fee_rate.
-    # Distance bracket has its own isolated ticker fetch (separate try/except) so
-    # a timeout here never blocks the main gather and the section always renders.
-    entry_fee = p.entry_price * p.contracts * deps.fee_rate
-    if p.side == "long":
-        breakeven = p.entry_price * (1 + 2 * deps.fee_rate)
-        sign_str = "+"
-        side_label = "long"
-    else:
-        breakeven = p.entry_price * (1 - 2 * deps.fee_rate)
-        sign_str = "−"  # Unicode minus U+2212, matches test assertion exactly
-        side_label = "short"
-
-    fb_lines = ["=== Fee & Breakeven ==="]
-    fb_lines.append(f"Entry fee paid: ~-{entry_fee:.2f} USDT (= entry × contracts × rate)")
-    # Separate ticker fetch for distance bracket only — failure degrades gracefully
-    try:
-        _distance_ticker = await deps.market_data.get_ticker(symbol)
-        if _distance_ticker.last > 0:
-            if p.side == "long":
-                _distance_pts = _distance_ticker.last - breakeven
-            else:
-                _distance_pts = breakeven - _distance_ticker.last
-            fb_lines.append(
-                f"Breakeven: {breakeven:,.2f} "
-                f"[current {_distance_ticker.last:,.2f}, {_distance_pts:+.0f} pts]"
-            )
-        else:
-            fb_lines.append(f"Breakeven: {breakeven:,.2f}")
-    except Exception:
-        fb_lines.append(f"Breakeven: {breakeven:,.2f}")
-    fb_lines.append(
-        f"  = {p.entry_price:,.2f} × (1 {sign_str} 2 × fee_rate) "
-        f"[{side_label} round-trip taker]"
-    )
-    sections.append("\n".join(fb_lines))
 
     try:
         ticker, balance, ohlcv_df, open_orders, contract_size, mark_price = await asyncio.gather(
@@ -377,6 +340,44 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             indicators = deps.technical.compute_indicators(df_closed)
             atr_1h = indicators.get("atr_14")
     current_price = ticker.last
+
+    # === Fee & Breakeven ===
+    # Depends on p.entry_price + deps.fee_rate + contract_size (USDT-denominated
+    # notional uses contract_size factor — see Risk Exposure below for the
+    # established convention). Rendered post-gather since contract_size and
+    # current_price are needed; ticker.last failure already short-circuits to
+    # the degradation branch above.
+    entry_fee = p.entry_price * p.contracts * contract_size * deps.fee_rate
+    if p.side == "long":
+        breakeven = p.entry_price * (1 + 2 * deps.fee_rate)
+        sign_str = "+"
+        side_label = "long"
+    else:
+        breakeven = p.entry_price * (1 - 2 * deps.fee_rate)
+        sign_str = "−"  # Unicode minus U+2212, matches test assertion exactly
+        side_label = "short"
+
+    fb_lines = ["=== Fee & Breakeven ==="]
+    fb_lines.append(
+        f"Entry fee paid: ~-{entry_fee:.2f} USDT "
+        f"(= entry × contracts × contract_size × rate)"
+    )
+    if current_price > 0:
+        if p.side == "long":
+            _distance_pts = current_price - breakeven
+        else:
+            _distance_pts = breakeven - current_price
+        fb_lines.append(
+            f"Breakeven: {breakeven:,.2f} "
+            f"[current {current_price:,.2f}, {_distance_pts:+.0f} pts]"
+        )
+    else:
+        fb_lines.append(f"Breakeven: {breakeven:,.2f}")
+    fb_lines.append(
+        f"  = {p.entry_price:,.2f} × (1 {sign_str} 2 × fee_rate) "
+        f"[{side_label} round-trip taker]"
+    )
+    sections.append("\n".join(fb_lines))
 
     # === Risk Exposure ===
     notional = p.contracts * p.entry_price * contract_size

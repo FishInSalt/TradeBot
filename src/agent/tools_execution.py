@@ -100,7 +100,8 @@ async def open_position(
         side=side, reasoning=reasoning,
     )
 
-    notional = ticker.last * quantity
+    contract_size = await deps.exchange.get_contract_size(deps.symbol)
+    notional = ticker.last * quantity * contract_size
     est_entry_fee = notional * deps.fee_rate
     return (
         f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order.id}\n"
@@ -120,14 +121,17 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
     if deps.exchange.has_pending_market_order(deps.symbol, side=order_side):
         return "A close order is already pending. Wait for fill confirmation."
 
-    # Fee + net PnL estimation BEFORE approval gate (so approval message shows both views)
+    # Fee + net PnL estimation BEFORE approval gate (so approval message shows both views).
+    # contract_size factor is required for USDT-denominated notional — matches
+    # get_position Risk Exposure convention (tools_perception.py: notional = contracts × price × contract_size).
     ticker = await deps.market_data.get_ticker(deps.symbol)
+    contract_size = await deps.exchange.get_contract_size(deps.symbol)
     total_unrealized = sum(p.unrealized_pnl for p in positions)
     total_contracts = sum(p.contracts for p in positions)
-    total_entry_fee = sum(p.entry_price * p.contracts * deps.fee_rate for p in positions)
+    total_entry_fee = sum(p.entry_price * p.contracts * contract_size * deps.fee_rate for p in positions)
     # Use bid/ask matching actual market close fill price (sim _fill_market_close convention)
     est_fill_price = ticker.bid if positions[0].side == "long" else ticker.ask
-    est_exit_notional = est_fill_price * total_contracts
+    est_exit_notional = est_fill_price * total_contracts * contract_size
     est_exit_fee = est_exit_notional * deps.fee_rate
     est_net_pnl = -total_entry_fee + total_unrealized - est_exit_fee
 
@@ -610,7 +614,8 @@ async def place_limit_order(
     leverage_suffix = ""
     if positions and leverage != actual_leverage:
         leverage_suffix = f" (matched existing position; requested {leverage}x ignored)"
-    notional = price * quantity
+    contract_size = await deps.exchange.get_contract_size(deps.symbol)
+    notional = price * quantity * contract_size
     est_entry_fee = notional * deps.fee_rate
     return (
         f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, "

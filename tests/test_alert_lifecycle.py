@@ -294,6 +294,7 @@ async def test_close_position_passes_reduce_only():
     ])
     deps.exchange.has_pending_market_order = MagicMock(return_value=False)
     deps.exchange.register_close_order_entry = MagicMock()
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     deps.exchange.create_order = AsyncMock(return_value=MagicMock(id="order-1"))
     ticker = MagicMock()
     ticker.bid = 50100.0

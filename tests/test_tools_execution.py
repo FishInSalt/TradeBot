@@ -27,6 +27,7 @@ def _make_deps(*, position_side="long", entry_price=80000.0, contracts=0.1,
         ),
     ])
     deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     ticker = MagicMock()
     ticker.bid = 80100.0
     ticker.ask = 80110.0
@@ -129,6 +130,7 @@ def _make_open_deps(*, fee_rate=0.0005, free_usdt=1000.0, leverage=10, last=8000
     deps.exchange.fetch_balance = AsyncMock(return_value=balance)
     deps.exchange.has_pending_market_order = MagicMock(return_value=False)
     deps.exchange.set_leverage = AsyncMock()
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
 
     # quantity = (free_usdt * position_pct/100 * leverage) / last
     # With position_pct=10: (1000 * 0.1 * 10) / 80000 = 0.125
@@ -218,6 +220,7 @@ def _make_close_deps(*, position_side="long", entry_price=80000.0, contracts=0.5
         ),
     ])
     deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     ticker = MagicMock()
     ticker.bid = bid
     ticker.ask = ask
@@ -333,6 +336,7 @@ def _make_limit_deps(*, fee_rate=0.0005, free_usdt=1000.0, order_id="lim1"):
     deps.exchange.fetch_positions = AsyncMock(return_value=[])
     deps.exchange.set_leverage = AsyncMock()
     deps.exchange.fetch_balance = AsyncMock(return_value=balance)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     # pass-through precision so quantity = raw_quantity
     deps.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, qty: qty)
     deps.exchange.create_order = AsyncMock(return_value=Order(
@@ -389,12 +393,14 @@ def test_place_limit_order_wrapper_docstring_mentions_fee():
 
 
 def test_execution_tool_docstrings_no_evaluation_words():
-    """Execution tools docstrings do not include evaluation/nudge words.
+    """Execution tools docstrings do not include evaluation/nudge phrases.
 
     F-dim drift guard. Approved fee-related vocabulary: 'taker fee', 'fee_rate',
-    'notional', 'round-trip', 'gross', 'net'. Forbidden:
-    - 'erode' / 'friction' / 'frequent small trades' (Layer 1 nudge family)
-    - 'should' / 'must' / 'avoid' / 'careful' (evaluative directives)
+    'notional', 'round-trip', 'gross', 'net'. Forbidden phrases (not bare words
+    — bare 'must'/'avoid' are too common in legitimate fact statements like
+    'amount must be > 0' or 'to avoid OCO cancellation'):
+    - 'erode capital' / 'friction cost' / 'frequent small trades' (Layer 1 nudge family)
+    - 'you should' / 'you must' / 'be careful' / 'should avoid' (evaluative directives)
     """
     import ast
     src = _TRADER_PY.read_text()
@@ -403,8 +409,8 @@ def test_execution_tool_docstrings_no_evaluation_words():
     # set_stop_loss / set_take_profit / place_limit_order / cancel_order
     target_tools = {"open_position", "close_position", "set_stop_loss",
                     "set_take_profit", "place_limit_order", "cancel_order"}
-    forbidden = ["erode", "friction", "frequent small trades",
-                 "should", "must", "avoid", "careful"]
+    forbidden = ["erode capital", "friction cost", "frequent small trades",
+                 "you should", "you must", "be careful", "should avoid"]
 
     # Walk AST for AsyncFunctionDef nodes matching target tool names; extract docstring
     for node in ast.walk(tree):

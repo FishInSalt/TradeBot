@@ -478,8 +478,13 @@ async def run_agent_cycle(
             # Open fill — fee only
             msg += f", Fee: {-context.fee:+.2f} USDT"
         elif context.is_full_close and context.entry_price is not None:
-            # Full close fill — fee + gross + equiv-round-trip net
-            entry_fee_recompute = context.entry_price * context.amount * deps.fee_rate
+            # Full close fill — fee + gross + equiv-round-trip net.
+            # contract_size factor required for USDT-denominated entry_fee — matches
+            # tools_perception.py / tools_execution.py convention.
+            _contract_size = await deps.exchange.get_contract_size(context.symbol)
+            entry_fee_recompute = (
+                context.entry_price * context.amount * _contract_size * deps.fee_rate
+            )
             round_trip_net = -entry_fee_recompute + context.pnl - context.fee
             msg += (
                 f", Fee: {-context.fee:+.2f} USDT, "

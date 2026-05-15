@@ -1654,3 +1654,55 @@ async def test_fill_event_entry_price_captured_before_pnl_cap():
     # pnl is clamped (won't exceed -margin); entry_price must still be the original
     assert liq_fill.pnl is not None
     assert liq_fill.entry_price == pytest.approx(expected_entry)
+
+
+def test_sim_close_paths_capture_entry_before_close_position_core():
+    """AST drift guard: all 3 sim close paths must read pos.entry_price BEFORE
+    calling self._close_position_core (which may pop the position from
+    self._positions, see _close_position_core implementation).
+
+    Mirror of test_fill_event_entry_price_captured_before_pnl_cap but covers
+    all 3 capture sites (_fill_market_close / _execute_fill / _force_liquidate)
+    via AST scan rather than only _force_liquidate via integration test.
+    """
+    import ast
+    import pathlib
+
+    sim_py = pathlib.Path(__file__).resolve().parents[1] / "src" / "integrations" / "exchange" / "simulated.py"
+    tree = ast.parse(sim_py.read_text())
+
+    target_methods = {"_fill_market_close", "_execute_fill", "_force_liquidate"}
+    found = {name: False for name in target_methods}
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name in target_methods):
+            continue
+        # Scan the function body for the relative ordering of:
+        # (a) any assignment whose value reads ".entry_price" attribute
+        # (b) any call to self._close_position_core
+        capture_line = None
+        close_call_line = None
+        for stmt in ast.walk(node):
+            if (isinstance(stmt, ast.Attribute) and stmt.attr == "entry_price"
+                    and capture_line is None):
+                # Only count entry_price reads on .entry_price (e.g. pos.entry_price)
+                capture_line = stmt.lineno
+            if (isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Attribute)
+                    and stmt.func.attr == "_close_position_core"
+                    and close_call_line is None):
+                close_call_line = stmt.lineno
+        assert capture_line is not None, (
+            f"{node.name}: no .entry_price capture found"
+        )
+        assert close_call_line is not None, (
+            f"{node.name}: no _close_position_core call found"
+        )
+        assert capture_line < close_call_line, (
+            f"{node.name}: .entry_price captured at line {capture_line} but "
+            f"_close_position_core called at line {close_call_line} — capture "
+            f"must precede close (position may be popped from self._positions)"
+        )
+        found[node.name] = True
+
+    missing = [name for name, ok in found.items() if not ok]
+    assert not missing, f"sim close paths not scanned: {missing}"

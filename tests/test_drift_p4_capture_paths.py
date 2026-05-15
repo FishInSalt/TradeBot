@@ -237,44 +237,53 @@ def test_build_services_drift_guard_runtime_vs_deps_fee_rate():
 
 
 def test_p4_runtime_config_matches_build_services_fee_rate():
-    """Guard D-3: P4 capture-path RuntimeConfig must carry the same
-    taker_fee_rate as build_services-internal RuntimeConfig.
+    """Guard D-3: both RuntimeConfig construction sites in cli/app.py
+    (build_services-internal and P4 Phase 5b in run()) must pass
+    taker_fee_rate=result.fee_rate.
 
-    Mirror of test_p4_runtime_config_matches_build_services (Guard C).
-    Extends assertion to taker_fee_rate field: both RuntimeConfig instances
-    (build_services-internal and P4 Phase 5b) must equal result.fee_rate.
-
-    This guards Critical #1: without this, sessions.system_prompt renders
-    Fee with default 0.0005 regardless of user's actual fee_rate.
+    AST scan rather than literal-RuntimeConfig replay (which would tautology
+    pass regardless of what cli/app.py actually does). Guards Critical #1
+    failure mode: if someone removes the kwarg from either site,
+    sessions.system_prompt renders Fee with default 0.0005 regardless of
+    user's actual fee_rate.
     """
-    from src.agent.persona import RuntimeConfig
-    from src.cli.app import _compute_max_wake
+    import ast
+    import pathlib
 
-    fee_rate = 0.001
-    scheduler_interval_min = 15
+    app_py = pathlib.Path(__file__).resolve().parents[1] / "src" / "cli" / "app.py"
+    tree = ast.parse(app_py.read_text())
 
-    # Replicate build_services-internal RuntimeConfig construction
-    max_wake = _compute_max_wake(scheduler_interval_min)
-    rc_build = RuntimeConfig(
-        wake_max_minutes=max_wake,
-        taker_fee_rate=fee_rate,
+    # Find all RuntimeConfig(...) Call nodes inside async def build_services
+    # and async def run.
+    found_sites: dict[str, list[ast.Call]] = {"build_services": [], "run": []}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in found_sites:
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "RuntimeConfig"):
+                    found_sites[node.name].append(inner)
+
+    assert len(found_sites["build_services"]) >= 1, (
+        "build_services must construct RuntimeConfig at least once"
+    )
+    assert len(found_sites["run"]) >= 1, (
+        "run() must construct RuntimeConfig at least once (P4 Phase 5b capture)"
     )
 
-    # Replicate run() Phase 5b RuntimeConfig construction (after our patch)
-    rc_capture = RuntimeConfig(
-        wake_max_minutes=_compute_max_wake(scheduler_interval_min),
-        taker_fee_rate=fee_rate,
-    )
+    def _has_taker_fee_kwarg(call: ast.Call) -> bool:
+        for kw in call.keywords:
+            if kw.arg != "taker_fee_rate":
+                continue
+            # Accept either result.fee_rate or _.fee_rate Attribute access
+            if isinstance(kw.value, ast.Attribute) and kw.value.attr == "fee_rate":
+                return True
+        return False
 
-    assert rc_build.taker_fee_rate == fee_rate, (
-        f"build_services RuntimeConfig.taker_fee_rate {rc_build.taker_fee_rate} "
-        f"!= result.fee_rate {fee_rate}"
-    )
-    assert rc_capture.taker_fee_rate == fee_rate, (
-        f"P4 Phase 5b RuntimeConfig.taker_fee_rate {rc_capture.taker_fee_rate} "
-        f"!= result.fee_rate {fee_rate}"
-    )
-    assert rc_build.taker_fee_rate == rc_capture.taker_fee_rate, (
-        f"fee_rate drift between build_services ({rc_build.taker_fee_rate}) "
-        f"and P4 capture ({rc_capture.taker_fee_rate}) RuntimeConfig instances"
-    )
+    for site_name, calls in found_sites.items():
+        for call in calls:
+            assert _has_taker_fee_kwarg(call), (
+                f"{site_name} RuntimeConfig at line {call.lineno} must pass "
+                f"taker_fee_rate=<obj>.fee_rate; missing or stale kwarg "
+                f"would let sessions.system_prompt drift to default fee_rate"
+            )

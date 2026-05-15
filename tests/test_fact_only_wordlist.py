@@ -664,6 +664,7 @@ async def _invoke_open_position(deps, mocker):
     deps.exchange.amount_to_precision = mocker.Mock(return_value=0.01)
     deps.exchange.has_pending_market_order = mocker.Mock(return_value=False)
     deps.exchange.set_leverage = AsyncMock(return_value=None)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     deps.exchange.create_order = AsyncMock(return_value=Order(
         id="ord1", symbol="BTC/USDT:USDT", side="buy", order_type="market",
         amount=0.01, price=None, status="open",
@@ -752,6 +753,7 @@ async def _invoke_place_limit_order_happy(deps, mocker):
         total_usdt=10000.0, free_usdt=8000.0, used_usdt=2000.0,
     ))
     deps.exchange.amount_to_precision = mocker.Mock(return_value=0.05)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     deps.exchange.create_order = AsyncMock(return_value=Order(
         id="abc12345-6789-0123-4567-89abcdef0123",  # UUID-shaped
         symbol="BTC/USDT:USDT", side="buy", order_type="limit",
@@ -825,6 +827,7 @@ async def _invoke_place_limit_order_with_position(deps, mocker, position_leverag
         total_usdt=10000.0, free_usdt=8000.0, used_usdt=2000.0,
     ))
     deps.exchange.amount_to_precision = mocker.Mock(return_value=0.05)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     deps.exchange.create_order = AsyncMock(return_value=Order(
         id="abc12345-6789-0123-4567-89abcdef0123",
         symbol="BTC/USDT:USDT", side="buy", order_type="limit",

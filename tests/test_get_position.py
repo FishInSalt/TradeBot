@@ -85,7 +85,7 @@ async def test_renders_fee_breakeven_section_long():
     out = await get_position(deps, "BTC/USDT:USDT")
 
     assert "=== Fee & Breakeven ===" in out
-    assert "Entry fee paid: ~-40.00 USDT (= entry × contracts × rate)" in out
+    assert "Entry fee paid: ~-40.00 USDT (= entry × contracts × contract_size × rate)" in out
     assert "Breakeven: 80,160.00" in out
     assert "[current 80,200.00, +40 pts]" in out
     assert "= 80,000.00 × (1 + 2 × fee_rate) [long round-trip taker]" in out
@@ -177,38 +177,27 @@ async def test_pnl_section_includes_gross_label():
 
 
 @pytest.mark.asyncio
-async def test_fee_breakeven_section_present_even_if_ticker_fails():
-    """Fee & Breakeven section is independent of ticker/balance/orders gather.
+async def test_fee_breakeven_section_uses_contract_size_factor():
+    """Entry fee formula = entry × contracts × contract_size × rate.
 
-    When the ticker for distance fails, section still renders (just without
-    the distance bracket). Main gather (ticker for Risk Exposure) succeeds.
+    Drift guard for OKX live where contract_size != 1.0 (e.g., BTC swap 0.01,
+    ETH swap 0.1). Without the contract_size factor, USDT-denominated fees
+    would be off by 10-100× on OKX.
+
+    entry=80000, contracts=10 contracts (= 0.1 BTC at contract_size=0.01),
+    fee_rate=0.001 → entry_fee_USDT = 80000 × 10 × 0.01 × 0.001 = 8.00
     """
     from src.agent.tools_perception import get_position
 
-    deps = _make_deps(side="long", entry_price=80_000.0, contracts=0.5,
+    deps = _make_deps(side="long", entry_price=80_000.0, contracts=10.0,
                       current_price=80_200.0, fee_rate=0.001)
-
-    # Make the second get_ticker call (distance ticker) raise — first call
-    # (in main gather) succeeds. We raise on the second call.
-    call_count = {"n": 0}
-    real_ticker = Ticker(
-        symbol="BTC/USDT:USDT", last=80_200.0, bid=80_195.0, ask=80_205.0,
-        high=81_000.0, low=79_500.0, base_volume=12_000.0, timestamp=1_715_040_000_000,
-    )
-
-    async def ticker_side_effect(sym):
-        call_count["n"] += 1
-        if call_count["n"] == 2:
-            raise RuntimeError("ticker timeout")
-        return real_ticker
-
-    deps.market_data.get_ticker = AsyncMock(side_effect=ticker_side_effect)
+    deps.exchange.get_contract_size = AsyncMock(return_value=0.01)
     out = await get_position(deps, "BTC/USDT:USDT")
 
     assert "=== Fee & Breakeven ===" in out
-    assert "Entry fee paid: ~-40.00 USDT" in out
-    # Breakeven still present, just no distance bracket
-    assert "Breakeven: 80,160.00" in out
+    assert "Entry fee paid: ~-8.00 USDT" in out, (
+        f"contract_size factor missing — got:\n{out}"
+    )
 
 
 @pytest.mark.asyncio

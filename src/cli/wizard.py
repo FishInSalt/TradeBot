@@ -304,7 +304,8 @@ def _show_summary(data: dict, console: Console) -> bool:
 
     ex_label = data["exchange_type"]
     fee_pct = data["fee_rate"] * 100
-    table.add_row("Exchange", f"{ex_label} (fee: {fee_pct:.2f}%)")
+    # .3f matches system prompt Layer 1 rendering — avoids 0.075% rounding to 0.08% drift
+    table.add_row("Exchange", f"{ex_label} (fee: {fee_pct:.3f}%)")
     table.add_row("Balance", f"{data['initial_balance']:.0f} USDT")
     table.add_row("Trading", f"{data['symbol']} / {data['timeframe']}")
     table.add_row("Model", f"{data['model_config'].id} ({data['model_config'].provider})")
