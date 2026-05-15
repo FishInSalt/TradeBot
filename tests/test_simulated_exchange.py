@@ -1487,3 +1487,40 @@ def test_init_raises_when_fee_rate_is_none():
             config=cfg, db_engine=None,
             session_id="t", symbol="BTC/USDT:USDT",
         )
+
+
+async def test_fill_market_close_includes_entry_price_in_event():
+    """sim market close fill event carries position weighted-avg entry."""
+    ex = _make_exchange(initial_balance=10000.0, fee_rate=0.0005)
+    ex._leverage["BTC/USDT:USDT"] = 10
+
+    # Set ticker to 80000 for open fill
+    ex._latest_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=80000.0, bid=79990.0, ask=80010.0,
+        high=81000.0, low=79000.0, base_volume=1000.0, timestamp=1712534400000,
+    )
+
+    # Open long @ ~80010 (ask)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", amount=0.1)
+    await ex._process_tick(_tick(last=80000.0, bid=79990.0, ask=80010.0))
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    entry_before_close = positions[0].entry_price  # should be 80010.0
+
+    # Register fill callback
+    fills = []
+    async def collect(ev):
+        fills.append(ev)
+    ex.on_fill(collect)
+
+    # Close long
+    await ex.create_order(
+        "BTC/USDT:USDT", "sell", "market", amount=0.1,
+        params={"reduceOnly": True},
+    )
+    await ex._process_tick(_tick(last=80200.0, bid=80190.0, ask=80210.0))
+
+    close_fills = [f for f in fills if f.pnl is not None]
+    assert len(close_fills) == 1
+    assert close_fills[0].entry_price == entry_before_close  # captured before _close_position_core
