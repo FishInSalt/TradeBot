@@ -483,8 +483,8 @@ async def run_agent_cycle(
             round_trip_net = -entry_fee_recompute + context.pnl - context.fee
             msg += (
                 f", Fee: {-context.fee:+.2f} USDT, "
-                f"PnL: {context.pnl:+.2f} (gross) / "
-                f"{round_trip_net:+.2f} (this fill, equiv-round-trip)"
+                f"PnL: {context.pnl:+.2f} USDT (gross) / "
+                f"{round_trip_net:+.2f} USDT (this fill, equiv-round-trip)"
             )
         else:
             # Part close OR full close with no entry_price (OKX cache miss)

@@ -1,7 +1,11 @@
 """Tests for Task 10: register_close_order_entry wired in close-direction tools."""
+import pathlib
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from src.integrations.exchange.base import Position, Order
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+_TRADER_PY = _REPO_ROOT / "src" / "agent" / "trader.py"
 
 
 def _make_deps(*, position_side="long", entry_price=80000.0, contracts=0.1,
@@ -171,9 +175,8 @@ async def test_open_position_output_includes_est_entry_fee():
 def test_open_position_wrapper_docstring_mentions_fee():
     """Wrapper docstring preserves fill-timing sentence + appends fee mention."""
     import ast
-    import pathlib
 
-    src = pathlib.Path("/Users/z/Z/TradeBot/src/agent/trader.py").read_text()
+    src = _TRADER_PY.read_text()
     tree = ast.parse(src)
 
     # Walk all function defs to find the open_position wrapper inside create_trader_agent
@@ -297,9 +300,8 @@ async def test_close_position_approval_message_includes_gross_and_net():
 def test_close_position_wrapper_docstring_mentions_fee():
     """Wrapper docstring appends fee/net-PnL mention."""
     import ast
-    import pathlib
 
-    src = pathlib.Path("/Users/z/Z/TradeBot/src/agent/trader.py").read_text()
+    src = _TRADER_PY.read_text()
     tree = ast.parse(src)
 
     docstring = None
@@ -370,9 +372,8 @@ async def test_place_limit_order_output_includes_est_entry_fee_if_filled():
 def test_place_limit_order_wrapper_docstring_mentions_fee():
     """Wrapper docstring appends maker/taker fee sentence."""
     import ast
-    import pathlib
 
-    src = pathlib.Path("/Users/z/Z/TradeBot/src/agent/trader.py").read_text()
+    src = _TRADER_PY.read_text()
     tree = ast.parse(src)
 
     docstring = None
@@ -396,7 +397,7 @@ def test_execution_tool_docstrings_no_evaluation_words():
     - 'should' / 'must' / 'avoid' / 'careful' (evaluative directives)
     """
     import ast
-    src = open("/Users/z/Z/TradeBot/src/agent/trader.py").read()
+    src = _TRADER_PY.read_text()
     tree = ast.parse(src)
     # 提取 trader.py wrapper docstrings for open_position / close_position /
     # set_stop_loss / set_take_profit / place_limit_order / cancel_order

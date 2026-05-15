@@ -138,8 +138,8 @@ def create_trader_agent(
         mark price.
 
         Output also includes Fee & Breakeven section: entry_fee paid (= entry × contracts × rate)
-        and breakeven price = entry × (1 ± 2 × fee_rate). Use breakeven as the fee-aware decision
-        anchor when judging whether to hold or close.
+        and breakeven price = entry × (1 ± 2 × fee_rate) — the fill price at which the
+        position is exactly flat on a taker round-trip.
 
         Args:
             symbol: trading symbol (defaults to session symbol).

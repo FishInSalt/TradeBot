@@ -156,7 +156,7 @@ async def test_fill_notification_close_full_includes_round_trip_net_uses_entry_p
     prompt = captured["prompt"]
     # entry_fee_recompute = 81878.6 * 0.366 * 0.001 = 29.9676... → rounds to 29.97
     # round_trip_net = -29.97 + (-56.29) - 29.91 = -116.17
-    assert "PnL: -56.29 (gross) / -116.17 (this fill, equiv-round-trip)" in prompt
+    assert "PnL: -56.29 USDT (gross) / -116.17 USDT (this fill, equiv-round-trip)" in prompt
     assert "Fee: -29.91 USDT" in prompt
 
 
