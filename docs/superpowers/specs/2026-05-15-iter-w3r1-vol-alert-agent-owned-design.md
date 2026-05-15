@@ -377,7 +377,7 @@ grep -rn "alert_config\|alert_enabled\|alert_window\|alert_threshold\|set_alert_
 **Pytest baseline drift**:
 
 - Baseline: 1694 passed (post PR #54)
-- Expected delta: removed ~8 cases (disabled / null-config branches) + added ~13 cases (cancel + lazy create + drift guards) → net +5 ± 3 → expected 1697-1702 passed
+- Expected delta: 9 added (4 Task-1 base lazy/cancel + 1 net Task-2 set rewrite + 2 Task-2 cancel + 2 Task-2 get_active_alerts) minus 8 deleted (1 set-disabled + 1 step_risk_alerts_off + 1 restore_null_alert_config + 5 Task-7 Category A old-API tests) → net **+1** → ~1695. Band **1693-1700** allows -1 ~ +6 tolerance for unexpected per-file rebalancing.
 - Acceptance: the test count moves in the expected direction; any unexpected failures are investigated, not suppressed
 
 **Manual smoke** (sim session):
