@@ -648,3 +648,62 @@ async def test_run_wizard_existing_names_conflict_reprompts():
 
     assert result is not None
     assert result.session_name == "BTC sim #2"
+
+
+# --- Task 13: fee_rate full fill ---
+
+def test_wizard_result_fee_rate_type_is_float_not_optional():
+    """WizardResult.fee_rate annotation is `float`, not `float | None`."""
+    from src.cli.wizard import WizardResult
+    import typing
+    hints = typing.get_type_hints(WizardResult)
+    assert hints["fee_rate"] is float
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", side_effect=[0.05, 100.0])
+@patch("src.cli.wizard.Prompt.ask", return_value="sim")
+def test_wizard_simulated_branch_prompt_says_per_side(mock_prompt, mock_float):
+    """Simulated fee_rate prompt text says 'Fee rate (% per side)' (was 'Fee rate (%)')."""
+    from src.cli.wizard import _step_exchange
+    _step_exchange(Settings(), Path("/tmp"), Console())
+    # First FloatPrompt.ask call is for fee_rate; check its prompt keyword argument
+    first_call = mock_float.call_args_list[0]
+    prompt_text = first_call.args[0] if first_call.args else first_call.kwargs.get("prompt", "")
+    assert "per side" in prompt_text
+
+
+@patch("src.cli.wizard.FloatPrompt.ask", side_effect=[200.0, 0.05])
+@patch("src.cli.wizard.Prompt.ask", side_effect=["real", "my_key", "my_secret", "my_pass"])
+def test_wizard_okx_branch_prompts_for_fee_rate(mock_prompt, mock_float, tmp_path):
+    """OKX path collects fee_rate (default 0.05% = OKX BTC perp regular tier taker).
+
+    OKX flow order: balance first, then fee_rate — so side_effect=[balance, fee_pct].
+    """
+    from src.cli.wizard import _step_exchange
+    result = _step_exchange(Settings(), tmp_path, Console())
+    assert result["exchange_type"] == "okx"
+    assert result["fee_rate"] is not None
+    assert result["fee_rate"] == pytest.approx(0.0005)  # 0.05 / 100
+    # Verify that FloatPrompt.ask was called with OKX VIP tier mention (second call)
+    okx_fee_call = mock_float.call_args_list[1]
+    prompt_text = okx_fee_call.args[0] if okx_fee_call.args else okx_fee_call.kwargs.get("prompt", "")
+    assert "OKX live" in prompt_text
+
+
+@patch("src.cli.wizard.Confirm.ask", return_value=True)
+def test_wizard_summary_shows_fee_for_okx_path(mock_confirm):
+    """_show_summary appends fee% for OKX path (not gated by exchange_type=='simulated')."""
+    from src.cli.wizard import _show_summary
+    from io import StringIO
+    console = Console(file=StringIO(), highlight=False)
+    data = {
+        "exchange_type": "okx", "fee_rate": 0.0005, "initial_balance": 10000.0,
+        "symbol": "BTC/USDT:USDT", "timeframe": "15m",
+        "model_config": ModelConfig(id="test", provider="anthropic", model="claude-opus-4-6", api_key="k", base_url=None),
+        "scheduler_interval_min": 15, "approval_enabled": True,
+        "token_budget": 500000,
+        "persona": PersonaConfig(),
+    }
+    _show_summary(data, console)
+    output = console.file.getvalue()
+    assert "0.05%" in output

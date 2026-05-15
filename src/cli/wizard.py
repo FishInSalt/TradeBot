@@ -22,7 +22,7 @@ _EXCHANGE_DISPLAY = {"simulated": "sim", "okx": "okx"}
 class WizardResult:
     # Exchange
     exchange_type: str              # "simulated" / "okx"
-    fee_rate: float | None          # simulated only
+    fee_rate: float                 # both paths, wizard-enforced
     initial_balance: float
     api_credentials: dict | None    # real: {api_key, secret, password}
     # Trading pair
@@ -71,7 +71,7 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
     if exchange_type == "simulated":
         fee = defaults.exchange.fee_rate if defaults.exchange.fee_rate is not None else 0.0005
         default_fee_pct = fee * 100
-        fee_pct = FloatPrompt.ask("  Fee rate (%)", default=default_fee_pct, console=console)
+        fee_pct = FloatPrompt.ask("  Fee rate (% per side)", default=default_fee_pct, console=console)
         balance = FloatPrompt.ask(
             "  Initial balance (USDT)",
             default=defaults.trading.initial_balance_usdt,
@@ -125,9 +125,20 @@ def _step_exchange(defaults: Settings, config_dir: Path, console: Console) -> di
         default=defaults.trading.initial_balance_usdt,
         console=console,
     )
+    # OKX path fee_rate (iter-tool-opt-fee-visibility):
+    # Currently user-input self-estimated (matches simulated path UX).
+    # Future: fetch via OKX /api/v5/account/trade-fee endpoint to get
+    # the user's actual taker rate by VIP tier; remove the manual input.
+    # See spec §7 follow-up "iter-tool-opt-okx-fee-rate-auto-fetch".
+    okx_fee_pct = FloatPrompt.ask(
+        "  Fee rate (% per side) "
+        "[default 0.05 = OKX BTC perp regular tier taker; "
+        "OKX live 用户请按 VIP tier 实填]",
+        default=0.05, console=console,
+    )
     return {
         "exchange_type": "okx",
-        "fee_rate": None,
+        "fee_rate": okx_fee_pct / 100,
         "initial_balance": balance,
         "api_credentials": api_credentials,
     }
@@ -291,10 +302,9 @@ def _show_summary(data: dict, console: Console) -> bool:
     table.add_column("Key", style="bold")
     table.add_column("Value")
 
-    ex = data["exchange_type"]
-    if ex == "simulated":
-        ex += f" (fee: {data['fee_rate'] * 100:.2f}%)"
-    table.add_row("Exchange", ex)
+    ex_label = data["exchange_type"]
+    fee_pct = data["fee_rate"] * 100
+    table.add_row("Exchange", f"{ex_label} (fee: {fee_pct:.2f}%)")
     table.add_row("Balance", f"{data['initial_balance']:.0f} USDT")
     table.add_row("Trading", f"{data['symbol']} / {data['timeframe']}")
     table.add_row("Model", f"{data['model_config'].id} ({data['model_config'].provider})")
