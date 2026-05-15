@@ -284,16 +284,16 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
                      f"Leverage: {p.leverage}x"]
         # F-P2: Liquidation lives in Risk Exposure section (richer form with
         # `(P% away = Q× ATR(1h))`); deduplicated from Position section.
-        pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT")
+        pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT (gross)")
 
         pnl_lines = ["=== PnL ==="]
         if deps.initial_balance > 0:
             pnl_pct_inner = (p.unrealized_pnl / deps.initial_balance) * 100
             pnl_lines.append(
-                f"PnL: {p.unrealized_pnl:+.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)"
+                f"PnL: {p.unrealized_pnl:+.2f} USDT gross ({pnl_pct_inner:+.2f}% of initial capital)"
             )
         else:
-            pnl_lines.append(f"PnL: {p.unrealized_pnl:+.2f} USDT")
+            pnl_lines.append(f"PnL: {p.unrealized_pnl:+.2f} USDT gross")
         if p.created_at is not None:
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
@@ -310,6 +310,48 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             pnl_lines.append("Duration: N/A")
         return ["\n".join(pos_lines), "\n".join(pnl_lines)]
 
+    # Phase 2a: core render + Fee & Breakeven section (Phase-1 fields only).
+    # These sections are computed before the main IO gather so they survive
+    # ticker/balance/orders failure in the degradation branch below.
+    sections = _render_position_core()
+
+    # Fee & Breakeven section — depends only on p.entry_price + deps.fee_rate.
+    # Distance bracket has its own isolated ticker fetch (separate try/except) so
+    # a timeout here never blocks the main gather and the section always renders.
+    entry_fee = p.entry_price * p.contracts * deps.fee_rate
+    if p.side == "long":
+        breakeven = p.entry_price * (1 + 2 * deps.fee_rate)
+        sign_str = "+"
+        side_label = "long"
+    else:
+        breakeven = p.entry_price * (1 - 2 * deps.fee_rate)
+        sign_str = "−"  # Unicode minus U+2212, matches test assertion exactly
+        side_label = "short"
+
+    fb_lines = ["=== Fee & Breakeven ==="]
+    fb_lines.append(f"Entry fee paid: ~-{entry_fee:.2f} USDT (= entry × contracts × rate)")
+    # Separate ticker fetch for distance bracket only — failure degrades gracefully
+    try:
+        _distance_ticker = await deps.market_data.get_ticker(symbol)
+        if _distance_ticker.last > 0:
+            if p.side == "long":
+                _distance_pts = _distance_ticker.last - breakeven
+            else:
+                _distance_pts = breakeven - _distance_ticker.last
+            fb_lines.append(
+                f"Breakeven: {breakeven:,.2f} "
+                f"[current {_distance_ticker.last:,.2f}, {_distance_pts:+.0f} pts]"
+            )
+        else:
+            fb_lines.append(f"Breakeven: {breakeven:,.2f}")
+    except Exception:
+        fb_lines.append(f"Breakeven: {breakeven:,.2f}")
+    fb_lines.append(
+        f"  = {p.entry_price:,.2f} × (1 {sign_str} 2 × fee_rate) "
+        f"[{side_label} round-trip taker]"
+    )
+    sections.append("\n".join(fb_lines))
+
     try:
         ticker, balance, ohlcv_df, open_orders, contract_size, mark_price = await asyncio.gather(
             deps.market_data.get_ticker(symbol),
@@ -322,7 +364,6 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         )
     except Exception as e:
         logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
-        sections = _render_position_core()
         sections.append(f"=== Risk Exposure ===\n(unavailable: {e.__class__.__name__})")
         sections.append(f"=== Exit Orders ===\n(unavailable: {e.__class__.__name__})")
         return "\n\n".join(sections)
@@ -336,8 +377,6 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             indicators = deps.technical.compute_indicators(df_closed)
             atr_1h = indicators.get("atr_14")
     current_price = ticker.last
-
-    sections = _render_position_core()
 
     # === Risk Exposure ===
     notional = p.contracts * p.entry_price * contract_size

@@ -137,6 +137,10 @@ def create_trader_agent(
         both entry and last price). Liquidation distance is computed against
         mark price.
 
+        Output also includes Fee & Breakeven section: entry_fee paid (= entry × contracts × rate)
+        and breakeven price = entry × (1 ± 2 × fee_rate). Use breakeven as the fee-aware decision
+        anchor when judging whether to hold or close.
+
         Args:
             symbol: trading symbol (defaults to session symbol).
         """

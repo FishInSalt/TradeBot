@@ -41,6 +41,7 @@ class MockDeps:
     wake_max_minutes: int = 60
     set_next_wake_fn: object = None
     initial_balance: float = 10000.0
+    fee_rate: float = 0.0005
     metrics: object = None
     news: object = None
     macro: object = None

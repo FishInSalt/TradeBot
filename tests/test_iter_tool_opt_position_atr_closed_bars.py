@@ -80,6 +80,7 @@ async def test_position_atr_strips_in_progress_bar():
     deps = MagicMock()
     deps.symbol = "BTC/USDT:USDT"
     deps.initial_balance = 10_000.0
+    deps.fee_rate = 0.0005
     deps.technical = svc
     deps.exchange.fetch_positions = AsyncMock(return_value=[
         Position(symbol="BTC/USDT:USDT", side="long", contracts=1.0,

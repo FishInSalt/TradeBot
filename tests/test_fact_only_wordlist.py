@@ -57,6 +57,7 @@ class MockDeps:
     # Execution-tool defaults (Task 12) — skip approval gate by default
     approval_enabled: bool = False
     approval_gate: object | None = None
+    fee_rate: float = 0.0005
 
 
 @pytest.mark.asyncio
