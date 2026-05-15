@@ -492,11 +492,17 @@ async def run_agent_cycle(
                 f"{round_trip_net:+.2f} USDT (this fill, equiv-round-trip)"
             )
         else:
-            # Part close OR full close with no entry_price (OKX cache miss)
-            msg += (
+            # Part close, OR full close with no entry_price (OKX cache miss —
+            # e.g., SL/TP placed in a prior process before restart). fact-provider
+            # principle: emit hint so agent knows why round-trip line is absent
+            # on full-close fills, distinguishing from part-close design.
+            base = (
                 f", Fee: {-context.fee:+.2f} USDT, "
                 f"PnL: {context.pnl:+.2f} USDT (gross)"
             )
+            if context.is_full_close and context.entry_price is None:
+                base += " [round-trip net unavailable: entry_price not cached]"
+            msg += base
         prompt += msg
     elif trigger_type == "alert" and context is not None:
         if isinstance(context, PriceLevelAlertInfo):

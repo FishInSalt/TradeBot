@@ -337,6 +337,7 @@ def _make_limit_deps(*, fee_rate=0.0005, free_usdt=1000.0, order_id="lim1"):
     deps.exchange.set_leverage = AsyncMock()
     deps.exchange.fetch_balance = AsyncMock(return_value=balance)
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.register_close_order_entry = MagicMock()
     # pass-through precision so quantity = raw_quantity
     deps.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, qty: qty)
     deps.exchange.create_order = AsyncMock(return_value=Order(
@@ -421,3 +422,52 @@ def test_execution_tool_docstrings_no_evaluation_words():
                 assert word not in ds_lower, (
                     f"{node.name} docstring contains forbidden word '{word}': {ds!r}"
                 )
+
+
+# === ultrareview R2 Imp #2: place_limit_order register hook for limit-as-close ===
+
+@pytest.mark.asyncio
+async def test_place_limit_order_registers_entry_when_closing_existing_position():
+    """Limit-as-close (reverse direction of existing position): register entry_price
+    so OKX _parse_fill_event can attach it. Without this hook, limit-close fills
+    on OKX would systematically miss round-trip net rendering (cache miss → degrade).
+    """
+    from src.agent.tools_execution import place_limit_order
+
+    deps = _make_limit_deps(fee_rate=0.0005, free_usdt=1000.0, order_id="limit-close-1")
+    # existing long position; limit short (sell) → close
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.1, entry_price=79000.0,
+        unrealized_pnl=0.0, leverage=10, liquidation_price=72000.0, created_at=None,
+    )])
+    await place_limit_order(deps, side="short", price=81000.0,
+                            position_pct=100, leverage=10, reasoning="lock profit")
+
+    deps.exchange.register_close_order_entry.assert_called_once_with("limit-close-1", 79000.0)
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_does_not_register_on_open():
+    """Same-direction limit (scale-in or fresh open): NO register call.
+    Open fills carry entry_price=None by design — register would pollute cache.
+    """
+    from src.agent.tools_execution import place_limit_order
+
+    deps = _make_limit_deps(fee_rate=0.0005, free_usdt=1000.0)
+    # no positions → fresh open
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    await place_limit_order(deps, side="long", price=80000.0,
+                            position_pct=100, leverage=10, reasoning="entry")
+
+    deps.exchange.register_close_order_entry.assert_not_called()
+
+    # same-side position → scale-in (still open semantic)
+    deps.exchange.register_close_order_entry.reset_mock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.05, entry_price=79500.0,
+        unrealized_pnl=0.0, leverage=10, liquidation_price=72000.0, created_at=None,
+    )])
+    await place_limit_order(deps, side="long", price=80500.0,
+                            position_pct=100, leverage=10, reasoning="scale-in")
+
+    deps.exchange.register_close_order_entry.assert_not_called()

@@ -263,3 +263,40 @@ async def test_fill_notification_pnl_cap_scenario_uses_actual_entry_price():
     assert "(this fill, equiv-round-trip)" in prompt
     assert "-516.00" in prompt
     assert "Fee: -8.00 USDT" in prompt
+
+
+@pytest.mark.asyncio
+async def test_fill_notification_full_close_cache_miss_emits_hint():
+    """Cache miss on full close (OKX restart scenario): is_full_close=True +
+    entry_price=None → render fee + gross + explicit hint, not silent degrade.
+
+    fact-provider principle: agent should know WHY round-trip line is absent
+    so it doesn't form wrong conclusions from the inconsistency vs sim path
+    (which always carries entry_price).
+    """
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from tests._fixtures import make_fill_event
+
+    deps, engine = await _make_deps_engine("sess-fill-cache-miss")
+    agent, captured = _make_capturing_agent()
+
+    fill = make_fill_event(
+        trigger_reason="stop",
+        fill_price=79000.0,
+        amount=0.5,
+        fee=41.0,
+        pnl=-500.0,
+        is_full_close=True,
+        entry_price=None,  # cache miss
+    )
+
+    await run_agent_cycle(
+        agent=agent, deps=deps, trigger_type="conditional",
+        budget=TokenBudget(daily_max=500_000),
+        engine=engine, context=fill,
+    )
+
+    prompt = captured["prompt"]
+    assert "Fee: -41.00 USDT" in prompt
+    assert "PnL: -500.00 USDT (gross)" in prompt
+    assert "[round-trip net unavailable: entry_price not cached]" in prompt

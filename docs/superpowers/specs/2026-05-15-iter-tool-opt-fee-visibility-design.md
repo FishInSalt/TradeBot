@@ -379,6 +379,8 @@ return (
 
 **ticker fetch 顺序**: 修订自 review B-3 + N3 — fetch 放在 `_check_approval` **之前**（之前 spec 文字描述与代码示例不一致；现 lock 为"approval 之前 ticker fetch"以支持 approval message 含 net 数字）。
 
+**Approval-gate IO ordering tradeoff**（ultrareview R2 Imp #4）: ticker + get_contract_size 在 approval 之前 fetch 是 design-intent，**不**是 bug。Rationale: approval message 需含 `PnL: gross / net (round-trip)` 双视角（Task 21 audit Moderate #3 修订要求），net 估算依赖 ticker.bid/ask + contract_size。代价: approval 拒绝时 2 个额外 API call 浪费（OKX live cached metadata + cached ticker ~微秒级，rate-limit 几乎无影响）。优先级低于"approval 知情决策"的价值，维持现状。
+
 注：one-way mode 下 `len(positions) == 1`，sum loop 单元素，保留 generic 写法。
 
 **关于估算 fill 价口径**（修订自 review #5 — 旧 rationale "fill 价 ≈ ticker.last" 不准；实际 sim `_fill_market_close` 用 `ticker.bid if long else ticker.ask`）:
@@ -916,6 +918,8 @@ grep -rn "WizardResult(" tests/
 | funding fee 模拟 | sim 不模拟 funding settlement；OKX 实盘 funding 单独账目；agent 看不到 cumulative funding cost | W3+ + 实盘准备期联合评估 | sim 算法扩展 + RuntimeConfig 新增 funding 字段（与 taker_fee_rate 同 pattern 独立字段，避免混入 fee 段）+ system prompt 加独立 §Funding 段（不混入 §Fee 段）+ 工具输出层 |
 | OKX 实盘 maker/taker mix | OKX 实盘 fee = limit maker / market taker 差异；当前用 taker rate 估算偏保守 | 实盘准备期；与 `project_okx_demo_mark_vs_last_drift` memory 同期 | sim/OKX 一致性 |
 | Manual Close Panic（W2 议题 2）| sim #8 manual close -129.30 vs stop trigger +30.63；需多 session 验证规律 | W3 baseline 1-2 session 再现后立项 | close_position 输出 + alternative-action |
+| **OKX `_close_order_entry_cache` 持久化** | 当前 in-memory only，进程重启丢全部 entries；OKX 重启后 pre-existing SL/TP 触发 → cli 退化"fee + gross"（agent 见到 `[round-trip net unavailable: entry_price not cached]` hint）。Design-intent graceful degradation，**不**算 regression. | 实盘准备期 + 用户进程重启频率高时；候选实现 `trade_actions.entry_price_snapshot` 列 + 重启时 rebuild cache | DB schema + 启动期 rebuild 逻辑 |
+| **`place_limit_order` limit-as-close hook** | ✅ 已在本 iter 落地（ultrareview R2 Imp #2）：existing position 反向 limit 注册 entry_price；scale-in / fresh open 不注册 | 本 iter 内闭环 | n/a |
 
 ---
 

@@ -167,6 +167,11 @@ class OKXExchange(BaseExchange):
         Keeps cache bounded across long SL/TP idle windows.
         """
         import time
+        # getattr defense: some tests construct OKXExchange via __new__ to skip
+        # __init__ (e.g., tests/_fixtures.py make_okx_exchange before fixture
+        # was patched). Direct production path always has the attribute via
+        # __init__. Safe-no-op on missing attribute lets fixture call sites
+        # invoke this method without crashing.
         cache = getattr(self, "_close_order_entry_cache", None)
         if not cache:
             return
@@ -773,6 +778,8 @@ class OKXExchange(BaseExchange):
             )
         else:
             await self._client.cancel_order(order_id, symbol)
+        # getattr defense: see _sweep_close_entry_cache_ttl comment — tests
+        # using __new__-bypass construction reach here without __init__ running.
         cache = getattr(self, "_close_order_entry_cache", None)
         if cache is not None:
             cache.pop(order_id, None)

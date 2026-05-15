@@ -606,6 +606,13 @@ async def place_limit_order(
         amount=quantity, price=price,
     )
 
+    # Limit-as-close hook: if a position exists and this limit is the reverse
+    # direction, the fill will be a close — register the position's entry_price
+    # so OKX _parse_fill_event can attach it to the FillEvent (sim path captures
+    # at fill time, no-op there).
+    if positions and positions[0].side != side:
+        deps.exchange.register_close_order_entry(order.id, positions[0].entry_price)
+
     await _record_action(
         deps, action="place_limit_order", order_id=order.id,
         side=side, price=price, reasoning=reasoning,
