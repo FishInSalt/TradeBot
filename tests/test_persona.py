@@ -613,3 +613,16 @@ def test_word_cap_value_consistent_across_three_channels():
     assert _count_words(body) == cap, \
         f"_count_words convention diverged: expected exactly {cap} " \
         f"words in truncated body, got {_count_words(body)}"
+
+
+def test_trading_deps_has_fee_rate_default():
+    """TradingDeps default fee_rate matches DEFAULT_TAKER_FEE_RATE."""
+    from src.agent.trader import TradingDeps
+    from unittest.mock import MagicMock
+    deps = TradingDeps(
+        symbol="BTC/USDT:USDT", timeframe="5m",
+        market_data=MagicMock(), exchange=MagicMock(),
+        technical=MagicMock(), memory=MagicMock(),
+        session_id="test",
+    )
+    assert deps.fee_rate == DEFAULT_TAKER_FEE_RATE

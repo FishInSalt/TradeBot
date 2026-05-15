@@ -8,7 +8,7 @@ from pydantic_ai import Agent, RunContext
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
-from src.agent.persona import generate_system_prompt, RuntimeConfig
+from src.agent.persona import DEFAULT_TAKER_FEE_RATE, generate_system_prompt, RuntimeConfig
 from src.cli.approval import ApprovalGate
 from src.config import PersonaConfig
 from src.integrations.crypto_etf.service import CryptoEtfService
@@ -37,6 +37,9 @@ class TradingDeps:
     wake_max_minutes: int = 60
     set_next_wake_fn: Callable[[int], None] | None = None
     initial_balance: float = 10000.0
+    fee_rate: float = DEFAULT_TAKER_FEE_RATE
+    """Session-level taker fee rate (decimal). Mirror of RuntimeConfig.taker_fee_rate;
+    injected from sessions.fee_rate via build_services. Default for tests only."""
     metrics: MetricsService | None = None
     news: NewsService | None = None
     macro: MacroService | None = None
