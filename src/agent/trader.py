@@ -194,12 +194,23 @@ def create_trader_agent(
 
     @tool
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
-        """Get quantitative trading performance statistics.
+        """Show session trading performance — balance, return, cumulative fees, win rate, drawdown.
 
-        Reports return, win rate, drawdown, profit factor, and other
-        quantitative metrics.
+        Returns:
+            str: Two sections.
 
-        Related: get_trade_journal (decision timeline).
+            === Trading Performance === — Initial Balance, Current Balance,
+            Total Return (% + USDT, incl. unrealized), Realized PnL (gross, before fees),
+            Total Fees (cumulative across all fills).
+
+            === Trade Stats === — Total Trades, Win Rate, Avg Win/Loss, Profit Factor,
+            Max Drawdown (equity-peak-based), Best/Worst Trade. All gross-based until
+            iter-tool-opt-net-pnl-metrics lands.
+
+            Related: get_trade_journal (decision timeline).
+
+        Degradation: 'No completed trades yet.' if zero trades.
+        'No metrics service available.' if metrics service is missing.
         """
         from src.agent.tools_perception import get_performance as _impl
 
