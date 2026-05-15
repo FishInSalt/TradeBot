@@ -1588,3 +1588,69 @@ async def test_execute_fill_includes_entry_price_for_take_profit_trigger():
     assert len(fills) == 1
     assert fills[0].trigger_reason == "take_profit"
     assert fills[0].entry_price == expected_entry
+
+
+@pytest.mark.asyncio
+async def test_force_liquidate_includes_entry_price():
+    """sim liquidation fill event carries position entry."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # Tick 1: normal price → fills the long (entry = tick.ask = 95010)
+    await ex._process_tick(_tick())
+    assert len(fills) == 1
+    original_entry = fills[0].fill_price  # entry_price == fill_price for market open
+
+    # Tick 2: price crashes below liquidation price
+    liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 79990.0, 80010.0,
+                        96000.0, 79000.0, 1000.0, 1712534500000)
+    await ex._process_tick(liq_ticker)
+
+    liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fills) == 1
+    assert liq_fills[0].entry_price == pytest.approx(original_entry)
+
+
+@pytest.mark.asyncio
+async def test_fill_event_entry_price_captured_before_pnl_cap():
+    """drift guard: entry_price reflects original entry even when pnl_cap fires.
+
+    Construct: leverage 100x position, market drops below liq; _close_position_core
+    pnl_cap clamps pnl to -margin. entry_price MUST still equal original entry
+    (not back-derived from clamped pnl).
+    """
+    ex = _make_exchange(initial_balance=10000.0)
+    ex._leverage["BTC/USDT:USDT"] = 100
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Place and fill a long at ~95010 (ask price from _tick())
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())
+    assert len(fills) == 1
+    expected_entry = fills[0].fill_price  # e.g. 95010.0
+
+    # Tick 2: deep crash — well below liquidation; pnl_cap will clamp pnl to -margin
+    deep_crash_ticker = Ticker(
+        "BTC/USDT:USDT", 50000.0, 49990.0, 50010.0,
+        96000.0, 49000.0, 1000.0, 1712535000000,
+    )
+    await ex._process_tick(deep_crash_ticker)
+
+    liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fills) == 1
+    liq_fill = liq_fills[0]
+
+    # pnl is clamped (won't exceed -margin); entry_price must still be the original
+    assert liq_fill.pnl is not None
+    assert liq_fill.entry_price == pytest.approx(expected_entry)

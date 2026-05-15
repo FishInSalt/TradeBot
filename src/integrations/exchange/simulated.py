@@ -607,6 +607,7 @@ class SimulatedExchange(BaseExchange):
 
     def _force_liquidate(self, pos: _Position, symbol: str, price: float) -> FillEvent:
         contracts = pos.contracts  # capture before close deletes pos
+        captured_entry = pos.entry_price  # capture BEFORE close (pos may be popped from self._positions in _close_position_core)
         pnl, fee, _ = self._close_position_core(
             symbol, pos.side, contracts, price, pnl_cap=True,
         )
@@ -622,6 +623,7 @@ class SimulatedExchange(BaseExchange):
             pnl=pnl,
             timestamp=now_ms,
             is_full_close=is_full_close,
+            entry_price=captured_entry,
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
