@@ -126,6 +126,11 @@ class OKXExchange(BaseExchange):
         self._pnl_fetch_timeout: float = 5.0
         self._seen_order_ids: dict[str, None] = {}
         self._seen_order_ids_max = 10000
+        self._close_order_entry_cache: dict[str, tuple[float, float]] = {}
+        """Maps close-direction order_id → (position.entry_price, monotonic_ts).
+        Populated by register_close_order_entry (called by tools_execution.py
+        close paths after create_order). Consumed by _parse_fill_event.
+        Cleaned on cancel_order or via TTL sweep."""
         logger.info(
             "OKX exchange initialized (%s account)",
             "demo" if sandbox else "live",
@@ -140,6 +145,17 @@ class OKXExchange(BaseExchange):
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback
+
+    # --- Entry price cache for close fills ---
+
+    def register_close_order_entry(self, order_id: str, entry_price: float) -> None:
+        """Cache position entry_price for close-direction order at submit time.
+
+        Allows _parse_fill_event to attach exchange-layer-known entry_price to
+        the FillEvent without relying on order response fields (OKX V5 avgPx
+        on close orders is exit price, not position entry)."""
+        import time
+        self._close_order_entry_cache[order_id] = (entry_price, time.monotonic())
 
     # --- WebSocket lifecycle ---
 
