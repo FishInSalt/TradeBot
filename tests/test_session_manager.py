@@ -350,6 +350,7 @@ async def test_select_or_create_with_history_restore(tmp_path):
             persona_config=json.dumps(PersonaConfig().model_dump()),
             model_config=json.dumps({"id": "m1", "provider": "openai", "model": "gpt-4o"}),
             last_active_at=datetime.now(timezone.utc),
+            fee_rate=0.0005,
         ))
         await db_sess.commit()
 
@@ -374,6 +375,63 @@ async def test_select_or_create_with_history_restore(tmp_path):
     async with get_session(engine) as db_sess:
         r = await db_sess.execute(select(Session).where(Session.id == "existing-1"))
         assert r.scalar_one().status == "active"
+    await engine.dispose()
+
+
+async def test_restore_session_prompts_for_fee_rate_on_legacy_null(tmp_path):
+    """_restore_session detects sessions.fee_rate IS NULL → prompts user → updates DB.
+
+    Returned WizardResult.fee_rate is non-None and equals fee_pct/100.
+    """
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    from src.config import PersonaConfig
+    from src.services.model_manager import ModelConfig
+
+    persona = PersonaConfig()
+    model_cfg = ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None)
+
+    # Seed session with fee_rate=NULL (legacy pre-iter session)
+    async with get_session(engine) as db_sess:
+        s = Session(
+            id="legacy-null-fee", name="BTC sim #99", symbol="BTC/USDT:USDT",
+            persona_config=json.dumps(persona.model_dump()),
+            model_config=json.dumps({"id": "m1", "provider": "openai", "model": "gpt-4o"}),
+            initial_balance=100.0, status="paused",
+            exchange_type="simulated", timeframe="15m",
+            scheduler_interval_min=15, approval_enabled=True,
+            fee_rate=None,
+            token_budget=500000,
+        )
+        db_sess.add(s)
+        await db_sess.commit()
+
+    from src.cli.session_manager import _restore_session
+
+    mock_mm = MagicMock()
+    mock_mm.load_models.return_value = [model_cfg]
+    mock_mm.get_model_by_id.return_value = model_cfg
+    mock_mm.create_model.return_value = MagicMock()
+
+    console = Console()
+    # FloatPrompt.ask returns 0.05 (% per side) → resolved_fee_rate = 0.0005
+    with patch("src.cli.session_manager.Confirm.ask", return_value=True), \
+         patch("rich.prompt.FloatPrompt.ask", return_value=0.05):
+        result = await _restore_session(
+            engine, "legacy-null-fee", mock_mm, None, console, Path(str(tmp_path)),
+        )
+
+    # WizardResult.fee_rate must be non-None and correctly converted
+    assert result is not None
+    assert result.fee_rate == pytest.approx(0.0005)
+
+    # DB row must be updated so subsequent restores skip the prompt
+    async with get_session(engine) as db_sess:
+        row = await db_sess.execute(select(Session).where(Session.id == "legacy-null-fee"))
+        updated = row.scalar_one()
+    assert updated.fee_rate == pytest.approx(0.0005)
+
     await engine.dispose()
 
 
