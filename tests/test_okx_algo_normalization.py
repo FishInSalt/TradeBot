@@ -47,7 +47,6 @@ def test_build_services_passes_sandbox_from_settings_to_okx_exchange():
     result.initial_balance = 100.0
     result.model = "claude-sonnet"
     result.persona = MagicMock()
-    result.alert_enabled = False
     result.fee_rate = None
 
     from src.config import Settings

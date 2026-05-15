@@ -30,9 +30,3 @@ database:
 approval:
   enabled: true                # If true, agent pauses before executing trades for human confirmation
   timeout_seconds: 300         # Seconds to wait for approval before auto-skipping the trade
-
-# === Price Alert Configuration ===
-alerts:
-  enabled: true                  # If true, agent is woken on significant price moves
-  window_minutes: 60             # Sliding window size for volatility detection
-  threshold_pct: 5.0             # Minimum % change to trigger alert

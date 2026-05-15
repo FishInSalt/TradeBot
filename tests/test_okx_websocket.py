@@ -619,7 +619,7 @@ async def test_watch_ticker_loop_skips_none_timestamp():
 
         mock_service = MagicMock()
         mock_service.check.return_value = None
-        exchange.set_alert_service(mock_service)
+        exchange._alert_service = mock_service
 
         exchange._running = True
         mock_ws = AsyncMock()
@@ -674,7 +674,7 @@ async def test_watch_ticker_loop_skips_none_bid():
 
         mock_service = MagicMock()
         mock_service.check.return_value = None
-        exchange.set_alert_service(mock_service)
+        exchange._alert_service = mock_service
 
         exchange._running = True
         mock_ws = AsyncMock()
@@ -755,35 +755,6 @@ async def test_close_without_ws_client():
         mock_rest.close.assert_called_once()
 
 
-async def test_okx_set_alert_service():
-    """set_alert_service 应注入 PriceAlertService。"""
-    with patch("ccxt.async_support.okx") as mock_okx:
-        mock_okx.return_value = MagicMock()
-        from src.integrations.exchange.okx import OKXExchange
-        exchange = OKXExchange(
-            api_key="test", secret="test", password="test",
-            symbol="BTC/USDT:USDT",
-        )
-        mock_service = MagicMock()
-        exchange.set_alert_service(mock_service)
-        assert exchange._alert_service is mock_service
-
-
-async def test_okx_update_alert_params_delegates():
-    """update_alert_params 应委托给 PriceAlertService.update_params。"""
-    with patch("ccxt.async_support.okx") as mock_okx:
-        mock_okx.return_value = MagicMock()
-        from src.integrations.exchange.okx import OKXExchange
-        exchange = OKXExchange(
-            api_key="test", secret="test", password="test",
-            symbol="BTC/USDT:USDT",
-        )
-        mock_service = MagicMock()
-        exchange.set_alert_service(mock_service)
-        exchange.update_alert_params(2.0, 10)
-        mock_service.update_params.assert_called_once_with(2.0, 10)
-
-
 async def test_watch_ticker_loop_triggers_alert():
     """_watch_ticker_loop 应在 PriceAlertService 返回 AlertInfo 时调用 alert callback。"""
     with patch("ccxt.async_support.okx") as mock_okx:
@@ -808,7 +779,7 @@ async def test_watch_ticker_loop_triggers_alert():
         )
         mock_service = MagicMock()
         mock_service.check.side_effect = [mock_alert, None]
-        exchange.set_alert_service(mock_service)
+        exchange._alert_service = mock_service
 
         exchange._running = True
         mock_ws = AsyncMock()
@@ -865,7 +836,7 @@ async def test_watch_ticker_loop_no_alert_when_service_returns_none():
 
         mock_service = MagicMock()
         mock_service.check.return_value = None
-        exchange.set_alert_service(mock_service)
+        exchange._alert_service = mock_service
 
         exchange._running = True
         mock_ws = AsyncMock()

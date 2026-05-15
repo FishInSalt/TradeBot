@@ -34,8 +34,8 @@ def test_price_alert_service_get_params_after_update():
 
 
 def test_base_exchange_alert_consolidation():
-    """BaseExchange stores alert_service and delegates to it."""
-    from unittest.mock import MagicMock
+    """BaseExchange stores alert_service via set_volatility_alert lazy create
+    and clears it via cancel_volatility_alert."""
     from src.integrations.exchange.base import BaseExchange
 
     # Create a concrete subclass for testing
@@ -74,17 +74,159 @@ def test_base_exchange_alert_consolidation():
     # No alert service → get_alert_params returns None
     assert ex.get_alert_params() is None
 
-    # Set alert service
-    mock_svc = MagicMock()
-    mock_svc.get_params.return_value = (5.0, 60)
-    ex.set_alert_service(mock_svc)
-
-    # get_alert_params delegates
+    # set_volatility_alert lazy-creates → get_alert_params returns the configured tuple
+    ex.set_volatility_alert(threshold_pct=5.0, window_minutes=60, symbol="BTC/USDT:USDT")
     assert ex.get_alert_params() == (5.0, 60)
 
-    # update_alert_params delegates
-    ex.update_alert_params(3.0, 30)
-    mock_svc.update_params.assert_called_once_with(3.0, 30)
+    # Second set updates in place
+    ex.set_volatility_alert(threshold_pct=3.0, window_minutes=30, symbol="BTC/USDT:USDT")
+    assert ex.get_alert_params() == (3.0, 30)
+
+    # cancel returns to None
+    ex.cancel_volatility_alert()
+    assert ex.get_alert_params() is None
+
+
+def test_base_set_volatility_alert_lazy_creates_when_none():
+    """First call constructs PriceAlertService with the passed args."""
+    from src.integrations.exchange.base import BaseExchange
+    from src.services.price_alert import PriceAlertService
+
+    class _TestExchange(BaseExchange):
+        async def fetch_ticker(self, symbol): ...
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100): ...
+        async def create_order(self, symbol, side, order_type, amount, price=None, params=None): ...
+        async def fetch_balance(self): ...
+        async def fetch_positions(self, symbol): ...
+        async def set_leverage(self, symbol, leverage): ...
+        def amount_to_precision(self, symbol, amount): ...
+        async def close(self): ...
+        async def fetch_order(self, order_id, symbol=None): ...
+        async def fetch_open_orders(self, symbol): ...
+        async def fetch_closed_orders(self, symbol, limit=20): ...
+        async def cancel_order(self, order_id, symbol, is_algo: bool = False): ...  # noqa: ARG002
+        async def fetch_funding_rate(self, symbol): ...
+        async def fetch_open_interest_history(self, symbol, period="1h", limit=26): ...
+        async def fetch_long_short_ratio(self, symbol): ...
+        async def fetch_order_book(self, symbol, depth=20): ...
+        async def fetch_trades(self, symbol, limit=500): return []
+        async def get_contract_size(self, symbol): return 1.0
+        async def get_mark_price(self, symbol): return 0.0
+
+    ex = _TestExchange()
+    assert ex._alert_service is None
+    assert ex.get_alert_params() is None
+
+    ex.set_volatility_alert(threshold_pct=2.0, window_minutes=30, symbol="BTC/USDT:USDT")
+
+    assert isinstance(ex._alert_service, PriceAlertService)
+    assert ex.get_alert_params() == (2.0, 30)
+
+
+def test_base_set_volatility_alert_updates_when_exists():
+    """Second call invokes update_params on the same instance and clears _ticks."""
+    from src.integrations.exchange.base import BaseExchange
+
+    class _TestExchange(BaseExchange):
+        async def fetch_ticker(self, symbol): ...
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100): ...
+        async def create_order(self, symbol, side, order_type, amount, price=None, params=None): ...
+        async def fetch_balance(self): ...
+        async def fetch_positions(self, symbol): ...
+        async def set_leverage(self, symbol, leverage): ...
+        def amount_to_precision(self, symbol, amount): ...
+        async def close(self): ...
+        async def fetch_order(self, order_id, symbol=None): ...
+        async def fetch_open_orders(self, symbol): ...
+        async def fetch_closed_orders(self, symbol, limit=20): ...
+        async def cancel_order(self, order_id, symbol, is_algo: bool = False): ...  # noqa: ARG002
+        async def fetch_funding_rate(self, symbol): ...
+        async def fetch_open_interest_history(self, symbol, period="1h", limit=26): ...
+        async def fetch_long_short_ratio(self, symbol): ...
+        async def fetch_order_book(self, symbol, depth=20): ...
+        async def fetch_trades(self, symbol, limit=500): return []
+        async def get_contract_size(self, symbol): return 1.0
+        async def get_mark_price(self, symbol): return 0.0
+
+    ex = _TestExchange()
+    ex.set_volatility_alert(threshold_pct=5.0, window_minutes=60, symbol="BTC/USDT:USDT")
+    first_instance = ex._alert_service
+
+    # Feed a tick to populate the rolling window
+    ex._alert_service.check(50000.0, 1700000000000)
+    assert len(ex._alert_service._ticks) == 1
+
+    # Second call must update in place AND clear ticks
+    ex.set_volatility_alert(threshold_pct=2.0, window_minutes=30, symbol="BTC/USDT:USDT")
+
+    assert ex._alert_service is first_instance  # same instance
+    assert ex.get_alert_params() == (2.0, 30)
+    assert len(ex._alert_service._ticks) == 0   # window reset
+
+
+def test_base_cancel_volatility_alert_clears_to_none():
+    """cancel_volatility_alert sets _alert_service back to None."""
+    from src.integrations.exchange.base import BaseExchange
+
+    class _TestExchange(BaseExchange):
+        async def fetch_ticker(self, symbol): ...
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100): ...
+        async def create_order(self, symbol, side, order_type, amount, price=None, params=None): ...
+        async def fetch_balance(self): ...
+        async def fetch_positions(self, symbol): ...
+        async def set_leverage(self, symbol, leverage): ...
+        def amount_to_precision(self, symbol, amount): ...
+        async def close(self): ...
+        async def fetch_order(self, order_id, symbol=None): ...
+        async def fetch_open_orders(self, symbol): ...
+        async def fetch_closed_orders(self, symbol, limit=20): ...
+        async def cancel_order(self, order_id, symbol, is_algo: bool = False): ...  # noqa: ARG002
+        async def fetch_funding_rate(self, symbol): ...
+        async def fetch_open_interest_history(self, symbol, period="1h", limit=26): ...
+        async def fetch_long_short_ratio(self, symbol): ...
+        async def fetch_order_book(self, symbol, depth=20): ...
+        async def fetch_trades(self, symbol, limit=500): return []
+        async def get_contract_size(self, symbol): return 1.0
+        async def get_mark_price(self, symbol): return 0.0
+
+    ex = _TestExchange()
+    ex.set_volatility_alert(threshold_pct=3.0, window_minutes=15, symbol="BTC/USDT:USDT")
+    assert ex._alert_service is not None
+
+    ex.cancel_volatility_alert()
+    assert ex._alert_service is None
+    assert ex.get_alert_params() is None
+
+
+def test_base_cancel_volatility_alert_idempotent_when_already_none():
+    """cancel_volatility_alert is a no-op when _alert_service is already None."""
+    from src.integrations.exchange.base import BaseExchange
+
+    class _TestExchange(BaseExchange):
+        async def fetch_ticker(self, symbol): ...
+        async def fetch_ohlcv(self, symbol, timeframe, limit=100): ...
+        async def create_order(self, symbol, side, order_type, amount, price=None, params=None): ...
+        async def fetch_balance(self): ...
+        async def fetch_positions(self, symbol): ...
+        async def set_leverage(self, symbol, leverage): ...
+        def amount_to_precision(self, symbol, amount): ...
+        async def close(self): ...
+        async def fetch_order(self, order_id, symbol=None): ...
+        async def fetch_open_orders(self, symbol): ...
+        async def fetch_closed_orders(self, symbol, limit=20): ...
+        async def cancel_order(self, order_id, symbol, is_algo: bool = False): ...  # noqa: ARG002
+        async def fetch_funding_rate(self, symbol): ...
+        async def fetch_open_interest_history(self, symbol, period="1h", limit=26): ...
+        async def fetch_long_short_ratio(self, symbol): ...
+        async def fetch_order_book(self, symbol, depth=20): ...
+        async def fetch_trades(self, symbol, limit=500): return []
+        async def get_contract_size(self, symbol): return 1.0
+        async def get_mark_price(self, symbol): return 0.0
+
+    ex = _TestExchange()
+    assert ex._alert_service is None
+    ex.cancel_volatility_alert()  # must not raise
+    assert ex._alert_service is None
 
 
 def test_base_exchange_get_price_level_alerts():
@@ -160,21 +302,20 @@ async def test_simulated_fetch_positions_has_created_at(tmp_path):
     await engine.dispose()
 
 
-def test_simulated_exchange_inherits_alert_methods():
-    """SimulatedExchange should NOT override set_alert_service/update_alert_params."""
+def test_simulated_exchange_inherits_volatility_alert_methods():
+    """SimulatedExchange should NOT override set_volatility_alert / cancel_volatility_alert."""
     from src.integrations.exchange.simulated import SimulatedExchange
     from src.integrations.exchange.base import BaseExchange
-    # Verify the methods are inherited, not overridden
-    assert SimulatedExchange.set_alert_service is BaseExchange.set_alert_service
-    assert SimulatedExchange.update_alert_params is BaseExchange.update_alert_params
+    assert SimulatedExchange.set_volatility_alert is BaseExchange.set_volatility_alert
+    assert SimulatedExchange.cancel_volatility_alert is BaseExchange.cancel_volatility_alert
 
 
-def test_okx_exchange_inherits_alert_methods():
-    """OKXExchange should NOT override set_alert_service/update_alert_params."""
+def test_okx_exchange_inherits_volatility_alert_methods():
+    """OKXExchange should NOT override set_volatility_alert / cancel_volatility_alert."""
     from src.integrations.exchange.okx import OKXExchange
     from src.integrations.exchange.base import BaseExchange
-    assert OKXExchange.set_alert_service is BaseExchange.set_alert_service
-    assert OKXExchange.update_alert_params is BaseExchange.update_alert_params
+    assert OKXExchange.set_volatility_alert is BaseExchange.set_volatility_alert
+    assert OKXExchange.cancel_volatility_alert is BaseExchange.cancel_volatility_alert
 
 
 # --- Task 3: TradeAction.fee column ---
@@ -726,35 +867,25 @@ async def test_set_take_profit_distance():
     assert "% from last price" in result or "from last price" in result
 
 
-async def test_set_price_volatility_alert_disabled():
-    from src.agent.tools_execution import set_price_volatility_alert
-
-    deps = _make_deps()
-    deps.exchange.get_alert_params = MagicMock(return_value=None)
-
-    result = await set_price_volatility_alert(deps, 5.0, 60, reasoning="test")
-    assert "disabled" in result.lower() or "Alerts are disabled" in result
-
-
 async def test_set_price_volatility_alert_enabled():
     from src.agent.tools_execution import set_price_volatility_alert
 
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.set_volatility_alert = MagicMock()
 
     result = await set_price_volatility_alert(deps, 3.0, 30, reasoning="tighter alert")
-    assert "updated" in result.lower() or "3.0%" in result
+    assert "replaced:" in result.lower() or "3.0%" in result
 
 
 async def test_set_price_volatility_alert_accepts_threshold_0_1():
     """R2-1 T4: tool layer accepts threshold_pct=0.1 (new lower bound)."""
     from src.agent.tools_execution import set_price_volatility_alert
     deps = _make_deps()
-    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
+    deps.exchange.set_volatility_alert = MagicMock()
     result = await set_price_volatility_alert(deps, threshold_pct=0.1, window_minutes=15, reasoning="test")
-    assert "Price volatility alert updated" in result
+    assert "Price volatility alert set" in result
     assert "threshold=0.1%" in result  # `%` 锁尾防 0.15 子串误命中（spec P2-1）
 
 
@@ -762,8 +893,7 @@ async def test_set_price_volatility_alert_rejects_threshold_below_0_1():
     """R2-1 T5: tool layer rejects threshold_pct=0.05 with new error message."""
     from src.agent.tools_execution import set_price_volatility_alert
     deps = _make_deps()
-    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.set_volatility_alert = MagicMock()
     result = await set_price_volatility_alert(deps, threshold_pct=0.05, window_minutes=15, reasoning="test")
     assert "Invalid threshold_pct: must be 0.1-50.0" in result
 
@@ -866,7 +996,7 @@ async def test_get_active_alerts_disabled():
     deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
 
     result = await get_active_alerts(deps)
-    assert "OFF" in result
+    assert "Not set" in result
     assert "0/20" in result
 
 

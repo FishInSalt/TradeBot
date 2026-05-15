@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
+from src.services.price_alert import PriceAlertService
+
 logger = logging.getLogger(__name__)
 
 # OKX rubik stat endpoint requires uppercase '1H' / '1D'; project convention exposes
@@ -107,7 +109,7 @@ class BaseExchange(ABC):
     def __init__(self):
         self._price_level_alerts: list[dict] = []
         self._latest_price: float | None = None
-        self._alert_service: Any | None = None
+        self._alert_service: PriceAlertService | None = None
         self._fill_callback: Callable[['FillEvent'], Awaitable[None]] | None = None
 
     @abstractmethod
@@ -183,14 +185,19 @@ class BaseExchange(ABC):
         """注册价格异动回调。默认空实现。"""
         pass
 
-    def set_alert_service(self, service: Any) -> None:
-        """Inject PriceAlertService instance."""
-        self._alert_service = service
-
-    def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
-        """Update price alert parameters. Delegates to alert service if set."""
-        if self._alert_service:
+    def set_volatility_alert(self, threshold_pct: float,
+                             window_minutes: int, symbol: str) -> None:
+        """Lazy-create on first call, update_params on subsequent calls.
+        Replacing parameters resets the rolling tick window (PriceAlertService
+        update_params semantics)."""
+        if self._alert_service is None:
+            self._alert_service = PriceAlertService(symbol, window_minutes, threshold_pct)
+        else:
             self._alert_service.update_params(threshold_pct, window_minutes)
+
+    def cancel_volatility_alert(self) -> None:
+        """Clear the singleton; subsequent ticks no longer evaluate volatility."""
+        self._alert_service = None
 
     def get_alert_params(self) -> tuple[float, int] | None:
         """Return (threshold_pct, window_minutes) or None if alerts disabled."""

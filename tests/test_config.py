@@ -100,60 +100,6 @@ def test_exchange_config_okx_ignores_sim_fields():
     assert config.precision is None
 
 
-def test_alerts_config_defaults():
-    """AlertsConfig 应有合理默认值。"""
-    from src.config import AlertsConfig
-    config = AlertsConfig()
-    assert config.enabled is True
-    assert config.window_minutes == 60
-    assert config.threshold_pct == 5.0
-
-
-def test_settings_with_alerts(tmp_path: Path):
-    """Settings 应能加载 alerts 配置段。"""
-    settings_file = tmp_path / "settings.yaml"
-    settings_file.write_text("""
-exchange:
-  name: okx
-alerts:
-  enabled: true
-  window_minutes: 10
-  threshold_pct: 5.0
-""")
-    from src.config import load_settings
-    settings = load_settings(settings_file, env_overrides={})
-    assert settings.alerts.enabled is True
-    assert settings.alerts.window_minutes == 10
-    assert settings.alerts.threshold_pct == 5.0
-
-
-def test_settings_without_alerts(tmp_path: Path):
-    """不提供 alerts 配置段时应使用默认值。"""
-    settings_file = tmp_path / "settings.yaml"
-    settings_file.write_text("""
-exchange:
-  name: okx
-""")
-    from src.config import load_settings
-    settings = load_settings(settings_file, env_overrides={})
-    assert settings.alerts.enabled is True
-    assert settings.alerts.window_minutes == 60
-
-
-def test_settings_alerts_disabled(tmp_path: Path):
-    """alerts.enabled=false 应正确加载。"""
-    settings_file = tmp_path / "settings.yaml"
-    settings_file.write_text("""
-exchange:
-  name: okx
-alerts:
-  enabled: false
-""")
-    from src.config import load_settings
-    settings = load_settings(settings_file, env_overrides={})
-    assert settings.alerts.enabled is False
-
-
 def test_settings_models_optional(tmp_path: Path):
     """settings.yaml 中不提供 models 配置段时 Settings.models 应为 None。"""
     settings_file = tmp_path / "settings.yaml"

@@ -667,7 +667,7 @@ async def test_simulated_exchange_alert_service_integration():
     )
     mock_service = MagicMock()
     mock_service.check.return_value = mock_alert
-    exchange.set_alert_service(mock_service)
+    exchange._alert_service = mock_service
 
     alert_callback = AsyncMock()
     exchange.on_alert(alert_callback)
@@ -706,7 +706,7 @@ async def test_simulated_exchange_no_alert_when_service_returns_none():
 
     mock_service = MagicMock()
     mock_service.check.return_value = None
-    exchange.set_alert_service(mock_service)
+    exchange._alert_service = mock_service
 
     alert_callback = AsyncMock()
     exchange.on_alert(alert_callback)
@@ -721,27 +721,6 @@ async def test_simulated_exchange_no_alert_when_service_returns_none():
 
     mock_service.check.assert_called_once()
     alert_callback.assert_not_called()
-
-
-async def test_simulated_exchange_update_alert_params():
-    """update_alert_params 应委托给内部 PriceAlertService。"""
-    from src.integrations.exchange.simulated import SimulatedExchange
-    from unittest.mock import MagicMock
-    from src.config import ExchangeConfig
-
-    config = ExchangeConfig(
-        name="simulated", fee_rate=0.0005,
-        precision={"BTC/USDT:USDT": 3},
-    )
-    exchange = SimulatedExchange(
-        config=config, db_engine=None, session_id="test",
-        symbol="BTC/USDT:USDT",
-    )
-
-    mock_service = MagicMock()
-    exchange.set_alert_service(mock_service)
-    exchange.update_alert_params(2.0, 10)
-    mock_service.update_params.assert_called_once_with(2.0, 10)
 
 
 async def test_simulated_exchange_alert_callback_outside_lock():
@@ -773,7 +752,7 @@ async def test_simulated_exchange_alert_callback_outside_lock():
     )
     mock_service = MagicMock()
     mock_service.check.return_value = mock_alert
-    exchange.set_alert_service(mock_service)
+    exchange._alert_service = mock_service
 
     lock_held_during_callback = False
 

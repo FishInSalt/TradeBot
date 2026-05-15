@@ -79,8 +79,8 @@ def test_registered_tool_names_matches_agent_tools():
         f"  In agent but not in REGISTERED_TOOL_NAMES: {actual - declared}\n"
         f"  In REGISTERED_TOOL_NAMES but not in agent: {declared - actual}"
     )
-    assert len(REGISTERED_TOOL_NAMES) == 32, (
-        f"Expected 32 tools (19+13), got {len(REGISTERED_TOOL_NAMES)}"
+    assert len(REGISTERED_TOOL_NAMES) == 33, (
+        f"Expected 33 tools (19+14), got {len(REGISTERED_TOOL_NAMES)}"
     )
     # 无重复
     assert len(REGISTERED_TOOL_NAMES) == len(set(REGISTERED_TOOL_NAMES)), \
@@ -208,12 +208,10 @@ def test_set_price_volatility_alert_schema_exposes_threshold_range():
     schema = tool.tool_def.parameters_json_schema
 
     threshold_desc = schema["properties"]["threshold_pct"]["description"]
-    assert "min 0.1," in threshold_desc, f"lower bound 0.1 missing from LLM-visible schema: {threshold_desc!r}"
-    assert "max 50)" in threshold_desc, f"upper bound 50 missing from LLM-visible schema: {threshold_desc!r}"
+    assert "0.1-50" in threshold_desc, f"threshold range missing from LLM-visible schema: {threshold_desc!r}"
 
     window_desc = schema["properties"]["window_minutes"]["description"]
-    assert "min 1," in window_desc, f"window lower bound missing: {window_desc!r}"
-    assert "max 240)" in window_desc, f"window upper bound missing: {window_desc!r}"
+    assert "1-240" in window_desc, f"window range missing: {window_desc!r}"
 
 
 def test_cancel_price_level_alert_schema_exposes_id_format_and_source():

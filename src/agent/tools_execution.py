@@ -228,11 +228,9 @@ async def set_price_volatility_alert(
     window_minutes: int,
     reasoning: str,
 ) -> str:
-    """Adjust price volatility alert parameters. threshold_pct: min 0.1, max 50, window_minutes: min 1, max 240."""
-    # Check if alerts are enabled
-    if deps.exchange.get_alert_params() is None:
-        return "Alerts are disabled for this session. Enable alerts in wizard to use this feature."
-
+    """Set the price volatility alert (singleton). Creates if none is
+    configured; otherwise replaces the existing one — replacing resets the
+    rolling tick window. threshold_pct: 0.1-50, window_minutes: 1-240."""
     # Parameter validation
     if not (0.1 <= threshold_pct <= 50.0):
         note_biz_error("invalid_threshold_range")
@@ -240,17 +238,52 @@ async def set_price_volatility_alert(
     if not (1 <= window_minutes <= 240):
         return f"Invalid window_minutes: must be 1-240, got {window_minutes}"
 
-    deps.exchange.update_alert_params(threshold_pct, window_minutes)
+    # Capture pre-state for the success message
+    prev = deps.exchange.get_alert_params()
+
+    deps.exchange.set_volatility_alert(threshold_pct, window_minutes, deps.symbol)
 
     await _record_action(
         deps, action="set_price_volatility_alert",
         reasoning=f"threshold={threshold_pct}%, window={window_minutes}min | {reasoning}",
     )
 
+    if prev is None:
+        return (
+            f"Price volatility alert set: threshold={threshold_pct}%, "
+            f"window={window_minutes}min"
+        )
+    prev_t, prev_w = prev
     return (
-        f"Price volatility alert updated: threshold={threshold_pct}%, "
-        f"window={window_minutes}min"
+        f"Price volatility alert replaced: threshold={threshold_pct}%, "
+        f"window={window_minutes}min "
+        f"(was {prev_t}%/{prev_w}min, rolling window reset)"
     )
+
+
+async def cancel_price_volatility_alert(
+    deps: TradingDeps,
+    reasoning: str,
+) -> str:
+    """Cancel the active price volatility alert. Idempotent: if no alert is
+    set, returns ok with a note (no mutation, no audit row).
+
+    Args:
+        reasoning: brief description of your decision logic.
+    """
+    prev = deps.exchange.get_alert_params()
+    if prev is None:
+        # State-not-found → idempotent ok with note. Matches
+        # cancel_price_level_alert protocol (R2-Next-E PR #47).
+        return "No volatility alert active to cancel."
+
+    prev_t, prev_w = prev
+    deps.exchange.cancel_volatility_alert()
+    await _record_action(
+        deps, action="cancel_price_volatility_alert",
+        reasoning=reasoning,
+    )
+    return f"Price volatility alert cancelled (was {prev_t}%/{prev_w}min)"
 
 
 async def add_price_level_alert(

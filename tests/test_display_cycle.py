@@ -1469,10 +1469,10 @@ def test_render_perception_tool_fallback_no_header():
 
 
 def test_dg_2_dispatch_sets_partition_all_registered_tools():
-    """T-DG-2: 二层集合互斥 + 完整覆盖 32 registered tools.
+    """T-DG-2: 二层集合互斥 + 完整覆盖 33 registered tools.
 
-    Post iter-w2r3-memory-disable: _PERCEPTION_TOOL_NAMES (19) ∪ _EXECUTION_TOOL_NAMES (13)
-    必须等于 REGISTERED_TOOL_NAMES (32)，且互不重叠。
+    Post iter-w3r1-vol-alert-agent-owned: _PERCEPTION_TOOL_NAMES (19) ∪ _EXECUTION_TOOL_NAMES (14)
+    必须等于 REGISTERED_TOOL_NAMES (33)，且互不重叠。
     _SECTIONED_PERCEPTION_TOOL_NAMES = _PERCEPTION_TOOL_NAMES (no exclusion).
     """
     from src.cli.display import (
@@ -1503,7 +1503,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
 
     # Counts.
     assert len(perception) == 19
-    assert len(execution) == 13
+    assert len(execution) == 14
 
 
 def test_ec_11_unregistered_tool_falls_back_with_warning(caplog):
@@ -3081,7 +3081,7 @@ _CRITICAL_FIELDS_PATH_A: dict[str, list[str]] = {
     "get_stablecoin_supply": ["Stablecoin Supply", "Error:", "not configured"],
     "get_trade_journal": ["Trade Journal", "No trade journal entries yet"],
     "get_performance": ["Trading Performance", "Initial Balance", "Current Balance"],
-    "get_active_alerts": ["Price Volatility Alert", "OFF"],
+    "get_active_alerts": ["Price Volatility Alert", "Not set"],
     "get_position": ["Position", "No open positions"],
 }
 

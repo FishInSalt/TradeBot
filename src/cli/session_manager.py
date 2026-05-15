@@ -27,7 +27,6 @@ async def _migrate_session_table(conn) -> None:
         ("timeframe", "TEXT DEFAULT '15m'"),
         ("scheduler_interval_min", "INTEGER DEFAULT 15"),
         ("approval_enabled", "BOOLEAN DEFAULT 1"),
-        ("alert_config", "TEXT"),
         ("fee_rate", "REAL"),
         ("token_budget", "INTEGER DEFAULT 500000"),
         ("last_active_at", "TIMESTAMP"),
@@ -134,16 +133,6 @@ async def _restore_session(
         selected_config = model_data["model_config"]
         selected_model = model_data["model"]
 
-    # Alert config
-    alert_enabled = False
-    alert_window = None
-    alert_threshold = None
-    if s.alert_config:
-        alert_data = json.loads(s.alert_config)
-        alert_enabled = alert_data.get("enabled", False)
-        alert_window = alert_data.get("window")
-        alert_threshold = alert_data.get("threshold")
-
     # Credentials for real exchange
     api_credentials = None
     if s.exchange_type == "okx":
@@ -186,9 +175,6 @@ async def _restore_session(
         model=selected_model,
         scheduler_interval_min=s.scheduler_interval_min,
         approval_enabled=s.approval_enabled,
-        alert_enabled=alert_enabled,
-        alert_window_min=alert_window,
-        alert_threshold_pct=alert_threshold,
         token_budget=s.token_budget,
         persona=persona,
         session_name=s.name,
@@ -212,15 +198,6 @@ async def _create_session(engine, result: WizardResult) -> str:
             name = f"{base_name} #{suffix}"
             suffix += 1
 
-        # Alert config JSON
-        alert_config = None
-        if result.alert_enabled:
-            alert_config = json.dumps({
-                "enabled": True,
-                "window": result.alert_window_min,
-                "threshold": result.alert_threshold_pct,
-            })
-
         trading_session = Session(
             name=name,
             symbol=result.symbol,
@@ -236,7 +213,6 @@ async def _create_session(engine, result: WizardResult) -> str:
             timeframe=result.timeframe,
             scheduler_interval_min=result.scheduler_interval_min,
             approval_enabled=result.approval_enabled,
-            alert_config=alert_config,
             fee_rate=result.fee_rate,
             token_budget=result.token_budget,
         )

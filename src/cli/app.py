@@ -792,8 +792,6 @@ def build_services(
     settings: Settings,
 ):
     """Build exchange, deps, agent, budget from WizardResult."""
-    from src.services.price_alert import PriceAlertService
-
     # Exchange
     if result.exchange_type == "simulated":
         from src.integrations.exchange.simulated import SimulatedExchange
@@ -911,21 +909,6 @@ def build_services(
         f"R2-5 drift: prompt range {runtime_config.wake_max_minutes} vs "
         f"clamp {deps.wake_max_minutes} must match"
     )
-
-    # Alert service
-    if result.alert_enabled:
-        alert_service = PriceAlertService(
-            symbol=result.symbol,
-            window_minutes=result.alert_window_min,
-            threshold_pct=result.alert_threshold_pct,
-        )
-        exchange.set_alert_service(alert_service)
-        sc.print(
-            f"Alerts: ON ({result.alert_window_min}min / "
-            f"{result.alert_threshold_pct}%)"
-        )
-    else:
-        sc.print("Alerts: OFF")
 
     stats = SessionStats()
     return exchange, deps, agent, budget, stats
