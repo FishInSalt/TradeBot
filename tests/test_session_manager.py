@@ -30,7 +30,7 @@ async def test_migrate_session_table_adds_new_columns(tmp_path):
         result = await conn.execute(text("PRAGMA table_info(sessions)"))
         cols = {row[1] for row in result}
     for col in ["exchange_type", "timeframe", "scheduler_interval_min",
-                "approval_enabled", "alert_config", "fee_rate",
+                "approval_enabled", "fee_rate",
                 "token_budget", "last_active_at"]:
         assert col in cols, f"Column {col} missing after migration"
     await engine.dispose()
@@ -60,7 +60,6 @@ async def test_restore_session_builds_wizard_result(tmp_path):
     persona = PersonaConfig(personality="aggressive", trading_style="breakout")
     model_cfg = ModelConfig(id="test-model", provider="openai", model="gpt-4o",
                             api_key="k", base_url=None)
-    alert_cfg = json.dumps({"enabled": True, "window": 5, "threshold": 3.0})
 
     async with get_session(engine) as db_sess:
         s = Session(
@@ -70,7 +69,7 @@ async def test_restore_session_builds_wizard_result(tmp_path):
             initial_balance=200.0, status="paused",
             exchange_type="simulated", timeframe="1H",
             scheduler_interval_min=30, approval_enabled=False,
-            alert_config=alert_cfg, fee_rate=0.0005,
+            fee_rate=0.0005,
             token_budget=300000,
         )
         db_sess.add(s)
@@ -102,44 +101,6 @@ async def test_restore_session_builds_wizard_result(tmp_path):
     assert result.persona.personality == "aggressive"
     assert result.session_name == "BTC sim #1"
     assert result.model == mock_model
-    await engine.dispose()
-
-
-async def test_restore_session_null_alert_config(tmp_path):
-    """Migrated old session with NULL alert_config → alerts disabled."""
-    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
-    engine = await init_db(db_url)
-
-    from src.config import PersonaConfig
-    from src.services.model_manager import ModelConfig
-
-    model_cfg = ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None)
-
-    async with get_session(engine) as db_sess:
-        s = Session(
-            id="old-session", name="old test", symbol="BTC/USDT:USDT",
-            persona_config=json.dumps(PersonaConfig().model_dump()),
-            model_config=json.dumps({"id": "m1", "provider": "openai", "model": "gpt-4o"}),
-            initial_balance=100.0, status="paused",
-            alert_config=None,
-        )
-        db_sess.add(s)
-        await db_sess.commit()
-
-    from src.cli.session_manager import _restore_session
-
-    mock_mm = MagicMock()
-    mock_mm.load_models.return_value = [model_cfg]
-    mock_mm.get_model_by_id.return_value = model_cfg
-    mock_mm.create_model.return_value = MagicMock()
-
-    with patch("src.cli.session_manager.Confirm.ask", return_value=True):
-        result = await _restore_session(
-            engine, "old-session", mock_mm, None, Console(), Path(str(tmp_path)),
-        )
-
-    assert result.alert_enabled is False
-    assert result.alert_window_min is None
     await engine.dispose()
 
 
@@ -269,9 +230,6 @@ async def test_create_session_from_wizard_result(tmp_path):
     assert s.approval_enabled is False
     assert s.fee_rate == 0.001
     assert s.token_budget == 300000
-    alert = json.loads(s.alert_config)
-    assert alert["enabled"] is True
-    assert alert["window"] == 10
     assert s.status == "active"
     await engine.dispose()
 

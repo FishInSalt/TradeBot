@@ -27,7 +27,6 @@ async def _migrate_session_table(conn) -> None:
         ("timeframe", "TEXT DEFAULT '15m'"),
         ("scheduler_interval_min", "INTEGER DEFAULT 15"),
         ("approval_enabled", "BOOLEAN DEFAULT 1"),
-        ("alert_config", "TEXT"),
         ("fee_rate", "REAL"),
         ("token_budget", "INTEGER DEFAULT 500000"),
         ("last_active_at", "TIMESTAMP"),

@@ -60,7 +60,6 @@ def _create_pre_alembic_schema(db_path: Path) -> None:
             timeframe VARCHAR(10) NOT NULL,
             scheduler_interval_min INTEGER NOT NULL,
             approval_enabled BOOLEAN NOT NULL,
-            alert_config TEXT,
             fee_rate FLOAT,
             token_budget INTEGER NOT NULL,
             last_active_at DATETIME

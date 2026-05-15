@@ -48,7 +48,6 @@ class Session(Base):
     timeframe: Mapped[str] = mapped_column(String(10), default="15m")
     scheduler_interval_min: Mapped[int] = mapped_column(Integer, default=15)
     approval_enabled: Mapped[bool] = mapped_column(default=True)
-    alert_config: Mapped[str | None] = mapped_column(Text, nullable=True)   # JSON: {enabled, window, threshold}
     fee_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     token_budget: Mapped[int] = mapped_column(Integer, default=500000)
     # P4 (obs roadmap Phase 3): rendered system_prompt at session creation; session-fixed

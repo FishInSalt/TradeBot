@@ -227,7 +227,6 @@ async def test_session_new_fields_have_defaults():
         assert s.timeframe == "15m"
         assert s.scheduler_interval_min == 15
         assert s.approval_enabled is True
-        assert s.alert_config is None
         assert s.fee_rate is None
         assert s.token_budget == 500000
         assert s.last_active_at is None
