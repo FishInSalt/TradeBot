@@ -463,7 +463,7 @@ async def test_get_active_alerts_fact_only(mocker):
     deps = MockDeps()
     outputs = []
 
-    # Scenario 1: alerts OFF + no price levels
+    # Scenario 1: volatility alert not set + no price levels
     deps.exchange.get_alert_params = mocker.Mock(return_value=None)
     deps.exchange.get_price_level_alerts = mocker.Mock(return_value=[])
     outputs.append(await get_active_alerts(deps))
@@ -704,9 +704,10 @@ async def _invoke_adjust_leverage(deps, mocker):
 
 
 async def _invoke_set_price_volatility_alert(deps, mocker):
-    """Early return: alerts disabled."""
+    """Create path: lazy-set the singleton."""
     from src.agent.tools_execution import set_price_volatility_alert
     deps.exchange.get_alert_params = mocker.Mock(return_value=None)
+    deps.exchange.set_volatility_alert = mocker.Mock()
     return await set_price_volatility_alert(deps, 1.5, 30, reasoning="test")
 
 

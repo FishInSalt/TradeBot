@@ -520,6 +520,7 @@ _EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
     "place_limit_order",
     "cancel_order",
     "set_price_volatility_alert",
+    "cancel_price_volatility_alert",
     "add_price_level_alert",
     "cancel_price_level_alert",
     "update_price_level_alert",

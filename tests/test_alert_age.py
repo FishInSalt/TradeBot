@@ -407,7 +407,7 @@ async def test_get_active_alerts_disabled_state_unchanged(monkeypatch):
     deps.exchange.get_price_level_alerts.return_value = []
 
     output = await get_active_alerts(deps)
-    assert "OFF" in output
+    assert "Not set" in output
     assert "No active alerts" in output
     # No age suffix anywhere
     assert "ago)" not in output
