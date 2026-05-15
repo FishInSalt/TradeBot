@@ -1440,3 +1440,24 @@ async def test_simulated_fetch_open_orders_limit_has_no_trigger_price():
     limit_orders = [o for o in open_orders if o.order_type == "limit"]
     assert len(limit_orders) == 1
     assert limit_orders[0].trigger_price is None
+
+
+def test_fill_event_has_optional_entry_price_field():
+    """FillEvent.entry_price defaults to None and accepts float."""
+    from src.integrations.exchange.base import FillEvent
+
+    ev = FillEvent(
+        order_id="1", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", trigger_reason="market",
+        fill_price=80000.0, amount=1.0, fee=40.0, pnl=100.0,
+        timestamp=1, is_full_close=True,
+    )
+    assert ev.entry_price is None  # default
+
+    ev2 = FillEvent(
+        order_id="2", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", trigger_reason="market",
+        fill_price=80000.0, amount=1.0, fee=40.0, pnl=100.0,
+        timestamp=1, is_full_close=True, entry_price=79900.0,
+    )
+    assert ev2.entry_price == 79900.0

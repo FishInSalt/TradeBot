@@ -334,6 +334,18 @@ class FillEvent:
     pnl: float | None      # 已实现盈亏（开仓时 None）
     timestamp: int
     is_full_close: bool    # True iff 该 fill 把 symbol 持仓清零（用于 alert 清理）
+    entry_price: float | None = None
+    """Position weighted-avg entry price at fill time (per contract).
+
+    For close fills (pnl is not None): exchange-layer-filled actual position
+    entry price (before any pnl_cap clamping in sim). Used by cli renderer
+    to compute round-trip net without reverse-engineering from pnl.
+
+    For open fills (pnl is None): always None — by design.
+    Rationale: open fill 的 entry 信息已通过 fill_price 表达；entry_price 字段
+    语义专用于 close fill 的 position weighted-avg entry。统一 open fill 永远
+    None 避免半态字段导致后续误用。
+    """
 
 
 @dataclass
