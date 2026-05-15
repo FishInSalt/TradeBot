@@ -1461,3 +1461,15 @@ def test_fill_event_has_optional_entry_price_field():
         timestamp=1, is_full_close=True, entry_price=79900.0,
     )
     assert ev2.entry_price == 79900.0
+
+
+def test_simulated_exchange_register_close_order_entry_is_noop():
+    """SimulatedExchange inherits BaseExchange.register_close_order_entry no-op (no error)."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.config import ExchangeConfig
+
+    cfg = ExchangeConfig(name="simulated", fee_rate=0.0005)
+    ex = SimulatedExchange(config=cfg, db_engine=None, session_id="t", symbol="BTC/USDT:USDT")
+    # 不抛错，不返回值
+    result = ex.register_close_order_entry("order123", 80000.0)
+    assert result is None

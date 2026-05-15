@@ -181,6 +181,18 @@ class BaseExchange(ABC):
         """注册 fill 回调。"""
         self._fill_callback = callback
 
+    def register_close_order_entry(self, order_id: str, entry_price: float) -> None:
+        """Hook for exchange impls to record per-order entry_price for close fills.
+
+        Default: no-op (sim path captures entry_price directly in fill event from
+        in-memory _Position; OKX path overrides this method to populate
+        _close_order_entry_cache, consumed by _parse_fill_event).
+
+        Called by close-direction tools (close_position / set_stop_loss /
+        set_take_profit) immediately after create_order returns.
+        """
+        return None
+
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         """注册价格异动回调。默认空实现。"""
         pass
