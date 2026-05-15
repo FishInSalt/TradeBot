@@ -35,6 +35,7 @@ from src.integrations.exchange.base import (
 class _Deps:
     symbol: str = "BTC/USDT:USDT"
     initial_balance: float = 10000.0
+    fee_rate: float = 0.0005
     exchange: AsyncMock = field(default_factory=AsyncMock)
     market_data: AsyncMock = field(default_factory=AsyncMock)
     technical: AsyncMock = field(default_factory=AsyncMock)

@@ -445,6 +445,7 @@ class TestPositionLiquidationDedup:
         deps.symbol = "BTC/USDT:USDT"
         deps.timeframe = "5m"
         deps.initial_balance = 10000.0
+        deps.fee_rate = 0.0005
         deps.exchange = MagicMock()
         deps.exchange.fetch_positions = AsyncMock(return_value=[p])
         deps.exchange.fetch_balance = AsyncMock(

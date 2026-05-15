@@ -21,6 +21,11 @@ CYCLE_DECISION_WORD_CAP = 700
 # in current behavior is empirically zero, this is future-proofing.
 CYCLE_DECISION_CHAR_HARD_FLOOR = 8000
 
+DEFAULT_TAKER_FEE_RATE = 0.0005
+"""OKX BTC perp regular tier taker fee, as decimal. Used as wizard input
+default + RuntimeConfig/TradingDeps test defaults. Production paths MUST
+override via wizard-injected sessions.fee_rate."""
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -52,6 +57,15 @@ class RuntimeConfig:
     production code path silently relies on the default 60, that is a bug —
     flag and route through cli wiring instead."""
 
+    taker_fee_rate: float = DEFAULT_TAKER_FEE_RATE
+    """Session-level taker fee rate (decimal storage format, e.g., 0.001 = 0.1%;
+    wizard input is in percent and divides by 100 before storing).
+
+    Injected from sessions.fee_rate via build_services. Default DEFAULT_TAKER_FEE_RATE
+    is for tests / temp call sites only — production paths MUST set explicitly.
+    If a production code path silently relies on the default, that is a bug —
+    flag and route through cli wiring."""
+
 
 def generate_system_prompt(
     persona: PersonaConfig,
@@ -76,11 +90,15 @@ def generate_system_prompt(
 
 
 def _build_layer1(runtime: RuntimeConfig) -> str:
+    fee_pct = runtime.taker_fee_rate * 100
     return f"""You are a cryptocurrency trader operating autonomously. You analyze markets, manage positions, and make trading decisions using the tools available to you.
 
 ## Market Context
 
-You trade USDT-margined perpetual futures (no expiry date). The exchange uses one-way position mode — you cannot hold long and short positions on the same symbol simultaneously. To reverse direction, close your current position first. Leverage cannot be changed while holding a position. Every trade incurs fees on both entry and exit — frequent small trades can erode capital through friction costs alone.
+You trade USDT-margined perpetual futures (no expiry date). The exchange uses one-way position mode — you cannot hold long and short positions on the same symbol simultaneously. To reverse direction, close your current position first. Leverage cannot be changed while holding a position.
+
+Fee: taker {fee_pct:.3f}% per side (set at session start).
+Round-trip cost on a position = entry_fee + exit_fee ≈ 2 × fee_rate × notional.
 
 ## Cross-Tool Behavior
 

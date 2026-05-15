@@ -181,6 +181,18 @@ class BaseExchange(ABC):
         """注册 fill 回调。"""
         self._fill_callback = callback
 
+    def register_close_order_entry(self, order_id: str, entry_price: float) -> None:
+        """Hook for exchange impls to record per-order entry_price for close fills.
+
+        Default: no-op (sim path captures entry_price directly in fill event from
+        in-memory _Position; OKX path overrides this method to populate
+        _close_order_entry_cache, consumed by _parse_fill_event).
+
+        Called by close-direction tools (close_position / set_stop_loss /
+        set_take_profit) immediately after create_order returns.
+        """
+        return None
+
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         """注册价格异动回调。默认空实现。"""
         pass
@@ -334,6 +346,18 @@ class FillEvent:
     pnl: float | None      # 已实现盈亏（开仓时 None）
     timestamp: int
     is_full_close: bool    # True iff 该 fill 把 symbol 持仓清零（用于 alert 清理）
+    entry_price: float | None = None
+    """Position weighted-avg entry price at fill time (per contract).
+
+    For close fills (pnl is not None): exchange-layer-filled actual position
+    entry price (before any pnl_cap clamping in sim). Used by cli renderer
+    to compute round-trip net without reverse-engineering from pnl.
+
+    For open fills (pnl is None): always None — by design.
+    Rationale: open fill 的 entry 信息已通过 fill_price 表达；entry_price 字段
+    语义专用于 close fill 的 position weighted-avg entry。统一 open fill 永远
+    None 避免半态字段导致后续误用。
+    """
 
 
 @dataclass

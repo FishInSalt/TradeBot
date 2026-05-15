@@ -1440,3 +1440,269 @@ async def test_simulated_fetch_open_orders_limit_has_no_trigger_price():
     limit_orders = [o for o in open_orders if o.order_type == "limit"]
     assert len(limit_orders) == 1
     assert limit_orders[0].trigger_price is None
+
+
+def test_fill_event_has_optional_entry_price_field():
+    """FillEvent.entry_price defaults to None and accepts float."""
+    from src.integrations.exchange.base import FillEvent
+
+    ev = FillEvent(
+        order_id="1", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", trigger_reason="market",
+        fill_price=80000.0, amount=1.0, fee=40.0, pnl=100.0,
+        timestamp=1, is_full_close=True,
+    )
+    assert ev.entry_price is None  # default
+
+    ev2 = FillEvent(
+        order_id="2", symbol="BTC/USDT:USDT", side="sell",
+        position_side="long", trigger_reason="market",
+        fill_price=80000.0, amount=1.0, fee=40.0, pnl=100.0,
+        timestamp=1, is_full_close=True, entry_price=79900.0,
+    )
+    assert ev2.entry_price == 79900.0
+
+
+def test_simulated_exchange_register_close_order_entry_is_noop():
+    """SimulatedExchange inherits BaseExchange.register_close_order_entry no-op (no error)."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.config import ExchangeConfig
+
+    cfg = ExchangeConfig(name="simulated", fee_rate=0.0005)
+    ex = SimulatedExchange(config=cfg, db_engine=None, session_id="t", symbol="BTC/USDT:USDT")
+    # 不抛错，不返回值
+    result = ex.register_close_order_entry("order123", 80000.0)
+    assert result is None
+
+
+def test_init_raises_when_fee_rate_is_none():
+    """SimulatedExchange constructor raises on None fee_rate (silent fallback removed)."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.config import ExchangeConfig
+    import pytest
+
+    cfg = ExchangeConfig(name="simulated", fee_rate=None)
+    with pytest.raises(ValueError, match="fee_rate"):
+        SimulatedExchange(
+            config=cfg, db_engine=None,
+            session_id="t", symbol="BTC/USDT:USDT",
+        )
+
+
+async def test_fill_market_close_includes_entry_price_in_event():
+    """sim market close fill event carries position weighted-avg entry."""
+    ex = _make_exchange(initial_balance=10000.0, fee_rate=0.0005)
+    ex._leverage["BTC/USDT:USDT"] = 10
+
+    # Set ticker to 80000 for open fill
+    ex._latest_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=80000.0, bid=79990.0, ask=80010.0,
+        high=81000.0, low=79000.0, base_volume=1000.0, timestamp=1712534400000,
+    )
+
+    # Open long @ ~80010 (ask)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", amount=0.1)
+    await ex._process_tick(_tick(last=80000.0, bid=79990.0, ask=80010.0))
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    assert len(positions) == 1
+    entry_before_close = positions[0].entry_price  # should be 80010.0
+
+    # Register fill callback
+    fills = []
+    async def collect(ev):
+        fills.append(ev)
+    ex.on_fill(collect)
+
+    # Close long
+    await ex.create_order(
+        "BTC/USDT:USDT", "sell", "market", amount=0.1,
+        params={"reduceOnly": True},
+    )
+    await ex._process_tick(_tick(last=80200.0, bid=80190.0, ask=80210.0))
+
+    close_fills = [f for f in fills if f.pnl is not None]
+    assert len(close_fills) == 1
+    assert close_fills[0].entry_price == entry_before_close  # captured before _close_position_core
+
+
+@pytest.mark.asyncio
+async def test_execute_fill_includes_entry_price_for_stop_trigger():
+    """sim SL trigger fill event carries position weighted-avg entry."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    # Open long at ~95010 (ask price from _tick default)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open; entry_price = 95010.0
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    expected_entry = positions[0].entry_price  # 95010.0
+
+    # Place SL below current price
+    await ex.create_order("BTC/USDT:USDT", "sell", "stop", 0.001, price=90000.0)
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Tick that triggers the stop (bid crosses below 90000)
+    drop_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=89500.0, bid=89490.0, ask=89510.0,
+        high=96000.0, low=88000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(drop_ticker)
+
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "stop"
+    assert fills[0].entry_price == expected_entry
+
+
+@pytest.mark.asyncio
+async def test_execute_fill_includes_entry_price_for_take_profit_trigger():
+    """sim TP trigger fill event carries position weighted-avg entry."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 3
+    # Open long at ~95010 (ask price from _tick default)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())  # fill open; entry_price = 95010.0
+
+    positions = await ex.fetch_positions("BTC/USDT:USDT")
+    expected_entry = positions[0].entry_price  # 95010.0
+
+    # Place TP above current price
+    await ex.create_order("BTC/USDT:USDT", "sell", "take_profit", 0.001, price=97000.0)
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Tick that triggers the take profit (bid crosses above 97000)
+    up_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=97500.0, bid=97490.0, ask=97510.0,
+        high=98000.0, low=94000.0, base_volume=1000.0, timestamp=1712535000000,
+    )
+    await ex._process_tick(up_ticker)
+
+    assert len(fills) == 1
+    assert fills[0].trigger_reason == "take_profit"
+    assert fills[0].entry_price == expected_entry
+
+
+@pytest.mark.asyncio
+async def test_force_liquidate_includes_entry_price():
+    """sim liquidation fill event carries position entry."""
+    ex = _make_exchange(initial_balance=100.0)
+    ex._leverage["BTC/USDT:USDT"] = 10
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # Tick 1: normal price → fills the long (entry = tick.ask = 95010)
+    await ex._process_tick(_tick())
+    assert len(fills) == 1
+    original_entry = fills[0].fill_price  # entry_price == fill_price for market open
+
+    # Tick 2: price crashes below liquidation price
+    liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 79990.0, 80010.0,
+                        96000.0, 79000.0, 1000.0, 1712534500000)
+    await ex._process_tick(liq_ticker)
+
+    liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fills) == 1
+    assert liq_fills[0].entry_price == pytest.approx(original_entry)
+
+
+@pytest.mark.asyncio
+async def test_fill_event_entry_price_captured_before_pnl_cap():
+    """drift guard: entry_price reflects original entry even when pnl_cap fires.
+
+    Construct: leverage 100x position, market drops below liq; _close_position_core
+    pnl_cap clamps pnl to -margin. entry_price MUST still equal original entry
+    (not back-derived from clamped pnl).
+    """
+    ex = _make_exchange(initial_balance=10000.0)
+    ex._leverage["BTC/USDT:USDT"] = 100
+
+    fills = []
+    async def on_fill(event):
+        fills.append(event)
+    ex.on_fill(on_fill)
+
+    # Place and fill a long at ~95010 (ask price from _tick())
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex._process_tick(_tick())
+    assert len(fills) == 1
+    expected_entry = fills[0].fill_price  # e.g. 95010.0
+
+    # Tick 2: deep crash — well below liquidation; pnl_cap will clamp pnl to -margin
+    deep_crash_ticker = Ticker(
+        "BTC/USDT:USDT", 50000.0, 49990.0, 50010.0,
+        96000.0, 49000.0, 1000.0, 1712535000000,
+    )
+    await ex._process_tick(deep_crash_ticker)
+
+    liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
+    assert len(liq_fills) == 1
+    liq_fill = liq_fills[0]
+
+    # pnl is clamped (won't exceed -margin); entry_price must still be the original
+    assert liq_fill.pnl is not None
+    assert liq_fill.entry_price == pytest.approx(expected_entry)
+
+
+def test_sim_close_paths_capture_entry_before_close_position_core():
+    """AST drift guard: all 3 sim close paths must read pos.entry_price BEFORE
+    calling self._close_position_core (which may pop the position from
+    self._positions, see _close_position_core implementation).
+
+    Mirror of test_fill_event_entry_price_captured_before_pnl_cap but covers
+    all 3 capture sites (_fill_market_close / _execute_fill / _force_liquidate)
+    via AST scan rather than only _force_liquidate via integration test.
+    """
+    import ast
+    import pathlib
+
+    sim_py = pathlib.Path(__file__).resolve().parents[1] / "src" / "integrations" / "exchange" / "simulated.py"
+    tree = ast.parse(sim_py.read_text())
+
+    target_methods = {"_fill_market_close", "_execute_fill", "_force_liquidate"}
+    found = {name: False for name in target_methods}
+
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name in target_methods):
+            continue
+        # Scan the function body for the relative ordering of:
+        # (a) any assignment whose value reads ".entry_price" attribute
+        # (b) any call to self._close_position_core
+        capture_line = None
+        close_call_line = None
+        for stmt in ast.walk(node):
+            if (isinstance(stmt, ast.Attribute) and stmt.attr == "entry_price"
+                    and capture_line is None):
+                # Only count entry_price reads on .entry_price (e.g. pos.entry_price)
+                capture_line = stmt.lineno
+            if (isinstance(stmt, ast.Call) and isinstance(stmt.func, ast.Attribute)
+                    and stmt.func.attr == "_close_position_core"
+                    and close_call_line is None):
+                close_call_line = stmt.lineno
+        assert capture_line is not None, (
+            f"{node.name}: no .entry_price capture found"
+        )
+        assert close_call_line is not None, (
+            f"{node.name}: no _close_position_core call found"
+        )
+        assert capture_line < close_call_line, (
+            f"{node.name}: .entry_price captured at line {capture_line} but "
+            f"_close_position_core called at line {close_call_line} — capture "
+            f"must precede close (position may be popped from self._positions)"
+        )
+        found[node.name] = True
+
+    missing = [name for name, ok in found.items() if not ok]
+    assert not missing, f"sim close paths not scanned: {missing}"

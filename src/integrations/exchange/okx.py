@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 P = ParamSpec("P")
 R = TypeVar("R")
 
+_CLOSE_ENTRY_CACHE_TTL_SECONDS = 24 * 3600  # 24h ceiling per spec §4.5b
+
 # order_type → trigger_reason 映射
 _TRIGGER_REASON_MAP = {
     "stop": "stop",
@@ -126,6 +128,11 @@ class OKXExchange(BaseExchange):
         self._pnl_fetch_timeout: float = 5.0
         self._seen_order_ids: dict[str, None] = {}
         self._seen_order_ids_max = 10000
+        self._close_order_entry_cache: dict[str, tuple[float, float]] = {}
+        """Maps close-direction order_id → (position.entry_price, monotonic_ts).
+        Populated by register_close_order_entry (called by tools_execution.py
+        close paths after create_order). Consumed by _parse_fill_event.
+        Cleaned on cancel_order or via TTL sweep."""
         logger.info(
             "OKX exchange initialized (%s account)",
             "demo" if sandbox else "live",
@@ -140,6 +147,39 @@ class OKXExchange(BaseExchange):
 
     def on_alert(self, callback: Callable[[Any], Awaitable[None]]) -> None:
         self._alert_callback = callback
+
+    # --- Entry price cache for close fills ---
+
+    def register_close_order_entry(self, order_id: str, entry_price: float) -> None:
+        """Cache position entry_price for close-direction order at submit time.
+
+        Allows _parse_fill_event to attach exchange-layer-known entry_price to
+        the FillEvent without relying on order response fields (OKX V5 avgPx
+        on close orders is exit price, not position entry)."""
+        import time
+        self._close_order_entry_cache[order_id] = (entry_price, time.monotonic())
+
+    def _sweep_close_entry_cache_ttl(self) -> None:
+        """Drop _close_order_entry_cache entries older than TTL.
+
+        Periodic-call hook — invoke from existing housekeeping loop or
+        as a defensive sweep at fetch_open_orders boundaries (cheap).
+        Keeps cache bounded across long SL/TP idle windows.
+        """
+        import time
+        # getattr defense: some tests construct OKXExchange via __new__ to skip
+        # __init__ (e.g., tests/_fixtures.py make_okx_exchange before fixture
+        # was patched). Direct production path always has the attribute via
+        # __init__. Safe-no-op on missing attribute lets fixture call sites
+        # invoke this method without crashing.
+        cache = getattr(self, "_close_order_entry_cache", None)
+        if not cache:
+            return
+        now = time.monotonic()
+        stale = [oid for oid, (_, ts) in cache.items()
+                 if now - ts > _CLOSE_ENTRY_CACHE_TTL_SECONDS]
+        for oid in stale:
+            cache.pop(oid, None)
 
     # --- WebSocket lifecycle ---
 
@@ -367,6 +407,24 @@ class OKXExchange(BaseExchange):
 
         is_full_close = self._infer_is_full_close(info, side, trigger_reason)
 
+        # Pop entry_price from cache for close fills.
+        #
+        # OKX V5 fillPnl semantic (per OKX V5 公开文档摘录):
+        #   "fillPnl: Last filled profit and loss, applicable to orders which
+        #    have a trade and aim to close position. It always is 0 in other
+        #    conditions"
+        #   ref: https://www.okx.com/docs-v5/en/#order-book-trading-trade-get-fills
+        #
+        # Semantic：fillPnl = gross realized P&L of this fill, **excludes**
+        # taker/maker fee (fee accounted separately via OKX `fee` / `fillFee`
+        # field, returned in CCXT-normalized form as fee_info.cost above).
+        # Matches sim convention (`_close_position_core` returns gross pnl).
+        #
+        # Cache miss (cached is None) → entry_price=None → cli renderer
+        # degrades to fee + gross view.
+        cached = self._close_order_entry_cache.pop(order_id, None)
+        entry_price = cached[0] if cached is not None else None
+
         return FillEvent(
             order_id=order_id,
             symbol=symbol,
@@ -379,6 +437,7 @@ class OKXExchange(BaseExchange):
             pnl=pnl,
             timestamp=timestamp,
             is_full_close=is_full_close,
+            entry_price=entry_price,
         )
 
     def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bool:
@@ -644,6 +703,7 @@ class OKXExchange(BaseExchange):
 
     @_retry()
     async def fetch_open_orders(self, symbol: str) -> list[Order]:  # type: ignore[override]
+        self._sweep_close_entry_cache_ttl()
         plain_task = self._client.fetch_open_orders(symbol)
         cond_task = self._client.fetch_open_orders(
             symbol, params={"stop": True, "ordType": "conditional"}
@@ -718,6 +778,11 @@ class OKXExchange(BaseExchange):
             )
         else:
             await self._client.cancel_order(order_id, symbol)
+        # getattr defense: see _sweep_close_entry_cache_ttl comment — tests
+        # using __new__-bypass construction reach here without __init__ running.
+        cache = getattr(self, "_close_order_entry_cache", None)
+        if cache is not None:
+            cache.pop(order_id, None)
 
     # ── Derivatives market-structure fetches ──
     # ccxt.RateLimitExceeded is a subclass of ccxt.NetworkError, and @_retry()

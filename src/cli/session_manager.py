@@ -150,6 +150,26 @@ async def _restore_session(
             from src.cli.wizard import _save_credentials
             _save_credentials(config_dir, "okx", api_credentials)
 
+    # Legacy NULL fee_rate detection (iter-tool-opt-fee-visibility §4.5):
+    # Pre-iter sessions may have NULL fee_rate. Prompt user to set it
+    # before constructing WizardResult (which requires float).
+    resolved_fee_rate = s.fee_rate
+    if resolved_fee_rate is None:
+        from rich.prompt import FloatPrompt
+        console.print("[yellow]Legacy session has no fee_rate configured.[/]")
+        fee_pct = FloatPrompt.ask(
+            "  Set fee rate (% per side) for this session",
+            default=0.05, console=console,
+        )
+        resolved_fee_rate = fee_pct / 100
+        async with get_session(engine) as db_sess:
+            await db_sess.execute(
+                update(Session).where(Session.id == session_id).values(
+                    fee_rate=resolved_fee_rate,
+                )
+            )
+            await db_sess.commit()
+
     # Update status to active + persist model choice
     new_model_config = json.dumps({
         "id": selected_config.id,
@@ -166,7 +186,7 @@ async def _restore_session(
 
     return WizardResult(
         exchange_type=s.exchange_type,
-        fee_rate=s.fee_rate,
+        fee_rate=resolved_fee_rate,
         initial_balance=s.initial_balance,
         api_credentials=api_credentials,
         symbol=s.symbol,

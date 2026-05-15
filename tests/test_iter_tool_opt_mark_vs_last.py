@@ -129,6 +129,7 @@ def mock_deps_for_position():
     deps = MagicMock()
     deps.symbol = "BTC/USDT:USDT"
     deps.initial_balance = 10_000.0
+    deps.fee_rate = 0.0005
 
     # Position: long with 0.5 contracts entry 80000, liq 51000
     deps.exchange.fetch_positions = AsyncMock(return_value=[
@@ -450,6 +451,7 @@ async def test_algo_trigger_reference_drives_label_text():
     deps = MagicMock()
     deps.symbol = "BTC/USDT:USDT"
     deps.initial_balance = 10_000.0
+    deps.fee_rate = 0.0005
     deps.db_engine = None
     deps.exchange.algo_trigger_reference = "mark"
     deps.exchange.fetch_balance = AsyncMock(return_value=MagicMock(

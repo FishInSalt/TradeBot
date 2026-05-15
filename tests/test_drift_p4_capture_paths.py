@@ -1,8 +1,10 @@
 """P4 drift guards: Guard A (P4 field coverage) + Guard B (retry-loop prompt
-invariant) + Guard C (max_wake helper consistency).
+invariant) + Guard C (max_wake helper consistency) + Guard D (fee_rate wiring).
 """
 import ast
+import dataclasses
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -114,3 +116,174 @@ def test_retry_loop_does_not_reassign_prompt():
                         f"P4 capture path must be rewritten (per-attempt capture / "
                         f"attempt-level field) before this change ships."
                     )
+
+
+# ── Guard D: fee_rate wiring ──────────────────────────────────────────────────
+
+
+def _make_minimal_wizard_result(fee_rate=0.001):
+    """Return a minimal WizardResult suitable for build_services tests.
+
+    Uses a simulated exchange to avoid OKX credential requirements.
+    fee_rate=None bypasses the dataclass type annotation via dataclasses.replace.
+    """
+    from src.cli.wizard import WizardResult
+    from src.config import PersonaConfig
+
+    base = WizardResult(
+        exchange_type="simulated",
+        fee_rate=0.001,
+        initial_balance=1000.0,
+        api_credentials=None,
+        symbol="BTC-USDT-SWAP",
+        timeframe="15m",
+        model_config=MagicMock(),
+        model=MagicMock(),
+        scheduler_interval_min=15,
+        approval_enabled=False,
+        token_budget=100_000,
+        persona=PersonaConfig(),
+        session_name="test-session",
+    )
+    if fee_rate is None:
+        return dataclasses.replace(base, fee_rate=None)
+    return dataclasses.replace(base, fee_rate=fee_rate)
+
+
+def _make_mock_engine():
+    return MagicMock()
+
+
+def _make_mock_sc():
+    sc = MagicMock()
+    sc.print = MagicMock()
+    return sc
+
+
+def _make_mock_settings():
+    """Return a minimal Settings-like mock for build_services."""
+    settings = MagicMock()
+    settings.exchange.sandbox = True
+    settings.exchange.fee_rate = 0.001
+    settings.news.enabled = False
+    settings.macro.enabled = False
+    settings.crypto_etf.enabled = False
+    settings.onchain.enabled = False
+    settings.approval.timeout_seconds = 30
+    return settings
+
+
+def _build_services_patches():
+    """Context manager stack of patches needed to run build_services in tests.
+
+    Mirrors the pattern in tests/test_wizard.py::test_build_services_sim_path.
+    """
+    return (
+        patch("src.integrations.exchange.simulated.SimulatedExchange"),
+        patch("src.cli.app.MarketDataService"),
+        patch("src.cli.app.MemoryService"),
+        patch("src.cli.app.create_trader_agent"),
+        patch("src.services.metrics.MetricsService"),
+    )
+
+
+def test_build_services_raises_on_none_fee_rate():
+    """Guard D-1: build_services fails-loud when WizardResult.fee_rate is None.
+
+    Defense in depth — wizard sub-step (Task 15) is primary recovery; this is
+    bottom layer for manual SQL / restored backup / migration bug.
+    The ValueError is raised at the top of build_services before any exchange
+    construction, so no patching is required.
+    """
+    from src.cli.app import build_services
+
+    result = _make_minimal_wizard_result(fee_rate=None)
+    with pytest.raises(ValueError, match="fee_rate"):
+        build_services(
+            result,
+            _make_mock_engine(),
+            "test-session-id",
+            _make_mock_sc(),
+            _make_mock_settings(),
+        )
+
+
+def test_build_services_drift_guard_runtime_vs_deps_fee_rate():
+    """Guard D-2: TradingDeps.fee_rate == result.fee_rate after build_services.
+
+    Confirms the fee_rate flows from WizardResult through into TradingDeps
+    (and that the internal drift guard assertion doesn't fire).
+    """
+    from src.cli.app import build_services
+
+    fee_rate = 0.00085
+    result = _make_minimal_wizard_result(fee_rate=fee_rate)
+
+    p_sim, p_mds, p_mem, p_agent, p_metrics = _build_services_patches()
+    with p_sim as MockSim, p_mds, p_mem, p_agent as mock_agent, p_metrics:
+        MockSim.return_value = MagicMock()
+        mock_agent.return_value = MagicMock()
+        _exchange, deps, _agent, _budget, _stats = build_services(
+            result,
+            _make_mock_engine(),
+            "test-session-id",
+            _make_mock_sc(),
+            _make_mock_settings(),
+        )
+
+    assert deps.fee_rate == fee_rate, (
+        f"TradingDeps.fee_rate {deps.fee_rate} != WizardResult.fee_rate {fee_rate}"
+    )
+
+
+def test_p4_runtime_config_matches_build_services_fee_rate():
+    """Guard D-3: both RuntimeConfig construction sites in cli/app.py
+    (build_services-internal and P4 Phase 5b in run()) must pass
+    taker_fee_rate=result.fee_rate.
+
+    AST scan rather than literal-RuntimeConfig replay (which would tautology
+    pass regardless of what cli/app.py actually does). Guards Critical #1
+    failure mode: if someone removes the kwarg from either site,
+    sessions.system_prompt renders Fee with default 0.0005 regardless of
+    user's actual fee_rate.
+    """
+    import ast
+    import pathlib
+
+    app_py = pathlib.Path(__file__).resolve().parents[1] / "src" / "cli" / "app.py"
+    tree = ast.parse(app_py.read_text())
+
+    # Find all RuntimeConfig(...) Call nodes inside async def build_services
+    # and async def run.
+    found_sites: dict[str, list[ast.Call]] = {"build_services": [], "run": []}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in found_sites:
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Name)
+                        and inner.func.id == "RuntimeConfig"):
+                    found_sites[node.name].append(inner)
+
+    assert len(found_sites["build_services"]) >= 1, (
+        "build_services must construct RuntimeConfig at least once"
+    )
+    assert len(found_sites["run"]) >= 1, (
+        "run() must construct RuntimeConfig at least once (P4 Phase 5b capture)"
+    )
+
+    def _has_taker_fee_kwarg(call: ast.Call) -> bool:
+        for kw in call.keywords:
+            if kw.arg != "taker_fee_rate":
+                continue
+            # Accept either result.fee_rate or _.fee_rate Attribute access
+            if isinstance(kw.value, ast.Attribute) and kw.value.attr == "fee_rate":
+                return True
+        return False
+
+    for site_name, calls in found_sites.items():
+        for call in calls:
+            assert _has_taker_fee_kwarg(call), (
+                f"{site_name} RuntimeConfig at line {call.lineno} must pass "
+                f"taker_fee_rate=<obj>.fee_rate; missing or stale kwarg "
+                f"would let sessions.system_prompt drift to default fee_rate"
+            )

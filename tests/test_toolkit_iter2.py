@@ -17,6 +17,7 @@ _AS_OF_TS = r"@ \d{2}:\d{2}:\d{2} UTC"
 class MockDeps:
     symbol: str = "BTC/USDT:USDT"
     initial_balance: float = 10000.0
+    fee_rate: float = 0.0005
     exchange: AsyncMock = field(default_factory=AsyncMock)
     market_data: AsyncMock = field(default_factory=AsyncMock)
     technical: AsyncMock = field(default_factory=AsyncMock)

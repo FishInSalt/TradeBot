@@ -1,5 +1,28 @@
 # tests/test_persona.py
 from src.config import PersonaConfig
+from src.agent.persona import (
+    CYCLE_DECISION_WORD_CAP,
+    DEFAULT_TAKER_FEE_RATE,
+    RuntimeConfig,
+    generate_system_prompt,
+)
+
+
+def test_default_taker_fee_rate_is_okx_btc_perp_regular_tier():
+    """DEFAULT_TAKER_FEE_RATE = 0.0005 (OKX BTC perp regular tier taker)."""
+    assert DEFAULT_TAKER_FEE_RATE == 0.0005
+
+
+def test_runtime_config_default_taker_fee_rate():
+    """RuntimeConfig 默认 taker_fee_rate 与常量一致 (test/temp 用途)."""
+    rc = RuntimeConfig()
+    assert rc.taker_fee_rate == DEFAULT_TAKER_FEE_RATE
+
+
+def test_runtime_config_explicit_taker_fee_rate():
+    """RuntimeConfig 接受 explicit override."""
+    rc = RuntimeConfig(taker_fee_rate=0.001)
+    assert rc.taker_fee_rate == 0.001
 
 
 def test_prompt_contains_layer1_identity():
@@ -590,3 +613,46 @@ def test_word_cap_value_consistent_across_three_channels():
     assert _count_words(body) == cap, \
         f"_count_words convention diverged: expected exactly {cap} " \
         f"words in truncated body, got {_count_words(body)}"
+
+
+def test_trading_deps_has_fee_rate_default():
+    """TradingDeps default fee_rate matches DEFAULT_TAKER_FEE_RATE."""
+    from src.agent.trader import TradingDeps
+    from unittest.mock import MagicMock
+    deps = TradingDeps(
+        symbol="BTC/USDT:USDT", timeframe="5m",
+        market_data=MagicMock(), exchange=MagicMock(),
+        technical=MagicMock(), memory=MagicMock(),
+        session_id="test",
+    )
+    assert deps.fee_rate == DEFAULT_TAKER_FEE_RATE
+
+
+def test_layer1_market_context_renders_taker_fee_rate():
+    """Market Context segment includes 'Fee: taker X.XXX% per side (set at session start).'"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    rc = RuntimeConfig(taker_fee_rate=0.001)
+    text = _build_layer1(rc)
+    assert "Fee: taker 0.100% per side (set at session start)." in text
+    assert "Round-trip cost on a position = entry_fee + exit_fee" in text
+    assert "≈ 2 × fee_rate × notional" in text
+
+
+def test_market_context_segment_no_evaluation_words():
+    """Market Context segment removes 'frequent small trades' / 'erode capital' nudges.
+
+    drift guard scope: only the '## Market Context' segment of _build_layer1
+    output. Layer 3 (personality / trading_style) MAY contain compliant
+    evaluation descriptors (e.g., 'patient trader') and is not part of this guard.
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    text = _build_layer1(RuntimeConfig())
+
+    # extract '## Market Context' segment up to next '##' header
+    market_ctx_start = text.index("## Market Context")
+    next_h2 = text.index("##", market_ctx_start + len("## Market Context"))
+    market_ctx_segment = text[market_ctx_start:next_h2]
+
+    forbidden = ["frequent small trades", "erode capital", "friction costs alone"]
+    for word in forbidden:
+        assert word not in market_ctx_segment, f"'{word}' still present in Market Context"

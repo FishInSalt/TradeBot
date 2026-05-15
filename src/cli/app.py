@@ -474,8 +474,35 @@ async def run_agent_cycle(
             f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
             f"— {context.symbol} {context.amount} @ {context.fill_price}"
         )
-        if context.pnl is not None:
-            msg += f", PnL: {context.pnl:.2f} USDT"
+        if context.pnl is None:
+            # Open fill — fee only
+            msg += f", Fee: {-context.fee:+.2f} USDT"
+        elif context.is_full_close and context.entry_price is not None:
+            # Full close fill — fee + gross + equiv-round-trip net.
+            # contract_size factor required for USDT-denominated entry_fee — matches
+            # tools_perception.py / tools_execution.py convention.
+            _contract_size = await deps.exchange.get_contract_size(context.symbol)
+            entry_fee_recompute = (
+                context.entry_price * context.amount * _contract_size * deps.fee_rate
+            )
+            round_trip_net = -entry_fee_recompute + context.pnl - context.fee
+            msg += (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} USDT (gross) / "
+                f"{round_trip_net:+.2f} USDT (this fill, equiv-round-trip)"
+            )
+        else:
+            # Part close, OR full close with no entry_price (OKX cache miss —
+            # e.g., SL/TP placed in a prior process before restart). fact-provider
+            # principle: emit hint so agent knows why round-trip line is absent
+            # on full-close fills, distinguishing from part-close design.
+            base = (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} USDT (gross)"
+            )
+            if context.is_full_close and context.entry_price is None:
+                base += " [round-trip net unavailable: entry_price not cached]"
+            msg += base
         prompt += msg
     elif trigger_type == "alert" and context is not None:
         if isinstance(context, PriceLevelAlertInfo):
@@ -792,6 +819,14 @@ def build_services(
     settings: Settings,
 ):
     """Build exchange, deps, agent, budget from WizardResult."""
+    if result.fee_rate is None:
+        raise ValueError(
+            "Session has no fee_rate configured. This usually means a legacy "
+            "session was loaded but the resume flow's fee_rate sub-step did "
+            "not run. To recover: (a) restart the CLI to trigger wizard resume "
+            "flow; (b) or manually UPDATE sessions SET fee_rate=0.0005 WHERE "
+            "id=<your_session_id> in DB and restart."
+        )
     # Exchange
     if result.exchange_type == "simulated":
         from src.integrations.exchange.simulated import SimulatedExchange
@@ -826,7 +861,10 @@ def build_services(
 
     # R2-5: session-fixed runtime config injected into system prompt
     max_wake = _compute_max_wake(result.scheduler_interval_min)
-    runtime_config = RuntimeConfig(wake_max_minutes=max_wake)
+    runtime_config = RuntimeConfig(
+        wake_max_minutes=max_wake,
+        taker_fee_rate=result.fee_rate,
+    )
     agent = create_trader_agent(
         model=result.model,
         persona_config=result.persona,
@@ -894,6 +932,7 @@ def build_services(
         approval_gate=approval_gate,
         approval_enabled=result.approval_enabled,
         initial_balance=result.initial_balance,
+        fee_rate=result.fee_rate,
         metrics=metrics_service,
         news=news_service,
         macro=macro_service,
@@ -908,6 +947,10 @@ def build_services(
     assert deps.wake_max_minutes == runtime_config.wake_max_minutes, (
         f"R2-5 drift: prompt range {runtime_config.wake_max_minutes} vs "
         f"clamp {deps.wake_max_minutes} must match"
+    )
+    assert deps.fee_rate == runtime_config.taker_fee_rate, (
+        f"fee_rate drift: TradingDeps {deps.fee_rate} vs "
+        f"RuntimeConfig {runtime_config.taker_fee_rate} must match"
     )
 
     stats = SessionStats()
@@ -967,6 +1010,7 @@ async def run(
     # ── Phase 5b: P4 system_prompt capture ──
     runtime_config_for_capture = RuntimeConfig(
         wake_max_minutes=_compute_max_wake(result.scheduler_interval_min),
+        taker_fee_rate=result.fee_rate,
     )
     await _capture_session_system_prompt(
         engine, session_id, result.persona, runtime_config_for_capture,

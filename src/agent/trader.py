@@ -8,7 +8,7 @@ from pydantic_ai import Agent, RunContext
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
-from src.agent.persona import generate_system_prompt, RuntimeConfig
+from src.agent.persona import DEFAULT_TAKER_FEE_RATE, generate_system_prompt, RuntimeConfig
 from src.cli.approval import ApprovalGate
 from src.config import PersonaConfig
 from src.integrations.crypto_etf.service import CryptoEtfService
@@ -37,6 +37,9 @@ class TradingDeps:
     wake_max_minutes: int = 60
     set_next_wake_fn: Callable[[int], None] | None = None
     initial_balance: float = 10000.0
+    fee_rate: float = DEFAULT_TAKER_FEE_RATE
+    """Session-level taker fee rate (decimal). Mirror of RuntimeConfig.taker_fee_rate;
+    injected from sessions.fee_rate via build_services. Default for tests only."""
     metrics: MetricsService | None = None
     news: NewsService | None = None
     macro: MacroService | None = None
@@ -134,6 +137,10 @@ def create_trader_agent(
         both entry and last price). Liquidation distance is computed against
         mark price.
 
+        Output also includes Fee & Breakeven section: entry_fee paid (= entry × contracts × rate)
+        and breakeven price = entry × (1 ± 2 × fee_rate) — the fill price at which the
+        position is exactly flat on a taker round-trip.
+
         Args:
             symbol: trading symbol (defaults to session symbol).
         """
@@ -187,12 +194,23 @@ def create_trader_agent(
 
     @tool
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
-        """Get quantitative trading performance statistics.
+        """Show session trading performance — balance, return, cumulative fees, win rate, drawdown.
 
-        Reports return, win rate, drawdown, profit factor, and other
-        quantitative metrics.
+        Returns:
+            str: Two sections.
 
-        Related: get_trade_journal (decision timeline).
+            === Trading Performance === — Initial Balance, Current Balance,
+            Total Return (% + USDT, incl. unrealized), Realized PnL (gross, before fees),
+            Total Fees (cumulative across all fills).
+
+            === Trade Stats === — Total Trades, Win Rate, Avg Win/Loss, Profit Factor,
+            Max Drawdown (equity-peak-based), Best/Worst Trade. All gross-based until
+            iter-tool-opt-net-pnl-metrics lands.
+
+            Related: get_trade_journal (decision timeline).
+
+        Degradation: 'No completed trades yet.' if zero trades.
+        'No metrics service available.' if metrics service is missing.
         """
         from src.agent.tools_perception import get_performance as _impl
 
@@ -440,6 +458,8 @@ def create_trader_agent(
         Stop loss and take profit place against an existing position, so they
         require the fill notification.
 
+        Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee.
+
         Args:
             side: 'long' or 'short'.
             position_pct: percent of free balance to allocate (0-100).
@@ -456,6 +476,8 @@ def create_trader_agent(
 
         Position closure fills via market order; you will receive a fill
         notification when execution completes (separate trigger).
+
+        Close incurs taker fee on exit. Submit output includes est. exit fee and est. round-trip net PnL.
 
         Args:
             reasoning: brief description of your decision logic (e.g., 'TP target hit', 'thesis invalidated').
@@ -722,6 +744,8 @@ def create_trader_agent(
         reasoning: str,
     ) -> str:
         """Place a limit order at a specific price (e.g., buy at support level).
+
+        Limit fill incurs maker or taker fee depending on fill condition.
 
         Args:
             side: 'long' or 'short'.

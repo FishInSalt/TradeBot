@@ -41,6 +41,7 @@ class MockDeps:
     wake_max_minutes: int = 60
     set_next_wake_fn: object = None
     initial_balance: float = 10000.0
+    fee_rate: float = 0.0005
     metrics: object = None
     news: object = None
     macro: object = None
@@ -90,6 +91,7 @@ def deps():
     d.exchange.get_price_level_alerts = MagicMock(return_value=[])
     d.exchange.get_contract_size = AsyncMock(return_value=1.0)
     d.exchange.get_mark_price = AsyncMock(return_value=65000.0)
+    d.exchange.register_close_order_entry = MagicMock()
     return d
 
 

@@ -284,16 +284,16 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
                      f"Leverage: {p.leverage}x"]
         # F-P2: Liquidation lives in Risk Exposure section (richer form with
         # `(P% away = Q× ATR(1h))`); deduplicated from Position section.
-        pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT")
+        pos_lines.append(f"Unrealized: {p.unrealized_pnl:+.2f} USDT (gross)")
 
         pnl_lines = ["=== PnL ==="]
         if deps.initial_balance > 0:
             pnl_pct_inner = (p.unrealized_pnl / deps.initial_balance) * 100
             pnl_lines.append(
-                f"PnL: {p.unrealized_pnl:+.2f} USDT ({pnl_pct_inner:+.2f}% of initial capital)"
+                f"PnL: {p.unrealized_pnl:+.2f} USDT gross ({pnl_pct_inner:+.2f}% of initial capital)"
             )
         else:
-            pnl_lines.append(f"PnL: {p.unrealized_pnl:+.2f} USDT")
+            pnl_lines.append(f"PnL: {p.unrealized_pnl:+.2f} USDT gross")
         if p.created_at is not None:
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
@@ -310,6 +310,11 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             pnl_lines.append("Duration: N/A")
         return ["\n".join(pos_lines), "\n".join(pnl_lines)]
 
+    # Phase 2a: core render (Position + PnL Phase-1 fields).
+    # Computed before the main IO gather so PnL + Duration survive
+    # ticker/balance/orders failure in the degradation branch below.
+    sections = _render_position_core()
+
     try:
         ticker, balance, ohlcv_df, open_orders, contract_size, mark_price = await asyncio.gather(
             deps.market_data.get_ticker(symbol),
@@ -322,7 +327,6 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
         )
     except Exception as e:
         logger.exception("get_position: one of ticker/balance/orders/contract_size failed")
-        sections = _render_position_core()
         sections.append(f"=== Risk Exposure ===\n(unavailable: {e.__class__.__name__})")
         sections.append(f"=== Exit Orders ===\n(unavailable: {e.__class__.__name__})")
         return "\n\n".join(sections)
@@ -337,7 +341,43 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
             atr_1h = indicators.get("atr_14")
     current_price = ticker.last
 
-    sections = _render_position_core()
+    # === Fee & Breakeven ===
+    # Depends on p.entry_price + deps.fee_rate + contract_size (USDT-denominated
+    # notional uses contract_size factor — see Risk Exposure below for the
+    # established convention). Rendered post-gather since contract_size and
+    # current_price are needed; ticker.last failure already short-circuits to
+    # the degradation branch above.
+    entry_fee = p.entry_price * p.contracts * contract_size * deps.fee_rate
+    if p.side == "long":
+        breakeven = p.entry_price * (1 + 2 * deps.fee_rate)
+        sign_str = "+"
+        side_label = "long"
+    else:
+        breakeven = p.entry_price * (1 - 2 * deps.fee_rate)
+        sign_str = "−"  # Unicode minus U+2212, matches test assertion exactly
+        side_label = "short"
+
+    fb_lines = ["=== Fee & Breakeven ==="]
+    fb_lines.append(
+        f"Entry fee paid: ~-{entry_fee:.2f} USDT "
+        f"(= entry × contracts × contract_size × rate)"
+    )
+    if current_price > 0:
+        if p.side == "long":
+            _distance_pts = current_price - breakeven
+        else:
+            _distance_pts = breakeven - current_price
+        fb_lines.append(
+            f"Breakeven: {breakeven:,.2f} "
+            f"[current {current_price:,.2f}, {_distance_pts:+.0f} pts]"
+        )
+    else:
+        fb_lines.append(f"Breakeven: {breakeven:,.2f}")
+    fb_lines.append(
+        f"  = {p.entry_price:,.2f} × (1 {sign_str} 2 × fee_rate) "
+        f"[{side_label} round-trip taker]"
+    )
+    sections.append("\n".join(fb_lines))
 
     # === Risk Exposure ===
     notional = p.contracts * p.entry_price * contract_size
@@ -697,11 +737,12 @@ async def get_performance(deps: TradingDeps) -> str:
     stats_section = (
         f"=== Trade Stats ===\n"
         f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
-        f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}\n"
-        f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT\n"
-        f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f}'}\n"
-        f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}%\n"
-        f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT"
+        f"({metrics.win_rate:.1%}, gross-based) | Loss: {metrics.losing_trades}\n"
+        f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT (gross-based)\n"
+        f"Profit Factor: "
+        f"{'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f} (gross-based)'}\n"
+        f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}% (gross-based equity)\n"
+        f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT (gross-based)"
     )
 
     return f"{perf_section}\n\n{stats_section}"
