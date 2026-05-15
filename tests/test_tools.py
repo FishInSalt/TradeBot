@@ -90,6 +90,7 @@ def deps():
     d.exchange.get_price_level_alerts = MagicMock(return_value=[])
     d.exchange.get_contract_size = AsyncMock(return_value=1.0)
     d.exchange.get_mark_price = AsyncMock(return_value=65000.0)
+    d.exchange.register_close_order_entry = MagicMock()
     return d
 
 

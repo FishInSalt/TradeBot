@@ -130,6 +130,7 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
             amount=p.contracts,
             params={"reduceOnly": True},  # ensures OKX echoes info.reduceOnly=true in fill event
         )
+        deps.exchange.register_close_order_entry(order.id, p.entry_price)
         order_ids.append(order.id)
         await _record_action(
             deps, action="close_position", order_id=order.id,
@@ -156,6 +157,7 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
     order = await deps.exchange.create_order(
         symbol=deps.symbol, side=side, order_type="stop", amount=p.contracts, price=price
     )
+    deps.exchange.register_close_order_entry(order.id, p.entry_price)
 
     await _record_action(
         deps, action="set_stop_loss", order_id=order.id,
@@ -187,6 +189,7 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
     order = await deps.exchange.create_order(
         symbol=deps.symbol, side=side, order_type="take_profit", amount=p.contracts, price=price
     )
+    deps.exchange.register_close_order_entry(order.id, p.entry_price)
 
     await _record_action(
         deps, action="set_take_profit", order_id=order.id,
