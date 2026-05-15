@@ -185,15 +185,6 @@ class BaseExchange(ABC):
         """注册价格异动回调。默认空实现。"""
         pass
 
-    def set_alert_service(self, service: Any) -> None:
-        """Inject PriceAlertService instance."""
-        self._alert_service = service
-
-    def update_alert_params(self, threshold_pct: float, window_minutes: int) -> None:
-        """Update price alert parameters. Delegates to alert service if set."""
-        if self._alert_service:
-            self._alert_service.update_params(threshold_pct, window_minutes)
-
     def set_volatility_alert(self, threshold_pct: float,
                              window_minutes: int, symbol: str) -> None:
         """Lazy-create on first call, update_params on subsequent calls.

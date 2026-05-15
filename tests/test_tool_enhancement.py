@@ -34,8 +34,8 @@ def test_price_alert_service_get_params_after_update():
 
 
 def test_base_exchange_alert_consolidation():
-    """BaseExchange stores alert_service and delegates to it."""
-    from unittest.mock import MagicMock
+    """BaseExchange stores alert_service via set_volatility_alert lazy create
+    and clears it via cancel_volatility_alert."""
     from src.integrations.exchange.base import BaseExchange
 
     # Create a concrete subclass for testing
@@ -74,17 +74,17 @@ def test_base_exchange_alert_consolidation():
     # No alert service → get_alert_params returns None
     assert ex.get_alert_params() is None
 
-    # Set alert service
-    mock_svc = MagicMock()
-    mock_svc.get_params.return_value = (5.0, 60)
-    ex.set_alert_service(mock_svc)
-
-    # get_alert_params delegates
+    # set_volatility_alert lazy-creates → get_alert_params returns the configured tuple
+    ex.set_volatility_alert(threshold_pct=5.0, window_minutes=60, symbol="BTC/USDT:USDT")
     assert ex.get_alert_params() == (5.0, 60)
 
-    # update_alert_params delegates
-    ex.update_alert_params(3.0, 30)
-    mock_svc.update_params.assert_called_once_with(3.0, 30)
+    # Second set updates in place
+    ex.set_volatility_alert(threshold_pct=3.0, window_minutes=30, symbol="BTC/USDT:USDT")
+    assert ex.get_alert_params() == (3.0, 30)
+
+    # cancel returns to None
+    ex.cancel_volatility_alert()
+    assert ex.get_alert_params() is None
 
 
 def test_base_set_volatility_alert_lazy_creates_when_none():
@@ -302,21 +302,20 @@ async def test_simulated_fetch_positions_has_created_at(tmp_path):
     await engine.dispose()
 
 
-def test_simulated_exchange_inherits_alert_methods():
-    """SimulatedExchange should NOT override set_alert_service/update_alert_params."""
+def test_simulated_exchange_inherits_volatility_alert_methods():
+    """SimulatedExchange should NOT override set_volatility_alert / cancel_volatility_alert."""
     from src.integrations.exchange.simulated import SimulatedExchange
     from src.integrations.exchange.base import BaseExchange
-    # Verify the methods are inherited, not overridden
-    assert SimulatedExchange.set_alert_service is BaseExchange.set_alert_service
-    assert SimulatedExchange.update_alert_params is BaseExchange.update_alert_params
+    assert SimulatedExchange.set_volatility_alert is BaseExchange.set_volatility_alert
+    assert SimulatedExchange.cancel_volatility_alert is BaseExchange.cancel_volatility_alert
 
 
-def test_okx_exchange_inherits_alert_methods():
-    """OKXExchange should NOT override set_alert_service/update_alert_params."""
+def test_okx_exchange_inherits_volatility_alert_methods():
+    """OKXExchange should NOT override set_volatility_alert / cancel_volatility_alert."""
     from src.integrations.exchange.okx import OKXExchange
     from src.integrations.exchange.base import BaseExchange
-    assert OKXExchange.set_alert_service is BaseExchange.set_alert_service
-    assert OKXExchange.update_alert_params is BaseExchange.update_alert_params
+    assert OKXExchange.set_volatility_alert is BaseExchange.set_volatility_alert
+    assert OKXExchange.cancel_volatility_alert is BaseExchange.cancel_volatility_alert
 
 
 # --- Task 3: TradeAction.fee column ---
