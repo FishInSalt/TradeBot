@@ -56,12 +56,6 @@ class ApprovalConfig(BaseModel):
     timeout_seconds: int = 300
 
 
-class AlertsConfig(BaseModel):
-    enabled: bool = True
-    window_minutes: int = 60
-    threshold_pct: float = 5.0
-
-
 class NewsConfig(BaseModel):
     enabled: bool = True
 
@@ -90,7 +84,6 @@ class Settings(BaseModel):
     llm_budget: LLMBudgetConfig = LLMBudgetConfig()
     database: DatabaseConfig = DatabaseConfig()
     approval: ApprovalConfig = ApprovalConfig()
-    alerts: AlertsConfig = AlertsConfig()
     news: NewsConfig = NewsConfig()
     macro: MacroConfig = MacroConfig()
     crypto_etf: CryptoEtfConfig = CryptoEtfConfig()

@@ -97,8 +97,6 @@ async def test_restore_session_builds_wizard_result(tmp_path):
     assert result.timeframe == "1H"
     assert result.scheduler_interval_min == 30
     assert result.approval_enabled is False
-    assert result.alert_enabled is True
-    assert result.alert_window_min == 5
     assert result.fee_rate == 0.0005
     assert result.token_budget == 300000
     assert result.persona.personality == "aggressive"
@@ -252,7 +250,6 @@ async def test_create_session_from_wizard_result(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=30, approval_enabled=False,
-        alert_enabled=True, alert_window_min=10, alert_threshold_pct=5.0,
         token_budget=300000,
         persona=PersonaConfig(personality="aggressive"),
         session_name="ETH sim #1",
@@ -294,7 +291,6 @@ async def test_create_session_name_dedup(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=15, approval_enabled=True,
-        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
         token_budget=500000,
         persona=PersonaConfig(),
         session_name="BTC sim",
@@ -353,7 +349,6 @@ async def test_select_or_create_no_history_runs_wizard(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=15, approval_enabled=True,
-        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
         token_budget=500000,
         persona=PersonaConfig(),
         session_name="BTC sim #1",
@@ -449,7 +444,6 @@ async def test_select_or_create_with_history_new_session(tmp_path):
         model_config=ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(),
         scheduler_interval_min=15, approval_enabled=True,
-        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
         token_budget=500000,
         persona=PersonaConfig(),
         session_name="ETH sim #1",

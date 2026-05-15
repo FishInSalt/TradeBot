@@ -34,9 +34,6 @@ class WizardResult:
     # Risk & scheduling
     scheduler_interval_min: int
     approval_enabled: bool
-    alert_enabled: bool
-    alert_window_min: int | None
-    alert_threshold_pct: float | None
     token_budget: int
     # Persona
     persona: PersonaConfig
@@ -247,26 +244,12 @@ def _step_risk_scheduling(defaults: Settings, exchange_type: str, console: Conso
     # Approval: sim defaults OFF, real defaults ON
     approval_default = exchange_type != "simulated"
     approval = Confirm.ask("  Approval gate", default=approval_default, console=console)
-    alert_enabled = Confirm.ask("  Price alerts", default=defaults.alerts.enabled, console=console)
-
-    alert_window = None
-    alert_threshold = None
-    if alert_enabled:
-        alert_window = IntPrompt.ask(
-            "    Window (min)", default=defaults.alerts.window_minutes, console=console,
-        )
-        alert_threshold = FloatPrompt.ask(
-            "    Threshold (%)", default=defaults.alerts.threshold_pct, console=console,
-        )
     budget = IntPrompt.ask(
         "  Token budget (daily)", default=defaults.llm_budget.daily_max_tokens, console=console,
     )
     return {
         "scheduler_interval_min": interval,
         "approval_enabled": approval,
-        "alert_enabled": alert_enabled,
-        "alert_window_min": alert_window,
-        "alert_threshold_pct": alert_threshold,
         "token_budget": budget,
     }
 
@@ -317,14 +300,6 @@ def _show_summary(data: dict, console: Console) -> bool:
     table.add_row("Model", f"{data['model_config'].id} ({data['model_config'].provider})")
     table.add_row("Scheduler", f"{data['scheduler_interval_min']} min")
     table.add_row("Approval", "ON" if data["approval_enabled"] else "OFF")
-
-    if data["alert_enabled"]:
-        alert_str = (
-            f"ON ({data['alert_window_min']}min / {data['alert_threshold_pct']}%)"
-        )
-    else:
-        alert_str = "OFF"
-    table.add_row("Alerts", alert_str)
 
     table.add_row("Budget", f"{data['token_budget']:,} tokens/day")
 

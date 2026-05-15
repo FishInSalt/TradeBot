@@ -14,7 +14,7 @@ from pydantic_ai import models
 
 from src.cli.wizard import WizardResult
 from src.config import (
-    AlertsConfig, ApprovalConfig, CryptoEtfConfig, DatabaseConfig,
+    ApprovalConfig, CryptoEtfConfig, DatabaseConfig,
     ExchangeConfig, LLMBudgetConfig, MacroConfig, ModelRouting, ModelsConfig,
     NewsConfig, OnchainConfig, PersonaConfig, SchedulerConfig, Settings,
     TradingConfig,
@@ -38,7 +38,6 @@ def _make_settings(
         llm_budget=LLMBudgetConfig(),
         database=DatabaseConfig(),
         approval=ApprovalConfig(),
-        alerts=AlertsConfig(enabled=False),
         news=NewsConfig(enabled=news_enabled),
         macro=MacroConfig(
             enabled=macro_enabled, fred_api_key="k",
@@ -72,9 +71,6 @@ def _make_result() -> WizardResult:
         model="test",
         scheduler_interval_min=15,
         approval_enabled=False,
-        alert_enabled=False,
-        alert_window_min=60,
-        alert_threshold_pct=5.0,
         token_budget=1_000_000,
         persona=PersonaConfig(),
         session_name="test-session",

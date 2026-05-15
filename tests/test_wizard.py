@@ -32,9 +32,6 @@ def test_wizard_result_construction():
         model=object(),
         scheduler_interval_min=15,
         approval_enabled=False,
-        alert_enabled=True,
-        alert_window_min=5,
-        alert_threshold_pct=3.0,
         token_budget=500000,
         persona=PersonaConfig(),
         session_name="BTC sim",
@@ -240,28 +237,14 @@ async def test_step_model_add_new(mock_int, mock_prompt):
 
 # --- Step 4: Risk & Scheduling ---
 
-@patch("src.cli.wizard.IntPrompt.ask", side_effect=[15, 5, 500000])
-@patch("src.cli.wizard.FloatPrompt.ask", return_value=3.0)
-@patch("src.cli.wizard.Confirm.ask", side_effect=[False, True])  # approval OFF, alerts ON
-def test_step_risk_sim_defaults(mock_confirm, mock_float, mock_int):
+@patch("src.cli.wizard.IntPrompt.ask", side_effect=[15, 500000])
+@patch("src.cli.wizard.Confirm.ask", side_effect=[False])  # approval OFF
+def test_step_risk_sim_defaults(mock_confirm, mock_int):
     from src.cli.wizard import _step_risk_scheduling
     result = _step_risk_scheduling(Settings(), "simulated", Console())
     assert result["scheduler_interval_min"] == 15
     assert result["approval_enabled"] is False
-    assert result["alert_enabled"] is True
-    assert result["alert_window_min"] == 5
-    assert result["alert_threshold_pct"] == 3.0
     assert result["token_budget"] == 500000
-
-
-@patch("src.cli.wizard.IntPrompt.ask", side_effect=[30, 500000])
-@patch("src.cli.wizard.Confirm.ask", side_effect=[True, False])  # approval ON, alerts OFF
-def test_step_risk_alerts_off(mock_confirm, mock_int):
-    from src.cli.wizard import _step_risk_scheduling
-    result = _step_risk_scheduling(Settings(), "okx", Console())
-    assert result["approval_enabled"] is True
-    assert result["alert_enabled"] is False
-    assert result["alert_window_min"] is None
 
 
 # --- Step 5: Persona ---
@@ -326,7 +309,6 @@ def test_show_summary_confirm(mock_confirm):
         "symbol": "BTC/USDT:USDT", "timeframe": "15m",
         "model_config": ModelConfig(id="test", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         "scheduler_interval_min": 15, "approval_enabled": False,
-        "alert_enabled": True, "alert_window_min": 5, "alert_threshold_pct": 3.0,
         "token_budget": 500000,
         "persona": PersonaConfig(),
     }
@@ -341,7 +323,6 @@ def test_show_summary_reject(mock_confirm):
         "symbol": "BTC/USDT:USDT", "timeframe": "15m",
         "model_config": ModelConfig(id="test", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         "scheduler_interval_min": 15, "approval_enabled": False,
-        "alert_enabled": False, "alert_window_min": None, "alert_threshold_pct": None,
         "token_budget": 500000,
         "persona": PersonaConfig(),
     }
@@ -367,15 +348,12 @@ async def test_run_wizard_full_flow(tmp_path):
         "BTC sim",           # Session name
     ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
         0.05, 100.0,        # Step 1: fee_rate, balance
-        3.0,                 # Step 4: threshold
     ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
         1,                   # Step 3: select model #1
         15,                  # Step 4: interval
-        5,                   # Step 4: alert window
         500000,              # Step 4: budget
     ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
         False,               # Step 4: approval OFF (sim default)
-        True,                # Step 4: alerts ON
         True,                # Summary: confirm
     ]):
         result = await run_wizard(
@@ -409,19 +387,19 @@ async def test_run_wizard_reject_then_confirm(tmp_path):
         "ETH sim",           # Session name (only reached on confirm)
     ]), patch("src.cli.wizard.FloatPrompt.ask", side_effect=[
         # Round 1
-        0.05, 100.0, 3.0,
+        0.05, 100.0,
         # Round 2
-        0.05, 200.0, 3.0,
+        0.05, 200.0,
     ]), patch("src.cli.wizard.IntPrompt.ask", side_effect=[
         # Round 1
-        1, 15, 5, 500000,
+        1, 15, 500000,
         # Round 2
-        1, 15, 5, 500000,
+        1, 15, 500000,
     ]), patch("src.cli.wizard.Confirm.ask", side_effect=[
         # Round 1
-        False, True, False,  # approval OFF, alerts ON, summary REJECT
+        False, False,        # approval OFF, summary REJECT
         # Round 2
-        False, True, True,   # approval OFF, alerts ON, summary CONFIRM
+        False, True,         # approval OFF, summary CONFIRM
     ]):
         result = await run_wizard(
             model_manager=mm, defaults=Settings(), trader_defaults=TraderConfig(),
@@ -462,7 +440,6 @@ def test_build_services_sim_path():
         api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
         model_config=ModelConfig(id="t", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(), scheduler_interval_min=15, approval_enabled=False,
-        alert_enabled=True, alert_window_min=5, alert_threshold_pct=3.0,
         token_budget=500000, persona=PersonaConfig(),
         session_name="test",
     )
@@ -474,8 +451,7 @@ def test_build_services_sim_path():
     with patch("src.integrations.exchange.simulated.SimulatedExchange") as MockSim, \
          patch("src.cli.app.MarketDataService"), \
          patch("src.cli.app.MemoryService"), \
-         patch("src.cli.app.create_trader_agent") as mock_agent, \
-         patch("src.services.price_alert.PriceAlertService"):
+         patch("src.cli.app.create_trader_agent") as mock_agent:
         MockSim.return_value = MagicMock()
         mock_agent.return_value = MagicMock()
         exchange, deps, agent, budget, _stats = build_services(
@@ -497,7 +473,6 @@ def _build_news_wiring_result():
         api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
         model_config=ModelConfig(id="t", provider="openai", model="gpt-4o", api_key="k", base_url=None),
         model=MagicMock(), scheduler_interval_min=15, approval_enabled=False,
-        alert_enabled=False, alert_window_min=None, alert_threshold_pct=None,
         token_budget=500000, persona=PersonaConfig(),
         session_name="test",
     )
@@ -578,8 +553,6 @@ async def test_run_wizard_uses_name_generator_callback():
         }), \
          patch("src.cli.wizard._step_risk_scheduling", return_value={
             "scheduler_interval_min": 15, "approval_enabled": True,
-            "alert_enabled": False, "alert_window_min": None,
-            "alert_threshold_pct": None,
             "token_budget": 500000,
         }), \
          patch("src.cli.wizard._step_persona", return_value={
@@ -618,8 +591,6 @@ async def test_run_wizard_without_name_generator_uses_internal():
         }), \
          patch("src.cli.wizard._step_risk_scheduling", return_value={
             "scheduler_interval_min": 15, "approval_enabled": True,
-            "alert_enabled": False, "alert_window_min": None,
-            "alert_threshold_pct": None,
             "token_budget": 500000,
         }), \
          patch("src.cli.wizard._step_persona", return_value={
@@ -659,8 +630,6 @@ async def test_run_wizard_existing_names_conflict_reprompts():
         }), \
          patch("src.cli.wizard._step_risk_scheduling", return_value={
             "scheduler_interval_min": 15, "approval_enabled": True,
-            "alert_enabled": False, "alert_window_min": None,
-            "alert_threshold_pct": None,
             "token_budget": 500000,
         }), \
          patch("src.cli.wizard._step_persona", return_value={
