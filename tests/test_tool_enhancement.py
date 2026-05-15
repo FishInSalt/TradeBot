@@ -868,35 +868,25 @@ async def test_set_take_profit_distance():
     assert "% from last price" in result or "from last price" in result
 
 
-async def test_set_price_volatility_alert_disabled():
-    from src.agent.tools_execution import set_price_volatility_alert
-
-    deps = _make_deps()
-    deps.exchange.get_alert_params = MagicMock(return_value=None)
-
-    result = await set_price_volatility_alert(deps, 5.0, 60, reasoning="test")
-    assert "disabled" in result.lower() or "Alerts are disabled" in result
-
-
 async def test_set_price_volatility_alert_enabled():
     from src.agent.tools_execution import set_price_volatility_alert
 
     deps = _make_deps()
     deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.set_volatility_alert = MagicMock()
 
     result = await set_price_volatility_alert(deps, 3.0, 30, reasoning="tighter alert")
-    assert "updated" in result.lower() or "3.0%" in result
+    assert "replaced:" in result.lower() or "3.0%" in result
 
 
 async def test_set_price_volatility_alert_accepts_threshold_0_1():
     """R2-1 T4: tool layer accepts threshold_pct=0.1 (new lower bound)."""
     from src.agent.tools_execution import set_price_volatility_alert
     deps = _make_deps()
-    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
+    deps.exchange.set_volatility_alert = MagicMock()
     result = await set_price_volatility_alert(deps, threshold_pct=0.1, window_minutes=15, reasoning="test")
-    assert "Price volatility alert updated" in result
+    assert "Price volatility alert set" in result
     assert "threshold=0.1%" in result  # `%` 锁尾防 0.15 子串误命中（spec P2-1）
 
 
@@ -904,8 +894,7 @@ async def test_set_price_volatility_alert_rejects_threshold_below_0_1():
     """R2-1 T5: tool layer rejects threshold_pct=0.05 with new error message."""
     from src.agent.tools_execution import set_price_volatility_alert
     deps = _make_deps()
-    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.set_volatility_alert = MagicMock()
     result = await set_price_volatility_alert(deps, threshold_pct=0.05, window_minutes=15, reasoning="test")
     assert "Invalid threshold_pct: must be 0.1-50.0" in result
 
@@ -1008,7 +997,7 @@ async def test_get_active_alerts_disabled():
     deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
 
     result = await get_active_alerts(deps)
-    assert "OFF" in result
+    assert "Not set" in result
     assert "0/20" in result
 
 

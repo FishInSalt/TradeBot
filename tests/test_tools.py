@@ -349,45 +349,98 @@ async def test_get_trade_journal_order_fetch_failure(tmp_path):
     await engine.dispose()
 
 
-async def test_set_price_volatility_alert_valid(deps):
-    """set_price_volatility_alert 参数合法时应调用 exchange.update_alert_params。"""
+async def test_set_price_volatility_alert_creates_when_none(deps):
+    """First call: success string says 'set:', not 'replaced:'."""
     from src.agent.tools_execution import set_price_volatility_alert
-    deps.exchange.update_alert_params = MagicMock()
-    result = await set_price_volatility_alert(deps, 2.0, 5, reasoning="high volatility")
-    assert "updated" in result.lower() or "set" in result.lower()
-    deps.exchange.update_alert_params.assert_called_once_with(2.0, 5)
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
+    deps.exchange.set_volatility_alert = MagicMock()
+    result = await set_price_volatility_alert(deps, 2.0, 30, reasoning="initial")
+    assert "set:" in result
+    assert "replaced" not in result
+    assert "threshold=2.0%" in result
+    assert "window=30min" in result
+    deps.exchange.set_volatility_alert.assert_called_once_with(2.0, 30, deps.symbol)
+
+
+async def test_set_price_volatility_alert_replaces_when_exists(deps):
+    """Replace path: success string contains 'replaced:', 'was X/Y', 'rolling window reset'."""
+    from src.agent.tools_execution import set_price_volatility_alert
+    deps.exchange.get_alert_params = MagicMock(return_value=(5.0, 60))
+    deps.exchange.set_volatility_alert = MagicMock()
+    result = await set_price_volatility_alert(deps, 2.0, 30, reasoning="tighten")
+    assert "replaced:" in result
+    assert "was 5.0%/60min" in result
+    assert "rolling window reset" in result
+    deps.exchange.set_volatility_alert.assert_called_once_with(2.0, 30, deps.symbol)
 
 
 async def test_set_price_volatility_alert_threshold_too_low(deps):
-    """threshold_pct < 0.1 时应返回错误，不调用 update。"""
     from src.agent.tools_execution import set_price_volatility_alert
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.set_volatility_alert = MagicMock()
     result = await set_price_volatility_alert(deps, 0.05, 5, reasoning="test")
-    assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
-    deps.exchange.update_alert_params.assert_not_called()
+    assert "Invalid threshold_pct" in result
+    deps.exchange.set_volatility_alert.assert_not_called()
 
 
 async def test_set_price_volatility_alert_threshold_too_high(deps):
-    """threshold_pct > 50 时应返回错误。"""
     from src.agent.tools_execution import set_price_volatility_alert
-    deps.exchange.update_alert_params = MagicMock()
+    deps.exchange.set_volatility_alert = MagicMock()
     result = await set_price_volatility_alert(deps, 55.0, 5, reasoning="test")
-    assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
-    deps.exchange.update_alert_params.assert_not_called()
+    assert "Invalid threshold_pct" in result
+    deps.exchange.set_volatility_alert.assert_not_called()
 
 
 async def test_set_price_volatility_alert_window_out_of_range(deps):
-    """window_minutes 超出 1-240 范围时应返回错误。"""
     from src.agent.tools_execution import set_price_volatility_alert
-    deps.exchange.update_alert_params = MagicMock()
-    # Lower bound
+    deps.exchange.set_volatility_alert = MagicMock()
+
     result = await set_price_volatility_alert(deps, 3.0, 0, reasoning="test")
-    assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
-    deps.exchange.update_alert_params.assert_not_called()
-    # Upper bound
+    assert "Invalid window_minutes" in result
+    deps.exchange.set_volatility_alert.assert_not_called()
+
     result = await set_price_volatility_alert(deps, 3.0, 250, reasoning="test")
-    assert "error" in result.lower() or "invalid" in result.lower() or "must be" in result.lower()
-    deps.exchange.update_alert_params.assert_not_called()
+    assert "Invalid window_minutes" in result
+    deps.exchange.set_volatility_alert.assert_not_called()
+
+
+async def test_cancel_price_volatility_alert_when_active(deps):
+    """Active path: clears slot, returns 'was X/Y' confirmation, records action."""
+    from src.agent.tools_execution import cancel_price_volatility_alert
+    deps.exchange.get_alert_params = MagicMock(return_value=(2.0, 30))
+    deps.exchange.cancel_volatility_alert = MagicMock()
+    result = await cancel_price_volatility_alert(deps, reasoning="market calmed")
+    assert "Price volatility alert cancelled" in result
+    assert "was 2.0%/30min" in result
+    deps.exchange.cancel_volatility_alert.assert_called_once_with()
+
+
+async def test_cancel_price_volatility_alert_when_none_idempotent(deps):
+    """Already-unset path: ok with note, no mutation, no audit row."""
+    from src.agent.tools_execution import cancel_price_volatility_alert
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
+    deps.exchange.cancel_volatility_alert = MagicMock()
+    result = await cancel_price_volatility_alert(deps, reasoning="cleanup")
+    assert "No volatility alert active to cancel" in result
+    deps.exchange.cancel_volatility_alert.assert_not_called()
+
+
+async def test_get_active_alerts_volatility_section_when_unset(deps):
+    """Unset path: section says 'Not set', NOT 'OFF'."""
+    from src.agent.tools_perception import get_active_alerts
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    result = await get_active_alerts(deps)
+    assert "Not set" in result
+    assert "\nOFF" not in result  # `\n` anchor avoids matching "OFF" inside other words
+
+
+async def test_get_active_alerts_volatility_section_when_set(deps):
+    """Set path: section shows '{threshold}% in {window}min window'."""
+    from src.agent.tools_perception import get_active_alerts
+    deps.exchange.get_alert_params = MagicMock(return_value=(2.0, 30))
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    result = await get_active_alerts(deps)
+    assert "2.0% in 30min window" in result
 
 
 async def test_add_price_level_alert_success(deps):

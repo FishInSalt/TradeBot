@@ -618,7 +618,7 @@ async def get_active_alerts(deps: TradingDeps) -> str:
         threshold, window = params
         sections.append(f"=== Price Volatility Alert (@ {fetch_ts} UTC) ===\n{threshold}% in {window}min window")
     else:
-        sections.append(f"=== Price Volatility Alert (@ {fetch_ts} UTC) ===\nOFF")
+        sections.append(f"=== Price Volatility Alert (@ {fetch_ts} UTC) ===\nNot set")
 
     # Price level alerts
     alerts = deps.exchange.get_price_level_alerts()

@@ -521,18 +521,40 @@ def create_trader_agent(
         window_minutes: int,
         reasoning: str,
     ) -> str:
-        """Adjust volatility alert sensitivity.
+        """Set the price volatility alert (singleton). Creates if none is
+        configured; otherwise replaces the existing one — replacing resets the
+        rolling tick window, so the next trigger requires re-accumulating ticks
+        across the full window from scratch. Use cancel_price_volatility_alert
+        to remove without setting a new one.
 
         Related: get_active_alerts (current volatility + price-level alert state).
 
         Args:
-            threshold_pct: alert threshold percent (min 0.1, max 50).
-            window_minutes: time window in minutes (min 1, max 240).
+            threshold_pct: alert threshold percent (0.1-50).
+            window_minutes: time window in minutes (1-240).
             reasoning: brief description of your decision logic.
         """
         from src.agent.tools_execution import set_price_volatility_alert as _impl
 
         return await _impl(ctx.deps, threshold_pct, window_minutes, reasoning=reasoning)
+
+    @tool
+    async def cancel_price_volatility_alert(
+        ctx: RunContext[TradingDeps],
+        reasoning: str,
+    ) -> str:
+        """Cancel the active price volatility alert. Idempotent: if no alert is
+        set, returns ok with a note. Use set_price_volatility_alert to configure
+        a new one.
+
+        Related: get_active_alerts (current volatility + price-level alert state).
+
+        Args:
+            reasoning: brief description of your decision logic.
+        """
+        from src.agent.tools_execution import cancel_price_volatility_alert as _impl
+
+        return await _impl(ctx.deps, reasoning=reasoning)
 
     @tool
     async def cancel_order(ctx: RunContext[TradingDeps], order_id: str, reasoning: str) -> str:
@@ -740,13 +762,14 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_recent_trades",
     "get_multi_timeframe_snapshot",
     "get_price_pivots",
-    # --- 执行 (13) ---
+    # --- 执行 (14) ---
     "open_position",
     "close_position",
     "set_stop_loss",
     "set_take_profit",
     "adjust_leverage",
     "set_price_volatility_alert",
+    "cancel_price_volatility_alert",
     "cancel_order",
     "add_price_level_alert",
     "cancel_price_level_alert",
