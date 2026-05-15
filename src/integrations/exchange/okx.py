@@ -383,6 +383,24 @@ class OKXExchange(BaseExchange):
 
         is_full_close = self._infer_is_full_close(info, side, trigger_reason)
 
+        # Pop entry_price from cache for close fills.
+        #
+        # OKX V5 fillPnl semantic (per OKX V5 公开文档摘录):
+        #   "fillPnl: Last filled profit and loss, applicable to orders which
+        #    have a trade and aim to close position. It always is 0 in other
+        #    conditions"
+        #   ref: https://www.okx.com/docs-v5/en/#order-book-trading-trade-get-fills
+        #
+        # Semantic：fillPnl = gross realized P&L of this fill, **excludes**
+        # taker/maker fee (fee accounted separately via OKX `fee` / `fillFee`
+        # field, returned in CCXT-normalized form as fee_info.cost above).
+        # Matches sim convention (`_close_position_core` returns gross pnl).
+        #
+        # Cache miss (cached is None) → entry_price=None → cli renderer
+        # degrades to fee + gross view.
+        cached = self._close_order_entry_cache.pop(order_id, None)
+        entry_price = cached[0] if cached is not None else None
+
         return FillEvent(
             order_id=order_id,
             symbol=symbol,
@@ -395,6 +413,7 @@ class OKXExchange(BaseExchange):
             pnl=pnl,
             timestamp=timestamp,
             is_full_close=is_full_close,
+            entry_price=entry_price,
         )
 
     def _infer_is_full_close(self, info: dict, side: str, trigger_reason: str) -> bool:

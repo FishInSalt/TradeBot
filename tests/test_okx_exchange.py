@@ -28,3 +28,44 @@ def test_okx_register_close_order_entry_writes_to_cache():
         entry, ts = ex._close_order_entry_cache["order123"]
         assert entry == 80000.0
         assert t_before <= ts <= t_after
+
+
+@pytest.mark.asyncio
+async def test_parse_fill_event_pops_entry_price_from_cache():
+    """OKX close fill event: entry_price filled from cache by order_id."""
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        ex.register_close_order_entry("oid1", 80000.0)
+
+        # synthesize close fill order_data (CCXT shape)
+        order_data = {
+            "id": "oid1", "symbol": "BTC/USDT:USDT", "side": "sell", "type": "market",
+            "average": 80100.0, "filled": 0.1,
+            "fee": {"cost": 4.005},
+            "info": {"pnl": "10.0", "reduceOnly": "true"},
+            "timestamp": 1234567890,
+        }
+        fill = await ex._parse_fill_event(order_data)
+        assert fill.entry_price == 80000.0
+        assert "oid1" not in ex._close_order_entry_cache  # popped
+
+
+@pytest.mark.asyncio
+async def test_parse_fill_event_cache_miss_yields_none_entry_price():
+    """OKX close fill: cache miss → entry_price=None (graceful degrade)."""
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        # no register call — cache empty
+        order_data = {
+            "id": "oid_unknown", "symbol": "BTC/USDT:USDT", "side": "sell", "type": "market",
+            "average": 80100.0, "filled": 0.1,
+            "fee": {"cost": 4.005},
+            "info": {"pnl": "10.0", "reduceOnly": "true"},
+            "timestamp": 1234567890,
+        }
+        fill = await ex._parse_fill_event(order_data)
+        assert fill.entry_price is None

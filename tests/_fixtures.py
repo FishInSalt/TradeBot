@@ -118,4 +118,5 @@ def make_okx_exchange():
     ex._pnl_fetch_timeout = 1.0
     ex._seen_order_ids = {}
     ex._seen_order_ids_max = 10000
+    ex._close_order_entry_cache = {}
     return ex
