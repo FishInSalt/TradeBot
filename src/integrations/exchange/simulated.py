@@ -63,7 +63,12 @@ class SimulatedExchange(BaseExchange):
         self._db_engine = db_engine
         self._session_id = session_id
         self._symbol = symbol
-        self._fee_rate: float = config.fee_rate if config.fee_rate is not None else 0.0005
+        if config.fee_rate is None:
+            raise ValueError(
+                "SimulatedExchange requires fee_rate in config "
+                "(wizard-enforced; legacy NULL session detected)"
+            )
+        self._fee_rate: float = config.fee_rate
         self._precision: dict[str, int] = config.precision if config.precision is not None else {}
 
         # Internal state (initialized in start() or directly for tests)

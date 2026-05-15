@@ -1473,3 +1473,17 @@ def test_simulated_exchange_register_close_order_entry_is_noop():
     # 不抛错，不返回值
     result = ex.register_close_order_entry("order123", 80000.0)
     assert result is None
+
+
+def test_init_raises_when_fee_rate_is_none():
+    """SimulatedExchange constructor raises on None fee_rate (silent fallback removed)."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.config import ExchangeConfig
+    import pytest
+
+    cfg = ExchangeConfig(name="simulated", fee_rate=None)
+    with pytest.raises(ValueError, match="fee_rate"):
+        SimulatedExchange(
+            config=cfg, db_engine=None,
+            session_id="t", symbol="BTC/USDT:USDT",
+        )
