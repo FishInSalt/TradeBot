@@ -458,6 +458,8 @@ def create_trader_agent(
         Stop loss and take profit place against an existing position, so they
         require the fill notification.
 
+        Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee.
+
         Args:
             side: 'long' or 'short'.
             position_pct: percent of free balance to allocate (0-100).

@@ -100,8 +100,12 @@ async def open_position(
         side=side, reasoning=reasoning,
     )
 
+    notional = ticker.last * quantity
+    est_entry_fee = notional * deps.fee_rate
     return (
         f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order.id}\n"
+        f"Est. entry fee: ~-{est_entry_fee:.2f} USDT "
+        f"(notional ~{notional:,.2f} × ~{deps.fee_rate*100:.3f}%)\n"
         f"You will be notified when filled."
     )
 

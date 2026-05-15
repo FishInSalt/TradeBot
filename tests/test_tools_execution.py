@@ -108,3 +108,84 @@ async def test_set_take_profit_calls_register_close_order_entry():
     await set_take_profit(deps, price=85000.0, reasoning="target reached")
 
     deps.exchange.register_close_order_entry.assert_called_once_with("tp1", 80000.0)
+
+
+# === Task 20: open_position Est. entry fee output ===
+
+def _make_open_deps(*, fee_rate=0.0005, free_usdt=1000.0, leverage=10, last=80000.0,
+                    order_id="op1"):
+    """Deps fixture for open_position tests."""
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.fee_rate = fee_rate
+
+    balance = MagicMock()
+    balance.free_usdt = free_usdt
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_balance = AsyncMock(return_value=balance)
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    deps.exchange.set_leverage = AsyncMock()
+
+    # quantity = (free_usdt * position_pct/100 * leverage) / last
+    # With position_pct=10: (1000 * 0.1 * 10) / 80000 = 0.125
+    deps.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, qty: qty)
+
+    ticker = MagicMock()
+    ticker.last = last
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=ticker)
+
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id=order_id,
+        symbol="BTC/USDT:USDT",
+        side="buy",
+        order_type="market",
+        amount=0.125,
+        price=None,
+        status="open",
+        fee=None,
+        is_algo=False,
+        trigger_price=None,
+    ))
+    deps.approval_gate = None
+    deps.approval_enabled = False
+    deps.db_engine = None  # _record_action no-op
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_open_position_output_includes_est_entry_fee():
+    """open_position return string includes Est. entry fee with notional × rate caption."""
+    from src.agent.tools_execution import open_position
+
+    # fee_rate=0.0005, free_usdt=1000, position_pct=100, leverage=10, last=80000
+    # usdt_amount = 1000 * 1.0 = 1000
+    # quantity = (1000 * 10) / 80000 = 0.125
+    # notional = 80000 * 0.125 = 10000; est_fee = 10000 * 0.0005 = 5.00
+    deps = _make_open_deps(fee_rate=0.0005, free_usdt=1000.0, leverage=10, last=80000.0)
+    out = await open_position(deps, side="long", position_pct=100, leverage=10, reasoning="t")
+    assert "Est. entry fee: ~-5.00 USDT" in out
+    assert "(notional ~10,000.00 × ~0.050%)" in out
+
+
+def test_open_position_wrapper_docstring_mentions_fee():
+    """Wrapper docstring preserves fill-timing sentence + appends fee mention."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("/Users/z/Z/TradeBot/src/agent/trader.py").read_text()
+    tree = ast.parse(src)
+
+    # Walk all function defs to find the open_position wrapper inside create_trader_agent
+    docstring = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "open_position":
+            # There may be multiple; grab the one that has a docstring body
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)):
+                docstring = node.body[0].value.value
+                break
+
+    assert docstring is not None, "open_position wrapper docstring not found in trader.py"
+    assert "Position fills via market order; you will receive a fill notification" in docstring
+    assert "Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee." in docstring
