@@ -69,3 +69,36 @@ async def test_parse_fill_event_cache_miss_yields_none_entry_price():
         }
         fill = await ex._parse_fill_event(order_data)
         assert fill.entry_price is None
+
+
+@pytest.mark.asyncio
+async def test_okx_cancel_order_pops_close_entry_cache(monkeypatch):
+    """cancel_order removes the order_id from _close_order_entry_cache."""
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        ex.register_close_order_entry("oid1", 80000.0)
+
+        async def fake_cancel(*a, **kw):
+            return None
+        monkeypatch.setattr(ex._client, "cancel_order", fake_cancel)
+
+        await ex.cancel_order("oid1", "BTC/USDT:USDT", is_algo=False)
+        assert "oid1" not in ex._close_order_entry_cache
+
+
+def test_okx_close_entry_cache_ttl_sweep_drops_stale():
+    """_sweep_close_entry_cache_ttl drops entries older than TTL_HOURS."""
+    import time
+    from src.integrations.exchange.okx import OKXExchange, _CLOSE_ENTRY_CACHE_TTL_SECONDS
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        # inject stale entry
+        ex._close_order_entry_cache["stale_oid"] = (80000.0, time.monotonic() - _CLOSE_ENTRY_CACHE_TTL_SECONDS - 1)
+        ex._close_order_entry_cache["fresh_oid"] = (80000.0, time.monotonic())
+
+        ex._sweep_close_entry_cache_ttl()
+        assert "stale_oid" not in ex._close_order_entry_cache
+        assert "fresh_oid" in ex._close_order_entry_cache

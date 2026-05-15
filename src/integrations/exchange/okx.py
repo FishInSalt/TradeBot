@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 P = ParamSpec("P")
 R = TypeVar("R")
 
+_CLOSE_ENTRY_CACHE_TTL_SECONDS = 24 * 3600  # 24h ceiling per spec §4.5b
+
 # order_type → trigger_reason 映射
 _TRIGGER_REASON_MAP = {
     "stop": "stop",
@@ -156,6 +158,23 @@ class OKXExchange(BaseExchange):
         on close orders is exit price, not position entry)."""
         import time
         self._close_order_entry_cache[order_id] = (entry_price, time.monotonic())
+
+    def _sweep_close_entry_cache_ttl(self) -> None:
+        """Drop _close_order_entry_cache entries older than TTL.
+
+        Periodic-call hook — invoke from existing housekeeping loop or
+        as a defensive sweep at fetch_open_orders boundaries (cheap).
+        Keeps cache bounded across long SL/TP idle windows.
+        """
+        import time
+        cache = getattr(self, "_close_order_entry_cache", None)
+        if not cache:
+            return
+        now = time.monotonic()
+        stale = [oid for oid, (_, ts) in cache.items()
+                 if now - ts > _CLOSE_ENTRY_CACHE_TTL_SECONDS]
+        for oid in stale:
+            cache.pop(oid, None)
 
     # --- WebSocket lifecycle ---
 
@@ -679,6 +698,7 @@ class OKXExchange(BaseExchange):
 
     @_retry()
     async def fetch_open_orders(self, symbol: str) -> list[Order]:  # type: ignore[override]
+        self._sweep_close_entry_cache_ttl()
         plain_task = self._client.fetch_open_orders(symbol)
         cond_task = self._client.fetch_open_orders(
             symbol, params={"stop": True, "ordType": "conditional"}
@@ -753,6 +773,9 @@ class OKXExchange(BaseExchange):
             )
         else:
             await self._client.cancel_order(order_id, symbol)
+        cache = getattr(self, "_close_order_entry_cache", None)
+        if cache is not None:
+            cache.pop(order_id, None)
 
     # ── Derivatives market-structure fetches ──
     # ccxt.RateLimitExceeded is a subclass of ccxt.NetworkError, and @_retry()
