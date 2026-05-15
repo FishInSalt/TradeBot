@@ -285,6 +285,7 @@ async def test_close_position_passes_reduce_only():
     deps.symbol = "BTC/USDT:USDT"
     deps.db_engine = None
     deps.session_id = "test-session"
+    deps.fee_rate = 0.0005
     deps.exchange = AsyncMock()
     deps.exchange.fetch_positions = AsyncMock(return_value=[
         Position(symbol="BTC/USDT:USDT", side="long", contracts=0.01,
@@ -293,6 +294,11 @@ async def test_close_position_passes_reduce_only():
     ])
     deps.exchange.has_pending_market_order = MagicMock(return_value=False)
     deps.exchange.create_order = AsyncMock(return_value=MagicMock(id="order-1"))
+    ticker = MagicMock()
+    ticker.bid = 50100.0
+    ticker.ask = 50110.0
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=ticker)
     # Bypass _check_approval (returns True if no human gate)
     from unittest.mock import patch
     with patch("src.agent.tools_execution._check_approval",

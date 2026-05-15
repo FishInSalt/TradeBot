@@ -120,8 +120,21 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
     if deps.exchange.has_pending_market_order(deps.symbol, side=order_side):
         return "A close order is already pending. Wait for fill confirmation."
 
-    total_pnl = sum(p.unrealized_pnl for p in positions)
-    action_desc = f"Close {len(positions)} position(s), PnL: {total_pnl:.2f}"
+    # Fee + net PnL estimation BEFORE approval gate (so approval message shows both views)
+    ticker = await deps.market_data.get_ticker(deps.symbol)
+    total_unrealized = sum(p.unrealized_pnl for p in positions)
+    total_contracts = sum(p.contracts for p in positions)
+    total_entry_fee = sum(p.entry_price * p.contracts * deps.fee_rate for p in positions)
+    # Use bid/ask matching actual market close fill price (sim _fill_market_close convention)
+    est_fill_price = ticker.bid if positions[0].side == "long" else ticker.ask
+    est_exit_notional = est_fill_price * total_contracts
+    est_exit_fee = est_exit_notional * deps.fee_rate
+    est_net_pnl = -total_entry_fee + total_unrealized - est_exit_fee
+
+    action_desc = (
+        f"Close {len(positions)} position(s), "
+        f"PnL: {total_unrealized:+.2f} gross / {est_net_pnl:+.2f} net (round-trip)"
+    )
     approved = await _check_approval(deps, "close", action_desc, 0, 0)
     if not approved:
         return "Close rejected by human approval."
@@ -141,7 +154,16 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
             side=p.side, reasoning=reasoning,
         )
 
-    return f"Orders submitted: close {len(positions)} position(s) | IDs: {', '.join(order_ids)}\nYou will be notified when filled."
+    return (
+        f"Orders submitted: close {len(positions)} position(s) | IDs: {', '.join(order_ids)}\n"
+        f"Est. exit fee: ~-{est_exit_fee:.2f} USDT "
+        f"(notional ~{est_exit_notional:,.2f} × ~{deps.fee_rate*100:.3f}%)\n"
+        f"Est. net PnL: ~{est_net_pnl:+.2f} USDT "
+        f"(round-trip = entry fee ~-{total_entry_fee:.2f} "
+        f"+ unrealized {total_unrealized:+.2f} "
+        f"+ est. exit fee ~-{est_exit_fee:.2f})\n"
+        f"You will be notified when filled."
+    )
 
 
 async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:

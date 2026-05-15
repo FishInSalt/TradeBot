@@ -189,3 +189,128 @@ def test_open_position_wrapper_docstring_mentions_fee():
     assert docstring is not None, "open_position wrapper docstring not found in trader.py"
     assert "Position fills via market order; you will receive a fill notification" in docstring
     assert "Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee." in docstring
+
+
+# === Task 21: close_position round-trip net PnL + approval message net view ===
+
+def _make_close_deps(*, position_side="long", entry_price=80000.0, contracts=0.5,
+                     unrealized_pnl=50.0, fee_rate=0.0005, order_id="oid1",
+                     bid=80100.0, ask=80110.0):
+    """Deps fixture for close_position Task-21 tests."""
+    from src.integrations.exchange.base import Position, Order
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.fee_rate = fee_rate
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(
+            symbol="BTC/USDT:USDT",
+            side=position_side,
+            contracts=contracts,
+            entry_price=entry_price,
+            unrealized_pnl=unrealized_pnl,
+            leverage=10,
+            liquidation_price=72000.0,
+            created_at=None,
+        ),
+    ])
+    deps.exchange.has_pending_market_order = MagicMock(return_value=False)
+    ticker = MagicMock()
+    ticker.bid = bid
+    ticker.ask = ask
+    ticker.last = (bid + ask) / 2
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=ticker)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id=order_id,
+        symbol="BTC/USDT:USDT",
+        side="sell" if position_side == "long" else "buy",
+        order_type="market",
+        amount=contracts,
+        price=None,
+        status="open",
+        fee=None,
+        is_algo=False,
+        trigger_price=None,
+    ))
+    deps.exchange.register_close_order_entry = MagicMock()
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.cancel_order = AsyncMock()
+    deps.exchange.algo_trigger_reference = "last"
+    deps.approval_gate = None
+    deps.approval_enabled = False
+    deps.db_engine = None
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_close_position_output_includes_round_trip_net_pnl():
+    """close_position output: Est. exit fee + Est. net PnL (round-trip) breakdown.
+
+    Position long entry=80000 contracts=0.5, ticker.bid=80100.0, fee_rate=0.0005
+    entry_fee = 80000*0.5*0.0005 = 20; exit_notional = 80100*0.5 = 40050; exit_fee = 20.025
+    unrealized = 50.0
+    net = -20 + 50 - 20.025 = +9.975 → +9.98
+    """
+    from src.agent.tools_execution import close_position
+
+    deps = _make_close_deps(
+        position_side="long", entry_price=80000.0, contracts=0.5,
+        unrealized_pnl=50.0, fee_rate=0.0005, bid=80100.0,
+    )
+    out = await close_position(deps, reasoning="t")
+
+    assert "Est. exit fee: ~-20.03 USDT" in out
+    assert "Est. net PnL: ~+9.97 USDT" in out
+    assert "round-trip = entry fee ~-20.00 + unrealized +50.00 + est. exit fee ~-20.03" in out
+
+
+@pytest.mark.asyncio
+async def test_close_position_approval_message_includes_gross_and_net():
+    """Approval gate action_desc format includes 'gross' and 'net (round-trip)'."""
+    from src.agent.tools_execution import close_position, _check_approval
+
+    deps = _make_close_deps(
+        position_side="long", entry_price=80000.0, contracts=0.5,
+        unrealized_pnl=50.0, fee_rate=0.0005, bid=80100.0,
+    )
+
+    captured = {}
+
+    async def _fake_check(deps_, action_type, action_desc, qty, price):
+        captured["action_desc"] = action_desc
+        return True  # approve
+
+    import src.agent.tools_execution as te_mod
+    original = te_mod._check_approval
+    te_mod._check_approval = _fake_check
+    try:
+        await close_position(deps, reasoning="t")
+    finally:
+        te_mod._check_approval = original
+
+    desc = captured.get("action_desc", "")
+    assert "gross" in desc, f"'gross' not in action_desc: {desc!r}"
+    assert "net (round-trip)" in desc, f"'net (round-trip)' not in action_desc: {desc!r}"
+
+
+def test_close_position_wrapper_docstring_mentions_fee():
+    """Wrapper docstring appends fee/net-PnL mention."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("/Users/z/Z/TradeBot/src/agent/trader.py").read_text()
+    tree = ast.parse(src)
+
+    docstring = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "close_position":
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)):
+                docstring = node.body[0].value.value
+                break
+
+    assert docstring is not None, "close_position wrapper docstring not found in trader.py"
+    assert "Close incurs taker fee on exit." in docstring
+    assert "est. exit fee" in docstring
+    assert "est. round-trip net PnL" in docstring

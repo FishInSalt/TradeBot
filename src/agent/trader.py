@@ -477,6 +477,8 @@ def create_trader_agent(
         Position closure fills via market order; you will receive a fill
         notification when execution completes (separate trigger).
 
+        Close incurs taker fee on exit. Submit output includes est. exit fee and est. round-trip net PnL.
+
         Args:
             reasoning: brief description of your decision logic (e.g., 'TP target hit', 'thesis invalidated').
         """
