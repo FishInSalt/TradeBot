@@ -745,6 +745,8 @@ def create_trader_agent(
     ) -> str:
         """Place a limit order at a specific price (e.g., buy at support level).
 
+        Limit fill incurs maker or taker fee depending on fill condition.
+
         Args:
             side: 'long' or 'short'.
             price: limit price.

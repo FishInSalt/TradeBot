@@ -610,9 +610,13 @@ async def place_limit_order(
     leverage_suffix = ""
     if positions and leverage != actual_leverage:
         leverage_suffix = f" (matched existing position; requested {leverage}x ignored)"
+    notional = price * quantity
+    est_entry_fee = notional * deps.fee_rate
     return (
         f"Limit order placed: {side} {quantity:.6f} @ {price:.2f}, "
         f"{actual_leverage}x{leverage_suffix} | ID: {order.id}\n"
+        f"Est. entry fee if filled: ~-{est_entry_fee:.2f} USDT "
+        f"(notional ~{notional:,.2f} × ~{deps.fee_rate*100:.3f}%)\n"
         "Note: This tool only submits the order — it does not mean the order has been filled."
     )
 

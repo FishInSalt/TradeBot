@@ -314,3 +314,74 @@ def test_close_position_wrapper_docstring_mentions_fee():
     assert "Close incurs taker fee on exit." in docstring
     assert "est. exit fee" in docstring
     assert "est. round-trip net PnL" in docstring
+
+
+# === Task 22: place_limit_order Est. entry fee if filled output ===
+
+def _make_limit_deps(*, fee_rate=0.0005, free_usdt=1000.0, order_id="lim1"):
+    """Deps fixture for place_limit_order Task-22 tests."""
+    from src.integrations.exchange.base import Balance, Order
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.fee_rate = fee_rate
+
+    balance = MagicMock(spec=Balance)
+    balance.free_usdt = free_usdt
+    deps.exchange = MagicMock()
+    deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    deps.exchange.set_leverage = AsyncMock()
+    deps.exchange.fetch_balance = AsyncMock(return_value=balance)
+    # pass-through precision so quantity = raw_quantity
+    deps.exchange.amount_to_precision = MagicMock(side_effect=lambda sym, qty: qty)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id=order_id,
+        symbol="BTC/USDT:USDT",
+        side="buy",
+        order_type="limit",
+        amount=0.125,
+        price=80000.0,
+        status="open",
+        fee=None,
+        is_algo=False,
+        trigger_price=None,
+    ))
+    deps.approval_gate = None
+    deps.approval_enabled = False
+    deps.db_engine = None  # _record_action no-op
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_place_limit_order_output_includes_est_entry_fee_if_filled():
+    """place_limit_order output: Est. entry fee if filled (uses limit price for notional)."""
+    from src.agent.tools_execution import place_limit_order
+
+    # fee_rate=0.0005, free_usdt=1000, position_pct=100, leverage=10, price=80000
+    # usdt_amount = 1000 * 100/100 = 1000
+    # quantity = (1000 * 10) / 80000 = 0.125
+    # notional = 80000 * 0.125 = 10000; est_fee = 10000 * 0.0005 = 5.00
+    deps = _make_limit_deps(fee_rate=0.0005, free_usdt=1000.0)
+    out = await place_limit_order(deps, side="long", price=80000, position_pct=100, leverage=10, reasoning="t")
+    assert "Est. entry fee if filled: ~-5.00 USDT" in out
+    assert "(notional ~10,000.00 × ~0.050%)" in out
+    assert "Note: This tool only submits the order" in out
+
+
+def test_place_limit_order_wrapper_docstring_mentions_fee():
+    """Wrapper docstring appends maker/taker fee sentence."""
+    import ast
+    import pathlib
+
+    src = pathlib.Path("/Users/z/Z/TradeBot/src/agent/trader.py").read_text()
+    tree = ast.parse(src)
+
+    docstring = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "place_limit_order":
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)):
+                docstring = node.body[0].value.value
+                break
+
+    assert docstring is not None, "place_limit_order wrapper docstring not found in trader.py"
+    assert "Limit fill incurs maker or taker fee depending on fill condition." in docstring
