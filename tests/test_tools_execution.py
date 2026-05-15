@@ -385,3 +385,32 @@ def test_place_limit_order_wrapper_docstring_mentions_fee():
 
     assert docstring is not None, "place_limit_order wrapper docstring not found in trader.py"
     assert "Limit fill incurs maker or taker fee depending on fill condition." in docstring
+
+
+def test_execution_tool_docstrings_no_evaluation_words():
+    """Execution tools docstrings do not include evaluation/nudge words.
+
+    F-dim drift guard. Approved fee-related vocabulary: 'taker fee', 'fee_rate',
+    'notional', 'round-trip', 'gross', 'net'. Forbidden:
+    - 'erode' / 'friction' / 'frequent small trades' (Layer 1 nudge family)
+    - 'should' / 'must' / 'avoid' / 'careful' (evaluative directives)
+    """
+    import ast
+    src = open("/Users/z/Z/TradeBot/src/agent/trader.py").read()
+    tree = ast.parse(src)
+    # 提取 trader.py wrapper docstrings for open_position / close_position /
+    # set_stop_loss / set_take_profit / place_limit_order / cancel_order
+    target_tools = {"open_position", "close_position", "set_stop_loss",
+                    "set_take_profit", "place_limit_order", "cancel_order"}
+    forbidden = ["erode", "friction", "frequent small trades",
+                 "should", "must", "avoid", "careful"]
+
+    # Walk AST for AsyncFunctionDef nodes matching target tool names; extract docstring
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in target_tools:
+            ds = ast.get_docstring(node) or ""
+            ds_lower = ds.lower()
+            for word in forbidden:
+                assert word not in ds_lower, (
+                    f"{node.name} docstring contains forbidden word '{word}': {ds!r}"
+                )
