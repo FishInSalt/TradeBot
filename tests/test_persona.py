@@ -1,5 +1,28 @@
 # tests/test_persona.py
 from src.config import PersonaConfig
+from src.agent.persona import (
+    CYCLE_DECISION_WORD_CAP,
+    DEFAULT_TAKER_FEE_RATE,
+    RuntimeConfig,
+    generate_system_prompt,
+)
+
+
+def test_default_taker_fee_rate_is_okx_btc_perp_regular_tier():
+    """DEFAULT_TAKER_FEE_RATE = 0.0005 (OKX BTC perp regular tier taker)."""
+    assert DEFAULT_TAKER_FEE_RATE == 0.0005
+
+
+def test_runtime_config_default_taker_fee_rate():
+    """RuntimeConfig 默认 taker_fee_rate 与常量一致 (test/temp 用途)."""
+    rc = RuntimeConfig()
+    assert rc.taker_fee_rate == DEFAULT_TAKER_FEE_RATE
+
+
+def test_runtime_config_explicit_taker_fee_rate():
+    """RuntimeConfig 接受 explicit override."""
+    rc = RuntimeConfig(taker_fee_rate=0.001)
+    assert rc.taker_fee_rate == 0.001
 
 
 def test_prompt_contains_layer1_identity():

@@ -21,6 +21,11 @@ CYCLE_DECISION_WORD_CAP = 700
 # in current behavior is empirically zero, this is future-proofing.
 CYCLE_DECISION_CHAR_HARD_FLOOR = 8000
 
+DEFAULT_TAKER_FEE_RATE = 0.0005
+"""OKX BTC perp regular tier taker fee, as decimal. Used as wizard input
+default + RuntimeConfig/TradingDeps test defaults. Production paths MUST
+override via wizard-injected sessions.fee_rate."""
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -51,6 +56,15 @@ class RuntimeConfig:
     **for tests / temporary call sites only, NOT for production**. If a
     production code path silently relies on the default 60, that is a bug —
     flag and route through cli wiring instead."""
+
+    taker_fee_rate: float = DEFAULT_TAKER_FEE_RATE
+    """Session-level taker fee rate (decimal storage format, e.g., 0.001 = 0.1%;
+    wizard input is in percent and divides by 100 before storing).
+
+    Injected from sessions.fee_rate via build_services. Default DEFAULT_TAKER_FEE_RATE
+    is for tests / temp call sites only — production paths MUST set explicitly.
+    If a production code path silently relies on the default, that is a bug —
+    flag and route through cli wiring."""
 
 
 def generate_system_prompt(
