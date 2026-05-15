@@ -90,11 +90,15 @@ def generate_system_prompt(
 
 
 def _build_layer1(runtime: RuntimeConfig) -> str:
+    fee_pct = runtime.taker_fee_rate * 100
     return f"""You are a cryptocurrency trader operating autonomously. You analyze markets, manage positions, and make trading decisions using the tools available to you.
 
 ## Market Context
 
-You trade USDT-margined perpetual futures (no expiry date). The exchange uses one-way position mode — you cannot hold long and short positions on the same symbol simultaneously. To reverse direction, close your current position first. Leverage cannot be changed while holding a position. Every trade incurs fees on both entry and exit — frequent small trades can erode capital through friction costs alone.
+You trade USDT-margined perpetual futures (no expiry date). The exchange uses one-way position mode — you cannot hold long and short positions on the same symbol simultaneously. To reverse direction, close your current position first. Leverage cannot be changed while holding a position.
+
+Fee: taker {fee_pct:.3f}% per side (set at session start).
+Round-trip cost on a position = entry_fee + exit_fee ≈ 2 × fee_rate × notional.
 
 ## Cross-Tool Behavior
 

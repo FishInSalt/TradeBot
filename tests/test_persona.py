@@ -626,3 +626,33 @@ def test_trading_deps_has_fee_rate_default():
         session_id="test",
     )
     assert deps.fee_rate == DEFAULT_TAKER_FEE_RATE
+
+
+def test_layer1_market_context_renders_taker_fee_rate():
+    """Market Context segment includes 'Fee: taker X.XXX% per side (set at session start).'"""
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    rc = RuntimeConfig(taker_fee_rate=0.001)
+    text = _build_layer1(rc)
+    assert "Fee: taker 0.100% per side (set at session start)." in text
+    assert "Round-trip cost on a position = entry_fee + exit_fee" in text
+    assert "≈ 2 × fee_rate × notional" in text
+
+
+def test_market_context_segment_no_evaluation_words():
+    """Market Context segment removes 'frequent small trades' / 'erode capital' nudges.
+
+    drift guard scope: only the '## Market Context' segment of _build_layer1
+    output. Layer 3 (personality / trading_style) MAY contain compliant
+    evaluation descriptors (e.g., 'patient trader') and is not part of this guard.
+    """
+    from src.agent.persona import _build_layer1, RuntimeConfig
+    text = _build_layer1(RuntimeConfig())
+
+    # extract '## Market Context' segment up to next '##' header
+    market_ctx_start = text.index("## Market Context")
+    next_h2 = text.index("##", market_ctx_start + len("## Market Context"))
+    market_ctx_segment = text[market_ctx_start:next_h2]
+
+    forbidden = ["frequent small trades", "erode capital", "friction costs alone"]
+    for word in forbidden:
+        assert word not in market_ctx_segment, f"'{word}' still present in Market Context"
