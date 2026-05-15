@@ -474,8 +474,24 @@ async def run_agent_cycle(
             f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
             f"— {context.symbol} {context.amount} @ {context.fill_price}"
         )
-        if context.pnl is not None:
-            msg += f", PnL: {context.pnl:.2f} USDT"
+        if context.pnl is None:
+            # Open fill — fee only
+            msg += f", Fee: {-context.fee:+.2f} USDT"
+        elif context.is_full_close and context.entry_price is not None:
+            # Full close fill — fee + gross + equiv-round-trip net
+            entry_fee_recompute = context.entry_price * context.amount * deps.fee_rate
+            round_trip_net = -entry_fee_recompute + context.pnl - context.fee
+            msg += (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} (gross) / "
+                f"{round_trip_net:+.2f} (this fill, equiv-round-trip)"
+            )
+        else:
+            # Part close OR full close with no entry_price (OKX cache miss)
+            msg += (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} USDT (gross)"
+            )
         prompt += msg
     elif trigger_type == "alert" and context is not None:
         if isinstance(context, PriceLevelAlertInfo):

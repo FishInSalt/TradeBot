@@ -20,6 +20,7 @@ def make_fill_event(
     pnl: float | None = None,
     timestamp: int = 1700000000000,
     is_full_close: bool = False,
+    entry_price: float | None = None,
 ) -> FillEvent:
     """Construct a FillEvent for tests with sensible defaults.
 
@@ -40,6 +41,7 @@ def make_fill_event(
         pnl=pnl,
         timestamp=timestamp,
         is_full_close=is_full_close,
+        entry_price=entry_price,
     )
 
 
