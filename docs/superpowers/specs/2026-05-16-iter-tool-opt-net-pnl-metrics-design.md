@@ -79,7 +79,7 @@ surface delta: 工具数量 **不变**；BaseExchange 接口 **不变**；FillEv
 | fee_rate 注入路径 | TradingDeps 注入 / `SELECT FROM sessions` 自洽 | **`SELECT FROM sessions`** | 与 scripts/_sim_metrics `_fetch_fee_rate` 同 pattern；MetricsService 自洽不依赖 TradingDeps 字段（便于跨 session forensic 复用）；不改 `compute()` signature；运行时一次 query 成本可忽略 |
 | `_close_order_entry_cache` miss fallback | 本 iter 实现 OKX API 反查 / 留 follow-up | **留 follow-up** + 本 iter skip-with-caveat | 与 fee_visibility iter §7 follow-up（`iter-tool-opt-okx-fee-rate-auto-fetch`）同期处理；本 iter 主线已 schema 变更 |
 | Backward compat 旧数据 | 接受 NULL / COALESCE 兼容 / backfill | **接受 NULL + skip-with-caveat** | fee_visibility 之前 close fill rows entry_price=NULL；CLAUDE.md "Don't add backwards-compatibility shims"；caveat 文案精确为 "based on rows after net-metrics iter landed" |
-| sessions.fee_rate IS NULL 旧数据 | fail-loud / 0-fallback / skip net | **0-fallback + warning log** | fee_visibility 之前 sim sessions 可能 NULL；0-fallback 等价于 "fee_rate 未知 → 假设 0" → net 数字降级为 close_fee-only 视角 + caveat "fee_rate unknown for this session, net excludes entry fees" |
+| sessions.fee_rate IS NULL 旧数据 | fail-loud / 0-fallback / skip net | **informational warning log only** | FIFO 算法用 `lot.open_fee + close.fee`（trade_actions 实际记录值）直接计算分摊，不依赖 fee_rate 数值。NULL 仅触发 informational warning；net 计算照常进行（详见 §6.1）|
 | OKX session 检测方式 | isinstance / `.name` 属性 | **isinstance(deps.exchange, OKXExchange)** | 类型清晰；BaseExchange 无 `.name` 属性，加 attribute 违反 "interface 不变" 承诺 |
 | Migration 风险 | add column / 重构旧表 | **add 2 nullable columns** | SQLite ALTER TABLE add nullable column 无锁表；零 backfill；W3R1 已过 Path 1 alembic upgrade，migration 接新 head 单步可达 |
 
@@ -208,7 +208,7 @@ per cli/app.py:427）。
             log.warning, caveat: legacy_close_skipped += 1
             continue                                # 不弹 lot（不知道弹多少）；§6.9 invariant 路径覆盖后续
          if fill.entry_price IS NULL:               # OKX cache miss — algorithmic OK, data-quality flag
-            caveat: okx_cache_miss_count += 1
+            caveat: missing_close_entry_price_count += 1
             # 继续，不 skip
          # Liquidation: pre-compute per-unit pnl once per fill (mirrors scripts §215-225)
          liq_pnl_per_unit = None
@@ -251,7 +251,7 @@ PerformanceMetrics dataclass → get_performance renders 并列双视角 string
 caveat output (Trade Stats section 顶；两类 caveat 各自独立，可同时出现)：
    - 若 legacy_open_skipped + legacy_close_skipped > 0：
        "Note: net stats based on m/n trades (k legacy rows skipped — pre-net-metrics-iter data)."
-   - 若 okx_cache_miss_count > 0：
+   - 若 missing_close_entry_price_count > 0：
        "Note: k close fills had cache-miss entry_price (FIFO unaffected; audit trail incomplete for those trades)."
    - 若 m=0（无 valid roundtrips）：
        "Net stats unavailable: all close fills are pre-net-metrics-iter legacy data."
@@ -301,9 +301,10 @@ scripts/analyze_sim.py / diff_sim.py 报表渲染 gross + net 并列
 ### 6.1 sessions.fee_rate IS NULL（旧 session）
 
 - 触发：fee_visibility iter 之前创建的 sim/OKX session（schema nullable=True 历史遗留）
-- 处理：`MetricsService.compute()` 取 fee_rate 时 NULL → log.warning + 0-fallback
-- 后果：该 session 的 net 数字等价于 `gross − close_fee`（无 entry fee 项），但因 entry_price 同样 NULL（pre-iter 老数据）实际走 §6.2 全 skip 路径
-- 输出：caveat "fee_rate unknown for this session (legacy); net excludes entry fees"
+- 处理：`MetricsService.compute()` 取 fee_rate 时 NULL → log.warning（informational）
+- **算法不受影响**：FIFO 用 `lot.open_fee + close.fee`（trade_actions 实际记录值）直接计算分摊，**不依赖 fee_rate 数值**。fee_rate 在 §2 决策表 "fee 归集算法 = FIFO lot pairing" 之后已退化为 informational diagnostic
+- 实际场景：pre-iter 老 session 同时缺 `amount`，FIFO 走 §6.2 (a) 全 skip 路径
+- 输出：不需要 fee_rate-specific caveat；§6.2 legacy skip caveat 已涵盖
 - **不**抛异常阻塞 `get_performance`
 
 ### 6.2 trade_actions 缺 amount / entry_price（pre-iter legacy 或 OKX cache miss）
@@ -318,7 +319,7 @@ scripts/analyze_sim.py / diff_sim.py 报表渲染 gross + net 并列
 
 **(b) `entry_price IS NULL` 但 `amount` 完整（OKX cache miss / 罕见 pre-iter mixed）**：
 - FIFO 算法不依赖 close.entry_price（用 lot.entry_px），**继续配对计算**
-- caveat `okx_cache_miss_count` += 1（仅信息标记，不影响数据可用性）
+- caveat `missing_close_entry_price_count` += 1（仅信息标记，不影响数据可用性）
 - 输出 caveat：`Note: k close fills had cache-miss entry_price (FIFO unaffected; OKX VIP audit trail incomplete for those trades).`
 
 **(c) 完全无可用数据（m=0 即所有 close 都 legacy skip）**：
@@ -530,7 +531,7 @@ Note: OKX net metrics use exchange-echoed fees (accurate); minor ε from lot amo
   ```
   此 caveat 与上一条可同时出现（两类独立计数）。
 - 全部 legacy skip（m=0）：所有 net 字段渲染 `N/A`，section 顶提示 `Net stats unavailable: all close fills are pre-net-metrics-iter legacy data.`
-- sessions.fee_rate NULL：caveat 末加 ` (fee_rate unknown for this session; net excludes entry fees)`
+- sessions.fee_rate NULL：仅 informational log warning，**不**额外加 caveat 文案（FIFO 用 trade_actions.fee 实际值，net 算法不受影响；详见 §6.1）
 
 ### 8.4 cli 输出折行考虑
 
