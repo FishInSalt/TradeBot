@@ -546,7 +546,7 @@ def test_render_header_full_alert_trigger():
             position={
                 "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
                 "entry_price": 75350.0, "unrealized_pnl": 75.0,
-                "leverage": 5, "liquidation_price": 0.0, "pnl_pct": 0.10,
+                "leverage": 5, "liquidation_price": 0.0, "pnl_pct_of_notional": 0.10,
             },
             balance={"total_usdt": 9990.0, "free_usdt": 9990.0, "used_usdt": 0.0},
         ),
@@ -1251,7 +1251,7 @@ def test_es_3_balance_none_omits_balance_segment():
         position={
             "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
             "entry_price": 75350.0, "leverage": 5, "unrealized_pnl": 75.0,
-            "liquidation_price": 0.0, "pnl_pct": 0.10,
+            "liquidation_price": 0.0, "pnl_pct_of_notional": 0.10,
         },
     ))
     assert "Short 0.265" in out
@@ -1259,13 +1259,13 @@ def test_es_3_balance_none_omits_balance_segment():
 
 
 def test_es_5_position_pnl_pct_none_omits_pnl_segment():
-    """T-ES-5: pnl_pct=None (notional 0 / 计算失败) → 省略 PnL 字段."""
+    """T-ES-5: pnl_pct_of_notional=None (notional 0 / 计算失败) → 省略 PnL 字段."""
     from src.cli.display import _format_state_line
     out = _format_state_line(_make_state_snapshot(
         position={
             "symbol": "BTC/USDT:USDT", "side": "short", "contracts": 0.265,
             "entry_price": 75350.0, "leverage": 5, "unrealized_pnl": 0.0,
-            "liquidation_price": 0.0, "pnl_pct": None,
+            "liquidation_price": 0.0, "pnl_pct_of_notional": None,
         },
         balance={"total_usdt": 10000.0, "free_usdt": 10000.0, "used_usdt": 0.0},
     ))

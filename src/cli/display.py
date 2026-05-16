@@ -714,7 +714,7 @@ def _format_state_line(state_snapshot: dict | None) -> str:
             if leverage:
                 piece += f" ({leverage}x)"
             parts.append(piece)
-            pnl_pct = pos.get("pnl_pct")
+            pnl_pct = pos.get("pnl_pct_of_notional")
             if pnl_pct is not None:
                 parts.append(f"PnL {pnl_pct:+.2f}%")
         except (KeyError, TypeError):
