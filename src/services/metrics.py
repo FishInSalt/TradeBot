@@ -1,7 +1,9 @@
 # src/services/metrics.py
 from __future__ import annotations
 
+import logging
 import statistics
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.storage.database import get_session
 from src.storage.models import ToolCall, TradeAction
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,6 +61,142 @@ class ToolCallStats:
     p95_duration_ms: int
     error_breakdown: dict[str, int]       # {"TimeoutError": 3, ...}
     last_called_at: datetime              # MAX(created_at); always has value for tools in dict
+
+
+@dataclass
+class _Lot:
+    """In-memory FIFO lot (spec §5.2; mirrors scripts/_sim_metrics._Lot subset)."""
+    side: str
+    entry_px: float
+    original_amount: float
+    remaining_amount: float
+    open_fee: float
+
+
+@dataclass
+class _Roundtrip:
+    """Lot pair result (spec §5.2; mirrors scripts/_sim_metrics.Roundtrip subset)."""
+    side: str
+    entry_px: float
+    exit_px: float
+    amount: float
+    pnl_gross: float
+    fee_open_share: float
+    fee_close_share: float
+    pnl_net: float
+    is_liquidation: bool
+
+
+_EPS = 1e-9
+
+
+async def _collect_roundtrips_from_trade_actions(
+    engine: AsyncEngine,
+    session_id: str,
+) -> tuple[list[_Roundtrip], dict[str, int]]:
+    """FIFO lot pairing from trade_actions (spec §5.2).
+
+    Reads trade_actions for the session, reconstructs FIFO lot queue from
+    open fills (pnl IS NULL), pairs against close fills (pnl IS NOT NULL).
+    Uses lot.open_fee + close.fee directly (no fee_rate dependency).
+
+    Returns (roundtrips, caveats). Caveats keys: legacy_open_skipped,
+    legacy_close_skipped, missing_close_entry_price_count, invariant_violations.
+    """
+    async with get_session(engine) as session:
+        result = await session.execute(
+            select(TradeAction)
+            .where(TradeAction.session_id == session_id)
+            .where(TradeAction.action == "order_filled")
+            .order_by(TradeAction.created_at, TradeAction.id)
+        )
+        fills = list(result.scalars().all())
+
+    lots: dict[str, deque[_Lot]] = {"long": deque(), "short": deque()}
+    roundtrips: list[_Roundtrip] = []
+    caveats = {
+        "legacy_open_skipped": 0,
+        "legacy_close_skipped": 0,
+        "missing_close_entry_price_count": 0,
+        "invariant_violations": 0,
+    }
+
+    for fill in fills:
+        # OPEN vs CLOSE discriminator (spec §5.2): pnl IS NULL → open
+        if fill.pnl is None:
+            if fill.amount is None:
+                caveats["legacy_open_skipped"] += 1
+                logger.warning("metrics FIFO: legacy open fill id=%s amount IS NULL, skipping", fill.id)
+                continue
+            if fill.amount <= 0 or fill.price <= 0:
+                logger.error("metrics FIFO: open fill id=%s corrupt amount=%s or price=%s",
+                             fill.id, fill.amount, fill.price)
+                caveats["invariant_violations"] += 1
+                continue
+            lots[fill.side].append(_Lot(
+                side=fill.side, entry_px=fill.price,
+                original_amount=fill.amount, remaining_amount=fill.amount,
+                open_fee=fill.fee or 0.0,
+            ))
+            continue
+
+        # CLOSE fill
+        if fill.amount is None:
+            caveats["legacy_close_skipped"] += 1
+            logger.warning("metrics FIFO: legacy close fill id=%s amount IS NULL, skipping", fill.id)
+            continue
+        if fill.amount <= 0:
+            logger.error("metrics FIFO: close fill id=%s amount %s <= 0 (corrupt data), skipping", fill.id, fill.amount)
+            caveats["invariant_violations"] += 1
+            continue
+        if fill.entry_price is None:
+            caveats["missing_close_entry_price_count"] += 1
+            # NOT skip — FIFO uses lot.entry_px from open fill (spec §6.2 b)
+
+        is_liquidation = fill.trigger_reason == "liquidation"
+        liq_pnl_per_unit: float | None = None
+        if is_liquidation:
+            if fill.pnl is None or fill.amount <= 0:
+                caveats["invariant_violations"] += 1
+                logger.error("metrics FIFO: liquidation id=%s missing pnl or zero amount", fill.id)
+                liq_pnl_per_unit = 0.0
+            else:
+                liq_pnl_per_unit = fill.pnl / fill.amount
+
+        close_remaining = fill.amount
+        close_fee_total = fill.fee or 0.0
+        while close_remaining > _EPS:
+            if not lots[fill.side]:
+                caveats["invariant_violations"] += 1
+                logger.error(
+                    "metrics FIFO: close fill id=%s no preceding open lot for side=%s",
+                    fill.id, fill.side,
+                )
+                break
+            lot = lots[fill.side][0]
+            consumed = min(lot.remaining_amount, close_remaining)
+            fee_open_share = lot.open_fee * (consumed / lot.original_amount)
+            fee_close_share = close_fee_total * (consumed / fill.amount)
+            sign = 1.0 if fill.side == "long" else -1.0
+            if is_liquidation:
+                pnl_gross = (liq_pnl_per_unit or 0.0) * consumed
+            else:
+                pnl_gross = (fill.price - lot.entry_px) * consumed * sign
+            pnl_net = pnl_gross - fee_open_share - fee_close_share
+            roundtrips.append(_Roundtrip(
+                side=lot.side, entry_px=lot.entry_px, exit_px=fill.price,
+                amount=consumed,
+                pnl_gross=pnl_gross,
+                fee_open_share=fee_open_share, fee_close_share=fee_close_share,
+                pnl_net=pnl_net,
+                is_liquidation=is_liquidation,
+            ))
+            lot.remaining_amount -= consumed
+            close_remaining -= consumed
+            if lot.remaining_amount <= _EPS:
+                lots[fill.side].popleft()
+
+    return roundtrips, caveats
 
 
 class MetricsService:
