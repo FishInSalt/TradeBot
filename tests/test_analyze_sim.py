@@ -163,11 +163,15 @@ async def test_analyze_emits_all_28_metric_groups(db_engine):
     assert r.returncode == 0
     # Every METRIC_GROUPS key (or its split sub-rows) is present.
     expected_substrings = [
-        # PnL
-        "win_rate", "total_pnl_net", "roundtrip_count",
-        "avg_fifo_pnl_per_roundtrip", "avg_roundtrip_duration_min",
-        "median_roundtrip_duration_min", "max_drawdown_pct",
-        "exit_type[market]", "largest_win", "largest_loss", "profit_factor",
+        # PnL — net + gross adjacent rows (net-pnl-metrics iter)
+        "win_rate_net", "win_rate_gross",
+        "total_pnl_net", "roundtrip_count",
+        "avg_fifo_pnl_per_roundtrip_net", "avg_fifo_pnl_per_roundtrip_gross",
+        "avg_roundtrip_duration_min", "median_roundtrip_duration_min",
+        "max_drawdown_pct", "exit_type[market]",
+        "largest_win_net", "largest_win_gross",
+        "largest_loss_net", "largest_loss_gross",
+        "profit_factor_net", "profit_factor_gross",
         # Cost
         "total_input_tokens", "total_output_tokens", "total_cache_read_tokens",
         "avg_cache_hit_rate", "tokens_per_cycle_p50", "tokens_per_cycle_p95",
