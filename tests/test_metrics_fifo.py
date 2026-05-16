@@ -108,3 +108,129 @@ async def test_fifo_multi_open_single_close(engine):
     assert rts[1].pnl_gross == pytest.approx(100.0)  # (53000-52000)*0.1
     assert rts[0].fee_close_share == pytest.approx(2.65)  # 5.3 * 0.1/0.2
     assert rts[1].fee_close_share == pytest.approx(2.65)
+
+
+@pytest.mark.asyncio
+async def test_fifo_liquidation_uses_reverse_pnl(engine):
+    """spec §5.2 liquidation: pnl_gross = fill.pnl/amount × consumed (吸收 sim pnl_cap)."""
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    sid = "fifo-liq"
+    async with engine.begin() as conn:
+        await _insert_session(conn, sid)
+        await _insert_fill(conn, sid, side="long", price=50000.0, amount=0.1, fee=2.5, pnl=None)
+        # liquidation at 45000; sim pnl_cap clamps pnl to -480 (not geometric -500)
+        await _insert_fill(conn, sid, side="long", price=45000.0, amount=0.1,
+                           fee=2.25, pnl=-480.0, entry_price=50000.0,
+                           trigger_reason="liquidation")
+
+    rts, caveats = await _collect_roundtrips_from_trade_actions(engine, sid)
+    assert len(rts) == 1
+    assert rts[0].pnl_gross == pytest.approx(-480.0)  # reverse, not geometric
+    assert rts[0].is_liquidation is True
+    assert caveats["invariant_violations"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fifo_okx_cache_miss_continues_algorithm(engine):
+    """spec §6.5: close fill entry_price=NULL — algorithm continues, caveat raised."""
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    sid = "fifo-okx-miss"
+    async with engine.begin() as conn:
+        await _insert_session(conn, sid)
+        await _insert_fill(conn, sid, side="long", price=50000.0, amount=0.1, fee=2.5, pnl=None)
+        await _insert_fill(conn, sid, side="long", price=51000.0, amount=0.1,
+                           fee=2.55, pnl=100.0, entry_price=None)  # ← None
+
+    rts, caveats = await _collect_roundtrips_from_trade_actions(engine, sid)
+    assert len(rts) == 1
+    assert rts[0].pnl_gross == pytest.approx(100.0)  # uses lot.entry_px=50000
+    assert caveats["missing_close_entry_price_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fifo_okx_cache_miss_pnl_equivalent_to_hit(engine):
+    """spec §7.1 核心 claim: cache miss vs cache hit pnl_net byte-equal."""
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+
+    async def setup(sid: str, close_entry_price: float | None):
+        async with engine.begin() as conn:
+            await _insert_session(conn, sid)
+            await _insert_fill(conn, sid, side="long", price=50000.0, amount=0.1, fee=2.5, pnl=None)
+            await _insert_fill(conn, sid, side="long", price=51000.0, amount=0.1,
+                               fee=2.55, pnl=100.0, entry_price=close_entry_price)
+
+    await setup("hit", 50000.0)
+    await setup("miss", None)
+    hit_rts, _ = await _collect_roundtrips_from_trade_actions(engine, "hit")
+    miss_rts, _ = await _collect_roundtrips_from_trade_actions(engine, "miss")
+    assert len(hit_rts) == len(miss_rts) == 1
+    assert hit_rts[0].pnl_net == pytest.approx(miss_rts[0].pnl_net)
+    assert hit_rts[0].pnl_gross == pytest.approx(miss_rts[0].pnl_gross)
+
+
+@pytest.mark.asyncio
+async def test_fifo_legacy_row_skipped(engine):
+    """spec §6.2 (a): amount IS NULL → skip + caveat counter."""
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    sid = "fifo-legacy"
+    async with engine.begin() as conn:
+        await _insert_session(conn, sid)
+        await _insert_fill(conn, sid, side="long", price=50000.0, amount=None, fee=2.5, pnl=None)
+        await _insert_fill(conn, sid, side="long", price=51000.0, amount=None,
+                           fee=2.55, pnl=100.0, entry_price=None)
+
+    rts, caveats = await _collect_roundtrips_from_trade_actions(engine, sid)
+    assert len(rts) == 0
+    assert caveats["legacy_open_skipped"] == 1
+    assert caveats["legacy_close_skipped"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fifo_invariant_close_without_open(engine):
+    """spec §6.9: close fill without preceding open lot → invariant_violations."""
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    sid = "fifo-invariant"
+    async with engine.begin() as conn:
+        await _insert_session(conn, sid)
+        await _insert_fill(conn, sid, side="long", price=51000.0, amount=0.1,
+                           fee=2.55, pnl=100.0, entry_price=50000.0)
+
+    rts, caveats = await _collect_roundtrips_from_trade_actions(engine, sid)
+    assert len(rts) == 0
+    # close fill enters `while close_remaining > _EPS`, hits `if not lots[fill.side]` once → +1
+    assert caveats["invariant_violations"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fifo_corrupt_zero_amount(engine):
+    """spec §6.3: amount=0 → invariant + skip."""
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    sid = "fifo-zero-amount"
+    async with engine.begin() as conn:
+        await _insert_session(conn, sid)
+        # corrupt open with amount=0
+        await _insert_fill(conn, sid, side="long", price=50000.0, amount=0.0, fee=0.0, pnl=None)
+        # close that would need that open
+        await _insert_fill(conn, sid, side="long", price=51000.0, amount=0.1,
+                           fee=2.55, pnl=100.0, entry_price=50000.0)
+
+    rts, caveats = await _collect_roundtrips_from_trade_actions(engine, sid)
+    # 2 violations: (1) open amount<=0 skipped + invariant; (2) close finds no open lot → invariant
+    assert caveats["invariant_violations"] == 2
+
+
+@pytest.mark.asyncio
+async def test_fifo_short_position(engine):
+    """Short side correctness: sign = -1."""
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    sid = "fifo-short"
+    async with engine.begin() as conn:
+        await _insert_session(conn, sid)
+        await _insert_fill(conn, sid, side="short", price=50000.0, amount=0.1, fee=2.5, pnl=None)
+        # short close at lower price (profit)
+        await _insert_fill(conn, sid, side="short", price=49000.0, amount=0.1,
+                           fee=2.45, pnl=100.0, entry_price=50000.0)
+
+    rts, _ = await _collect_roundtrips_from_trade_actions(engine, sid)
+    assert len(rts) == 1
+    assert rts[0].pnl_gross == pytest.approx(100.0)  # (50000-49000)*0.1 (after sign)
