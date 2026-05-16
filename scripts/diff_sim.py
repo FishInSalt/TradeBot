@@ -26,10 +26,13 @@ from scripts._sim_metrics import (  # noqa: E402
     assert_not_legacy, assert_schema_migrated,
     collect_roundtrips,
     render_caveats_per_side, render_caveats_diff_only,
-    win_rate, total_pnl_net, roundtrip_count,
-    avg_fifo_pnl_per_roundtrip,
+    win_rate, win_rate_gross,
+    total_pnl_net, roundtrip_count,
+    avg_fifo_pnl_per_roundtrip, avg_fifo_pnl_per_roundtrip_gross,
     avg_roundtrip_duration_min, median_roundtrip_duration_min,
-    max_drawdown_pct, exit_type_distribution, largest_win_loss, profit_factor,
+    max_drawdown_pct, exit_type_distribution,
+    largest_win_loss, largest_win_loss_gross,
+    profit_factor, profit_factor_gross,
     cost_token_sums, avg_cache_hit_rate, tokens_per_cycle_percentile,
     avg_wall_time_ms, avg_llm_call_ms, avg_tool_total_ms,
     per_tool_call_top10,
@@ -164,18 +167,24 @@ async def compute_metrics_for_session(engine, session) -> tuple[dict, list, dict
     sid = session.id
     out: dict = {}
 
-    # PnL — 10 groups
-    out["win_rate"] = win_rate(rts)
+    # PnL — 14 groups (10 net + 4 gross per net-pnl-metrics iter)
+    out["win_rate_net"] = win_rate(rts)
+    out["win_rate_gross"] = win_rate_gross(rts)
     out["total_pnl_net"] = await total_pnl_net(engine, sid, rts)
     out["roundtrip_count"] = roundtrip_count(rts)
-    out["avg_fifo_pnl_per_roundtrip"] = avg_fifo_pnl_per_roundtrip(rts)
+    out["avg_fifo_pnl_per_roundtrip_net"] = avg_fifo_pnl_per_roundtrip(rts)
+    out["avg_fifo_pnl_per_roundtrip_gross"] = avg_fifo_pnl_per_roundtrip_gross(rts)
     out["avg_roundtrip_duration_min"] = avg_roundtrip_duration_min(rts)
     out["median_roundtrip_duration_min"] = median_roundtrip_duration_min(rts)
     out["max_drawdown_pct"] = await max_drawdown_pct(engine, sid)
     win, loss = largest_win_loss(rts)
-    out["largest_win"] = win
-    out["largest_loss"] = loss
-    out["profit_factor"] = profit_factor(rts)
+    out["largest_win_net"] = win
+    out["largest_loss_net"] = loss
+    win_g, loss_g = largest_win_loss_gross(rts)
+    out["largest_win_gross"] = win_g
+    out["largest_loss_gross"] = loss_g
+    out["profit_factor_net"] = profit_factor(rts)
+    out["profit_factor_gross"] = profit_factor_gross(rts)
     for k, v in exit_type_distribution(rts).items():
         out[f"exit_type[{k}]"] = v
 
@@ -233,17 +242,22 @@ async def compute_metrics_for_session(engine, session) -> tuple[dict, list, dict
 #              'avg' (Δ%) / 'avg_pnl' (Δ%, fall back to |Δ|) /
 #              'rate' (pp + % OR) / 'percentile' (Δ%)
 ROW_KINDS: dict[str, str] = {
-    # PnL
-    "win_rate": "rate",
+    # PnL — net + gross adjacent (net-pnl-metrics iter)
+    "win_rate_net": "rate",
+    "win_rate_gross": "rate",
     "total_pnl_net": "sum_pnl",
     "roundtrip_count": "count",
-    "avg_fifo_pnl_per_roundtrip": "avg_pnl",
+    "avg_fifo_pnl_per_roundtrip_net": "avg_pnl",
+    "avg_fifo_pnl_per_roundtrip_gross": "avg_pnl",
     "avg_roundtrip_duration_min": "avg",
     "median_roundtrip_duration_min": "avg",
     "max_drawdown_pct": "rate",
-    "largest_win": "sum_pnl",
-    "largest_loss": "sum_pnl",
-    "profit_factor": "avg",  # ratio — Δ% threshold; PnL absolute irrelevant
+    "largest_win_net": "sum_pnl",
+    "largest_win_gross": "sum_pnl",
+    "largest_loss_net": "sum_pnl",
+    "largest_loss_gross": "sum_pnl",
+    "profit_factor_net": "avg",  # ratio — Δ% threshold; PnL absolute irrelevant
+    "profit_factor_gross": "avg",
     # exit_type[*] — added dynamically (kind='rate' since values are 0..1 fractions)
     # Cost
     "total_input_tokens": "sum_token",
@@ -365,9 +379,14 @@ def _fmt_pct_cell(pct):
 
 # Section static label inventory (excludes dynamic distribution / per_tool keys).
 PNL_LABELS = [
-    "total_pnl_net", "win_rate", "roundtrip_count", "avg_fifo_pnl_per_roundtrip",
+    "total_pnl_net",
+    "win_rate_net", "win_rate_gross",
+    "roundtrip_count",
+    "avg_fifo_pnl_per_roundtrip_net", "avg_fifo_pnl_per_roundtrip_gross",
     "avg_roundtrip_duration_min", "median_roundtrip_duration_min", "max_drawdown_pct",
-    "largest_win", "largest_loss", "profit_factor",
+    "largest_win_net", "largest_win_gross",
+    "largest_loss_net", "largest_loss_gross",
+    "profit_factor_net", "profit_factor_gross",
 ]
 PNL_DIST_PREFIX = "exit_type["
 

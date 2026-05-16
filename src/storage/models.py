@@ -56,7 +56,15 @@ class Session(Base):
 
 
 class TradeAction(Base):
-    """Agent 的交易操作日志 — append-only 事件模型。"""
+    """Agent 的交易操作日志 — append-only 事件模型.
+
+    iter-tool-opt-net-pnl-metrics 字段范围说明:
+    - amount: 所有 action='order_filled' 行（open + close）有值（per FillEvent.amount 必填）；
+              非 fill 行（cancel / submit 等由 tools_execution._record_action 写）NULL by design.
+    - entry_price: open fill 行永远 NULL（per FillEvent.entry_price 设计 "open fill 永远 None"，
+                   base.py:349-360）；close fill 行通常有值，OKX cache miss 时可 NULL
+                   （继承 fee_visibility iter limitation；详见 spec §6.5）；非 fill 行 NULL by design.
+    """
 
     __tablename__ = "trade_actions"
 
@@ -73,6 +81,8 @@ class TradeAction(Base):
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     fee: Mapped[float | None] = mapped_column(Float, nullable=True)
+    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

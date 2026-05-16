@@ -10,22 +10,28 @@ from src.storage.models import SimOrder
 
 
 def test_metric_groups_inventory_28():
-    """Single source: METRIC_GROUPS list has exactly 28 group keys.
+    """Single source: METRIC_GROUPS list has exactly 32 group keys (10 PnL net
+    + 4 PnL gross + 8 Cost + 10 Behavior).
 
     Future additions intentionally break this test → reviewer must
     update spec §3 + METRIC_GROUPS together.
+
+    Test name retains '_28' suffix for git-history continuity; the assertion
+    flipped to 32 per net-pnl-metrics iter (gross-view counterparts added).
     """
-    assert len(METRIC_GROUPS) == 28
-    assert len(set(METRIC_GROUPS)) == 28
+    assert len(METRIC_GROUPS) == 32
+    assert len(set(METRIC_GROUPS)) == 32
 
 
 def test_metric_groups_split_into_3_dimensions():
-    """10 PnL + 8 Cost + 10 Behavior verified by group key partition."""
+    """14 PnL (10 net + 4 gross) + 8 Cost + 10 Behavior verified by partition."""
     pnl_keys = {"win_rate", "total_pnl_net", "roundtrip_count",
                 "avg_fifo_pnl_per_roundtrip",
                 "avg_roundtrip_duration_min", "median_roundtrip_duration_min",
                 "max_drawdown_pct", "exit_type_distribution",
-                "largest_win_loss", "profit_factor"}
+                "largest_win_loss", "profit_factor",
+                "win_rate_gross", "profit_factor_gross",
+                "avg_fifo_pnl_per_roundtrip_gross", "largest_win_loss_gross"}
     cost_keys = {"total_input_tokens", "total_output_tokens",
                  "total_cache_read_tokens", "avg_cache_hit_rate",
                  "tokens_per_cycle_percentile", "avg_wall_time_ms",
@@ -35,7 +41,7 @@ def test_metric_groups_split_into_3_dimensions():
                      "five_field_complete_rate", "per_field_hit_rate",
                      "decision_length_avg_p95", "retraction_rate",
                      "reasoning_avg_pair", "alert_lifecycle_summary"}
-    assert len(pnl_keys) == 10
+    assert len(pnl_keys) == 14
     assert len(cost_keys) == 8
     assert len(behavior_keys) == 10
     assert set(METRIC_GROUPS) == (pnl_keys | cost_keys | behavior_keys)

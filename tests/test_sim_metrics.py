@@ -81,9 +81,13 @@ def test_r2_7_merged_at_constant():
 
 
 def test_metric_groups_count_28():
-    """Single source of metric inventory; renderer + drift guard reuse this."""
-    assert len(METRIC_GROUPS) == 28
-    assert len(set(METRIC_GROUPS)) == 28  # no duplicates
+    """Single source of metric inventory; renderer + drift guard reuse this.
+
+    Count flipped to 32 per net-pnl-metrics iter (4 gross-view PnL keys added);
+    test name retains '_28' for git-history continuity.
+    """
+    assert len(METRIC_GROUPS) == 32
+    assert len(set(METRIC_GROUPS)) == 32  # no duplicates
 
 
 async def test_phase1_views_runnable(db_engine):
@@ -980,3 +984,66 @@ def test_render_caveats_diff_only_does_not_emit_per_side():
     out = render_caveats_diff_only(a_eq_b=True, cross_symbol=None)
     assert "0 closed roundtrips" not in out
     assert "unclosed lot" not in out
+
+
+# === T9b: Gross-view PnL metrics (net-pnl-metrics iter) ===
+
+from scripts._sim_metrics import (
+    win_rate_gross, profit_factor_gross,
+    avg_fifo_pnl_per_roundtrip_gross, largest_win_loss_gross,
+)
+
+
+def _rt_gross_net(pnl_gross: float, pnl_net: float) -> Roundtrip:
+    """Helper: build minimal Roundtrip for gross/net unit tests."""
+    return Roundtrip(
+        open_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        close_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        open_cycle_id=None, close_cycle_id=None,
+        side="long", entry_px=50000.0, exit_px=51000.0,
+        amount=0.1, leverage=10,
+        pnl_gross=pnl_gross,
+        fee_open_share=0.0, fee_close_share=0.0,
+        fee_total=0.0, pnl_net=pnl_net,
+        duration_seconds=60, exit_type="market",
+    )
+
+
+def test_win_rate_gross_empty():
+    assert win_rate_gross([]) is None
+
+
+def test_win_rate_gross_all_wins():
+    rts = [_rt_gross_net(10.0, 5.0), _rt_gross_net(20.0, 15.0)]
+    assert win_rate_gross(rts) == 1.0
+
+
+def test_win_rate_gross_mixed():
+    # 2 gross wins, 1 gross loss
+    rts = [_rt_gross_net(10.0, 5.0), _rt_gross_net(-5.0, -10.0), _rt_gross_net(20.0, 15.0)]
+    assert win_rate_gross(rts) == pytest.approx(2 / 3, abs=0.01)
+
+
+def test_profit_factor_gross_zero_losses_returns_none():
+    rts = [_rt_gross_net(10.0, 5.0), _rt_gross_net(20.0, 15.0)]
+    assert profit_factor_gross(rts) is None
+
+
+def test_profit_factor_gross_zero_wins_returns_none():
+    rts = [_rt_gross_net(-10.0, -15.0)]
+    assert profit_factor_gross(rts) is None
+
+
+def test_profit_factor_gross_typical():
+    rts = [_rt_gross_net(30.0, 25.0), _rt_gross_net(-10.0, -15.0)]
+    assert profit_factor_gross(rts) == pytest.approx(3.0)
+
+
+def test_avg_fifo_pnl_per_roundtrip_gross():
+    rts = [_rt_gross_net(10.0, 5.0), _rt_gross_net(20.0, 15.0)]
+    assert avg_fifo_pnl_per_roundtrip_gross(rts) == pytest.approx(15.0)
+
+
+def test_largest_win_loss_gross():
+    rts = [_rt_gross_net(10.0, 5.0), _rt_gross_net(-5.0, -10.0), _rt_gross_net(30.0, 25.0)]
+    assert largest_win_loss_gross(rts) == (30.0, -5.0)

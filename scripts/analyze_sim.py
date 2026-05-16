@@ -28,11 +28,13 @@ from scripts._sim_metrics import (  # noqa: E402
     R2_7_MERGED_AT, METRIC_GROUPS,
     assert_not_legacy, assert_schema_migrated,
     collect_roundtrips, render_caveats_per_side,
-    win_rate, total_pnl_net, roundtrip_count,
-    avg_fifo_pnl_per_roundtrip,
+    win_rate, win_rate_gross,
+    total_pnl_net, roundtrip_count,
+    avg_fifo_pnl_per_roundtrip, avg_fifo_pnl_per_roundtrip_gross,
     avg_roundtrip_duration_min, median_roundtrip_duration_min,
     max_drawdown_pct, exit_type_distribution,
-    largest_win_loss, profit_factor,
+    largest_win_loss, largest_win_loss_gross,
+    profit_factor, profit_factor_gross,
     cost_token_sums, avg_cache_hit_rate, tokens_per_cycle_percentile,
     avg_wall_time_ms, avg_llm_call_ms, avg_tool_total_ms,
     per_tool_call_top10,
@@ -133,19 +135,28 @@ async def _render_pnl(engine, session, rts) -> str:
     p2 = await total_pnl_net(engine, session.id, rts)
     dd = await max_drawdown_pct(engine, session.id)
     win, loss = largest_win_loss(rts)
+    win_g, loss_g = largest_win_loss_gross(rts)
     pf = profit_factor(rts)
+    pf_g = profit_factor_gross(rts)
     dist = exit_type_distribution(rts)
     rows = [
         ("total_pnl_net", _fmt_pnl(p2)),
-        ("win_rate", _fmt_pct(win_rate(rts))),
+        ("win_rate_net", _fmt_pct(win_rate(rts))),
+        ("win_rate_gross", _fmt_pct(win_rate_gross(rts))),
         ("roundtrip_count", _fmt_count(roundtrip_count(rts))),
-        ("avg_fifo_pnl_per_roundtrip", _fmt_pnl(avg_fifo_pnl_per_roundtrip(rts))),
+        ("avg_fifo_pnl_per_roundtrip_net",
+         _fmt_pnl(avg_fifo_pnl_per_roundtrip(rts))),
+        ("avg_fifo_pnl_per_roundtrip_gross",
+         _fmt_pnl(avg_fifo_pnl_per_roundtrip_gross(rts))),
         ("avg_roundtrip_duration_min", _fmt_dur(avg_roundtrip_duration_min(rts))),
         ("median_roundtrip_duration_min", _fmt_dur(median_roundtrip_duration_min(rts))),
         ("max_drawdown_pct", _fmt_pct(dd)),
-        ("largest_win", _fmt_pnl(win)),
-        ("largest_loss", _fmt_pnl(loss)),
-        ("profit_factor", "—" if pf is None else f"{pf:.2f}"),
+        ("largest_win_net", _fmt_pnl(win)),
+        ("largest_win_gross", _fmt_pnl(win_g)),
+        ("largest_loss_net", _fmt_pnl(loss)),
+        ("largest_loss_gross", _fmt_pnl(loss_g)),
+        ("profit_factor_net", "—" if pf is None else f"{pf:.2f}"),
+        ("profit_factor_gross", "—" if pf_g is None else f"{pf_g:.2f}"),
     ]
     for key in ["market", "stop", "take_profit", "limit", "liquidation"]:
         rows.append((f"exit_type[{key}]", _fmt_pct(dist[key])))

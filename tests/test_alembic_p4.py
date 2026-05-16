@@ -64,10 +64,15 @@ async def test_head_has_p4_columns(head_db):
 
 
 async def test_downgrade_drops_p4_columns(head_db):
-    """P4 downgrade -1: both columns removed; no IntegrityError (fields nullable)."""
+    """P4 downgrade: both columns removed; no IntegrityError (fields nullable).
+
+    Targets PHASE1_REV explicitly (was `-1`); after iter-net-pnl-metrics added a
+    new rev on top of P4, `-1` from head lands at P4 (not pre-P4) so P4 cols
+    remain — `-1` semantics drifted post-PR. Stable form names the rev directly.
+    """
     db, env = head_db
     result = subprocess.run(
-        ["alembic", "downgrade", "-1"],
+        ["alembic", "downgrade", PHASE1_REV],
         check=True, env=env, capture_output=True, text=True,
     )
 

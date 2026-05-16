@@ -47,12 +47,14 @@ R2_7_MERGED_AT = datetime(2026, 5, 2, tzinfo=timezone.utc)
 
 
 METRIC_GROUPS: list[str] = [
-    # PnL (10)
+    # PnL (14 — 10 net + 4 gross variants per net-pnl-metrics iter)
     "win_rate", "total_pnl_net", "roundtrip_count",
     "avg_fifo_pnl_per_roundtrip",
     "avg_roundtrip_duration_min", "median_roundtrip_duration_min",
     "max_drawdown_pct",
     "exit_type_distribution", "largest_win_loss", "profit_factor",
+    "win_rate_gross", "profit_factor_gross",
+    "avg_fifo_pnl_per_roundtrip_gross", "largest_win_loss_gross",
     # Cost (8)
     "total_input_tokens", "total_output_tokens", "total_cache_read_tokens",
     "avg_cache_hit_rate",
@@ -71,8 +73,8 @@ METRIC_GROUPS: list[str] = [
     "reasoning_avg_pair",
     "alert_lifecycle_summary",
 ]
-assert len(METRIC_GROUPS) == 28, \
-    "METRIC_GROUPS must stay at 28 — update spec §3 if changing"
+assert len(METRIC_GROUPS) == 32, \
+    "METRIC_GROUPS must stay at 32 — update spec §3 if changing"
 
 
 def _is_close_fill(position_side: str, side: str) -> bool:
@@ -320,6 +322,41 @@ def profit_factor(rts: list[Roundtrip]) -> float | None:
     if wins == 0 or losses == 0:
         return None
     return wins / abs(losses)
+
+
+# ── Gross-view PnL metrics (net-pnl-metrics iter) ────────────────────────────
+# Parallel to the net-view functions above; consume rt.pnl_gross instead of
+# rt.pnl_net. Naming asymmetry: existing net functions keep no-suffix names
+# (avoids breaking analyze_sim.py imports); gross variants take _gross suffix.
+
+
+def win_rate_gross(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    return sum(1 for rt in rts if rt.pnl_gross > 0) / len(rts)
+
+
+def profit_factor_gross(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    wins = sum(rt.pnl_gross for rt in rts if rt.pnl_gross > 0)
+    losses = sum(rt.pnl_gross for rt in rts if rt.pnl_gross < 0)
+    if wins == 0 or losses == 0:
+        return None
+    return wins / abs(losses)
+
+
+def avg_fifo_pnl_per_roundtrip_gross(rts: list[Roundtrip]) -> float | None:
+    if not rts:
+        return None
+    return statistics.mean(rt.pnl_gross for rt in rts)
+
+
+def largest_win_loss_gross(rts: list[Roundtrip]) -> tuple[float | None, float | None]:
+    if not rts:
+        return None, None
+    pnls = [rt.pnl_gross for rt in rts]
+    return max(pnls), min(pnls)
 
 
 def exit_type_distribution(rts: list[Roundtrip]) -> dict[str, float]:

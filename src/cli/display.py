@@ -26,9 +26,10 @@ def format_metrics(metrics: PerformanceMetrics) -> str:
     pos = metrics.current_position.upper() if metrics.current_position != "none" else "FLAT"
     return (
         f"Return: {metrics.total_return_pct:+.2f}% ({metrics.total_pnl:+.2f} USDT)\n"
-        f"Win Rate: {metrics.win_rate * 100:.1f}% ({metrics.winning_trades}W / {metrics.losing_trades}L)\n"
-        f"Max Drawdown: -{metrics.max_drawdown_pct:.2f}%\n"
-        f"Profit Factor: {metrics.profit_factor:.2f}\n"
+        f"Win Rate: {metrics.win_rate * 100:.1f}% ({metrics.winning_trades}W / {metrics.losing_trades}L"
+        f"{f' / {metrics.break_even_trades}B' if metrics.break_even_trades > 0 else ''})\n"
+        f"Max Drawdown: {('0.00%' if metrics.max_drawdown_pct == 0 else f'-{metrics.max_drawdown_pct:.2f}%')} (net equity)\n"
+        f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor is None else f'{metrics.profit_factor:.2f}'}\n"
         f"Total Trades: {metrics.total_trades}\n"
         f"Position: {pos}"
     )
@@ -714,7 +715,7 @@ def _format_state_line(state_snapshot: dict | None) -> str:
             if leverage:
                 piece += f" ({leverage}x)"
             parts.append(piece)
-            pnl_pct = pos.get("pnl_pct")
+            pnl_pct = pos.get("pnl_pct_of_notional")
             if pnl_pct is not None:
                 parts.append(f"PnL {pnl_pct:+.2f}%")
         except (KeyError, TypeError):

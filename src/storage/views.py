@@ -59,7 +59,7 @@ SELECT
        json_extract(ac.state_snapshot, '$.position.side')                       AS position_side,
   CAST(json_extract(ac.state_snapshot, '$.position.leverage')       AS INTEGER) AS position_leverage,
   CAST(json_extract(ac.state_snapshot, '$.position.unrealized_pnl') AS REAL)    AS position_unrealized_pnl,
-  CAST(json_extract(ac.state_snapshot, '$.position.pnl_pct')        AS REAL)    AS position_pnl_pct,
+  CAST(json_extract(ac.state_snapshot, '$.position.pnl_pct_of_notional')  AS REAL)    AS position_pnl_pct,
   CAST(json_extract(ac.state_snapshot, '$.balance.free_usdt')       AS REAL)    AS balance_free_usdt,
   CAST(json_extract(ac.state_snapshot, '$.market.ticker_last')      AS REAL)    AS ticker_last,
        json_extract(ac.state_snapshot, '$.market.fetched_at')                   AS state_captured_at,

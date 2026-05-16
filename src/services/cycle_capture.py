@@ -121,7 +121,7 @@ async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
                 if p.entry_price > 0 and p.contracts > 0
                 else 0.0
             )
-            pnl_pct = (p.unrealized_pnl / notional * 100) if notional > 0 else None
+            pnl_pct_of_notional = (p.unrealized_pnl / notional * 100) if notional > 0 else None
             snapshot["position"] = {
                 "symbol": p.symbol,
                 "side": p.side,
@@ -130,7 +130,7 @@ async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
                 "unrealized_pnl": p.unrealized_pnl,
                 "leverage": p.leverage,
                 "liquidation_price": p.liquidation_price,
-                "pnl_pct": pnl_pct,
+                "pnl_pct_of_notional": pnl_pct_of_notional,
             }
     except Exception as e:
         msg = f"position_fetch_failed: {type(e).__name__}"

@@ -1,7 +1,9 @@
 # src/services/metrics.py
 from __future__ import annotations
 
+import logging
 import statistics
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -11,14 +13,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from src.storage.database import get_session
 from src.storage.models import ToolCall, TradeAction
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PerformanceMetrics:
+    # Gross metrics (existing — per-lot-pair semantics shift per spec §0)
     total_return_pct: float = 0.0
     total_pnl: float = 0.0
     win_rate: float = 0.0
     max_drawdown_pct: float = 0.0
-    profit_factor: float = 0.0
+    profit_factor: float | None = None  # zero-denom → None per spec §2
     total_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
@@ -29,6 +34,26 @@ class PerformanceMetrics:
     worst_trade: float = 0.0
     recent_summary: str = ""
     total_fees: float = 0.0
+    # Net metrics (iter-tool-opt-net-pnl-metrics — per spec §C3)
+    net_pnl: float = 0.0
+    net_profit_factor: float | None = None
+    net_win_rate: float = 0.0
+    avg_win_net: float = 0.0
+    avg_loss_net: float = 0.0
+    best_trade_net: float = 0.0
+    worst_trade_net: float = 0.0
+    net_winning_trades: int = 0
+    net_losing_trades: int = 0
+    # Break-even counts (PR #57 review R2-I-3) — surface partition completeness
+    # to agent: total_trades = winning + losing + break_even (gross side; net
+    # side analogous). Zero by default; output layer renders only when > 0.
+    break_even_trades: int = 0
+    net_break_even_trades: int = 0
+    # Caveats (per spec §6.2)
+    legacy_open_skipped: int = 0
+    legacy_close_skipped: int = 0
+    missing_close_entry_price_count: int = 0
+    invariant_violations: int = 0
 
 
 @dataclass
@@ -41,6 +66,148 @@ class ToolCallStats:
     p95_duration_ms: int
     error_breakdown: dict[str, int]       # {"TimeoutError": 3, ...}
     last_called_at: datetime              # MAX(created_at); always has value for tools in dict
+
+
+@dataclass
+class _Lot:
+    """In-memory FIFO lot (spec §5.2; mirrors scripts/_sim_metrics._Lot subset)."""
+    side: str
+    entry_px: float
+    original_amount: float
+    remaining_amount: float
+    open_fee: float
+
+
+@dataclass
+class _Roundtrip:
+    """Lot pair result (spec §5.2; mirrors scripts/_sim_metrics.Roundtrip subset)."""
+    side: str
+    entry_px: float
+    exit_px: float
+    amount: float
+    pnl_gross: float
+    fee_open_share: float
+    fee_close_share: float
+    pnl_net: float
+    is_liquidation: bool
+
+
+_EPS = 1e-9
+
+
+async def _collect_roundtrips_from_trade_actions(
+    engine: AsyncEngine,
+    session_id: str,
+) -> tuple[list[_Roundtrip], dict[str, int]]:
+    """FIFO lot pairing from trade_actions (spec §5.2).
+
+    Reads trade_actions for the session, reconstructs FIFO lot queue from
+    open fills (pnl IS NULL), pairs against close fills (pnl IS NOT NULL).
+    Uses lot.open_fee + close.fee directly (no fee_rate dependency).
+
+    Returns (roundtrips, caveats). Caveats keys: legacy_open_skipped,
+    legacy_close_skipped, missing_close_entry_price_count, invariant_violations.
+    """
+    async with get_session(engine) as session:
+        result = await session.execute(
+            select(TradeAction)
+            .where(TradeAction.session_id == session_id)
+            .where(TradeAction.action == "order_filled")
+            .order_by(TradeAction.created_at, TradeAction.id)
+        )
+        fills = list(result.scalars().all())
+
+    lots: dict[str, deque[_Lot]] = {"long": deque(), "short": deque()}
+    roundtrips: list[_Roundtrip] = []
+    caveats = {
+        "legacy_open_skipped": 0,
+        "legacy_close_skipped": 0,
+        "missing_close_entry_price_count": 0,
+        "invariant_violations": 0,
+    }
+
+    for fill in fills:
+        # OPEN vs CLOSE discriminator (spec §5.2): pnl IS NULL → open
+        if fill.pnl is None:
+            if fill.amount is None:
+                caveats["legacy_open_skipped"] += 1
+                logger.warning("metrics FIFO: legacy open fill id=%s amount IS NULL, skipping", fill.id)
+                continue
+            if fill.amount <= 0 or fill.price <= 0:
+                logger.error("metrics FIFO: open fill id=%s corrupt amount=%s or price=%s",
+                             fill.id, fill.amount, fill.price)
+                caveats["invariant_violations"] += 1
+                continue
+            lots[fill.side].append(_Lot(
+                side=fill.side, entry_px=fill.price,
+                original_amount=fill.amount, remaining_amount=fill.amount,
+                open_fee=fill.fee or 0.0,
+            ))
+            continue
+
+        # CLOSE fill
+        if fill.amount is None:
+            caveats["legacy_close_skipped"] += 1
+            logger.warning("metrics FIFO: legacy close fill id=%s amount IS NULL, skipping", fill.id)
+            continue
+        if fill.amount <= 0 or fill.price <= 0:
+            # Symmetric with open path (PR #57 review R4-I-1): price=0 corrupt close
+            # would otherwise compute phantom pnl = (0 - lot.entry_px) * consumed * sign,
+            # polluting total_pnl / best / worst / MDD / PF silently.
+            logger.error(
+                "metrics FIFO: close fill id=%s corrupt amount=%s or price=%s, skipping",
+                fill.id, fill.amount, fill.price,
+            )
+            caveats["invariant_violations"] += 1
+            continue
+        if fill.entry_price is None:
+            caveats["missing_close_entry_price_count"] += 1
+            # NOT skip — FIFO uses lot.entry_px from open fill (spec §6.2 b)
+
+        is_liquidation = fill.trigger_reason == "liquidation"
+        liq_pnl_per_unit: float | None = None
+        if is_liquidation:
+            if fill.pnl is None or fill.amount <= 0:
+                caveats["invariant_violations"] += 1
+                logger.error("metrics FIFO: liquidation id=%s missing pnl or zero amount", fill.id)
+                liq_pnl_per_unit = 0.0
+            else:
+                liq_pnl_per_unit = fill.pnl / fill.amount
+
+        close_remaining = fill.amount
+        close_fee_total = fill.fee or 0.0
+        while close_remaining > _EPS:
+            if not lots[fill.side]:
+                caveats["invariant_violations"] += 1
+                logger.error(
+                    "metrics FIFO: close fill id=%s no preceding open lot for side=%s",
+                    fill.id, fill.side,
+                )
+                break
+            lot = lots[fill.side][0]
+            consumed = min(lot.remaining_amount, close_remaining)
+            fee_open_share = lot.open_fee * (consumed / lot.original_amount)
+            fee_close_share = close_fee_total * (consumed / fill.amount)
+            sign = 1.0 if fill.side == "long" else -1.0
+            if is_liquidation:
+                pnl_gross = (liq_pnl_per_unit or 0.0) * consumed
+            else:
+                pnl_gross = (fill.price - lot.entry_px) * consumed * sign
+            pnl_net = pnl_gross - fee_open_share - fee_close_share
+            roundtrips.append(_Roundtrip(
+                side=lot.side, entry_px=lot.entry_px, exit_px=fill.price,
+                amount=consumed,
+                pnl_gross=pnl_gross,
+                fee_open_share=fee_open_share, fee_close_share=fee_close_share,
+                pnl_net=pnl_net,
+                is_liquidation=is_liquidation,
+            ))
+            lot.remaining_amount -= consumed
+            close_remaining -= consumed
+            if lot.remaining_amount <= _EPS:
+                lots[fill.side].popleft()
+
+    return roundtrips, caveats
 
 
 class MetricsService:
@@ -58,71 +225,119 @@ class MetricsService:
         self,
         current_position: str = "none",
     ) -> PerformanceMetrics:
-        # Query all fills (including opens with pnl=None) for fee totaling
+        from src.storage.models import Session as SessionModel
+
+        # Fetch fee_rate from sessions (informational; FIFO uses lot.open_fee + fill.fee directly)
+        async with get_session(self._engine) as session:
+            row = (await session.execute(
+                select(SessionModel.fee_rate).where(SessionModel.id == self._session_id)
+            )).first()
+        fee_rate = row.fee_rate if row else None
+        if fee_rate is None:
+            logger.warning(
+                "metrics: sessions.fee_rate IS NULL for session %s (informational; "
+                "FIFO algorithm uses recorded trade_actions.fee values)",
+                self._session_id,
+            )
+
+        # Total fees (independent of FIFO roundtrips)
         async with get_session(self._engine) as session:
             result = await session.execute(
                 select(TradeAction)
                 .where(TradeAction.session_id == self._session_id)
                 .where(TradeAction.action == "order_filled")
-                .order_by(TradeAction.created_at)
             )
-            all_fills = result.scalars().all()
-
-        # Total fees from ALL fills (open + close)
+            all_fills = list(result.scalars().all())
         total_fees = sum(f.fee for f in all_fills if f.fee is not None)
 
-        # PnL trades: only fills with pnl (close fills)
-        pnl_fills = [f for f in all_fills if f.pnl is not None]
-        pnls: list[float] = [f.pnl for f in pnl_fills]
+        # FIFO lot pairing
+        rts, caveats = await _collect_roundtrips_from_trade_actions(self._engine, self._session_id)
 
-        if not pnls:
+        # All stats unavailable when no roundtrips (spec §6.2 c)
+        if not rts:
             return PerformanceMetrics(
                 current_position=current_position,
                 total_fees=total_fees,
+                legacy_open_skipped=caveats["legacy_open_skipped"],
+                legacy_close_skipped=caveats["legacy_close_skipped"],
+                missing_close_entry_price_count=caveats["missing_close_entry_price_count"],
+                invariant_violations=caveats["invariant_violations"],
             )
 
-        total_pnl = sum(pnls)
-        winning_pnls = [p for p in pnls if p > 0]
-        losing_pnls = [p for p in pnls if p <= 0]  # breakeven (0.0) counted as loss
-        gross_profit = sum(winning_pnls) if winning_pnls else 0.0
-        gross_loss = abs(sum(losing_pnls)) if losing_pnls else 0.0
+        # Break-even (pnl == 0) excluded from both wins and losses — aligns
+        # with scripts/_sim_metrics convention (PR #57 review I-1; spec §3
+        # single-source-of-truth). Affects losing_trades count + avg_loss
+        # denominator only (win_rate / profit_factor mathematically identical
+        # since 0 contributes 0 to sum).
+        gross_pnls = [rt.pnl_gross for rt in rts]
+        gross_wins = [p for p in gross_pnls if p > 0]
+        gross_losses = [p for p in gross_pnls if p < 0]
+        gross_profit = sum(gross_wins)
+        gross_loss_abs = abs(sum(gross_losses))
 
-        # Max drawdown — equity-peak-based (matches scripts/_sim_metrics.max_drawdown_pct
-        # algorithm; G-calc-rigor-audit §G-3). equity_t = initial_balance + cumulative PnL;
-        # peak_t = running max; dd_t = (peak_t - equity_t) / peak_t.
+        net_pnls = [rt.pnl_net for rt in rts]
+        net_wins = [p for p in net_pnls if p > 0]
+        net_losses = [p for p in net_pnls if p < 0]
+        net_profit = sum(net_wins)
+        net_loss_abs = abs(sum(net_losses))
+
+        # MDD on net equity (spec §A1)
         equity = self._initial_balance
-        peak_equity = self._initial_balance
+        peak = equity
         max_dd_ratio = 0.0
-        for p in pnls:
-            equity += p
-            peak_equity = max(peak_equity, equity)
-            if peak_equity > 0:
-                max_dd_ratio = max(max_dd_ratio, (peak_equity - equity) / peak_equity)
+        for net in net_pnls:
+            equity += net
+            peak = max(peak, equity)
+            if peak > 0:
+                max_dd_ratio = max(max_dd_ratio, (peak - equity) / peak)
 
-        # Recent summary: last N trades
-        n = min(5, len(pnls))
-        recent_pnls = pnls[-n:]
+        # recent_summary 沿用 gross W/L 计数（spec 未明确切 net）；net 化作 W3 follow-up
+        # candidate if fee 翻转 win→loss 频率高（参 spec §10 OOS）.
+        # Break-even (p == 0) 与主指标一致排除（PR #57 review R2-I-2）；当 BE 存在时
+        # 加 `B` 段，agent 可从 W+L+B = n 验证 partition 完整性.
+        n = min(5, len(gross_pnls))
+        recent_pnls = gross_pnls[-n:]
         recent_wins = sum(1 for p in recent_pnls if p > 0)
-        recent_losses = n - recent_wins
+        recent_losses = sum(1 for p in recent_pnls if p < 0)
+        recent_be = n - recent_wins - recent_losses
         trade_word = "trade" if n == 1 else "trades"
-        recent_summary = f"{recent_wins}W {recent_losses}L (last {n} {trade_word})"
+        be_part = f" {recent_be}B" if recent_be > 0 else ""
+        recent_summary = f"{recent_wins}W {recent_losses}L{be_part} (last {n} {trade_word})"
+
+        total_pnl = sum(gross_pnls)
+        net_pnl = sum(net_pnls)
 
         return PerformanceMetrics(
             total_return_pct=(total_pnl / self._initial_balance) * 100 if self._initial_balance > 0 else 0.0,
             total_pnl=total_pnl,
-            win_rate=len(winning_pnls) / len(pnls),
+            win_rate=len(gross_wins) / len(rts),
             max_drawdown_pct=max_dd_ratio * 100.0,
-            profit_factor=gross_profit / gross_loss if gross_loss > 0 else float("inf"),
-            total_trades=len(pnls),
-            winning_trades=len(winning_pnls),
-            losing_trades=len(losing_pnls),
+            profit_factor=(gross_profit / gross_loss_abs) if (gross_wins and gross_loss_abs > 0) else None,
+            total_trades=len(rts),
+            winning_trades=len(gross_wins),
+            losing_trades=len(gross_losses),
             current_position=current_position,
-            avg_win=gross_profit / len(winning_pnls) if winning_pnls else 0.0,
-            avg_loss=-gross_loss / len(losing_pnls) if losing_pnls else 0.0,
-            best_trade=max(pnls),
-            worst_trade=min(pnls),
+            avg_win=gross_profit / len(gross_wins) if gross_wins else 0.0,
+            avg_loss=-gross_loss_abs / len(gross_losses) if gross_losses else 0.0,
+            best_trade=max(gross_pnls),
+            worst_trade=min(gross_pnls),
             recent_summary=recent_summary,
             total_fees=total_fees,
+            net_pnl=net_pnl,
+            net_profit_factor=(net_profit / net_loss_abs) if (net_wins and net_loss_abs > 0) else None,
+            net_win_rate=len(net_wins) / len(rts),
+            avg_win_net=net_profit / len(net_wins) if net_wins else 0.0,
+            avg_loss_net=-net_loss_abs / len(net_losses) if net_losses else 0.0,
+            best_trade_net=max(net_pnls),
+            worst_trade_net=min(net_pnls),
+            net_winning_trades=len(net_wins),
+            net_losing_trades=len(net_losses),
+            break_even_trades=sum(1 for p in gross_pnls if p == 0),
+            net_break_even_trades=sum(1 for p in net_pnls if p == 0),
+            legacy_open_skipped=caveats["legacy_open_skipped"],
+            legacy_close_skipped=caveats["legacy_close_skipped"],
+            missing_close_entry_price_count=caveats["missing_close_entry_price_count"],
+            invariant_violations=caveats["invariant_violations"],
         )
 
     async def get_tool_call_summary(

@@ -92,7 +92,7 @@ async def test_state_snapshot_no_position(deps_flat):
 
 
 async def test_state_snapshot_with_position(deps_with_position):
-    """T-SS-2: 有持仓 cycle → position 含 8 字段（含 pnl_pct 衍生计算）。"""
+    """T-SS-2: 有持仓 cycle → position 含 8 字段（含 pnl_pct_of_notional 衍生计算）。"""
     snap = await _capture_state_snapshot("cyc-002", deps_with_position)
     p = snap["position"]
     assert p["symbol"] == "BTC/USDT:USDT"
@@ -102,8 +102,8 @@ async def test_state_snapshot_with_position(deps_with_position):
     assert p["unrealized_pnl"] == 12.34
     assert p["leverage"] == 5
     assert p["liquidation_price"] == 79500.0
-    # pnl_pct = 12.34 / (75350 * 0.265) * 100 ≈ 0.0618
-    assert p["pnl_pct"] == pytest.approx(0.0618, rel=1e-3)
+    # pnl_pct_of_notional = 12.34 / (75350 * 0.265) * 100 ≈ 0.0618
+    assert p["pnl_pct_of_notional"] == pytest.approx(0.0618, rel=1e-3)
 
 
 async def test_state_snapshot_pending_orders_detail(deps_with_position):
@@ -195,7 +195,7 @@ async def test_state_snapshot_balance_field_name(deps_flat):
 
 
 async def test_state_snapshot_pnl_pct_zero_position():
-    """T-SS-10: entry_price=0 或 contracts=0 → pnl_pct = None（不除 0）。"""
+    """T-SS-10: entry_price=0 或 contracts=0 → pnl_pct_of_notional = None（不除 0）。"""
     deps = MagicMock()
     deps.symbol = "BTC/USDT:USDT"
     deps.exchange = MagicMock()
@@ -217,7 +217,7 @@ async def test_state_snapshot_pnl_pct_zero_position():
         base_volume=1.0, timestamp=0,
     ))
     snap = await _capture_state_snapshot("cyc-010", deps)
-    assert snap["position"]["pnl_pct"] is None
+    assert snap["position"]["pnl_pct_of_notional"] is None
 
 
 async def test_state_snapshot_always_returns_dict_never_none():

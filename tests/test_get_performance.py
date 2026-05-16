@@ -1,6 +1,7 @@
 # tests/test_get_performance.py
-"""Task 19: get_performance gross-based labels + wrapper docstring rewrite."""
+"""iter-tool-opt-net-pnl-metrics: get_performance gross/net dual-view output + wrapper docstring."""
 import pytest
+import pytest_asyncio
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
@@ -47,21 +48,39 @@ def _make_deps() -> _MockDeps:
 
 
 async def _make_deps_with_metrics(tmp_path):
-    """Build deps with MetricsService backed by a DB with two completed trades."""
+    """Build deps with MetricsService backed by a DB with two completed paired trades.
+
+    iter-tool-opt-net-pnl-metrics: TradeAction 必须有 amount + entry_price (close fill)
+    for FIFO to produce roundtrips.
+    """
     from src.storage.database import init_db, get_session
     from src.storage.models import Session, TradeAction
     from src.services.metrics import MetricsService
 
     engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/perf19.db")
     async with get_session(engine) as session:
-        session.add(Session(id="s19", name="test-perf-19", initial_balance=10000.0))
+        session.add(Session(id="s19", name="test-perf-19", initial_balance=10000.0, fee_rate=0.0005))
+        # Trade 1: open @50000 -> close @50450, gross=+45 (long 0.1)
         session.add(TradeAction(
-            session_id="s19", action="order_filled", order_id="o1",
-            symbol="BTC/USDT:USDT", side="long", pnl=45.0, fee=0.5,
+            session_id="s19", action="order_filled", order_id="o1-open",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50000.0, amount=0.1, fee=0.25, pnl=None, entry_price=None,
         ))
         session.add(TradeAction(
-            session_id="s19", action="order_filled", order_id="o2",
-            symbol="BTC/USDT:USDT", side="long", pnl=-22.0, fee=0.3,
+            session_id="s19", action="order_filled", order_id="o1-close",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50450.0, amount=0.1, fee=0.25, pnl=45.0, entry_price=50000.0,
+        ))
+        # Trade 2: open @50000 -> close @49780, gross=-22 (long 0.1)
+        session.add(TradeAction(
+            session_id="s19", action="order_filled", order_id="o2-open",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50000.0, amount=0.1, fee=0.15, pnl=None, entry_price=None,
+        ))
+        session.add(TradeAction(
+            session_id="s19", action="order_filled", order_id="o2-close",
+            symbol="BTC/USDT:USDT", side="long",
+            price=49780.0, amount=0.1, fee=0.15, pnl=-22.0, entry_price=50000.0,
         ))
         await session.commit()
 
@@ -69,18 +88,19 @@ async def _make_deps_with_metrics(tmp_path):
     deps.db_engine = engine
     deps.session_id = "s19"
     deps.initial_balance = 10000.0
+    deps.fee_rate = 0.0005
     deps.metrics = MetricsService(engine=engine, session_id="s19", initial_balance=10000.0)
     deps.exchange.fetch_balance.return_value = Balance(10023.0, 9023.0, 1000.0)
     return deps, engine
 
 
 # ---------------------------------------------------------------------------
-# Task 19 AC: gross-based label assertions
+# iter-tool-opt-net-pnl-metrics AC: dual gross/net label assertions
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_trade_stats_includes_gross_based_label(tmp_path):
-    """Trade Stats labels each metric as (gross-based) until net iter lands."""
+    """Trade Stats labels each metric with both gross and net dual views."""
     from src.agent.tools_perception import get_performance
 
     deps, engine = await _make_deps_with_metrics(tmp_path)
@@ -89,11 +109,11 @@ async def test_trade_stats_includes_gross_based_label(tmp_path):
     finally:
         await engine.dispose()
 
-    # Win rate line contains gross-based label
+    # Output carries dual gross/net view
     assert "Win" in out
-    assert "(gross-based)" in out
+    assert "gross" in out and "net" in out
 
-    # Key stat lines all carry the label
+    # Key stat lines all present
     assert "Profit Factor:" in out
     assert "Max Drawdown:" in out
     assert "Best Trade:" in out
@@ -102,7 +122,7 @@ async def test_trade_stats_includes_gross_based_label(tmp_path):
 
 @pytest.mark.asyncio
 async def test_win_rate_line_has_gross_based_label(tmp_path):
-    """Win rate specifically annotated with 'gross-based'."""
+    """Win rate line emits dual 'NN% gross ... NN% net' schema."""
     from src.agent.tools_perception import get_performance
 
     deps, engine = await _make_deps_with_metrics(tmp_path)
@@ -111,16 +131,15 @@ async def test_win_rate_line_has_gross_based_label(tmp_path):
     finally:
         await engine.dispose()
 
-    # The win-rate part of the Total Trades line should read "(...%, gross-based)"
     import re
-    assert re.search(r"\d+\.?\d*%,\s*gross-based\)", out), (
-        f"Expected 'NN%, gross-based)' on win-rate line; got:\n{out}"
+    assert re.search(r"\d+%\s+gross.*\d+%\s+net", out), (
+        f"Expected 'NN% gross ... NN% net' on win-rate line; got:\n{out}"
     )
 
 
 @pytest.mark.asyncio
 async def test_profit_factor_has_gross_based_label(tmp_path):
-    """Profit Factor line ends with '(gross-based)'."""
+    """Profit Factor line contains both 'gross' and 'net' tokens."""
     from src.agent.tools_perception import get_performance
 
     deps, engine = await _make_deps_with_metrics(tmp_path)
@@ -131,8 +150,8 @@ async def test_profit_factor_has_gross_based_label(tmp_path):
 
     for line in out.splitlines():
         if line.startswith("Profit Factor:"):
-            assert "(gross-based)" in line, (
-                f"Expected '(gross-based)' on Profit Factor line; got: {line!r}"
+            assert "gross" in line and "net" in line, (
+                f"Expected gross+net on Profit Factor line; got: {line!r}"
             )
             break
     else:
@@ -141,7 +160,7 @@ async def test_profit_factor_has_gross_based_label(tmp_path):
 
 @pytest.mark.asyncio
 async def test_max_drawdown_has_gross_based_label(tmp_path):
-    """Max Drawdown line carries '(gross-based equity)' label."""
+    """Max Drawdown line carries '(net equity)' label (spec §A1)."""
     from src.agent.tools_perception import get_performance
 
     deps, engine = await _make_deps_with_metrics(tmp_path)
@@ -152,8 +171,8 @@ async def test_max_drawdown_has_gross_based_label(tmp_path):
 
     for line in out.splitlines():
         if line.startswith("Max Drawdown:"):
-            assert "(gross-based equity)" in line, (
-                f"Expected '(gross-based equity)' on Max Drawdown line; got: {line!r}"
+            assert "(net equity)" in line, (
+                f"Expected '(net equity)' on Max Drawdown line; got: {line!r}"
             )
             break
     else:
@@ -162,7 +181,7 @@ async def test_max_drawdown_has_gross_based_label(tmp_path):
 
 @pytest.mark.asyncio
 async def test_best_worst_trade_has_gross_based_label(tmp_path):
-    """Best/Worst Trade line carries '(gross-based)'."""
+    """Best/Worst Trade lines emit dual gross/net view."""
     from src.agent.tools_perception import get_performance
 
     deps, engine = await _make_deps_with_metrics(tmp_path)
@@ -173,8 +192,8 @@ async def test_best_worst_trade_has_gross_based_label(tmp_path):
 
     for line in out.splitlines():
         if line.startswith("Best Trade:"):
-            assert "(gross-based)" in line, (
-                f"Expected '(gross-based)' on Best/Worst Trade line; got: {line!r}"
+            assert "gross" in line and "net" in line, (
+                f"Expected gross+net on Best Trade line; got: {line!r}"
             )
             break
     else:
@@ -182,11 +201,11 @@ async def test_best_worst_trade_has_gross_based_label(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 19 AC: wrapper docstring
+# AC: wrapper docstring
 # ---------------------------------------------------------------------------
 
 def test_get_performance_wrapper_docstring_lists_fee_fields_and_gross_caveat():
-    """Wrapper docstring lists Total Fees field and gross-based caveat."""
+    """Wrapper docstring lists Total Fees field + dual view tokens + MDD net equity."""
     from src.agent.trader import create_trader_agent
     from src.config import PersonaConfig
 
@@ -197,18 +216,21 @@ def test_get_performance_wrapper_docstring_lists_fee_fields_and_gross_caveat():
     assert "Total Fees" in desc, (
         f"'Total Fees' missing from get_performance wrapper docstring:\n{desc!r}"
     )
-    assert "gross-based" in desc, (
-        f"'gross-based' caveat missing from get_performance wrapper docstring:\n{desc!r}"
+    assert "gross" in desc and "net" in desc, (
+        f"gross/net dual view missing from get_performance wrapper docstring:\n{desc!r}"
+    )
+    assert "(net equity)" in desc, (
+        f"'(net equity)' MDD label missing from wrapper docstring:\n{desc!r}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Regression: existing get_performance tests still pass (no Trading Perf regression)
+# Regression: existing get_performance tests still pass
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_get_performance_trading_perf_section_unchanged(tmp_path):
-    """Trading Performance section still renders correctly after Task 19."""
+    """Trading Performance section header + key fields still render."""
     from src.agent.tools_perception import get_performance
     import re
 
@@ -231,7 +253,7 @@ async def test_get_performance_trading_perf_section_unchanged(tmp_path):
 
 @pytest.mark.asyncio
 async def test_get_performance_no_metrics_service_unchanged():
-    """Regression: get_performance(deps.metrics=None) path unaffected by Task 19."""
+    """Regression: get_performance(deps.metrics=None) emits 'No metrics service available.'"""
     from src.agent.tools_perception import get_performance
 
     deps = _make_deps()
@@ -266,3 +288,216 @@ async def test_get_performance_no_trades_unchanged(tmp_path):
         await engine.dispose()
 
     assert "No completed trades yet" in out
+
+
+# ---------------------------------------------------------------------------
+# iter-tool-opt-net-pnl-metrics: new positive dual-view assertions (spec §8.1)
+# ---------------------------------------------------------------------------
+
+@pytest_asyncio.fixture
+async def deps_with_one_winning_trade(db_engine, deps_factory):
+    """deps_factory + metrics service + 1 winning paired trade (raw SQL insert)."""
+    from sqlalchemy import text
+    from src.services.metrics import MetricsService
+
+    sid = "perf-test-1"
+    async with db_engine.begin() as conn:
+        # Defensive idempotent — deps_factory doesn't insert into sessions, but
+        # tmp_path reuse across tests may leave residue.
+        await conn.execute(text("DELETE FROM sessions WHERE id = :sid"), {"sid": sid})
+        await conn.execute(text(
+            "INSERT INTO sessions "
+            "(id, name, symbol, initial_balance, status, created_at, updated_at, "
+            " exchange_type, timeframe, scheduler_interval_min, approval_enabled, "
+            " token_budget, fee_rate) "
+            "VALUES (:sid, :sid, 'BTC/USDT:USDT', 10000.0, 'active', "
+            "        '2026-01-01T00:00:00', '2026-01-01T00:00:00', "
+            "        'simulated', '15m', 15, 1, 500000, 0.0005)"
+        ), {"sid": sid})
+        # Paired open + close (one winning roundtrip). Distinct created_at
+        # so FIFO ORDER BY created_at puts open before close.
+        for fill in [
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 50000.0,
+             "amount": 0.1, "fee": 2.5, "pnl": None, "entry_price": None,
+             "order_id": "o-open", "created_at": "2026-01-01T00:00:00"},
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 51000.0,
+             "amount": 0.1, "fee": 2.55, "pnl": 100.0, "entry_price": 50000.0,
+             "order_id": "o-close", "created_at": "2026-01-01T00:00:01"},
+        ]:
+            cols = ", ".join(fill.keys())
+            placeholders = ", ".join(f":{k}" for k in fill.keys())
+            await conn.execute(text(f"INSERT INTO trade_actions ({cols}) VALUES ({placeholders})"), fill)
+
+    deps = deps_factory(session_id=sid, initial_balance=10000.0)
+    deps.metrics = MetricsService(db_engine, sid, initial_balance=10000.0)
+    deps.fee_rate = 0.0005
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_get_performance_dual_view_lines(deps_with_one_winning_trade):
+    """spec §8.1: 输出 gross/net 双视角."""
+    from src.agent.tools_perception import get_performance
+
+    out = await get_performance(deps_with_one_winning_trade)
+    # Win Rate line
+    win_line = next(line for line in out.splitlines() if line.startswith("Win Rate"))
+    assert "gross" in win_line and "net" in win_line, (
+        f"Win rate line missing dual view: {win_line!r}"
+    )
+    # Profit Factor line
+    pf_line = next(line for line in out.splitlines() if line.startswith("Profit Factor"))
+    assert "gross" in pf_line and "net" in pf_line, (
+        f"PF line missing dual view: {pf_line!r}"
+    )
+    # Max Drawdown line
+    mdd_line = next(line for line in out.splitlines() if "Max Drawdown" in line)
+    assert "net equity" in mdd_line, (
+        f"MDD line missing 'net equity': {mdd_line!r}"
+    )
+    # Realized PnL line — lock in gross/net numeric pairing (fixture: gross=+100, fees=5.05, net=+94.95)
+    # Guards against gross/net field swaps that would slip past substring-only checks.
+    pnl_line = next(line for line in out.splitlines() if line.startswith("Realized PnL"))
+    assert "+100.00 USDT gross" in pnl_line, (
+        f"Realized PnL line missing gross value: {pnl_line!r}"
+    )
+    assert "+94.95 USDT net" in pnl_line, (
+        f"Realized PnL line missing net value: {pnl_line!r}"
+    )
+
+
+@pytest_asyncio.fixture
+async def deps_with_legacy_only(db_engine, deps_factory):
+    """deps + metrics service + only pre-iter legacy fills (amount IS NULL on both open + close).
+
+    Mirrors pre-net-metrics-iter session shape: scripts/_sim_metrics from sim_orders
+    still has forensic data, but trade_actions has no amount/entry_price → FIFO skips
+    everything → total_trades=0 → output should be "Stats unavailable: all close fills
+    are pre-net-metrics-iter legacy data ...".
+    """
+    from sqlalchemy import text
+    from src.services.metrics import MetricsService
+
+    sid = "perf-test-legacy"
+    async with db_engine.begin() as conn:
+        await conn.execute(text("DELETE FROM sessions WHERE id = :sid"), {"sid": sid})
+        await conn.execute(text(
+            "INSERT INTO sessions "
+            "(id, name, symbol, initial_balance, status, created_at, updated_at, "
+            " exchange_type, timeframe, scheduler_interval_min, approval_enabled, "
+            " token_budget, fee_rate) "
+            "VALUES (:sid, :sid, 'BTC/USDT:USDT', 10000.0, 'active', "
+            "        '2026-01-01T00:00:00', '2026-01-01T00:00:00', "
+            "        'simulated', '15m', 15, 1, 500000, 0.0005)"
+        ), {"sid": sid})
+        for fill in [
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 50000.0,
+             "amount": None, "fee": 2.5, "pnl": None, "entry_price": None,
+             "order_id": "o-legacy-open", "created_at": "2026-01-01T00:00:00"},
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 51000.0,
+             "amount": None, "fee": 2.55, "pnl": 100.0, "entry_price": None,
+             "order_id": "o-legacy-close", "created_at": "2026-01-01T00:00:01"},
+        ]:
+            cols = ", ".join(fill.keys())
+            placeholders = ", ".join(f":{k}" for k in fill.keys())
+            await conn.execute(text(f"INSERT INTO trade_actions ({cols}) VALUES ({placeholders})"), fill)
+
+    deps = deps_factory(session_id=sid, initial_balance=10000.0)
+    deps.metrics = MetricsService(db_engine, sid, initial_balance=10000.0)
+    deps.fee_rate = 0.0005
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_get_performance_legacy_session_stats_unavailable_text(deps_with_legacy_only):
+    """spec §6.2(c): all-legacy session UX — agent sees explicit
+    'Stats unavailable: all close fills are pre-net-metrics-iter legacy data ...'
+    pointing to scripts/_sim_metrics.py for forensic recovery.
+
+    PR #57 mini-fix I-3: prior coverage only asserted internal caveat counters
+    (test_compute_legacy_session_all_stats_unavailable), not the rendered output.
+    """
+    from src.agent.tools_perception import get_performance
+
+    out = await get_performance(deps_with_legacy_only)
+    assert "Stats unavailable" in out, f"Missing degradation label in:\n{out}"
+    assert "pre-net-metrics-iter legacy data" in out, f"Missing legacy caveat in:\n{out}"
+    assert "scripts/_sim_metrics" in out, f"Missing forensic pointer in:\n{out}"
+
+
+@pytest_asyncio.fixture
+async def deps_with_paired_trade_and_invariant(db_engine, deps_factory):
+    """deps + metrics service + 1 valid paired trade + 1 orphan close (no preceding open).
+
+    Mirrors spec §6.9 'close fill without preceding open lot' scenario: clean
+    session-level stats present (1 winning trade) but FIFO emits +1
+    invariant_violations counter for the orphan close. Used to verify
+    spec §6.9 contract (Note surfaced in populated-state output).
+    """
+    from sqlalchemy import text
+    from src.services.metrics import MetricsService
+
+    sid = "perf-test-invariant"
+    async with db_engine.begin() as conn:
+        await conn.execute(text("DELETE FROM sessions WHERE id = :sid"), {"sid": sid})
+        await conn.execute(text(
+            "INSERT INTO sessions "
+            "(id, name, symbol, initial_balance, status, created_at, updated_at, "
+            " exchange_type, timeframe, scheduler_interval_min, approval_enabled, "
+            " token_budget, fee_rate) "
+            "VALUES (:sid, :sid, 'BTC/USDT:USDT', 10000.0, 'active', "
+            "        '2026-01-01T00:00:00', '2026-01-01T00:00:00', "
+            "        'simulated', '15m', 15, 1, 500000, 0.0005)"
+        ), {"sid": sid})
+        # 1 valid paired roundtrip (gross win) + 1 orphan close at timestamp before any open
+        for fill in [
+            # Orphan close FIRST (no preceding open lot when processed in time order)
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 51000.0,
+             "amount": 0.05, "fee": 1.275, "pnl": 100.0, "entry_price": 50000.0,
+             "order_id": "o-orphan-close", "created_at": "2026-01-01T00:00:00"},
+            # Then valid paired open + close
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 50000.0,
+             "amount": 0.1, "fee": 2.5, "pnl": None, "entry_price": None,
+             "order_id": "o-open", "created_at": "2026-01-01T00:00:01"},
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 51000.0,
+             "amount": 0.1, "fee": 2.55, "pnl": 100.0, "entry_price": 50000.0,
+             "order_id": "o-close", "created_at": "2026-01-01T00:00:02"},
+        ]:
+            cols = ", ".join(fill.keys())
+            placeholders = ", ".join(f":{k}" for k in fill.keys())
+            await conn.execute(text(f"INSERT INTO trade_actions ({cols}) VALUES ({placeholders})"), fill)
+
+    deps = deps_factory(session_id=sid, initial_balance=10000.0)
+    deps.metrics = MetricsService(db_engine, sid, initial_balance=10000.0)
+    deps.fee_rate = 0.0005
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_get_performance_invariant_violation_note_in_populated_state(
+    deps_with_paired_trade_and_invariant,
+):
+    """spec §6.9 contract: invariant_violations > 0 must surface as Note even
+    when total_trades > 0 (populated-state path). Without this Note, agent
+    sees clean 1 trade + total_fees including the orphan close's fee → gross −
+    fees ≠ net self-check fails silently (PR #57 review R4-I-2).
+    """
+    from src.agent.tools_perception import get_performance
+
+    out = await get_performance(deps_with_paired_trade_and_invariant)
+    # Populated state: 1 valid trade present
+    assert "Total Trades: 1" in out, f"Expected 1 valid trade; got:\n{out}"
+    # spec §6.9 caveat surfaced even with populated stats
+    assert "invariant violations" in out.lower(), (
+        f"Missing spec §6.9 invariant Note in populated-state output:\n{out}"
+    )
+    assert "1 fill" in out or "1 fill(s)" in out, (
+        f"Note must report violation count (1):\n{out}"
+    )

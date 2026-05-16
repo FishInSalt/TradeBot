@@ -288,9 +288,9 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
 
         pnl_lines = ["=== PnL ==="]
         if deps.initial_balance > 0:
-            pnl_pct_inner = (p.unrealized_pnl / deps.initial_balance) * 100
+            pnl_pct_of_capital = (p.unrealized_pnl / deps.initial_balance) * 100
             pnl_lines.append(
-                f"PnL: {p.unrealized_pnl:+.2f} USDT gross ({pnl_pct_inner:+.2f}% of initial capital)"
+                f"PnL: {p.unrealized_pnl:+.2f} USDT gross ({pnl_pct_of_capital:+.2f}% of initial capital)"
             )
         else:
             pnl_lines.append(f"PnL: {p.unrealized_pnl:+.2f} USDT gross")
@@ -603,11 +603,13 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
     if deps.metrics is not None:
         metrics = await deps.metrics.compute()
         if metrics.total_trades > 0:
+            # All metrics gross-based (PR #57 review I-2 + spec §3 single-source);
+            # full gross/net dual view is in get_performance.
             summary_lines = [
                 f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
-                f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}",
-                f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT",
-                f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f}'}",
+                f"({metrics.win_rate:.1%}, gross) | Loss: {metrics.losing_trades}",
+                f"Avg Win: {metrics.avg_win:+.2f} USDT gross | Avg Loss: {metrics.avg_loss:.2f} USDT gross",
+                f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor is None else f'{metrics.profit_factor:.2f}'} (gross)",
             ]
             if metrics.recent_summary:
                 summary_lines.append(f"Recent: {metrics.recent_summary}")
@@ -695,7 +697,7 @@ async def get_performance(deps: TradingDeps) -> str:
             f"=== Trading Performance (@ {fetch_ts} UTC) ===\n"
             f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
             f"Current Balance: {balance.total_usdt:.2f} USDT\n"
-            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)"
+            f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized, net)"
         )
         stats_section = (
             "=== Trade Stats ===\n"
@@ -705,47 +707,131 @@ async def get_performance(deps: TradingDeps) -> str:
 
     metrics = await deps.metrics.compute()
 
+    # Scope `(all fills)` 显式提示 total_fees 含未平仓 open lot 的 entry fee
+    # → 当 session 末仍有持仓时 gross − net ≠ total_fees (差额 = 未平仓 lot 的
+    # open_fee_share). agent 算术自检 `gross − fees ≈ net` 时必读 scope
+    # 才不致 mismatch (PR #57 review R5-I-2).
+    fees_line = (
+        f"Total Fees: -{metrics.total_fees:.2f} USDT (all fills)"
+        if metrics.total_fees > 0
+        else "Total Fees: 0.00 USDT (all fills)"
+    )
+
     if metrics.total_trades == 0:
-        # L3 by-design empty state (NOT an error): no completed trades yet.
+        if metrics.legacy_close_skipped > 0 or metrics.legacy_open_skipped > 0:
+            stats_body = (
+                "Stats unavailable: all close fills are pre-net-metrics-iter legacy data "
+                "(forensic analysis via scripts/_sim_metrics.py from sim_orders table)."
+            )
+        elif metrics.invariant_violations > 0:
+            stats_body = (
+                f"Stats unavailable: data invariant violations "
+                f"({metrics.invariant_violations} close fills had no preceding open lot "
+                f"or corrupt amount/price). Investigate trade_actions integrity."
+            )
+        else:
+            stats_body = "No completed trades yet."
         perf_section = (
             f"=== Trading Performance (@ {fetch_ts} UTC) ===\n"
             f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
             f"Current Balance: {balance.total_usdt:.2f} USDT\n"
-            f"Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT)"
+            f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized, net)\n"
+            f"{fees_line}"
         )
-        stats_section = (
-            "=== Trade Stats ===\n"
-            "No completed trades yet."
-        )
+        stats_section = f"=== Trade Stats ===\n{stats_body}"
         return f"{perf_section}\n\n{stats_section}"
 
-    fees_line = (
-        f"Total Fees: -{metrics.total_fees:.2f} USDT"
-        if metrics.total_fees > 0
-        else "Total Fees: 0.00 USDT"
-    )
+    def _fmt_pf(pf: float | None) -> str:
+        return "N/A (no losses)" if pf is None else f"{pf:.2f}"
 
     perf_section = (
         f"=== Trading Performance (@ {fetch_ts} UTC) ===\n"
         f"Initial Balance: {deps.initial_balance:.2f} USDT\n"
         f"Current Balance: {balance.total_usdt:.2f} USDT\n"
-        f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized)\n"
-        f"Realized PnL: {metrics.total_pnl:+.2f} USDT (gross, before fees)\n"
+        f"Total Return: {ret_pct:+.2f}% ({ret_usdt:+.2f} USDT) (incl. unrealized, net)\n"
+        f"Realized PnL: {metrics.total_pnl:+.2f} USDT gross / {metrics.net_pnl:+.2f} USDT net "
+        f"(fees {-metrics.total_fees:+.2f} USDT)\n"
         f"{fees_line}"
     )
 
-    stats_section = (
-        f"=== Trade Stats ===\n"
-        f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
-        f"({metrics.win_rate:.1%}, gross-based) | Loss: {metrics.losing_trades}\n"
-        f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT (gross-based)\n"
-        f"Profit Factor: "
-        f"{'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f} (gross-based)'}\n"
-        f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}% (gross-based equity)\n"
-        f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT (gross-based)"
-    )
+    # Note: 与 spec §8.1 example schema 一致。`fees` 注解 = session-wide total_fees
+    # (含未平仓 open lot 的 entry fee)。当 session 末仍有持仓时，gross − net ≠ total_fees
+    # (差额 = 未平仓 lot 的 open_fee_share)；此为已知 minor UX 不一致，未平仓退出后即收敛。
 
-    return f"{perf_section}\n\n{stats_section}"
+    stats_lines = []
+    # Condition keyed on close-skipped (not OR open) — open-only skip doesn't
+    # change trade count, message would degrade to "m/m (0 skipped)" noise
+    # (PR #57 review I-4).
+    if metrics.legacy_close_skipped > 0:
+        m = metrics.total_trades
+        n = m + metrics.legacy_close_skipped
+        stats_lines.append(
+            f"Note: net stats based on {m}/{n} trades "
+            f"({metrics.legacy_close_skipped} legacy rows skipped — pre-net-metrics-iter data)."
+        )
+    if metrics.missing_close_entry_price_count > 0:
+        stats_lines.append(
+            f"Note: {metrics.missing_close_entry_price_count} close fills had cache-miss entry_price "
+            f"(FIFO unaffected; audit trail incomplete for those trades)."
+        )
+    # spec §6.9 contract — surface invariant_violations alongside populated stats
+    # (not just empty-state). Without this, agent sees clean totals but `gross − fees ≈ net`
+    # self-check silently fails because total_fees includes the excluded fills' fees
+    # (PR #57 review R4-I-2).
+    if metrics.invariant_violations > 0:
+        stats_lines.append(
+            f"Note: invariant violations: {metrics.invariant_violations} fill(s) "
+            f"had no preceding open lot or corrupt amount/price "
+            f"(excluded from FIFO; investigate trade_actions integrity)."
+        )
+
+    stats_lines.append(f"Total Trades: {metrics.total_trades}")
+    # Break-even (pnl == 0) trades 不计入 W/L (per spec §3 / R2-I-1 align with scripts);
+    # 当 BE > 0 时附 `/{n}B` 段，agent 可验证 W+L+B = total partition completeness
+    # (PR #57 review R2-I-3).
+    gross_be_part = f"/{metrics.break_even_trades}B" if metrics.break_even_trades > 0 else ""
+    net_be_part = f"/{metrics.net_break_even_trades}B" if metrics.net_break_even_trades > 0 else ""
+    stats_lines.append(
+        f"Win Rate: {metrics.win_rate:.0%} gross ({metrics.winning_trades}W/{metrics.losing_trades}L{gross_be_part}) "
+        f"/ {metrics.net_win_rate:.0%} net ({metrics.net_winning_trades}W/{metrics.net_losing_trades}L{net_be_part})"
+    )
+    stats_lines.append(
+        f"Profit Factor: {_fmt_pf(metrics.profit_factor)} gross / {_fmt_pf(metrics.net_profit_factor)} net"
+    )
+    stats_lines.append(
+        f"Avg Win:  {metrics.avg_win:+.2f} USDT gross / {metrics.avg_win_net:+.2f} USDT net"
+    )
+    stats_lines.append(
+        f"Avg Loss: {metrics.avg_loss:.2f} USDT gross / {metrics.avg_loss_net:.2f} USDT net"
+    )
+    stats_lines.append(
+        f"Best Trade: {metrics.best_trade:+.2f} USDT gross / {metrics.best_trade_net:+.2f} USDT net"
+    )
+    stats_lines.append(
+        f"Worst Trade: {metrics.worst_trade:.2f} USDT gross / {metrics.worst_trade_net:.2f} USDT net"
+    )
+    mdd_str = f"-{metrics.max_drawdown_pct:.1f}%" if metrics.max_drawdown_pct > 0 else "0.0%"
+    stats_lines.append(f"Max Drawdown: {mdd_str} (net equity)")
+
+    stats_section = "=== Trade Stats ===\n" + "\n".join(stats_lines)
+
+    out = f"{perf_section}\n\n{stats_section}"
+
+    # OKX session footnote (spec §6.4). Cache-miss line conditional on actual
+    # caveat being emitted above — otherwise points to nothing (PR #57 review I-3).
+    from src.integrations.exchange.okx import OKXExchange
+    if isinstance(deps.exchange, OKXExchange):
+        out += (
+            "\n\nNote: OKX net metrics use exchange-echoed fees (accurate); "
+            "minor ε from lot amount precision possible."
+        )
+        if metrics.missing_close_entry_price_count > 0:
+            out += (
+                "\n      Cache-miss close fills are included (FIFO uses lot.entry_px from open); "
+                "audit-trail flagged in caveat above."
+            )
+
+    return out
 
 
 # Display-layer filter for CoinDesk CATEGORY_DATA — strips thematic tags
