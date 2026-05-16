@@ -489,3 +489,47 @@ async def test_compute_profit_factor_none_on_zero_losses(engine):
     m = await svc.compute()
     assert m.profit_factor is None
     assert m.net_profit_factor is None
+
+
+@pytest.mark.asyncio
+async def test_compute_break_even_trade_excluded_from_losses(engine):
+    """spec §3 single-source convention: break-even trade (pnl == 0) must NOT
+    count as loss; aligns src with scripts/_sim_metrics (uses < 0 not <= 0).
+
+    PR #57 review I-1 regression guard.
+
+    Fixture:
+      - Trade A: open @50000 → close @50000, gross_pnl=0 (price-flat), fees=5.0,
+        net_pnl=-5.0 → gross break-even, net loss.
+      - Trade B: open @50000 → close @51010 (gross=+101) with fees=5.05 → net=+95.95
+        → gross win, net win.
+    Expected: gross 1W/0L (NOT 1W/1L); avg_loss=0.0 (no gross losses).
+              net 1W/1L (trade A net=-5 is a real loss).
+    """
+    from src.services.metrics import MetricsService
+    sid = "break-even"
+    await _setup_compute_session(engine, sid, fills=[
+        # Trade A: gross break-even, net loss (open @50000 → close @50000)
+        {"side": "long", "price": 50000.0, "amount": 0.1, "fee": 2.5, "pnl": None},
+        {"side": "long", "price": 50000.0, "amount": 0.1, "fee": 2.5,
+         "pnl": 0.0, "entry_price": 50000.0},
+        # Trade B: clear gross + net win (open @50000 → close @51010)
+        {"side": "long", "price": 50000.0, "amount": 0.1, "fee": 2.5, "pnl": None},
+        {"side": "long", "price": 51010.0, "amount": 0.1, "fee": 2.55,
+         "pnl": 101.0, "entry_price": 50000.0},
+    ])
+    svc = MetricsService(engine, sid, initial_balance=10000.0)
+    m = await svc.compute()
+    assert m.total_trades == 2
+    # Gross side: trade A (pnl_gross=0) excluded; trade B (pnl_gross=+101) is win
+    assert m.winning_trades == 1
+    assert m.losing_trades == 0, (
+        f"break-even gross trade must NOT count as loss; got {m.losing_trades}"
+    )
+    assert m.avg_loss == 0.0, (
+        f"avg_loss must be 0.0 (no gross losses); got {m.avg_loss}"
+    )
+    # Net side: trade A (pnl_net=-5) is real loss; trade B (pnl_net=+95.95) is win
+    assert m.net_winning_trades == 1
+    assert m.net_losing_trades == 1
+    assert m.avg_loss_net == pytest.approx(-5.0)

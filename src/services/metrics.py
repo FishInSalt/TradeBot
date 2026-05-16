@@ -253,15 +253,20 @@ class MetricsService:
                 invariant_violations=caveats["invariant_violations"],
             )
 
+        # Break-even (pnl == 0) excluded from both wins and losses — aligns
+        # with scripts/_sim_metrics convention (PR #57 review I-1; spec §3
+        # single-source-of-truth). Affects losing_trades count + avg_loss
+        # denominator only (win_rate / profit_factor mathematically identical
+        # since 0 contributes 0 to sum).
         gross_pnls = [rt.pnl_gross for rt in rts]
         gross_wins = [p for p in gross_pnls if p > 0]
-        gross_losses = [p for p in gross_pnls if p <= 0]
+        gross_losses = [p for p in gross_pnls if p < 0]
         gross_profit = sum(gross_wins)
         gross_loss_abs = abs(sum(gross_losses))
 
         net_pnls = [rt.pnl_net for rt in rts]
         net_wins = [p for p in net_pnls if p > 0]
-        net_losses = [p for p in net_pnls if p <= 0]
+        net_losses = [p for p in net_pnls if p < 0]
         net_profit = sum(net_wins)
         net_loss_abs = abs(sum(net_losses))
 
