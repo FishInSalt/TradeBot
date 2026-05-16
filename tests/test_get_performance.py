@@ -366,3 +366,64 @@ async def test_get_performance_dual_view_lines(deps_with_one_winning_trade):
     assert "+94.95 USDT net" in pnl_line, (
         f"Realized PnL line missing net value: {pnl_line!r}"
     )
+
+
+@pytest_asyncio.fixture
+async def deps_with_legacy_only(db_engine, deps_factory):
+    """deps + metrics service + only pre-iter legacy fills (amount IS NULL on both open + close).
+
+    Mirrors pre-net-metrics-iter session shape: scripts/_sim_metrics from sim_orders
+    still has forensic data, but trade_actions has no amount/entry_price → FIFO skips
+    everything → total_trades=0 → output should be "Stats unavailable: all close fills
+    are pre-net-metrics-iter legacy data ...".
+    """
+    from sqlalchemy import text
+    from src.services.metrics import MetricsService
+
+    sid = "perf-test-legacy"
+    async with db_engine.begin() as conn:
+        await conn.execute(text("DELETE FROM sessions WHERE id = :sid"), {"sid": sid})
+        await conn.execute(text(
+            "INSERT INTO sessions "
+            "(id, name, symbol, initial_balance, status, created_at, updated_at, "
+            " exchange_type, timeframe, scheduler_interval_min, approval_enabled, "
+            " token_budget, fee_rate) "
+            "VALUES (:sid, :sid, 'BTC/USDT:USDT', 10000.0, 'active', "
+            "        '2026-01-01T00:00:00', '2026-01-01T00:00:00', "
+            "        'simulated', '15m', 15, 1, 500000, 0.0005)"
+        ), {"sid": sid})
+        for fill in [
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 50000.0,
+             "amount": None, "fee": 2.5, "pnl": None, "entry_price": None,
+             "order_id": "o-legacy-open", "created_at": "2026-01-01T00:00:00"},
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 51000.0,
+             "amount": None, "fee": 2.55, "pnl": 100.0, "entry_price": None,
+             "order_id": "o-legacy-close", "created_at": "2026-01-01T00:00:01"},
+        ]:
+            cols = ", ".join(fill.keys())
+            placeholders = ", ".join(f":{k}" for k in fill.keys())
+            await conn.execute(text(f"INSERT INTO trade_actions ({cols}) VALUES ({placeholders})"), fill)
+
+    deps = deps_factory(session_id=sid, initial_balance=10000.0)
+    deps.metrics = MetricsService(db_engine, sid, initial_balance=10000.0)
+    deps.fee_rate = 0.0005
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_get_performance_legacy_session_stats_unavailable_text(deps_with_legacy_only):
+    """spec §6.2(c): all-legacy session UX — agent sees explicit
+    'Stats unavailable: all close fills are pre-net-metrics-iter legacy data ...'
+    pointing to scripts/_sim_metrics.py for forensic recovery.
+
+    PR #57 mini-fix I-3: prior coverage only asserted internal caveat counters
+    (test_compute_legacy_session_all_stats_unavailable), not the rendered output.
+    """
+    from src.agent.tools_perception import get_performance
+
+    out = await get_performance(deps_with_legacy_only)
+    assert "Stats unavailable" in out, f"Missing degradation label in:\n{out}"
+    assert "pre-net-metrics-iter legacy data" in out, f"Missing legacy caveat in:\n{out}"
+    assert "scripts/_sim_metrics" in out, f"Missing forensic pointer in:\n{out}"

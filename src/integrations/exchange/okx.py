@@ -407,6 +407,17 @@ class OKXExchange(BaseExchange):
 
         is_full_close = self._infer_is_full_close(info, side, trigger_reason)
 
+        # OKX V5 fillPnl 在 open 上恒返 "0" → 上方解析得 pnl=0.0 → 下游 FIFO
+        # (src/services/metrics._collect_roundtrips_from_trade_actions) 用
+        # `pnl IS NULL → open` 判别会把 open 误归 close → invariant_violations 爆表.
+        # 当前 convention 下 is_full_close ⟺ close direction（参 _infer_is_full_close
+        # docstring）, 故 not is_full_close 即 open, 强制 pnl=None 对齐 sim 语义.
+        # 未来若加 partial close 工具 (reduce_position(percent) 等), is_full_close 会
+        # static-false-positive partial close, 届时需基于 fetch_positions / in-memory
+        # position cache 重做 open/close 判别 (见 _infer_is_full_close:444-453 future warning).
+        if not is_full_close:
+            pnl = None
+
         # Pop entry_price from cache for close fills.
         #
         # OKX V5 fillPnl semantic (per OKX V5 公开文档摘录):

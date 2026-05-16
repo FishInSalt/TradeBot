@@ -2563,38 +2563,3 @@ git push -u origin iter-tool-opt-net-pnl-metrics
 ```
 
 Watch CI for green status; ready for PR.
-
----
-
-## Self-Review Checklist
-
-1. **Spec coverage**: 
-   - §0 摘要 → covered by Task 1 + Task 3 + Task 7 + Task 8
-   - §1 实证 → reference only (spec context)
-   - §2 决策表 → Task 1 (schema) + Task 4 (PF None) + Task 5 (FIFO no fee_rate arg) + Task 7 (compute) + Task 8 (output) + Task 9 (scripts)
-   - §3 Architecture → Task 5 + Task 7
-   - §4 Components → Task 1-9 (each C# mapped)
-   - §5 Data Flow → Task 1 + Task 3 + Task 5 + Task 7
-   - §6 Error Handling → Task 5 (legacy/invariant), Task 6 (edge cases), Task 7 (fee_rate NULL), Task 8 (caveat output)
-   - §7 Testing → distributed in Tasks 5-10
-   - §8 Output → Task 8
-   - §9 Surface Δ → Task 1 (migration delta documented)
-   - §10 OOS → no task (documented in spec)
-   - §11 Trigger → no task (closure check in spec)
-
-2. **Placeholder scan**: 
-   - All code blocks complete
-   - One explicit `<<< paste verbatim ... >>>` in Task 1 Step 6 — engineer-driven copy required (cannot be inlined without 195-line embed); marked WARNING
-
-3. **Type consistency**:
-   - `_Lot` / `_Roundtrip` / `_collect_roundtrips_from_trade_actions` defined Task 5, consumed Task 7 + Task 10 ✓
-   - `pnl_pct_of_notional` JSON key consistent across cycle_capture (Task 2), display (Task 2), views.py (Task 1) ✓
-   - `PerformanceMetrics` field set stable Task 4 onward; consumed by `get_performance` Task 8 ✓
-   - `profit_factor: float | None` ripples through display.py:31 (Task 4), tools_perception.py:610 (Task 4), tools_perception.py:743 (Task 8), test_metrics.py:51 (Task 4) ✓
-
-4. **Breaking tests**: explicit enumeration in Task 11 cross-references back to fixing task ✓
-
-5. **Parity scope caveats** (per spec §6.10):
-   - MDD src ↔ scripts **not** in parity scope (src = realized-only equity; scripts = broker total including unrealized)
-   - Drift guard `roundtrip` byte-equal only enforced on **math-consistent synthetic fixtures**; real sim data parity may diverge due to `_derive_close_amount` 1% tolerance path or `created_at` vs `filled_at` ordering nuance — not a bug, document as known limitation if encountered in W3 sim
-   - Real-data parity follow-up（if W3 数据触发）属独立议题

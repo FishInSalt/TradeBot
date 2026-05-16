@@ -799,7 +799,8 @@ async def get_performance(deps: TradingDeps) -> str:
         out += (
             "\n\nNote: OKX net metrics use exchange-echoed fees (accurate); "
             "minor ε from lot amount precision possible.\n"
-            "      Cache-miss close fills (if any) excluded from net stats; see caveat above."
+            "      Cache-miss close fills are included (FIFO uses lot.entry_px from open); "
+            "audit-trail flagged in caveat above."
         )
 
     return out

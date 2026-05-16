@@ -72,6 +72,58 @@ async def test_parse_fill_event_cache_miss_yields_none_entry_price():
 
 
 @pytest.mark.asyncio
+async def test_parse_fill_event_open_forces_pnl_none():
+    """OKX V5 fillPnl='0' on opens — _parse_fill_event must override to pnl=None
+    so downstream FIFO (src/services/metrics._collect_roundtrips_from_trade_actions)
+    correctly treats it as an open (pnl IS NULL discriminator) instead of a
+    breakeven close that would cascade to invariant_violations.
+
+    Regression guard for PR #57 mini-fix I-1.
+    """
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        # synthesize an OPEN fill order_data — no reduceOnly / no algoId /
+        # trigger_reason="market" / net_mode posSide → _infer_is_full_close=False
+        order_data = {
+            "id": "oid_open", "symbol": "BTC/USDT:USDT", "side": "buy", "type": "market",
+            "average": 80000.0, "filled": 0.1,
+            "fee": {"cost": 4.0},
+            "info": {"pnl": "0", "posSide": "net"},  # fillPnl="0" per OKX V5 docs on opens
+            "timestamp": 1234567890,
+        }
+        fill = await ex._parse_fill_event(order_data)
+        assert fill.is_full_close is False
+        assert fill.pnl is None, (
+            f"open fill must have pnl=None (not 0.0) so FIFO treats it as open; got {fill.pnl}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_parse_fill_event_close_preserves_pnl():
+    """OKX close fill: pnl from fillPnl preserved (positive guard companion to
+    test_parse_fill_event_open_forces_pnl_none — confirms override only applies
+    on opens, closes keep their pnl).
+    """
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        ex.register_close_order_entry("oid_close", 80000.0)
+        order_data = {
+            "id": "oid_close", "symbol": "BTC/USDT:USDT", "side": "sell", "type": "market",
+            "average": 80100.0, "filled": 0.1,
+            "fee": {"cost": 4.005},
+            "info": {"pnl": "10.0", "reduceOnly": "true"},
+            "timestamp": 1234567890,
+        }
+        fill = await ex._parse_fill_event(order_data)
+        assert fill.is_full_close is True
+        assert fill.pnl == 10.0
+
+
+@pytest.mark.asyncio
 async def test_okx_cancel_order_pops_close_entry_cache(monkeypatch):
     """cancel_order removes the order_id from _close_order_entry_cache."""
     from src.integrations.exchange.okx import OKXExchange
