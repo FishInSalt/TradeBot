@@ -44,6 +44,11 @@ class PerformanceMetrics:
     worst_trade_net: float = 0.0
     net_winning_trades: int = 0
     net_losing_trades: int = 0
+    # Break-even counts (PR #57 review R2-I-3) — surface partition completeness
+    # to agent: total_trades = winning + losing + break_even (gross side; net
+    # side analogous). Zero by default; output layer renders only when > 0.
+    break_even_trades: int = 0
+    net_break_even_trades: int = 0
     # Caveats (per spec §6.2)
     legacy_open_skipped: int = 0
     legacy_close_skipped: int = 0
@@ -281,13 +286,17 @@ class MetricsService:
                 max_dd_ratio = max(max_dd_ratio, (peak - equity) / peak)
 
         # recent_summary 沿用 gross W/L 计数（spec 未明确切 net）；net 化作 W3 follow-up
-        # candidate if fee 翻转 win→loss 频率高（参 spec §10 OOS）
+        # candidate if fee 翻转 win→loss 频率高（参 spec §10 OOS）.
+        # Break-even (p == 0) 与主指标一致排除（PR #57 review R2-I-2）；当 BE 存在时
+        # 加 `B` 段，agent 可从 W+L+B = n 验证 partition 完整性.
         n = min(5, len(gross_pnls))
         recent_pnls = gross_pnls[-n:]
         recent_wins = sum(1 for p in recent_pnls if p > 0)
-        recent_losses = n - recent_wins
+        recent_losses = sum(1 for p in recent_pnls if p < 0)
+        recent_be = n - recent_wins - recent_losses
         trade_word = "trade" if n == 1 else "trades"
-        recent_summary = f"{recent_wins}W {recent_losses}L (last {n} {trade_word})"
+        be_part = f" {recent_be}B" if recent_be > 0 else ""
+        recent_summary = f"{recent_wins}W {recent_losses}L{be_part} (last {n} {trade_word})"
 
         total_pnl = sum(gross_pnls)
         net_pnl = sum(net_pnls)
@@ -317,6 +326,8 @@ class MetricsService:
             worst_trade_net=min(net_pnls),
             net_winning_trades=len(net_wins),
             net_losing_trades=len(net_losses),
+            break_even_trades=sum(1 for p in gross_pnls if p == 0),
+            net_break_even_trades=sum(1 for p in net_pnls if p == 0),
             legacy_open_skipped=caveats["legacy_open_skipped"],
             legacy_close_skipped=caveats["legacy_close_skipped"],
             missing_close_entry_price_count=caveats["missing_close_entry_price_count"],

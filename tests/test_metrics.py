@@ -526,10 +526,15 @@ async def test_compute_break_even_trade_excluded_from_losses(engine):
     assert m.losing_trades == 0, (
         f"break-even gross trade must NOT count as loss; got {m.losing_trades}"
     )
+    assert m.break_even_trades == 1
+    # Partition completeness (PR #57 review M-6): W + L + B = total
+    assert m.winning_trades + m.losing_trades + m.break_even_trades == m.total_trades
     assert m.avg_loss == 0.0, (
         f"avg_loss must be 0.0 (no gross losses); got {m.avg_loss}"
     )
     # Net side: trade A (pnl_net=-5) is real loss; trade B (pnl_net=+95.95) is win
     assert m.net_winning_trades == 1
     assert m.net_losing_trades == 1
+    assert m.net_break_even_trades == 0
+    assert m.net_winning_trades + m.net_losing_trades + m.net_break_even_trades == m.total_trades
     assert m.avg_loss_net == pytest.approx(-5.0)

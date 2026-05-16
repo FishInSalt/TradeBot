@@ -102,10 +102,7 @@ async def test_parse_fill_event_open_forces_pnl_none():
 
 @pytest.mark.asyncio
 async def test_parse_fill_event_close_preserves_pnl():
-    """OKX close fill: pnl from fillPnl preserved (positive guard companion to
-    test_parse_fill_event_open_forces_pnl_none — confirms override only applies
-    on opens, closes keep their pnl).
-    """
+    """OKX close fill via signal 1 (reduceOnly=true): pnl preserved."""
     from src.integrations.exchange.okx import OKXExchange
     with patch("src.integrations.exchange.okx.ccxt"):
         ex = OKXExchange(api_key="x", secret="x", password="x",
@@ -121,6 +118,58 @@ async def test_parse_fill_event_close_preserves_pnl():
         fill = await ex._parse_fill_event(order_data)
         assert fill.is_full_close is True
         assert fill.pnl == 10.0
+
+
+@pytest.mark.asyncio
+async def test_parse_fill_event_close_via_signal_2_stop_preserves_pnl():
+    """OKX close fill via signal 2 (trigger_reason='stop' from order_type='stop'):
+    pnl preserved end-to-end. Defends against R1-I-1 override regression on
+    SL trigger paths where reduceOnly is not echoed (PR #57 review I-5).
+    """
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        ex.register_close_order_entry("oid_stop", 80000.0)
+        # type='stop' → trigger_reason='stop' → signal 2 fires; no reduceOnly / no algoId
+        order_data = {
+            "id": "oid_stop", "symbol": "BTC/USDT:USDT", "side": "sell", "type": "stop",
+            "average": 79500.0, "filled": 0.1,
+            "fee": {"cost": 3.975},
+            "info": {"pnl": "-50.0"},  # SL hit, real loss
+            "timestamp": 1234567890,
+        }
+        fill = await ex._parse_fill_event(order_data)
+        assert fill.is_full_close is True
+        assert fill.pnl == -50.0
+        assert fill.trigger_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_parse_fill_event_close_via_signal_4_algo_id_preserves_pnl():
+    """OKX close fill via signal 4 (info.algoId non-empty, type='market'):
+    pnl preserved end-to-end. Defends against R1-I-1 override regression on
+    algo (SL/TP/conditional) trigger paths where ordType reverts to 'market'
+    after algo fires (PR #57 review I-5).
+    """
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):
+        ex = OKXExchange(api_key="x", secret="x", password="x",
+                         symbol="BTC/USDT:USDT", sandbox=True)
+        # algoId-aware order_id resolution: order_id == info.algoId here.
+        ex.register_close_order_entry("algo_id_001", 80000.0)
+        order_data = {
+            "id": "underlying_ord_999", "symbol": "BTC/USDT:USDT", "side": "sell",
+            "type": "market",  # algo 触发后 ordType='market' → trigger_reason='market' → signal 2 漏
+            "average": 80300.0, "filled": 0.1,
+            "fee": {"cost": 4.015},
+            "info": {"pnl": "30.0", "algoId": "algo_id_001"},  # 信号 4 fires
+            "timestamp": 1234567890,
+        }
+        fill = await ex._parse_fill_event(order_data)
+        assert fill.is_full_close is True
+        assert fill.pnl == 30.0
+        assert fill.order_id == "algo_id_001"  # algoId override
 
 
 @pytest.mark.asyncio

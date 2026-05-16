@@ -358,7 +358,7 @@ scripts/analyze_sim.py / diff_sim.py 报表渲染 gross + net 并列
 - 当前 fee_visibility iter 已锁定 `FillEvent.fee` 始终正数；maker rebate 未来才处理
 - 本 iter 不展开（与 OKX maker/taker mix 实盘准备期议题同期）
 - 测试加 1 个 placeholder：FIFO 算法本身 sign-agnostic（`fee_open_share = open_fee × ratio` / `pnl_net = pnl_gross − fee_open_share − fee_close_share` 符号自然传递）
-- **未定**：下游字段约定（`total_fees = sum(fee)` 汇总语义 / `losing_pnls = [p for p in pnls if p <= 0]` breakeven 归类）在 fee 负值出现时的边界行为，由 maker rebate iter plan-phase 单独 audit
+- **已定（PR #57 review R2-I-1 settled）**：`losing_pnls = [p for p in pnls if p < 0]` —— break-even (p == 0) 不计入 losses 也不计入 wins，与 `scripts/_sim_metrics.win_rate / profit_factor` 约定一致。`PerformanceMetrics` 显式暴露 `break_even_trades` + `net_break_even_trades` 字段；`get_performance` 当 BE > 0 时附 `/{n}B` 段确保 `W + L + B = total` 完整 partition。`total_fees = sum(fee)` 汇总语义 + maker rebate 负 fee 边界行为，仍 defer 到 maker rebate iter
 
 ### 6.7 metrics 服务不可用
 

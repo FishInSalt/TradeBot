@@ -772,9 +772,14 @@ async def get_performance(deps: TradingDeps) -> str:
         )
 
     stats_lines.append(f"Total Trades: {metrics.total_trades}")
+    # Break-even (pnl == 0) trades 不计入 W/L (per spec §3 / R2-I-1 align with scripts);
+    # 当 BE > 0 时附 `/{n}B` 段，agent 可验证 W+L+B = total partition completeness
+    # (PR #57 review R2-I-3).
+    gross_be_part = f"/{metrics.break_even_trades}B" if metrics.break_even_trades > 0 else ""
+    net_be_part = f"/{metrics.net_break_even_trades}B" if metrics.net_break_even_trades > 0 else ""
     stats_lines.append(
-        f"Win Rate: {metrics.win_rate:.0%} gross ({metrics.winning_trades}W/{metrics.losing_trades}L) "
-        f"/ {metrics.net_win_rate:.0%} net ({metrics.net_winning_trades}W/{metrics.net_losing_trades}L)"
+        f"Win Rate: {metrics.win_rate:.0%} gross ({metrics.winning_trades}W/{metrics.losing_trades}L{gross_be_part}) "
+        f"/ {metrics.net_win_rate:.0%} net ({metrics.net_winning_trades}W/{metrics.net_losing_trades}L{net_be_part})"
     )
     stats_lines.append(
         f"Profit Factor: {_fmt_pf(metrics.profit_factor)} gross / {_fmt_pf(metrics.net_profit_factor)} net"

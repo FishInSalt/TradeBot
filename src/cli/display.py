@@ -27,7 +27,7 @@ def format_metrics(metrics: PerformanceMetrics) -> str:
     return (
         f"Return: {metrics.total_return_pct:+.2f}% ({metrics.total_pnl:+.2f} USDT)\n"
         f"Win Rate: {metrics.win_rate * 100:.1f}% ({metrics.winning_trades}W / {metrics.losing_trades}L)\n"
-        f"Max Drawdown: -{metrics.max_drawdown_pct:.2f}% (net equity)\n"
+        f"Max Drawdown: {('0.00%' if metrics.max_drawdown_pct == 0 else f'-{metrics.max_drawdown_pct:.2f}%')} (net equity)\n"
         f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor is None else f'{metrics.profit_factor:.2f}'}\n"
         f"Total Trades: {metrics.total_trades}\n"
         f"Position: {pos}"
