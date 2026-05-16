@@ -2,6 +2,23 @@
 
 加密货币永续期货自动交易 agent，基于 pydantic-ai + 多交易所抽象（OKX / Simulated）。
 
+## 当前运行阶段（2026-05-16 起）
+
+**系统仅通过 simulated exchange 运行**——sim 数据收集 / 性能分析 / 工具优化迭代为当前唯一焦点；真实交易所（OKX 实盘）的下单 / 撤单 / 仓位变更接口**暂不使用、暂不接入**。
+
+后续 Claude 工作请聚焦在两块：
+
+1. **系统运行机制** — `src/scheduler/`（cycle 调度）/ `src/agent/`（agent loop：perception → reasoning → execution）/ `src/storage/`（持久化 + views）/ `src/services/cycle_capture.py`（状态快照）/ metrics & analytics（`src/services/metrics.py` + `scripts/analyze_sim.py` / `diff_sim.py` 等）
+2. **模拟交易** — `src/integrations/exchange/simulated.py`（撮合 / fill / fee / margin / liquidation 语义）+ 与真实交易所的 fidelity gap（per memory `project_iter2_mock_fidelity_lesson` / `project_sim_alignment`）
+
+**暂缓 / 不优先**（保留代码路径 + 维护通过测试即可，不在当前 iter scope）：
+
+- `src/integrations/exchange/okx.py` 实盘代码路径
+- 实盘准备期 backlog（见 `.working/all-pending-needs.md` Tier 3）—— OKX demo mark-vs-last drift / N14 leverage 上限 / log redaction / P3 硬风控 / OKX fee auto-fetch / partial-close `is_full_close` 解耦（PR #57 followup OKX live blocker）等
+- 跨交易所差异修法——除非通过 sim 行为缺口暴露 fidelity gap 且可在 sim 层修
+
+**议题立项判定**："属 sim 焦点 vs 实盘 backlog" 看议题是否在 `simulated.py` 路径上可观察 / 可修复 / 可验证。否 → 进 Tier 3 backlog 不立 iter。
+
 ## 关键约定
 
 ### 工具设计与优化原则（必读）
@@ -45,4 +62,4 @@
 - `src/scheduler/` — APScheduler 调度
 - `src/cli/` — CLI 入口（Rich + wizard）
 - `scripts/` — 开发期 / 观察期分析与诊断脚本（如 `analyze_sim.py` / `diff_sim.py` cross-sim analytics、`fetch_session_ohlcv.py` OHLCV helper、`tool_call_summary.py` 工具调用统计、各 iter 的 smoke/probe/capture 脚本）
-- `tests/` — pytest 测试集（1487 tests collected as of 2026-05-11）
+- `tests/` — pytest 测试集（1756 tests as of 2026-05-16 / PR #57）
