@@ -707,10 +707,14 @@ async def get_performance(deps: TradingDeps) -> str:
 
     metrics = await deps.metrics.compute()
 
+    # Scope `(all fills)` 显式提示 total_fees 含未平仓 open lot 的 entry fee
+    # → 当 session 末仍有持仓时 gross − net ≠ total_fees (差额 = 未平仓 lot 的
+    # open_fee_share). agent 算术自检 `gross − fees ≈ net` 时必读 scope
+    # 才不致 mismatch (PR #57 review R5-I-2).
     fees_line = (
-        f"Total Fees: -{metrics.total_fees:.2f} USDT"
+        f"Total Fees: -{metrics.total_fees:.2f} USDT (all fills)"
         if metrics.total_fees > 0
-        else "Total Fees: 0.00 USDT"
+        else "Total Fees: 0.00 USDT (all fills)"
     )
 
     if metrics.total_trades == 0:
