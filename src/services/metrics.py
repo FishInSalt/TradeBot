@@ -214,71 +214,108 @@ class MetricsService:
         self,
         current_position: str = "none",
     ) -> PerformanceMetrics:
-        # Query all fills (including opens with pnl=None) for fee totaling
+        from src.storage.models import Session as SessionModel
+
+        # Fetch fee_rate from sessions (informational; FIFO uses lot.open_fee + fill.fee directly)
+        async with get_session(self._engine) as session:
+            row = (await session.execute(
+                select(SessionModel.fee_rate).where(SessionModel.id == self._session_id)
+            )).first()
+        fee_rate = row.fee_rate if row else None
+        if fee_rate is None:
+            logger.warning(
+                "metrics: sessions.fee_rate IS NULL for session %s (informational; "
+                "FIFO algorithm uses recorded trade_actions.fee values)",
+                self._session_id,
+            )
+
+        # Total fees (independent of FIFO roundtrips)
         async with get_session(self._engine) as session:
             result = await session.execute(
                 select(TradeAction)
                 .where(TradeAction.session_id == self._session_id)
                 .where(TradeAction.action == "order_filled")
-                .order_by(TradeAction.created_at)
             )
-            all_fills = result.scalars().all()
-
-        # Total fees from ALL fills (open + close)
+            all_fills = list(result.scalars().all())
         total_fees = sum(f.fee for f in all_fills if f.fee is not None)
 
-        # PnL trades: only fills with pnl (close fills)
-        pnl_fills = [f for f in all_fills if f.pnl is not None]
-        pnls: list[float] = [f.pnl for f in pnl_fills]
+        # FIFO lot pairing
+        rts, caveats = await _collect_roundtrips_from_trade_actions(self._engine, self._session_id)
 
-        if not pnls:
+        # All stats unavailable when no roundtrips (spec §6.2 c)
+        if not rts:
             return PerformanceMetrics(
                 current_position=current_position,
                 total_fees=total_fees,
+                legacy_open_skipped=caveats["legacy_open_skipped"],
+                legacy_close_skipped=caveats["legacy_close_skipped"],
+                missing_close_entry_price_count=caveats["missing_close_entry_price_count"],
+                invariant_violations=caveats["invariant_violations"],
             )
 
-        total_pnl = sum(pnls)
-        winning_pnls = [p for p in pnls if p > 0]
-        losing_pnls = [p for p in pnls if p <= 0]  # breakeven (0.0) counted as loss
-        gross_profit = sum(winning_pnls) if winning_pnls else 0.0
-        gross_loss = abs(sum(losing_pnls)) if losing_pnls else 0.0
+        gross_pnls = [rt.pnl_gross for rt in rts]
+        gross_wins = [p for p in gross_pnls if p > 0]
+        gross_losses = [p for p in gross_pnls if p <= 0]
+        gross_profit = sum(gross_wins)
+        gross_loss_abs = abs(sum(gross_losses))
 
-        # Max drawdown — equity-peak-based (matches scripts/_sim_metrics.max_drawdown_pct
-        # algorithm; G-calc-rigor-audit §G-3). equity_t = initial_balance + cumulative PnL;
-        # peak_t = running max; dd_t = (peak_t - equity_t) / peak_t.
+        net_pnls = [rt.pnl_net for rt in rts]
+        net_wins = [p for p in net_pnls if p > 0]
+        net_losses = [p for p in net_pnls if p <= 0]
+        net_profit = sum(net_wins)
+        net_loss_abs = abs(sum(net_losses))
+
+        # MDD on net equity (spec §A1)
         equity = self._initial_balance
-        peak_equity = self._initial_balance
+        peak = equity
         max_dd_ratio = 0.0
-        for p in pnls:
-            equity += p
-            peak_equity = max(peak_equity, equity)
-            if peak_equity > 0:
-                max_dd_ratio = max(max_dd_ratio, (peak_equity - equity) / peak_equity)
+        for net in net_pnls:
+            equity += net
+            peak = max(peak, equity)
+            if peak > 0:
+                max_dd_ratio = max(max_dd_ratio, (peak - equity) / peak)
 
-        # Recent summary: last N trades
-        n = min(5, len(pnls))
-        recent_pnls = pnls[-n:]
+        # recent_summary 沿用 gross W/L 计数（spec 未明确切 net）；net 化作 W3 follow-up
+        # candidate if fee 翻转 win→loss 频率高（参 spec §10 OOS）
+        n = min(5, len(gross_pnls))
+        recent_pnls = gross_pnls[-n:]
         recent_wins = sum(1 for p in recent_pnls if p > 0)
         recent_losses = n - recent_wins
         trade_word = "trade" if n == 1 else "trades"
         recent_summary = f"{recent_wins}W {recent_losses}L (last {n} {trade_word})"
 
+        total_pnl = sum(gross_pnls)
+        net_pnl = sum(net_pnls)
+
         return PerformanceMetrics(
             total_return_pct=(total_pnl / self._initial_balance) * 100 if self._initial_balance > 0 else 0.0,
             total_pnl=total_pnl,
-            win_rate=len(winning_pnls) / len(pnls),
+            win_rate=len(gross_wins) / len(rts),
             max_drawdown_pct=max_dd_ratio * 100.0,
-            profit_factor=gross_profit / gross_loss if gross_loss > 0 else float("inf"),
-            total_trades=len(pnls),
-            winning_trades=len(winning_pnls),
-            losing_trades=len(losing_pnls),
+            profit_factor=(gross_profit / gross_loss_abs) if (gross_wins and gross_loss_abs > 0) else None,
+            total_trades=len(rts),
+            winning_trades=len(gross_wins),
+            losing_trades=len(gross_losses),
             current_position=current_position,
-            avg_win=gross_profit / len(winning_pnls) if winning_pnls else 0.0,
-            avg_loss=-gross_loss / len(losing_pnls) if losing_pnls else 0.0,
-            best_trade=max(pnls),
-            worst_trade=min(pnls),
+            avg_win=gross_profit / len(gross_wins) if gross_wins else 0.0,
+            avg_loss=-gross_loss_abs / len(gross_losses) if gross_losses else 0.0,
+            best_trade=max(gross_pnls),
+            worst_trade=min(gross_pnls),
             recent_summary=recent_summary,
             total_fees=total_fees,
+            net_pnl=net_pnl,
+            net_profit_factor=(net_profit / net_loss_abs) if (net_wins and net_loss_abs > 0) else None,
+            net_win_rate=len(net_wins) / len(rts),
+            avg_win_net=net_profit / len(net_wins) if net_wins else 0.0,
+            avg_loss_net=-net_loss_abs / len(net_losses) if net_losses else 0.0,
+            best_trade_net=max(net_pnls),
+            worst_trade_net=min(net_pnls),
+            net_winning_trades=len(net_wins),
+            net_losing_trades=len(net_losses),
+            legacy_open_skipped=caveats["legacy_open_skipped"],
+            legacy_close_skipped=caveats["legacy_close_skipped"],
+            missing_close_entry_price_count=caveats["missing_close_entry_price_count"],
+            invariant_violations=caveats["invariant_violations"],
         )
 
     async def get_tool_call_summary(
