@@ -357,3 +357,12 @@ async def test_get_performance_dual_view_lines(deps_with_one_winning_trade):
     assert "net equity" in mdd_line, (
         f"MDD line missing 'net equity': {mdd_line!r}"
     )
+    # Realized PnL line — lock in gross/net numeric pairing (fixture: gross=+100, fees=5.05, net=+94.95)
+    # Guards against gross/net field swaps that would slip past substring-only checks.
+    pnl_line = next(line for line in out.splitlines() if line.startswith("Realized PnL"))
+    assert "+100.00 USDT gross" in pnl_line, (
+        f"Realized PnL line missing gross value: {pnl_line!r}"
+    )
+    assert "+94.95 USDT net" in pnl_line, (
+        f"Realized PnL line missing net value: {pnl_line!r}"
+    )
