@@ -194,23 +194,27 @@ def create_trader_agent(
 
     @tool
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
-        """Show session trading performance — balance, return, cumulative fees, win rate, drawdown.
+        """Show session trading performance — balance, return, fees, win rate, drawdown (gross + net dual view).
 
         Returns:
             str: Two sections.
 
             === Trading Performance === — Initial Balance, Current Balance,
-            Total Return (% + USDT, incl. unrealized), Realized PnL (gross, before fees),
+            Total Return (% + USDT, incl. unrealized, net), Realized PnL (gross / net + fees),
             Total Fees (cumulative across all fills).
 
-            === Trade Stats === — Total Trades, Win Rate, Avg Win/Loss, Profit Factor,
-            Max Drawdown (equity-peak-based), Best/Worst Trade. All gross-based until
-            iter-tool-opt-net-pnl-metrics lands.
+            === Trade Stats === — Total Trades, Win Rate (gross / net), Avg Win/Loss
+            (gross / net), Profit Factor (gross / net), Max Drawdown (net equity),
+            Best/Worst Trade (gross / net). Caveats:
+            - Pre-iter legacy close fills are skipped (FIFO requires entry_price + amount);
+              when present, output adds "Note: net stats based on m/n trades" line.
+            - OKX cache-miss close fills are included in algorithm (FIFO uses lot.entry_px
+              from open) but flagged in caveat note.
 
             Related: get_trade_journal (decision timeline).
 
-        Degradation: 'No completed trades yet.' if zero trades.
-        'No metrics service available.' if metrics service is missing.
+        Degradation: 'No completed trades yet.' if zero trades; 'Stats unavailable: ...'
+        if all close fills are legacy; 'No metrics service available.' if metrics service missing.
         """
         from src.agent.tools_perception import get_performance as _impl
 

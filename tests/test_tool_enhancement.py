@@ -763,15 +763,30 @@ async def test_get_trade_journal_with_summary(tmp_path):
 
     engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t9.db")
     async with get_session(engine) as session:
-        session.add(Session(id="t9", name="test-journal", initial_balance=10000.0))
+        session.add(Session(id="t9", name="test-journal", initial_balance=10000.0, fee_rate=0.0005))
+        # iter-tool-opt-net-pnl-metrics: paired open+close so FIFO yields roundtrips.
         session.add(TradeAction(
-            session_id="t9", action="order_filled", order_id="o1",
-            symbol="BTC/USDT:USDT", side="long", pnl=30.0, fee=0.5,
+            session_id="t9", action="order_filled", order_id="o1-open",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50000.0, amount=0.1, fee=0.25, pnl=None, entry_price=None,
+            reasoning="open 1",
+        ))
+        session.add(TradeAction(
+            session_id="t9", action="order_filled", order_id="o1-close",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50300.0, amount=0.1, fee=0.25, pnl=30.0, entry_price=50000.0,
             reasoning="test fill",
         ))
         session.add(TradeAction(
-            session_id="t9", action="order_filled", order_id="o2",
-            symbol="BTC/USDT:USDT", side="long", pnl=-10.0, fee=0.3,
+            session_id="t9", action="order_filled", order_id="o2-open",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50000.0, amount=0.1, fee=0.15, pnl=None, entry_price=None,
+            reasoning="open 2",
+        ))
+        session.add(TradeAction(
+            session_id="t9", action="order_filled", order_id="o2-close",
+            symbol="BTC/USDT:USDT", side="long",
+            price=49900.0, amount=0.1, fee=0.15, pnl=-10.0, entry_price=50000.0,
             reasoning="test fill 2",
         ))
         await session.commit()
@@ -1043,14 +1058,27 @@ async def test_get_performance_with_trades(tmp_path):
 
     engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t11.db")
     async with get_session(engine) as session:
-        session.add(Session(id="t11", name="test-perf", initial_balance=10000.0))
+        session.add(Session(id="t11", name="test-perf", initial_balance=10000.0, fee_rate=0.0005))
+        # iter-tool-opt-net-pnl-metrics: paired open+close so FIFO yields roundtrips.
         session.add(TradeAction(
-            session_id="t11", action="order_filled", order_id="o1",
-            symbol="BTC/USDT:USDT", side="long", pnl=45.0, fee=0.5,
+            session_id="t11", action="order_filled", order_id="o1-open",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50000.0, amount=0.1, fee=0.25, pnl=None, entry_price=None,
         ))
         session.add(TradeAction(
-            session_id="t11", action="order_filled", order_id="o2",
-            symbol="BTC/USDT:USDT", side="long", pnl=-22.0, fee=0.3,
+            session_id="t11", action="order_filled", order_id="o1-close",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50450.0, amount=0.1, fee=0.25, pnl=45.0, entry_price=50000.0,
+        ))
+        session.add(TradeAction(
+            session_id="t11", action="order_filled", order_id="o2-open",
+            symbol="BTC/USDT:USDT", side="long",
+            price=50000.0, amount=0.1, fee=0.15, pnl=None, entry_price=None,
+        ))
+        session.add(TradeAction(
+            session_id="t11", action="order_filled", order_id="o2-close",
+            symbol="BTC/USDT:USDT", side="long",
+            price=49780.0, amount=0.1, fee=0.15, pnl=-22.0, entry_price=50000.0,
         ))
         await session.commit()
 
@@ -1069,7 +1097,8 @@ async def test_get_performance_with_trades(tmp_path):
         result,
     ), result[:200]
     assert "Total Trades: 2" in result
-    assert "Win: 1" in result
+    # iter-tool-opt-net-pnl-metrics: Win Rate dual view (1W/1L)
+    assert "1W/1L" in result, result
     assert "Profit Factor:" in result
     assert "Max Drawdown:" in result
     assert "Best Trade:" in result
