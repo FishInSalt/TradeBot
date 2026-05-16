@@ -770,6 +770,16 @@ async def get_performance(deps: TradingDeps) -> str:
             f"Note: {metrics.missing_close_entry_price_count} close fills had cache-miss entry_price "
             f"(FIFO unaffected; audit trail incomplete for those trades)."
         )
+    # spec §6.9 contract — surface invariant_violations alongside populated stats
+    # (not just empty-state). Without this, agent sees clean totals but `gross − fees ≈ net`
+    # self-check silently fails because total_fees includes the excluded fills' fees
+    # (PR #57 review R4-I-2).
+    if metrics.invariant_violations > 0:
+        stats_lines.append(
+            f"Note: invariant violations: {metrics.invariant_violations} fill(s) "
+            f"had no preceding open lot or corrupt amount/price "
+            f"(excluded from FIFO; investigate trade_actions integrity)."
+        )
 
     stats_lines.append(f"Total Trades: {metrics.total_trades}")
     # Break-even (pnl == 0) trades 不计入 W/L (per spec §3 / R2-I-1 align with scripts);

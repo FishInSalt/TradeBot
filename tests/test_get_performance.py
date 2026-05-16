@@ -427,3 +427,77 @@ async def test_get_performance_legacy_session_stats_unavailable_text(deps_with_l
     assert "Stats unavailable" in out, f"Missing degradation label in:\n{out}"
     assert "pre-net-metrics-iter legacy data" in out, f"Missing legacy caveat in:\n{out}"
     assert "scripts/_sim_metrics" in out, f"Missing forensic pointer in:\n{out}"
+
+
+@pytest_asyncio.fixture
+async def deps_with_paired_trade_and_invariant(db_engine, deps_factory):
+    """deps + metrics service + 1 valid paired trade + 1 orphan close (no preceding open).
+
+    Mirrors spec §6.9 'close fill without preceding open lot' scenario: clean
+    session-level stats present (1 winning trade) but FIFO emits +1
+    invariant_violations counter for the orphan close. Used to verify
+    spec §6.9 contract (Note surfaced in populated-state output).
+    """
+    from sqlalchemy import text
+    from src.services.metrics import MetricsService
+
+    sid = "perf-test-invariant"
+    async with db_engine.begin() as conn:
+        await conn.execute(text("DELETE FROM sessions WHERE id = :sid"), {"sid": sid})
+        await conn.execute(text(
+            "INSERT INTO sessions "
+            "(id, name, symbol, initial_balance, status, created_at, updated_at, "
+            " exchange_type, timeframe, scheduler_interval_min, approval_enabled, "
+            " token_budget, fee_rate) "
+            "VALUES (:sid, :sid, 'BTC/USDT:USDT', 10000.0, 'active', "
+            "        '2026-01-01T00:00:00', '2026-01-01T00:00:00', "
+            "        'simulated', '15m', 15, 1, 500000, 0.0005)"
+        ), {"sid": sid})
+        # 1 valid paired roundtrip (gross win) + 1 orphan close at timestamp before any open
+        for fill in [
+            # Orphan close FIRST (no preceding open lot when processed in time order)
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 51000.0,
+             "amount": 0.05, "fee": 1.275, "pnl": 100.0, "entry_price": 50000.0,
+             "order_id": "o-orphan-close", "created_at": "2026-01-01T00:00:00"},
+            # Then valid paired open + close
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 50000.0,
+             "amount": 0.1, "fee": 2.5, "pnl": None, "entry_price": None,
+             "order_id": "o-open", "created_at": "2026-01-01T00:00:01"},
+            {"session_id": sid, "action": "order_filled", "symbol": "BTC/USDT:USDT",
+             "side": "long", "trigger_reason": "market", "price": 51000.0,
+             "amount": 0.1, "fee": 2.55, "pnl": 100.0, "entry_price": 50000.0,
+             "order_id": "o-close", "created_at": "2026-01-01T00:00:02"},
+        ]:
+            cols = ", ".join(fill.keys())
+            placeholders = ", ".join(f":{k}" for k in fill.keys())
+            await conn.execute(text(f"INSERT INTO trade_actions ({cols}) VALUES ({placeholders})"), fill)
+
+    deps = deps_factory(session_id=sid, initial_balance=10000.0)
+    deps.metrics = MetricsService(db_engine, sid, initial_balance=10000.0)
+    deps.fee_rate = 0.0005
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_get_performance_invariant_violation_note_in_populated_state(
+    deps_with_paired_trade_and_invariant,
+):
+    """spec §6.9 contract: invariant_violations > 0 must surface as Note even
+    when total_trades > 0 (populated-state path). Without this Note, agent
+    sees clean 1 trade + total_fees including the orphan close's fee → gross −
+    fees ≠ net self-check fails silently (PR #57 review R4-I-2).
+    """
+    from src.agent.tools_perception import get_performance
+
+    out = await get_performance(deps_with_paired_trade_and_invariant)
+    # Populated state: 1 valid trade present
+    assert "Total Trades: 1" in out, f"Expected 1 valid trade; got:\n{out}"
+    # spec §6.9 caveat surfaced even with populated stats
+    assert "invariant violations" in out.lower(), (
+        f"Missing spec §6.9 invariant Note in populated-state output:\n{out}"
+    )
+    assert "1 fill" in out or "1 fill(s)" in out, (
+        f"Note must report violation count (1):\n{out}"
+    )

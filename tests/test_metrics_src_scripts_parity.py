@@ -1,4 +1,23 @@
-"""src/services/metrics FIFO ↔ scripts/_sim_metrics.collect_roundtrips parity (spec §6.10)."""
+"""src/services/metrics FIFO ↔ scripts/_sim_metrics.collect_roundtrips parity (spec §6.10).
+
+Parity scope (compared on math-consistent synthetic fixtures only):
+  - **numeric**: pnl_gross, pnl_net, fee_open_share, fee_close_share
+  - **identity**: side, entry_px, exit_px, amount (PR #57 review R4-I-3 — defends
+    against off-by-one open lot lookup or side-sign swap that could numerically
+    coincide on synthetic fixtures)
+
+Intentionally excluded from parity (scripts-only fields not represented in src):
+  - open_at / close_at / duration_seconds (scripts derives from sim_orders timestamps;
+    src doesn't surface)
+  - leverage (scripts inherits from open order; src treats as informational only)
+  - open_cycle_id / close_cycle_id (scripts joins to agent_cycles; src doesn't)
+  - exit_type / is_liquidation modeling differences
+
+Intentionally excluded from fixtures (wontfix per spec §6.10):
+  - stale_close_amount_count divergence: scripts derives close amount from fee/fee_rate
+    when amount stale; src trusts FillEvent.amount (actual filled, not order.amount)
+  - MDD: src = realized-only equity (Σ net_pnls); scripts = broker total (state_snapshot)
+"""
 from __future__ import annotations
 
 import math
@@ -89,10 +108,7 @@ async def test_src_scripts_fifo_parity_simple(engine):
     script_rts, caveats = await collect_roundtrips(engine, sid)
     assert caveats["stale_close_amount_count"] == 0
     assert len(src_rts) == len(script_rts) == 1
-    assert math.isclose(src_rts[0].pnl_gross, script_rts[0].pnl_gross, abs_tol=1e-9)
-    assert math.isclose(src_rts[0].pnl_net, script_rts[0].pnl_net, abs_tol=1e-9)
-    assert math.isclose(src_rts[0].fee_open_share, script_rts[0].fee_open_share, abs_tol=1e-9)
-    assert math.isclose(src_rts[0].fee_close_share, script_rts[0].fee_close_share, abs_tol=1e-9)
+    _assert_roundtrip_parity(src_rts[0], script_rts[0])
 
 
 @pytest.mark.asyncio
@@ -114,7 +130,33 @@ async def test_src_scripts_fifo_parity_partial_close(engine):
     assert caveats["stale_close_amount_count"] == 0
     assert len(src_rts) == len(script_rts) == 2
     for s, t in zip(src_rts, script_rts):
-        assert math.isclose(s.pnl_gross, t.pnl_gross, abs_tol=1e-9)
-        assert math.isclose(s.pnl_net, t.pnl_net, abs_tol=1e-9)
-        assert math.isclose(s.fee_open_share, t.fee_open_share, abs_tol=1e-9)
-        assert math.isclose(s.fee_close_share, t.fee_close_share, abs_tol=1e-9)
+        _assert_roundtrip_parity(s, t)
+
+
+def _assert_roundtrip_parity(src_rt, script_rt) -> None:
+    """Assert src ↔ scripts Roundtrip parity on common fields.
+
+    Numeric (math.isclose abs_tol=1e-9): pnl_gross, pnl_net, fee_open_share,
+    fee_close_share.
+
+    Identity (==): side, entry_px, exit_px, amount — defends against off-by-one
+    open lot lookup or side-sign swap that could numerically coincide on
+    synthetic fixtures (PR #57 review R4-I-3).
+    """
+    # Numeric
+    assert math.isclose(src_rt.pnl_gross, script_rt.pnl_gross, abs_tol=1e-9), (
+        f"pnl_gross drift: src={src_rt.pnl_gross} vs scripts={script_rt.pnl_gross}"
+    )
+    assert math.isclose(src_rt.pnl_net, script_rt.pnl_net, abs_tol=1e-9)
+    assert math.isclose(src_rt.fee_open_share, script_rt.fee_open_share, abs_tol=1e-9)
+    assert math.isclose(src_rt.fee_close_share, script_rt.fee_close_share, abs_tol=1e-9)
+    # Identity
+    assert src_rt.side == script_rt.side, (
+        f"side drift: src={src_rt.side!r} vs scripts={script_rt.side!r}"
+    )
+    assert math.isclose(src_rt.entry_px, script_rt.entry_px, abs_tol=1e-9), (
+        f"entry_px drift: src={src_rt.entry_px} vs scripts={script_rt.entry_px} "
+        f"(likely off-by-one open lot lookup)"
+    )
+    assert math.isclose(src_rt.exit_px, script_rt.exit_px, abs_tol=1e-9)
+    assert math.isclose(src_rt.amount, script_rt.amount, abs_tol=1e-9)

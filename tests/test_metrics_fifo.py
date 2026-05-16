@@ -234,3 +234,28 @@ async def test_fifo_short_position(engine):
     rts, _ = await _collect_roundtrips_from_trade_actions(engine, sid)
     assert len(rts) == 1
     assert rts[0].pnl_gross == pytest.approx(100.0)  # (50000-49000)*0.1 (after sign)
+
+
+@pytest.mark.asyncio
+async def test_fifo_corrupt_close_zero_price(engine):
+    """spec §6.3 + PR #57 review R4-I-1: close fill with price=0 must NOT
+    produce phantom pnl_gross = -entry_px*amount. Must skip + invariant++,
+    symmetric with open path zero-price guard.
+    """
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    sid = "fifo-close-zero-price"
+    async with engine.begin() as conn:
+        await _insert_session(conn, sid)
+        # Open at real price
+        await _insert_fill(conn, sid, side="long", price=50000.0, amount=0.1, fee=2.5, pnl=None)
+        # Corrupt close at price=0 (e.g., stale ticker, data write bug)
+        await _insert_fill(conn, sid, side="long", price=0.0, amount=0.1,
+                           fee=2.55, pnl=-5000.0, entry_price=50000.0)
+
+    rts, caveats = await _collect_roundtrips_from_trade_actions(engine, sid)
+    # Zero-price close must be excluded — no phantom roundtrip produced
+    assert len(rts) == 0, (
+        f"corrupt zero-price close must NOT produce roundtrip; got {len(rts)} "
+        f"(phantom pnl_gross would be -5000 USDT silently)"
+    )
+    assert caveats["invariant_violations"] == 1

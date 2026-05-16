@@ -150,8 +150,14 @@ async def _collect_roundtrips_from_trade_actions(
             caveats["legacy_close_skipped"] += 1
             logger.warning("metrics FIFO: legacy close fill id=%s amount IS NULL, skipping", fill.id)
             continue
-        if fill.amount <= 0:
-            logger.error("metrics FIFO: close fill id=%s amount %s <= 0 (corrupt data), skipping", fill.id, fill.amount)
+        if fill.amount <= 0 or fill.price <= 0:
+            # Symmetric with open path (PR #57 review R4-I-1): price=0 corrupt close
+            # would otherwise compute phantom pnl = (0 - lot.entry_px) * consumed * sign,
+            # polluting total_pnl / best / worst / MDD / PF silently.
+            logger.error(
+                "metrics FIFO: close fill id=%s corrupt amount=%s or price=%s, skipping",
+                fill.id, fill.amount, fill.price,
+            )
             caveats["invariant_violations"] += 1
             continue
         if fill.entry_price is None:
