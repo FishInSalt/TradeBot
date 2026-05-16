@@ -416,7 +416,11 @@ _DUMMY_STATS = _DummySessionStats()
 
 
 async def _record_action_from_fill(engine, session_id, event: FillEvent):
-    """将 FillEvent 记录为 TradeAction。"""
+    """将 FillEvent 记录为 TradeAction。
+
+    iter-tool-opt-net-pnl-metrics: 同步写 amount + entry_price
+    （per spec §C2 / §6.5 OKX cache miss 时 entry_price 可 NULL）.
+    """
     async with get_session(engine) as session:
         session.add(TradeAction(
             session_id=session_id,
@@ -428,6 +432,8 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
             price=event.fill_price,
             pnl=event.pnl,
             fee=event.fee,
+            amount=event.amount,
+            entry_price=event.entry_price,
             reasoning=f"(exchange: {event.trigger_reason} order filled @ {event.fill_price:.2f})",
         ))
         await session.commit()

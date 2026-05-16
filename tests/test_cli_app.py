@@ -300,3 +300,91 @@ async def test_fill_notification_full_close_cache_miss_emits_hint():
     assert "Fee: -41.00 USDT" in prompt
     assert "PnL: -500.00 USDT (gross)" in prompt
     assert "[round-trip net unavailable: entry_price not cached]" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Task 3: _record_action_from_fill writes amount + entry_price
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_record_action_open_fill_writes_amount_no_entry_price(engine, session_with_row):
+    """spec §C2: open fill 行写 amount，entry_price=NULL（FillEvent 设计）."""
+    from src.cli.app import _record_action_from_fill
+    from src.integrations.exchange.base import FillEvent
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from sqlalchemy import select
+
+    event = FillEvent(
+        order_id="o-open", symbol="BTC/USDT:USDT",
+        side="buy", position_side="long",
+        trigger_reason="market", fill_price=50000.0, amount=0.1, fee=2.5,
+        pnl=None, timestamp=1700_000_000_000, is_full_close=False,
+        entry_price=None,  # open fill always None
+    )
+    await _record_action_from_fill(engine, session_with_row, event)
+
+    async with get_session(engine) as session:
+        row = (await session.execute(
+            select(TradeAction).where(TradeAction.session_id == session_with_row)
+            .where(TradeAction.order_id == "o-open")
+        )).scalars().one()
+    assert row.amount == 0.1
+    assert row.entry_price is None
+    assert row.pnl is None
+
+
+@pytest.mark.asyncio
+async def test_record_action_close_fill_writes_amount_and_entry_price(engine, session_with_row):
+    """spec §C2: close fill 行写 amount + entry_price."""
+    from src.cli.app import _record_action_from_fill
+    from src.integrations.exchange.base import FillEvent
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from sqlalchemy import select
+
+    event = FillEvent(
+        order_id="o-close", symbol="BTC/USDT:USDT",
+        side="sell", position_side="long",
+        trigger_reason="market", fill_price=51000.0, amount=0.1, fee=2.55,
+        pnl=100.0, timestamp=1700_000_001_000, is_full_close=True,
+        entry_price=50000.0,
+    )
+    await _record_action_from_fill(engine, session_with_row, event)
+
+    async with get_session(engine) as session:
+        row = (await session.execute(
+            select(TradeAction).where(TradeAction.session_id == session_with_row)
+            .where(TradeAction.order_id == "o-close")
+        )).scalars().one()
+    assert row.amount == 0.1
+    assert row.entry_price == 50000.0
+    assert row.pnl == 100.0
+
+
+@pytest.mark.asyncio
+async def test_record_action_okx_cache_miss_close_entry_price_null(engine, session_with_row):
+    """spec §6.5: OKX cache miss close fill — entry_price=None (algorithm continues)."""
+    from src.cli.app import _record_action_from_fill
+    from src.integrations.exchange.base import FillEvent
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from sqlalchemy import select
+
+    event = FillEvent(
+        order_id="o-miss", symbol="BTC/USDT:USDT",
+        side="sell", position_side="long",
+        trigger_reason="liquidation", fill_price=45000.0, amount=0.05, fee=1.125,
+        pnl=-250.0, timestamp=1700_000_002_000, is_full_close=False,
+        entry_price=None,  # cache miss
+    )
+    await _record_action_from_fill(engine, session_with_row, event)
+
+    async with get_session(engine) as session:
+        row = (await session.execute(
+            select(TradeAction).where(TradeAction.session_id == session_with_row)
+            .where(TradeAction.order_id == "o-miss")
+        )).scalars().one()
+    assert row.amount == 0.05
+    assert row.entry_price is None
+    assert row.pnl == -250.0
