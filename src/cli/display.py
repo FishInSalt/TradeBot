@@ -294,7 +294,10 @@ _EXECUTION_SUCCESS_PREFIXES = {
     "adjust_leverage": "Leverage adjusted to",
     "place_limit_order": "Limit order placed:",
     "cancel_order": "Order cancelled:",
-    "set_price_volatility_alert": "Price volatility alert updated:",
+    "set_price_volatility_alert": (
+        "Price volatility alert set:",        # first-time create
+        "Price volatility alert replaced:",   # replace existing
+    ),
     "add_price_level_alert": ("Price level alert set:", "Alert set"),
     "cancel_price_level_alert": (
         "Price level alert cancelled",   # cancel success (real removal)

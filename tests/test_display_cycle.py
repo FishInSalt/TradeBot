@@ -306,7 +306,7 @@ def test_summarize_cancel_order():
 
 def test_summarize_set_price_volatility_alert():
     from src.cli.display import summarize_tool
-    content = "Price volatility alert updated: threshold=5.0%, window=60min"
+    content = "Price volatility alert set: threshold=5.0%, window=60min"
     result = summarize_tool("set_price_volatility_alert", content)
     assert "5.0" in result
     assert "60" in result
@@ -410,6 +410,35 @@ def test_is_tool_error_add_price_level_alert_immediate_trigger():
     )
     # Actual failure
     assert is_tool_error("add_price_level_alert", "Invalid direction: must be 'above' or 'below', got 'up'", outcome="success")
+
+
+def test_is_tool_error_set_price_volatility_alert_first_time_set():
+    """First-time create returns 'Price volatility alert set: ...' — must not flag as error.
+
+    Regression guard for prefix drift: tools_execution.py returns 'set:' / 'replaced:'
+    but the success-prefix whitelist had a stale 'updated:' prefix, causing W3 sim
+    sessions to render successful volatility alert calls with ✗.
+    """
+    from src.cli.display import is_tool_error
+    content = "Price volatility alert set: threshold=0.2%, window=5min"
+    assert is_tool_error("set_price_volatility_alert", content) is False
+
+
+def test_is_tool_error_set_price_volatility_alert_replaced():
+    """Replace path returns 'Price volatility alert replaced: ...' — must not flag as error."""
+    from src.cli.display import is_tool_error
+    content = (
+        "Price volatility alert replaced: threshold=0.3%, window=10min "
+        "(was 0.2%/5min, rolling window reset)"
+    )
+    assert is_tool_error("set_price_volatility_alert", content) is False
+
+
+def test_is_tool_error_set_price_volatility_alert_invalid_threshold():
+    """Parameter rejection must flag as error."""
+    from src.cli.display import is_tool_error
+    content = "Invalid threshold_pct: must be 0.1-50.0, got 0.05"
+    assert is_tool_error("set_price_volatility_alert", content) is True
 
 
 # === Cycle output formatting ===
