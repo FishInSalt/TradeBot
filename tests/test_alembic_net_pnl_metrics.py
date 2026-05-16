@@ -138,4 +138,4 @@ async def test_downgrade_drops_new_columns_and_restores_view(head_db):
     assert "pnl_pct_of_notional" not in view_sql, (
         "downgrade should restore pre-iter view DDL (no pnl_pct_of_notional)"
     )
-    assert "pnl_pct" in view_sql, "downgrade should restore '$.position.pnl_pct' JSON path"
+    assert "$.position.pnl_pct'" in view_sql, "downgrade should restore '$.position.pnl_pct' JSON path"
