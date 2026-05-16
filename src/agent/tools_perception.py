@@ -607,7 +607,7 @@ async def get_trade_journal(deps: TradingDeps, limit: int = 20) -> str:
                 f"Total Trades: {metrics.total_trades} | Win: {metrics.winning_trades} "
                 f"({metrics.win_rate:.1%}) | Loss: {metrics.losing_trades}",
                 f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT",
-                f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f}'}",
+                f"Profit Factor: {'N/A (no losses)' if metrics.profit_factor is None else f'{metrics.profit_factor:.2f}'}",
             ]
             if metrics.recent_summary:
                 summary_lines.append(f"Recent: {metrics.recent_summary}")
@@ -740,7 +740,7 @@ async def get_performance(deps: TradingDeps) -> str:
         f"({metrics.win_rate:.1%}, gross-based) | Loss: {metrics.losing_trades}\n"
         f"Avg Win: {metrics.avg_win:+.2f} USDT | Avg Loss: {metrics.avg_loss:.2f} USDT (gross-based)\n"
         f"Profit Factor: "
-        f"{'N/A (no losses)' if metrics.profit_factor == float('inf') else f'{metrics.profit_factor:.2f} (gross-based)'}\n"
+        f"{'N/A (no losses)' if metrics.profit_factor is None else f'{metrics.profit_factor:.2f} (gross-based)'}\n"
         f"Max Drawdown: {f'-{metrics.max_drawdown_pct:.1f}' if metrics.max_drawdown_pct > 0 else '0.0'}% (gross-based equity)\n"
         f"Best Trade: {metrics.best_trade:+.2f} USDT | Worst Trade: {metrics.worst_trade:.2f} USDT (gross-based)"
     )

@@ -14,11 +14,12 @@ from src.storage.models import ToolCall, TradeAction
 
 @dataclass
 class PerformanceMetrics:
+    # Gross metrics (existing — per-lot-pair semantics shift per spec §0)
     total_return_pct: float = 0.0
     total_pnl: float = 0.0
     win_rate: float = 0.0
     max_drawdown_pct: float = 0.0
-    profit_factor: float = 0.0
+    profit_factor: float | None = None  # zero-denom → None per spec §2
     total_trades: int = 0
     winning_trades: int = 0
     losing_trades: int = 0
@@ -29,6 +30,21 @@ class PerformanceMetrics:
     worst_trade: float = 0.0
     recent_summary: str = ""
     total_fees: float = 0.0
+    # Net metrics (iter-tool-opt-net-pnl-metrics — per spec §C3)
+    net_pnl: float = 0.0
+    net_profit_factor: float | None = None
+    net_win_rate: float = 0.0
+    avg_win_net: float = 0.0
+    avg_loss_net: float = 0.0
+    best_trade_net: float = 0.0
+    worst_trade_net: float = 0.0
+    net_winning_trades: int = 0
+    net_losing_trades: int = 0
+    # Caveats (per spec §6.2)
+    legacy_open_skipped: int = 0
+    legacy_close_skipped: int = 0
+    missing_close_entry_price_count: int = 0
+    invariant_violations: int = 0
 
 
 @dataclass

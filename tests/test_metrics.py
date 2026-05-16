@@ -311,3 +311,32 @@ async def test_tool_call_summary_percentiles_inclusive():
     # Sanity: p50 somewhere middle, p95 near high end
     assert 40 <= summary["tool_b"].p50_duration_ms <= 60
     assert 80 <= summary["tool_b"].p95_duration_ms <= 100
+
+
+def test_performance_metrics_has_net_fields():
+    """spec §C3: PerformanceMetrics +7 net 字段 + 2 计数字段 + 4 caveat."""
+    from src.services.metrics import PerformanceMetrics
+    pm = PerformanceMetrics()
+    # 7 net metric fields
+    assert pm.net_pnl == 0.0
+    assert pm.net_profit_factor is None
+    assert pm.net_win_rate == 0.0
+    assert pm.avg_win_net == 0.0
+    assert pm.avg_loss_net == 0.0
+    assert pm.best_trade_net == 0.0
+    assert pm.worst_trade_net == 0.0
+    # 2 count fields
+    assert pm.net_winning_trades == 0
+    assert pm.net_losing_trades == 0
+    # 4 caveat counters
+    assert pm.legacy_open_skipped == 0
+    assert pm.legacy_close_skipped == 0
+    assert pm.missing_close_entry_price_count == 0
+    assert pm.invariant_violations == 0
+
+
+def test_performance_metrics_profit_factor_default_none():
+    """spec §2 zero-denom decision: PF default None (was 0.0/inf)."""
+    from src.services.metrics import PerformanceMetrics
+    pm = PerformanceMetrics()
+    assert pm.profit_factor is None
