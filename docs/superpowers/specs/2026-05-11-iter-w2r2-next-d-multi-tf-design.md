@@ -686,13 +686,16 @@ N13 unification (per §6.3) touches every test that asserts the prior label:
 
 | Metric | sim #8 baseline | Target | Source |
 |---|---|---|---|
-| MTS calls / cycles | 25% (44/178) | **MVP ≥ 45%** (partial-success bar) / **stretch ≥ 60%** (full-success target). Falling under MVP triggers immediate prompt-nudge iteration; landing between MVP and stretch is acceptable for lock-in with documented follow-up. | `tool_calls` table grouped by cycle |
+| MTS-called-cycle share | 25% (44/178) | ≥ 45% sanity check（agent 是否真在用工具；过低 → tool dead-called，与下面 ref-rate 高低无关都要 rollback） | DISTINCT cycle_id WHERE `tool_name='get_multi_timeframe_snapshot'` / total cycles |
+| MTS structure-terms ref rate (**primary adoption gate**) | W2 HTF+pivots era: 11.1% (9/81) | ≥ 60% retain / 50-60% observe / 31-50% docstring promo / < 31% rollback | MTS-call-cycles ∩ reasoning regex `golden cross\|death cross\|MA stack\|MA50.*MA200` / MTS-call-cycles |
 | GMD ×3 cycles | 72% (129/178) | **MVP ≤ 50%** / **stretch ≤ 30%**. Same MVP/stretch tier as MTS frequency target above. | Cycles with three GMD calls |
 | Mean tokens / cycle | ~80,674 (sim #8: 14.36M / 178 cycles) | ≤ 85% of baseline (~68,573 tokens/cycle) | Session log token counts |
 | Narrative `"stale data"` confusion | ≥8 cycles | 0 cycles | `grep` on session log narrative |
 | Narrative `"manual MA value compute"` traces | several | reduced | `grep` on session log narrative |
 
 If targets are not met, iterate on the **wrapper-docstring "Related perception tools" tail phrasing** (the cross-tool routing surface per §6.1) rather than rewriting the tool spec. Layer-1 in `persona.py` remains untouched per the PR #25 discipline.
+
+**为什么主 adoption gate 是 ref rate 而不是 call-frequency**：agent cycle 必定先调 state 工具（`get_position` / `get_open_orders` / `get_active_alerts`），MTS 是 multi-TF anchor 不是 cycle 入口；任何"first call per cycle"类口径在此架构下都会 ≈ 0%，与 MTS 是否被深度 consume 无关。"调用后 reasoning 引用 structure terms 比例" 才是 path-reversal 是否成功的真实信号 — agent 调用 MTS 后是否把 MA stack / golden cross / death cross 等 anchor 内化进 thesis。W3 sim #10 实测 structure-terms ref rate = 71.4% (85/119) → 达 retain 阈值；MTS-called-cycle share 也从 W2 25% 升至 W3 119/384 ≈ 31%（达 sanity check）。forensic 完整数据：`.working/w2-to-w3/05-w3-forensic.md` §二。
 
 ---
 
