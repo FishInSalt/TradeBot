@@ -9,6 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
 from src.agent.persona import DEFAULT_TAKER_FEE_RATE, generate_system_prompt, RuntimeConfig
+from src.agent.tools_descriptions import (
+    GET_HIGHER_TIMEFRAME_VIEW_DESCRIPTION,
+    GET_MARKET_DATA_DESCRIPTION,
+    GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION,
+    SET_NEXT_WAKE_AT_DESCRIPTION,
+    SET_NEXT_WAKE_DESCRIPTION,
+)
 from src.cli.approval import ApprovalGate
 from src.config import PersonaConfig
 from src.integrations.crypto_etf.service import CryptoEtfService
@@ -48,6 +55,37 @@ class TradingDeps:
     cycle_id: str | None = None  # Mutated by run_agent_cycle before agent.run(); see §3.3 of spec
 
 
+def _create_dual_mode_tool(agent):
+    """Build the project's @tool decorator with two usage modes:
+
+        @tool                       — default: griffe sniffs docstring main_desc + Args
+        @tool(description=DESC_X)   — override: pass DESC_X verbatim to LLM,
+                                       bypass griffe section-stripping
+
+    Why dual-mode: pydantic-ai 1.78 / griffe strips google section headers
+    (Examples:, Example call:, inline admonitions) from tool_def.description.
+    Override path B carries multi-outcome Examples / multi-section Example
+    output blocks intact. See spec §2.2 of
+    docs/superpowers/specs/2026-05-19-iter-tool-opt-dead-example-promote-design.md.
+
+    Backward-compat: 33 existing @tool sites use the no-arg form, unchanged.
+
+    Iter 5 D preserved: docstring_format='google' + require_parameter_descriptions=True
+    still enforced on both branches.
+    """
+    def tool(func=None, *, description=None):
+        kwargs = {
+            "docstring_format": "google",
+            "require_parameter_descriptions": True,
+        }
+        if description is not None:
+            kwargs["description"] = description
+        if func is not None and callable(func):
+            return agent.tool(**kwargs)(func)
+        return lambda f: agent.tool(**kwargs)(f)
+    return tool
+
+
 def create_trader_agent(
     model: str,
     persona_config: PersonaConfig,
@@ -73,55 +111,29 @@ def create_trader_agent(
         model_settings=get_optimal_settings(model_name),
     )
 
-    # Iter 5 D: 启用 google docstring 显式声明 + 强制 Args 完整性。
-    # require_parameter_descriptions=True 在 tool 加载时校验，缺 Args 立即 startup fail。
-    # 用 def 而非 functools.partial — partial 丢失 Agent.tool 的 overload 信息，
-    # IDE static type checker 会把 @tool 标红；def 让 pyright 看到清晰的装饰器签名。
-    def tool(func):
-        return agent.tool(
-            docstring_format="google",
-            require_parameter_descriptions=True,
-        )(func)
+    # Iter 5 D: 启用 google docstring 显式声明 + 强制 Args 完整性 (preserved).
+    # iter-tool-opt-dead-example-promote (2026-05-19): dual-mode wrapper extracted
+    # to module-level `_create_dual_mode_tool` — supports `@tool(description=DESC_X)`
+    # path-B override that bypasses griffe section-stripping for tools with
+    # multi-outcome Examples / multi-section Example output blocks.
+    tool = _create_dual_mode_tool(agent)
 
     # === Perception Tools ===
 
-    @tool
+    # LLM-visible description: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION
+    @tool(description=GET_MARKET_DATA_DESCRIPTION)
     async def get_market_data(
         ctx: RunContext[TradingDeps],
         symbol: str | None = None,
         timeframe: str | None = None,
         candle_count: int = 30,
     ) -> str:
-        """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
-
-        All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
-
-        Markers in OHLCV table (upside-only thresholds):
-            "vol↑"   — bar volume > 2× SMA(20) of bar volumes
-            "range↑" — bar range (high - low) > 2× ATR(14)
-            Empty    — neither threshold tripped.
-
-        Time column shows candle open in UTC.
+        """Get single-timeframe market data with indicators + OHLCV.
 
         Args:
             symbol: Trading symbol. Defaults to session symbol.
             timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
             candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
-
-        Example call:
-            get_market_data(timeframe="5m", candle_count=30)
-        Example output:
-            === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
-            Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
-            ...
-            === Recent Candles (5m, last 30, oldest-first by row) ===
-            Time (open UTC)   Open ... Vol     Markers
-            14:20         ...         245.3   vol↑
-            ...
-            === Period summary (last 5 closed candles vs prior 5 closed candles) ===
-            Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
-            Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
-            Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
         """
         from src.agent.tools_perception import get_market_data as _impl
 
@@ -196,6 +208,8 @@ def create_trader_agent(
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
         """Show session trading performance — balance, return, fees, win rate, drawdown (gross + net dual view).
 
+        When there are no completed trades the response is `No completed trades yet.`. When all close fills are pre-iter legacy (FIFO can't compute), the response is `Stats unavailable: ...`. When the metrics service is unavailable, the response is `No metrics service available.`.
+
         Returns:
             str: Two sections.
 
@@ -212,9 +226,6 @@ def create_trader_agent(
               from open) but flagged in caveat note.
 
             Related: get_trade_journal (decision timeline).
-
-        Degradation: 'No completed trades yet.' if zero trades; 'Stats unavailable: ...'
-        if all close fills are legacy; 'No metrics service available.' if metrics service missing.
         """
         from src.agent.tools_perception import get_performance as _impl
 
@@ -297,39 +308,16 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, symbol)
 
-    @tool
+    # LLM-visible description: src.agent.tools_descriptions.GET_HIGHER_TIMEFRAME_VIEW_DESCRIPTION
+    @tool(description=GET_HIGHER_TIMEFRAME_VIEW_DESCRIPTION)
     async def get_higher_timeframe_view(
         ctx: RunContext[TradingDeps],
         timeframes: list[Literal["4h", "1d", "1w", "1M"]] | None = None,
     ) -> str:
-        """Long-term structural view across one or more higher timeframes: ticker (authoritative live price), per-tf MA50/MA100/MA200 with raw value, price-vs-MA percentage, and MA slope (10-bar lookback); MA stack comparison; 100-period high and low with bars-ago and the candle open timestamp; range position within 100-period; 20-period high-low range width; last-bar volume vs 20-period SMA ratio (base volume); ATR(14) raw, percent of price, and ratio vs 20-period ATR average.
-
-        All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). The slope reference and all rolling averages use the closed-candle series.
-
-        MA stack comparison uses ">" / "<" / "≈" with 0.1% tolerance: when |MAa - MAb| / MAb < 0.001, the operator collapses to "≈" (e.g., "MA50 ≈ MA100 < MA200").
-
-        Per-tf MA periods: 4h / 1d / 1w use (50, 100, 200) — standard moving-average periods. 1M uses (12, 24, 60), corresponding to 1-year / 2-year / 5-year monthly cycles, matching crypto-industry monthly chart conventions; the 1M section header marks the period choice explicitly.
+        """Higher-timeframe structural view across MA / range / ATR / volume.
 
         Args:
             timeframes: List of CCXT timeframes from {"4h", "1d", "1w", "1M"}. Default ["4h", "1d"]. Each timeframe rendered as a separate section.
-
-        Example call:
-            get_higher_timeframe_view(timeframes=["4h", "1d"])
-        Example output:
-            === Higher Timeframe View (BTC/USDT:USDT @ 14:23:08 UTC) ===
-            Last: 81870.50
-
-            [4h] (last closed candle: open 2026-05-11 08:00 UTC)
-              MA50: 79200.00 (price vs MA: +3.4%; MA slope vs 10 bars ago: +0.8%)
-              ...
-              MA stack: MA50 > MA100 > MA200
-              100-period High: 82800.00 (32 bars ago, candle open 2026-05-06 00:00 UTC)
-              ...
-              Last bar vol (base): 1521.6 (5.0× SMA(20) avg)
-              ATR(14): 1572.30 (1.92% of price; 1.04× vs 20-period ATR(14) avg)
-            ...
-
-        Degradation: per-tf "insufficient data (need N candles)" if OHLCV history is shorter than the longest MA period; per-tf "Error: Temporarily unavailable" if the OHLCV fetch for that tf fails; overall returns header-only error if the ticker fetch fails.
         """
         from src.agent.tools_perception import get_higher_timeframe_view as _impl
 
@@ -379,15 +367,10 @@ def create_trader_agent(
     async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 15) -> str:
         """Return top-N order book depth with concentrated-level breakdown.
 
-        Reports best bid/ask, cumulative depth, bid/ask share, and concentrated
-        levels (size > 3× same-side median).
+        Reports best bid/ask, cumulative depth, bid/ask share, and concentrated levels (size > 3× same-side median). If the book is empty or shorter than requested depth, the response is `Order book ({symbol}): insufficient data (requested depth X, got Y)`. On service failure, the response is `Order book ({symbol}): temporarily unavailable`.
 
         Args:
             depth: levels per side to fetch (default 15).
-
-        Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)"
-        if book is empty/short; "Order book ({symbol}): temporarily unavailable" on
-        service failure.
         """
         from src.agent.tools_perception import get_order_book as _impl
 
@@ -407,28 +390,13 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, window_seconds=window_seconds)
 
-    @tool
+    # LLM-visible description: src.agent.tools_descriptions.GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION
+    @tool(description=GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION)
     async def get_multi_timeframe_snapshot(ctx: RunContext[TradingDeps], tfs: list[str] | None = None) -> str:
-        """Multi-timeframe snapshot: ticker (authoritative current price) plus a cross-tf MA fast-vs-slow direction line plus per-tf rows containing momentum (live ticker vs primary MA, %), fast-vs-slow MA structure (MA names with raw values and comparison operator; weekly/monthly tfs use degraded (20, 50) periods marked with " (short-structure)"), volatility (ATR % of price and its ratio vs 20-period ATR average), range position (live ticker price within the last 20 closed-bar high-low, 0% = low / 100% = high), and the most recent 3 closed candle closes with the close timestamp.
-
-        All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). Per-tf MA values are rendered inline in the Structure column; the Momentum column shows the percentage from live ticker to the primary MA on each tf. ATR(14) is computed via _atr_series (mamode='rma' algorithm lock per spec §6.4.2); shared 4h/1d signals also surfaced by HTF use the same SMA formula and the same _atr_series helper, so identical inputs produce identical values by construction (§2.2.1 algorithm-lock invariant; end-to-end verified by test_mts_htf_overlap_values_match).
+        """Multi-TF snapshot — single fanout across N timeframes.
 
         Args:
             tfs: List of CCXT timeframes. Default ["5m", "1h", "4h", "1d"].
-
-        Example call:
-            get_multi_timeframe_snapshot()
-        Example output:
-            === Multi-TF Snapshot (BTC/USDT:USDT) ===
-            Last (ticker @ 14:23:08 UTC): 81870.50
-            MA fast-vs-slow per tf: 5m below | 1h above | 4h above | 1d below
-            Columns: ...
-
-            [5m]  Mom -0.3% (vs MA20) | MA20: 81960 < MA50: 82150 | ATR 0.15% (20p avg 0.18%, 0.83×) | Range pos 65%
-                  Last 3 closes (closed @ 2026-05-11 14:20 UTC): 81870→81848→81870
-            ... (3 more tf rows)
-
-        Degradation: per-TF "insufficient data" or "temporarily unavailable"; overall returns header-only error if all TFs fail or ticker fetch fails.
         """
         from src.agent.tools_perception import get_multi_timeframe_snapshot as _impl
 
@@ -667,44 +635,32 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, alert_id, new_price, reasoning=reasoning)
 
-    @tool
+    # LLM-visible description: src.agent.tools_descriptions.SET_NEXT_WAKE_DESCRIPTION
+    @tool(description=SET_NEXT_WAKE_DESCRIPTION)
     async def set_next_wake(
         ctx: RunContext[TradingDeps],
         minutes: int,
         reasoning: str,
     ) -> str:
-        """Schedule the next scheduler wake-up after a relative minute interval.
+        """Schedule the next scheduler wake-up (relative interval).
 
         Args:
             minutes: minutes from now until the next wake-up. Must fall within
                 [wake_min_minutes, wake_max_minutes]; rejected otherwise.
             reasoning: brief description of your decision logic.
-
-        Returns a confirmation, or a reject message describing the violation.
-
-        Examples:
-            set_next_wake(15, "consolidation phase, check in 15 min")
-            → "Next wake set to 15 min. Reason: ..."
-
-            set_next_wake(90, "...")
-            → "Cannot set wake to 90 min: exceeds wake_max=60 min for this session."
-
-            set_next_wake(0, "...")
-            → "Cannot set wake to 0 min: below wake_min=1 min."
-
-        Alerts, fills, and conditional triggers always interrupt scheduled wake.
         """
         from src.agent.tools_execution import set_next_wake as _impl
 
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
-    @tool
+    # LLM-visible description: src.agent.tools_descriptions.SET_NEXT_WAKE_AT_DESCRIPTION
+    @tool(description=SET_NEXT_WAKE_AT_DESCRIPTION)
     async def set_next_wake_at(
         ctx: RunContext[TradingDeps],
         target_time: str,
         reasoning: str,
     ) -> str:
-        """Schedule the next scheduler wake-up at an absolute UTC time.
+        """Schedule the next scheduler wake-up (absolute UTC time).
 
         Args:
             target_time: future wake time in 'HH:MM' UTC format (e.g., '10:37').
@@ -713,27 +669,6 @@ def create_trader_agent(
                 within [now+wake_min_minutes, now+wake_max_minutes]; rejected
                 otherwise.
             reasoning: brief description of your decision logic.
-
-        Returns a confirmation containing the resolved date-time, or a reject
-        message describing the violation.
-
-        Examples:
-            set_next_wake_at("10:37", "align with 1h candle close at 11:00 UTC")
-            → "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: ..."
-
-            set_next_wake_at("12:00", "...")
-            → "Cannot wake at 12:00 UTC: nearest future 2026-05-12 12:00 UTC
-               (in 97 min) exceeds wake_max=60 min for this session."
-
-            set_next_wake_at("10:23", "...")  # now=10:23, resolves to tomorrow
-            → "Cannot wake at 10:23 UTC: nearest future 2026-05-13 10:23 UTC
-               (in 1440 min) exceeds wake_max=60 min for this session."
-
-            set_next_wake_at("foo", "...")
-            → "Invalid target_time format: 'foo'. Expected 'HH:MM' UTC
-               with 2-digit hour and minute (e.g., '10:37' or '03:05')."
-
-        Alerts, fills, and conditional triggers always interrupt scheduled wake.
         """
         from src.agent.tools_execution import set_next_wake_at as _impl
 

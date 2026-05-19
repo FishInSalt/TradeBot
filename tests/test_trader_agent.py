@@ -267,3 +267,266 @@ def test_cancel_price_level_alert_schema_exposes_id_format_and_source():
         f"id format constraint missing from LLM-visible schema: {alert_id_desc!r}"
     assert "get_active_alerts" in alert_id_desc, \
         f"id source guidance missing from LLM-visible schema: {alert_id_desc!r}"
+
+
+def test_dual_mode_tool_wrapper():
+    """Foundation drift guard: dual-mode @tool wrapper accepts both
+    `@tool` (no override) and `@tool(description=DESC)` (override) forms.
+
+    Override form bypasses griffe section-stripping (see pydantic-ai
+    issue #1146 + spec §2.2). Args still parsed from docstring in both
+    forms. `require_parameter_descriptions=True` still enforced in
+    override mode (missing-Args still fails fast).
+    """
+    import pytest
+    from pydantic_ai import Agent, RunContext
+    from pydantic_ai.exceptions import UserError
+    from src.agent.trader import _create_dual_mode_tool
+
+    agent = Agent("test", deps_type=type(None), output_type=str)
+    tool = _create_dual_mode_tool(agent)
+
+    @tool
+    async def t_default(ctx: RunContext[None], x: int) -> str:
+        """T1 default mode description.
+
+        Args:
+            x: an int.
+        """
+        return ""
+
+    CUSTOM = "Custom override description.\n\nExamples:\n    t_override(1) → 'ok'\n"
+
+    @tool(description=CUSTOM)
+    async def t_override(ctx: RunContext[None], x: int) -> str:
+        """Internal docstring — replaced by override.
+
+        Args:
+            x: an int.
+        """
+        return ""
+
+    assert agent._function_toolset.tools["t_default"].tool_def.description == "T1 default mode description."
+    assert agent._function_toolset.tools["t_override"].tool_def.description == CUSTOM
+    # Args still parsed from docstring in BOTH forms
+    assert agent._function_toolset.tools["t_default"].tool_def.parameters_json_schema["properties"]["x"]["description"] == "an int."
+    assert agent._function_toolset.tools["t_override"].tool_def.parameters_json_schema["properties"]["x"]["description"] == "an int."
+
+    # Negative control: require_parameter_descriptions=True still fires
+    # in override mode if Args section is missing for a parameter.
+    fail_agent = Agent("test", deps_type=type(None), output_type=str)
+    fail_tool = _create_dual_mode_tool(fail_agent)
+    with pytest.raises(UserError, match="Missing parameter descriptions"):
+        @fail_tool(description="override desc")
+        async def t_missing_args(ctx: RunContext[None], y: int) -> str:
+            """Tool with description override but no Args section for y."""
+            return ""
+
+
+def test_set_next_wake_description_carries_examples_block():
+    """W3 R2-Next-H attribution lever — set_next_wake description must
+    carry the 3-outcome Examples block (success + over-max + under-min)
+    via path B override, since baseline desc was 69 chars (90% loss).
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["set_next_wake"]
+    desc = tool.tool_def.description
+
+    # Examples block presence
+    assert "Examples:" in desc, f"Examples block header missing: {desc!r}"
+    assert "consolidation phase" in desc, f"success-outcome example missing: {desc!r}"
+    assert "exceeds wake_max" in desc, f"over-max reject outcome missing: {desc!r}"
+    assert "below wake_min" in desc, f"under-min reject outcome missing: {desc!r}"
+    # Runtime contract
+    assert "Alerts, fills" in desc, f"alerts-interrupt-wake contract missing: {desc!r}"
+    # Args still parsed (unchanged)
+    schema = tool.tool_def.parameters_json_schema
+    assert "wake_min_minutes" in schema["properties"]["minutes"]["description"]
+
+
+def test_set_next_wake_at_description_carries_examples_block():
+    """W3 R2-Next-H attribution lever — set_next_wake_at description must
+    carry the 4-outcome Examples block via path B override, since baseline
+    desc was 60 chars (95% loss). Adoption W3 only 2.0% (3/147)."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["set_next_wake_at"]
+    desc = tool.tool_def.description
+
+    assert "Examples:" in desc
+    assert "candle close at 11:00 UTC" in desc, f"success-outcome example missing: {desc!r}"
+    assert "nearest future" in desc, f"resolution-semantics literal missing: {desc!r}"
+    assert "resolves to tomorrow" in desc, f"tomorrow-resolution outcome missing: {desc!r}"
+    assert "Invalid target_time format" in desc, f"format-reject outcome missing: {desc!r}"
+    assert "Alerts, fills" in desc, f"alerts-interrupt-wake contract missing: {desc!r}"
+
+
+def test_get_market_data_description_carries_example_output():
+    """get_market_data description must carry the multi-section Example
+    output (Ticker / Recent Candles / Period summary) + OHLCV marker
+    semantics via path B override.
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_market_data"]
+    desc = tool.tool_def.description
+
+    assert "=== Ticker" in desc, f"Ticker section header missing in example: {desc!r}"
+    assert "=== Recent Candles" in desc, f"Candles section header missing: {desc!r}"
+    assert "=== Period summary" in desc, f"Period summary section header missing: {desc!r}"
+    assert "vol↑" in desc, f"OHLCV vol marker literal missing: {desc!r}"
+    assert "range↑" in desc, f"OHLCV range marker literal missing: {desc!r}"
+
+
+def test_get_higher_timeframe_view_description_carries_example_and_degradation():
+    """get_higher_timeframe_view description must carry per-tf Example
+    output + Degradation trailer via path B override.
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_higher_timeframe_view"]
+    desc = tool.tool_def.description
+
+    assert "=== Higher Timeframe View" in desc
+    assert "MA stack: MA50 > MA100 > MA200" in desc
+    assert "100-period High:" in desc
+    assert "insufficient data (need N candles)" in desc, f"Degradation literal missing: {desc!r}"
+    assert "MA50 ≈ MA100" in desc, f"MA stack tolerance semantics missing: {desc!r}"
+
+
+def test_get_multi_timeframe_snapshot_description_carries_example():
+    """get_multi_timeframe_snapshot description must carry per-TF Example
+    output + Degradation trailer via path B override. Gate 4 attribution
+    candidate.
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_multi_timeframe_snapshot"]
+    desc = tool.tool_def.description
+
+    assert "=== Multi-TF Snapshot" in desc
+    assert "MA fast-vs-slow per tf" in desc
+    assert "Range pos" in desc
+    assert "insufficient data" in desc, f"Degradation literal missing: {desc!r}"
+
+
+def test_get_order_book_description_carries_degradation():
+    """get_order_book degradation文案 (insufficient / unavailable) must
+    reach LLM via path A inline narrative. Preserves existing main_desc
+    'Reports best bid/ask...' fact content."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_order_book"]
+    desc = tool.tool_def.description
+
+    # Existing main_desc preserved (path A doesn't delete fact content)
+    assert "Reports best bid/ask" in desc, f"existing main_desc literal lost (regression): {desc!r}"
+    # New inline degradation
+    assert "insufficient data" in desc, f"insufficient-data degradation literal missing: {desc!r}"
+    assert "temporarily unavailable" in desc, f"unavailable degradation literal missing: {desc!r}"
+
+
+def test_get_performance_description_carries_degradation():
+    """get_performance degradation文案 (zero trades / legacy / no service)
+    must reach LLM via path A inline narrative. Returns: block survives
+    via <returns> XML wrap (don't break it)."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_performance"]
+    desc = tool.tool_def.description
+
+    assert "No completed trades yet" in desc
+    assert "Stats unavailable" in desc
+    assert "No metrics service available" in desc
+    # Returns: block still wrapped in <returns> XML (don't break this)
+    assert "<returns>" in desc, f"Returns block XML wrap lost (regression): {desc!r}"
+
+
+def test_no_block_admonition_lost_to_griffe_stripping():
+    """Module-level audit: detects when a block-style `<Word>:\\n<indent>`
+    admonition in a wrapper's source docstring fails to reach the
+    LLM-visible `tool.tool_def.description` (i.e., griffe stripped it).
+
+    Detection is empirical (source-vs-desc differential), not
+    regex-pattern-guessing — catches exactly what griffe actually strips
+    on the current pydantic-ai / griffe version. Inline `<Word>: <prose>`
+    on a single line is NOT detected (it survives griffe as plain prose;
+    see `cancel_price_level_alert` for an example).
+
+    Path-B override tools whitelisted — their source docstring is for
+    IDE/dev readers only; LLM-facing content lives in DESC constants
+    in `src/agent/tools_descriptions.py`.
+
+    Allowed sections: griffe handles Args/Parameters into the
+    `parameters_json_schema`, and pydantic-ai wraps Returns into a
+    `<returns>` XML segment within description (see
+    `pydantic_ai/_griffe.py:doc_descriptions`). So `Args:` / `Returns:` /
+    `Yields:` block admonitions are intentional and excluded.
+    """
+    import re
+    import textwrap
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+
+    # Path-B override sites — docstring is dev-facing, description is in DESC constant.
+    PATH_B_OVERRIDE = {
+        "set_next_wake",
+        "set_next_wake_at",
+        "get_market_data",
+        "get_higher_timeframe_view",
+        "get_multi_timeframe_snapshot",
+    }
+
+    # Headers that pydantic-ai handles explicitly — not "dead" even if griffe parses them.
+    HANDLED_HEADERS = {"Args", "Arguments", "Parameters", "Returns", "Yields"}
+
+    # Block-style admonition pattern: line ending in `<Word>:` + immediately
+    # indented continuation line. Captures multi-word headers like
+    # "Example output:" or "Example call:".
+    BLOCK_ADMONITION = re.compile(
+        r"^[ \t]*([A-Z][A-Za-z]+(?:\s+[a-z]+)?)\s*:\s*\n[ \t]+\S",
+        re.MULTILINE,
+    )
+
+    offenders = []
+    for name, tool in agent._function_toolset.tools.items():
+        if name in PATH_B_OVERRIDE:
+            continue
+        src = textwrap.dedent(tool.function.__doc__ or "")
+        desc = tool.tool_def.description or ""
+        for match in BLOCK_ADMONITION.finditer(src):
+            header = match.group(1)
+            if header in HANDLED_HEADERS:
+                continue
+            # If griffe stripped this block, the header label itself
+            # will be absent from `description` — that's the signal.
+            if f"{header}:" not in desc:
+                offenders.append((name, header))
+
+    assert not offenders, (
+        "Found block-style admonitions in @tool docstrings that are stripped\n"
+        "from the LLM-visible description by griffe:\n"
+        + "\n".join(f"  {n}: {h}:" for n, h in offenders)
+        + "\n\nFix: either rewrite as inline narrative (path A — same-line "
+        "prose, no indented continuation) OR move content into a DESC constant "
+        "with `@tool(description=DESC_X)` (path B — see "
+        "src/agent/tools_descriptions.py)."
+    )
+
