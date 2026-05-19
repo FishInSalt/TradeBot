@@ -10,9 +10,6 @@ See docs/superpowers/specs/2026-05-19-iter-tool-opt-dead-example-promote-design.
 for the audit (7 tools / 4 loss categories) + design rationale.
 """
 
-# Constants added by subsequent migration tasks (Tasks 2-6).
-
-
 SET_NEXT_WAKE_DESCRIPTION = """Schedule the next scheduler wake-up after a relative minute interval.
 
 Returns a confirmation, or a reject message describing the violation. Alerts, fills, and conditional triggers always interrupt scheduled wake.

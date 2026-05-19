@@ -120,6 +120,7 @@ def create_trader_agent(
 
     # === Perception Tools ===
 
+    # LLM-visible description: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION
     @tool(description=GET_MARKET_DATA_DESCRIPTION)
     async def get_market_data(
         ctx: RunContext[TradingDeps],
@@ -307,6 +308,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, symbol)
 
+    # LLM-visible description: src.agent.tools_descriptions.GET_HIGHER_TIMEFRAME_VIEW_DESCRIPTION
     @tool(description=GET_HIGHER_TIMEFRAME_VIEW_DESCRIPTION)
     async def get_higher_timeframe_view(
         ctx: RunContext[TradingDeps],
@@ -388,6 +390,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, window_seconds=window_seconds)
 
+    # LLM-visible description: src.agent.tools_descriptions.GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION
     @tool(description=GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION)
     async def get_multi_timeframe_snapshot(ctx: RunContext[TradingDeps], tfs: list[str] | None = None) -> str:
         """Multi-TF snapshot — single fanout across N timeframes.
@@ -632,6 +635,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, alert_id, new_price, reasoning=reasoning)
 
+    # LLM-visible description: src.agent.tools_descriptions.SET_NEXT_WAKE_DESCRIPTION
     @tool(description=SET_NEXT_WAKE_DESCRIPTION)
     async def set_next_wake(
         ctx: RunContext[TradingDeps],
@@ -649,6 +653,7 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
+    # LLM-visible description: src.agent.tools_descriptions.SET_NEXT_WAKE_AT_DESCRIPTION
     @tool(description=SET_NEXT_WAKE_AT_DESCRIPTION)
     async def set_next_wake_at(
         ctx: RunContext[TradingDeps],
