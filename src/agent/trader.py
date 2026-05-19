@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from src.agent.memory import MemoryService
 from src.agent.persona import DEFAULT_TAKER_FEE_RATE, generate_system_prompt, RuntimeConfig
+from src.agent.tools_descriptions import (
+    SET_NEXT_WAKE_AT_DESCRIPTION,
+    SET_NEXT_WAKE_DESCRIPTION,
+)
 from src.cli.approval import ApprovalGate
 from src.config import PersonaConfig
 from src.integrations.crypto_etf.service import CryptoEtfService
@@ -695,44 +699,30 @@ def create_trader_agent(
 
         return await _impl(ctx.deps, alert_id, new_price, reasoning=reasoning)
 
-    @tool
+    @tool(description=SET_NEXT_WAKE_DESCRIPTION)
     async def set_next_wake(
         ctx: RunContext[TradingDeps],
         minutes: int,
         reasoning: str,
     ) -> str:
-        """Schedule the next scheduler wake-up after a relative minute interval.
+        """Schedule the next scheduler wake-up (relative interval).
 
         Args:
             minutes: minutes from now until the next wake-up. Must fall within
                 [wake_min_minutes, wake_max_minutes]; rejected otherwise.
             reasoning: brief description of your decision logic.
-
-        Returns a confirmation, or a reject message describing the violation.
-
-        Examples:
-            set_next_wake(15, "consolidation phase, check in 15 min")
-            → "Next wake set to 15 min. Reason: ..."
-
-            set_next_wake(90, "...")
-            → "Cannot set wake to 90 min: exceeds wake_max=60 min for this session."
-
-            set_next_wake(0, "...")
-            → "Cannot set wake to 0 min: below wake_min=1 min."
-
-        Alerts, fills, and conditional triggers always interrupt scheduled wake.
         """
         from src.agent.tools_execution import set_next_wake as _impl
 
         return await _impl(ctx.deps, minutes, reasoning=reasoning)
 
-    @tool
+    @tool(description=SET_NEXT_WAKE_AT_DESCRIPTION)
     async def set_next_wake_at(
         ctx: RunContext[TradingDeps],
         target_time: str,
         reasoning: str,
     ) -> str:
-        """Schedule the next scheduler wake-up at an absolute UTC time.
+        """Schedule the next scheduler wake-up (absolute UTC time).
 
         Args:
             target_time: future wake time in 'HH:MM' UTC format (e.g., '10:37').
@@ -741,27 +731,6 @@ def create_trader_agent(
                 within [now+wake_min_minutes, now+wake_max_minutes]; rejected
                 otherwise.
             reasoning: brief description of your decision logic.
-
-        Returns a confirmation containing the resolved date-time, or a reject
-        message describing the violation.
-
-        Examples:
-            set_next_wake_at("10:37", "align with 1h candle close at 11:00 UTC")
-            → "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: ..."
-
-            set_next_wake_at("12:00", "...")
-            → "Cannot wake at 12:00 UTC: nearest future 2026-05-12 12:00 UTC
-               (in 97 min) exceeds wake_max=60 min for this session."
-
-            set_next_wake_at("10:23", "...")  # now=10:23, resolves to tomorrow
-            → "Cannot wake at 10:23 UTC: nearest future 2026-05-13 10:23 UTC
-               (in 1440 min) exceeds wake_max=60 min for this session."
-
-            set_next_wake_at("foo", "...")
-            → "Invalid target_time format: 'foo'. Expected 'HH:MM' UTC
-               with 2-digit hour and minute (e.g., '10:37' or '03:05')."
-
-        Alerts, fills, and conditional triggers always interrupt scheduled wake.
         """
         from src.agent.tools_execution import set_next_wake_at as _impl
 

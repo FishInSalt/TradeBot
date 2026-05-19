@@ -321,3 +321,46 @@ def test_dual_mode_tool_wrapper():
         async def t_missing_args(ctx: RunContext[None], y: int) -> str:
             """Tool with description override but no Args section for y."""
             return ""
+
+
+def test_set_next_wake_description_carries_examples_block():
+    """W3 R2-Next-H attribution lever — set_next_wake description must
+    carry the 3-outcome Examples block (success + over-max + under-min)
+    via path B override, since baseline desc was 69 chars (90% loss).
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["set_next_wake"]
+    desc = tool.tool_def.description
+
+    # Examples block presence
+    assert "Examples:" in desc, f"Examples block header missing: {desc!r}"
+    assert "consolidation phase" in desc, f"success-outcome example missing: {desc!r}"
+    assert "exceeds wake_max" in desc, f"over-max reject outcome missing: {desc!r}"
+    assert "below wake_min" in desc, f"under-min reject outcome missing: {desc!r}"
+    # Runtime contract
+    assert "Alerts, fills" in desc, f"alerts-interrupt-wake contract missing: {desc!r}"
+    # Args still parsed (unchanged)
+    schema = tool.tool_def.parameters_json_schema
+    assert "wake_min_minutes" in schema["properties"]["minutes"]["description"]
+
+
+def test_set_next_wake_at_description_carries_examples_block():
+    """W3 R2-Next-H attribution lever — set_next_wake_at description must
+    carry the 4-outcome Examples block via path B override, since baseline
+    desc was 60 chars (95% loss). Adoption W3 only 2.0% (3/147)."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["set_next_wake_at"]
+    desc = tool.tool_def.description
+
+    assert "Examples:" in desc
+    assert "candle close at 11:00 UTC" in desc, f"success-outcome example missing: {desc!r}"
+    assert "nearest future" in desc, f"resolution-semantics literal missing: {desc!r}"
+    assert "resolves to tomorrow" in desc, f"tomorrow-resolution outcome missing: {desc!r}"
+    assert "Invalid target_time format" in desc, f"format-reject outcome missing: {desc!r}"
+    assert "Alerts, fills" in desc, f"alerts-interrupt-wake contract missing: {desc!r}"
