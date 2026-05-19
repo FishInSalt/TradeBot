@@ -457,6 +457,38 @@ def test_get_performance_description_carries_degradation():
     assert "<returns>" in desc, f"Returns block XML wrap lost (regression): {desc!r}"
 
 
+def test_get_performance_docstring_accuracy_caveats_and_scope():
+    """get_performance Returns: block carries faithful runtime contract:
+    (1) all 3 Note caveat variants (legacy / cache-miss / invariant),
+    (2) caveats-before-stats positioning,
+    (3) (all fills) scope + gross-fees-net arithmetic caveat,
+    (4) @ HH:MM:SS UTC timestamp in header,
+    (5) Stats unavailable 2 distinct variants (legacy data vs invariant violations).
+
+    All survive griffe via the <returns> XML wrap — the 3rd LLM-visible
+    channel besides pre-Args text and Args -> parameters_json_schema. See
+    [[griffe-example-section-stripped]] memory for the channel taxonomy."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_performance"]
+    desc = tool.tool_def.description
+
+    # Fix 1: invariant violations Note variant present
+    assert "invariant violations" in desc, f"invariant violations caveat missing: {desc!r}"
+    # Fix 2: caveats appear before stats values (positional accuracy)
+    assert "precede metric values" in desc, f"caveat-before-stats position not clarified: {desc!r}"
+    # Fix 3: (all fills) scope + gross-fees-net arithmetic caveat
+    assert "(all fills)" in desc, f"(all fills) scope missing: {desc!r}"
+    assert "gross − fees ≈ net" in desc, f"arithmetic self-check caveat missing: {desc!r}"
+    # Fix 4: timestamp annotation in Trading Performance header
+    assert "HH:MM:SS UTC" in desc, f"timestamp annotation missing: {desc!r}"
+    # Fix 5: Stats unavailable 2 variants explicit
+    assert "pre-net-metrics-iter legacy data" in desc, f"Stats unavailable legacy variant missing: {desc!r}"
+    assert "data invariant violations" in desc, f"Stats unavailable invariant variant missing: {desc!r}"
+
+
 def test_no_block_admonition_lost_to_griffe_stripping():
     """Module-level audit: detects when a block-style `<Word>:\\n<indent>`
     admonition in a wrapper's source docstring fails to reach the
