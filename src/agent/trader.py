@@ -48,6 +48,37 @@ class TradingDeps:
     cycle_id: str | None = None  # Mutated by run_agent_cycle before agent.run(); see §3.3 of spec
 
 
+def _create_dual_mode_tool(agent):
+    """Build the project's @tool decorator with two usage modes:
+
+        @tool                       — default: griffe sniffs docstring main_desc + Args
+        @tool(description=DESC_X)   — override: pass DESC_X verbatim to LLM,
+                                       bypass griffe section-stripping
+
+    Why dual-mode: pydantic-ai 1.78 / griffe strips google section headers
+    (Examples:, Example call:, inline admonitions) from tool_def.description.
+    Override path B carries multi-outcome Examples / multi-section Example
+    output blocks intact. See spec §2.2 of
+    docs/superpowers/specs/2026-05-19-iter-tool-opt-dead-example-promote-design.md.
+
+    Backward-compat: 33 existing @tool sites use the no-arg form, unchanged.
+
+    Iter 5 D preserved: docstring_format='google' + require_parameter_descriptions=True
+    still enforced on both branches.
+    """
+    def tool(func=None, *, description=None):
+        kwargs = {
+            "docstring_format": "google",
+            "require_parameter_descriptions": True,
+        }
+        if description is not None:
+            kwargs["description"] = description
+        if func is not None and callable(func):
+            return agent.tool(**kwargs)(func)
+        return lambda f: agent.tool(**kwargs)(f)
+    return tool
+
+
 def create_trader_agent(
     model: str,
     persona_config: PersonaConfig,
@@ -73,15 +104,12 @@ def create_trader_agent(
         model_settings=get_optimal_settings(model_name),
     )
 
-    # Iter 5 D: 启用 google docstring 显式声明 + 强制 Args 完整性。
-    # require_parameter_descriptions=True 在 tool 加载时校验，缺 Args 立即 startup fail。
-    # 用 def 而非 functools.partial — partial 丢失 Agent.tool 的 overload 信息，
-    # IDE static type checker 会把 @tool 标红；def 让 pyright 看到清晰的装饰器签名。
-    def tool(func):
-        return agent.tool(
-            docstring_format="google",
-            require_parameter_descriptions=True,
-        )(func)
+    # Iter 5 D: 启用 google docstring 显式声明 + 强制 Args 完整性 (preserved).
+    # iter-tool-opt-dead-example-promote (2026-05-19): dual-mode wrapper extracted
+    # to module-level `_create_dual_mode_tool` — supports `@tool(description=DESC_X)`
+    # path-B override that bypasses griffe section-stripping for tools with
+    # multi-outcome Examples / multi-section Example output blocks.
+    tool = _create_dual_mode_tool(agent)
 
     # === Perception Tools ===
 

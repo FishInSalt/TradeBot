@@ -267,3 +267,57 @@ def test_cancel_price_level_alert_schema_exposes_id_format_and_source():
         f"id format constraint missing from LLM-visible schema: {alert_id_desc!r}"
     assert "get_active_alerts" in alert_id_desc, \
         f"id source guidance missing from LLM-visible schema: {alert_id_desc!r}"
+
+
+def test_dual_mode_tool_wrapper():
+    """Foundation drift guard: dual-mode @tool wrapper accepts both
+    `@tool` (no override) and `@tool(description=DESC)` (override) forms.
+
+    Override form bypasses griffe section-stripping (see pydantic-ai
+    issue #1146 + spec §2.2). Args still parsed from docstring in both
+    forms. `require_parameter_descriptions=True` still enforced in
+    override mode (missing-Args still fails fast).
+    """
+    import pytest
+    from pydantic_ai import Agent, RunContext
+    from pydantic_ai.exceptions import UserError
+    from src.agent.trader import _create_dual_mode_tool
+
+    agent = Agent("test", deps_type=type(None), output_type=str)
+    tool = _create_dual_mode_tool(agent)
+
+    @tool
+    async def t_default(ctx: RunContext[None], x: int) -> str:
+        """T1 default mode description.
+
+        Args:
+            x: an int.
+        """
+        return ""
+
+    CUSTOM = "Custom override description.\n\nExamples:\n    t_override(1) → 'ok'\n"
+
+    @tool(description=CUSTOM)
+    async def t_override(ctx: RunContext[None], x: int) -> str:
+        """Internal docstring — replaced by override.
+
+        Args:
+            x: an int.
+        """
+        return ""
+
+    assert agent._function_toolset.tools["t_default"].tool_def.description == "T1 default mode description."
+    assert agent._function_toolset.tools["t_override"].tool_def.description == CUSTOM
+    # Args still parsed from docstring in BOTH forms
+    assert agent._function_toolset.tools["t_default"].tool_def.parameters_json_schema["properties"]["x"]["description"] == "an int."
+    assert agent._function_toolset.tools["t_override"].tool_def.parameters_json_schema["properties"]["x"]["description"] == "an int."
+
+    # Negative control: require_parameter_descriptions=True still fires
+    # in override mode if Args section is missing for a parameter.
+    fail_agent = Agent("test", deps_type=type(None), output_type=str)
+    fail_tool = _create_dual_mode_tool(fail_agent)
+    with pytest.raises(UserError, match="Missing parameter descriptions"):
+        @fail_tool(description="override desc")
+        async def t_missing_args(ctx: RunContext[None], y: int) -> str:
+            """Tool with description override but no Args section for y."""
+            return ""
