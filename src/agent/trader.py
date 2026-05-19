@@ -284,10 +284,11 @@ def create_trader_agent(
         longs (settlement interval varies by contract — see next settlement time
         in output). Open interest is total outstanding contracts in USD, rendered
         with anchor values from 1h ago and 24h ago and the percent change to
-        the current value. Anchor labels correspond to OKX 1H-bar boundaries
-        and may differ from wall-clock 1h/24h offsets by 0-60 minutes when the
-        latest bar is still in progress. Long/short ratio is the ratio of long
-        vs short account positions.
+        the current value — e.g. the OI line renders as `Open Interest: $2.69B
+        (1h ago $2.71B, -0.7%; 24h ago $2.45B, +9.8%)`. Anchor labels correspond
+        to OKX 1H-bar boundaries and may differ from wall-clock 1h/24h offsets
+        by 0-60 minutes when the latest bar is still in progress. Long/short
+        ratio is the ratio of long vs short account positions.
 
         Args:
             symbol: trading symbol; None uses the currently traded pair.
