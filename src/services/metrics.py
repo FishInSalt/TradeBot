@@ -291,10 +291,11 @@ class MetricsService:
             if peak > 0:
                 max_dd_ratio = max(max_dd_ratio, (peak - equity) / peak)
 
-        # recent_summary 沿用 gross W/L 计数（spec 未明确切 net）；net 化作 W3 follow-up
-        # candidate if fee 翻转 win→loss 频率高（参 spec §10 OOS）.
-        # Break-even (p == 0) 与主指标一致排除（PR #57 review R2-I-2）；当 BE 存在时
-        # 加 `B` 段，agent 可从 W+L+B = n 验证 partition 完整性.
+        # recent_summary uses gross W/L counts and labels the partition as `gross`
+        # so agents reading the field don't conflate it with net W/L counts surfaced
+        # elsewhere. Break-even (p == 0) is excluded from W/L like the main metrics
+        # (PR #57 review R2-I-2); when BE exists a `B` segment is appended so
+        # W + L + B = n holds.
         n = min(5, len(gross_pnls))
         recent_pnls = gross_pnls[-n:]
         recent_wins = sum(1 for p in recent_pnls if p > 0)
@@ -302,7 +303,7 @@ class MetricsService:
         recent_be = n - recent_wins - recent_losses
         trade_word = "trade" if n == 1 else "trades"
         be_part = f" {recent_be}B" if recent_be > 0 else ""
-        recent_summary = f"{recent_wins}W {recent_losses}L{be_part} (last {n} {trade_word})"
+        recent_summary = f"{recent_wins}W {recent_losses}L{be_part} (last {n} {trade_word}, gross)"
 
         total_pnl = sum(gross_pnls)
         net_pnl = sum(net_pnls)

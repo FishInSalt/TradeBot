@@ -193,6 +193,40 @@ def test_missing_args_with_require_descriptions_triggers_fail():
             return str(x)
 
 
+def test_get_derivatives_data_docstring_includes_oi_anchor_example():
+    """W3 R2-Next-G adoption gate (oi_delta_ref_rate 39.1% — 31-50%
+    docstring-promo band per spec §6.2): the wrapper docstring must carry a
+    fact-only inline example of the rendered OI line with 1h/24h anchors +
+    percent delta. Inline narrative form (not an ``Example output:`` block)
+    is required because pydantic-ai 1.78 / griffe parses section-like
+    headers and strips them from ``tool.tool_def.description`` — only the
+    pre-``Args:`` description body reaches the LLM.
+
+    Principle 8 (trust agent + tools first): example is fact-only — no
+    guidance verb such as "use X for Y". If the underlying tool output
+    format in tools_perception._derive_oi_anchors / get_derivatives_data
+    ever drifts away from "Open Interest: $... (1h ago $..., +X.X%;
+    24h ago $..., +Y.Y%)" the example becomes stale — this guard fails
+    fast so the docstring example stays a truthful spec.
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_derivatives_data"]
+    description = tool.tool_def.description
+
+    assert "Open Interest:" in description, (
+        f"Example missing OI label in LLM-visible description: {description!r}"
+    )
+    assert "1h ago $" in description, (
+        f"Example missing 1h anchor literal '1h ago $': {description!r}"
+    )
+    assert "24h ago $" in description, (
+        f"Example missing 24h anchor literal '24h ago $': {description!r}"
+    )
+
+
 def test_set_price_volatility_alert_schema_exposes_threshold_range():
     """R2-1 drift guard: set_price_volatility_alert tool schema must expose threshold_pct and
     window_minutes range to LLM via pydantic-ai docstring sniffing.

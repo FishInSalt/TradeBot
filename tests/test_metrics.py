@@ -111,6 +111,7 @@ async def test_compute_metrics_recent_summary(metrics_db):
     metrics = await service.compute()
     assert "3W 1L" in metrics.recent_summary
     assert "last 4" in metrics.recent_summary
+    assert "gross" in metrics.recent_summary
 
 
 async def test_compute_metrics_total_fees_includes_opens(metrics_db):
