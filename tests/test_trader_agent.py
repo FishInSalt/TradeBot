@@ -456,3 +456,77 @@ def test_get_performance_description_carries_degradation():
     # Returns: block still wrapped in <returns> XML (don't break this)
     assert "<returns>" in desc, f"Returns block XML wrap lost (regression): {desc!r}"
 
+
+def test_no_block_admonition_lost_to_griffe_stripping():
+    """Module-level audit: detects when a block-style `<Word>:\\n<indent>`
+    admonition in a wrapper's source docstring fails to reach the
+    LLM-visible `tool.tool_def.description` (i.e., griffe stripped it).
+
+    Detection is empirical (source-vs-desc differential), not
+    regex-pattern-guessing — catches exactly what griffe actually strips
+    on the current pydantic-ai / griffe version. Inline `<Word>: <prose>`
+    on a single line is NOT detected (it survives griffe as plain prose;
+    see `cancel_price_level_alert` for an example).
+
+    Path-B override tools whitelisted — their source docstring is for
+    IDE/dev readers only; LLM-facing content lives in DESC constants
+    in `src/agent/tools_descriptions.py`.
+
+    Allowed sections: griffe handles Args/Parameters into the
+    `parameters_json_schema`, and pydantic-ai wraps Returns into a
+    `<returns>` XML segment within description (see
+    `pydantic_ai/_griffe.py:doc_descriptions`). So `Args:` / `Returns:` /
+    `Yields:` block admonitions are intentional and excluded.
+    """
+    import re
+    import textwrap
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+
+    # Path-B override sites — docstring is dev-facing, description is in DESC constant.
+    PATH_B_OVERRIDE = {
+        "set_next_wake",
+        "set_next_wake_at",
+        "get_market_data",
+        "get_higher_timeframe_view",
+        "get_multi_timeframe_snapshot",
+    }
+
+    # Headers that pydantic-ai handles explicitly — not "dead" even if griffe parses them.
+    HANDLED_HEADERS = {"Args", "Arguments", "Parameters", "Returns", "Yields"}
+
+    # Block-style admonition pattern: line ending in `<Word>:` + immediately
+    # indented continuation line. Captures multi-word headers like
+    # "Example output:" or "Example call:".
+    BLOCK_ADMONITION = re.compile(
+        r"^[ \t]*([A-Z][A-Za-z]+(?:\s+[a-z]+)?)\s*:\s*\n[ \t]+\S",
+        re.MULTILINE,
+    )
+
+    offenders = []
+    for name, tool in agent._function_toolset.tools.items():
+        if name in PATH_B_OVERRIDE:
+            continue
+        src = textwrap.dedent(tool.function.__doc__ or "")
+        desc = tool.tool_def.description or ""
+        for match in BLOCK_ADMONITION.finditer(src):
+            header = match.group(1)
+            if header in HANDLED_HEADERS:
+                continue
+            # If griffe stripped this block, the header label itself
+            # will be absent from `description` — that's the signal.
+            if f"{header}:" not in desc:
+                offenders.append((name, header))
+
+    assert not offenders, (
+        "Found block-style admonitions in @tool docstrings that are stripped\n"
+        "from the LLM-visible description by griffe:\n"
+        + "\n".join(f"  {n}: {h}:" for n, h in offenders)
+        + "\n\nFix: either rewrite as inline narrative (path A — same-line "
+        "prose, no indented continuation) OR move content into a DESC constant "
+        "with `@tool(description=DESC_X)` (path B — see "
+        "src/agent/tools_descriptions.py)."
+    )
+
