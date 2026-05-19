@@ -208,22 +208,31 @@ def create_trader_agent(
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
         """Show session trading performance — balance, return, fees, win rate, drawdown (gross + net dual view).
 
-        When there are no completed trades the response is `No completed trades yet.`. When all close fills are pre-iter legacy (FIFO can't compute), the response is `Stats unavailable: ...`. When the metrics service is unavailable, the response is `No metrics service available.`.
+        Degradation responses: `No completed trades yet.` when there are no completed trades. `Stats unavailable: all close fills are pre-net-metrics-iter legacy data (forensic analysis via scripts/_sim_metrics.py from sim_orders table).` when all close fills are legacy. `Stats unavailable: data invariant violations (N close fills had no preceding open lot or corrupt amount/price). Investigate trade_actions integrity.` when data invariant violations are detected with zero recoverable trades. `No metrics service available.` when the metrics service is unavailable.
 
         Returns:
             str: Two sections.
 
-            === Trading Performance === — Initial Balance, Current Balance,
+            === Trading Performance (@ HH:MM:SS UTC) === — Initial Balance, Current Balance,
             Total Return (% + USDT, incl. unrealized, net), Realized PnL (gross / net + fees),
-            Total Fees (cumulative across all fills).
+            Total Fees (-X.XX USDT (all fills)). The `(all fills)` scope flags that
+            total_fees includes unclosed open lots' entry fees, so arithmetic
+            self-check `gross − fees ≈ net` only holds exactly when no positions
+            are open at compute time.
 
-            === Trade Stats === — Total Trades, Win Rate (gross / net), Avg Win/Loss
+            === Trade Stats === — Per-condition `Note: ...` caveat lines appear FIRST
+            (before metric values), in this order when applicable:
+            - `Note: net stats based on m/n trades (...)` when pre-iter legacy close
+              fills are skipped (FIFO requires entry_price + amount).
+            - `Note: N close fills had cache-miss entry_price (FIFO unaffected; audit
+              trail incomplete for those trades).` when OKX cache-miss is present.
+            - `Note: invariant violations: N fill(s) had no preceding open lot or
+              corrupt amount/price (excluded from FIFO; investigate trade_actions
+              integrity).` when data integrity violations are detected.
+
+            Metric values follow: Total Trades, Win Rate (gross / net), Avg Win/Loss
             (gross / net), Profit Factor (gross / net), Max Drawdown (net equity),
-            Best/Worst Trade (gross / net). Caveats:
-            - Pre-iter legacy close fills are skipped (FIFO requires entry_price + amount);
-              when present, output adds "Note: net stats based on m/n trades" line.
-            - OKX cache-miss close fills are included in algorithm (FIFO uses lot.entry_px
-              from open) but flagged in caveat note.
+            Best/Worst Trade (gross / net).
 
             Related: get_trade_journal (decision timeline).
         """
