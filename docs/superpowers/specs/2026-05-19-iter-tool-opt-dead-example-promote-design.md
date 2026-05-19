@@ -148,17 +148,23 @@ def test_<tool_name>_description_includes_<key_content>():
 - Path A 工具：1-2 个关键散文 literal（e.g. `"insufficient data"` / `"temporarily unavailable"`）
 - Path B 工具：3-5 个关键 literal（Examples 块标志 + 至少 2 个 outcome 文案 + Args 不退化）
 
-外加 1 个 module-level audit test 锁住"无新增 dead Example 块回归"：
+外加 1 个 module-level audit test 锁住"无新增 dead block-style admonition 回归"。**检测策略：source-vs-desc 差分**（非 regex pattern-guessing）：
 
 ```python
-def test_no_dead_example_blocks_in_descriptions():
-    """Drift guard prevents future regressions: any tool defined with
-    `@tool` (no description override) must not contain section-like
-    headers in docstring that get stripped by griffe."""
-    # Scan all 33 tools; for each with @tool (no override), assert
-    # source __doc__ does NOT contain `Example call:` / `Example output:`
-    # / `Examples:` / `Note:` / `Warning:` / `Tip:` literals.
+def test_no_block_admonition_lost_to_griffe_stripping():
+    """Drift guard: detects when a block-style `<Word>:\\n<indent>`
+    admonition in a non-PATH_B wrapper's source docstring fails to
+    reach `tool.tool_def.description`. Differential mechanism catches
+    exactly what griffe actually strips on the current version."""
+    # For each tool (non-PATH_B):
+    #   - find block-style admonitions in source (line `<Word>:` + indented next line)
+    #   - skip handled headers (Args/Returns/Yields)
+    #   - if header literal absent from tool_def.description → offender
 ```
+
+**为什么用差分检测而非 regex 黑名单**：实证（plan review 2026-05-19）发现 `cancel_price_level_alert` 源 docstring 含 `Note: alerts at SL/TP...` 但是 **inline same-line `<Word>: <prose>` 形态**（不是块结构），griffe **不**剥离，description 完整含 `Note:` 字面。Regex-only `^Note:|^Warning:|...` 黑名单会 false-positive 此类合法用法。差分检测只 flag 实际被剥离的 header — 与 griffe 行为同步，未来 griffe 修复 dead admonition 时测试也自动适应。
+
+**griffe 实际剥离触发条件**：行尾 `<词>:` + 立即跟随缩进续行块。Inline `Note: <prose>` 同行连写 → griffe 当散文保留。
 
 ### 2.6 Args 描述完整性 — 副议题
 
