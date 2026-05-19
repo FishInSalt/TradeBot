@@ -419,3 +419,40 @@ def test_get_multi_timeframe_snapshot_description_carries_example():
     assert "MA fast-vs-slow per tf" in desc
     assert "Range pos" in desc
     assert "insufficient data" in desc, f"Degradation literal missing: {desc!r}"
+
+
+def test_get_order_book_description_carries_degradation():
+    """get_order_book degradation文案 (insufficient / unavailable) must
+    reach LLM via path A inline narrative. Preserves existing main_desc
+    'Reports best bid/ask...' fact content."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_order_book"]
+    desc = tool.tool_def.description
+
+    # Existing main_desc preserved (path A doesn't delete fact content)
+    assert "Reports best bid/ask" in desc, f"existing main_desc literal lost (regression): {desc!r}"
+    # New inline degradation
+    assert "insufficient data" in desc, f"insufficient-data degradation literal missing: {desc!r}"
+    assert "temporarily unavailable" in desc, f"unavailable degradation literal missing: {desc!r}"
+
+
+def test_get_performance_description_carries_degradation():
+    """get_performance degradation文案 (zero trades / legacy / no service)
+    must reach LLM via path A inline narrative. Returns: block survives
+    via <returns> XML wrap (don't break it)."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_performance"]
+    desc = tool.tool_def.description
+
+    assert "No completed trades yet" in desc
+    assert "Stats unavailable" in desc
+    assert "No metrics service available" in desc
+    # Returns: block still wrapped in <returns> XML (don't break this)
+    assert "<returns>" in desc, f"Returns block XML wrap lost (regression): {desc!r}"
+

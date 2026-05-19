@@ -207,6 +207,8 @@ def create_trader_agent(
     async def get_performance(ctx: RunContext[TradingDeps]) -> str:
         """Show session trading performance — balance, return, fees, win rate, drawdown (gross + net dual view).
 
+        When there are no completed trades the response is `No completed trades yet.`. When all close fills are pre-iter legacy (FIFO can't compute), the response is `Stats unavailable: ...`. When the metrics service is unavailable, the response is `No metrics service available.`.
+
         Returns:
             str: Two sections.
 
@@ -223,9 +225,6 @@ def create_trader_agent(
               from open) but flagged in caveat note.
 
             Related: get_trade_journal (decision timeline).
-
-        Degradation: 'No completed trades yet.' if zero trades; 'Stats unavailable: ...'
-        if all close fills are legacy; 'No metrics service available.' if metrics service missing.
         """
         from src.agent.tools_perception import get_performance as _impl
 
@@ -366,15 +365,10 @@ def create_trader_agent(
     async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 15) -> str:
         """Return top-N order book depth with concentrated-level breakdown.
 
-        Reports best bid/ask, cumulative depth, bid/ask share, and concentrated
-        levels (size > 3× same-side median).
+        Reports best bid/ask, cumulative depth, bid/ask share, and concentrated levels (size > 3× same-side median). If the book is empty or shorter than requested depth, the response is `Order book ({symbol}): insufficient data (requested depth X, got Y)`. On service failure, the response is `Order book ({symbol}): temporarily unavailable`.
 
         Args:
             depth: levels per side to fetch (default 15).
-
-        Degradation: "Order book ({symbol}): insufficient data (requested depth X, got Y)"
-        if book is empty/short; "Order book ({symbol}): temporarily unavailable" on
-        service failure.
         """
         from src.agent.tools_perception import get_order_book as _impl
 
