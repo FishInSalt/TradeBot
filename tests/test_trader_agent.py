@@ -364,3 +364,58 @@ def test_set_next_wake_at_description_carries_examples_block():
     assert "resolves to tomorrow" in desc, f"tomorrow-resolution outcome missing: {desc!r}"
     assert "Invalid target_time format" in desc, f"format-reject outcome missing: {desc!r}"
     assert "Alerts, fills" in desc, f"alerts-interrupt-wake contract missing: {desc!r}"
+
+
+def test_get_market_data_description_carries_example_output():
+    """get_market_data description must carry the multi-section Example
+    output (Ticker / Recent Candles / Period summary) + OHLCV marker
+    semantics via path B override.
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_market_data"]
+    desc = tool.tool_def.description
+
+    assert "=== Ticker" in desc, f"Ticker section header missing in example: {desc!r}"
+    assert "=== Recent Candles" in desc, f"Candles section header missing: {desc!r}"
+    assert "=== Period summary" in desc, f"Period summary section header missing: {desc!r}"
+    assert "vol↑" in desc, f"OHLCV vol marker literal missing: {desc!r}"
+    assert "range↑" in desc, f"OHLCV range marker literal missing: {desc!r}"
+
+
+def test_get_higher_timeframe_view_description_carries_example_and_degradation():
+    """get_higher_timeframe_view description must carry per-tf Example
+    output + Degradation trailer via path B override.
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_higher_timeframe_view"]
+    desc = tool.tool_def.description
+
+    assert "=== Higher Timeframe View" in desc
+    assert "MA stack: MA50 > MA100 > MA200" in desc
+    assert "100-period High:" in desc
+    assert "insufficient data (need N candles)" in desc, f"Degradation literal missing: {desc!r}"
+    assert "MA50 ≈ MA100" in desc, f"MA stack tolerance semantics missing: {desc!r}"
+
+
+def test_get_multi_timeframe_snapshot_description_carries_example():
+    """get_multi_timeframe_snapshot description must carry per-TF Example
+    output + Degradation trailer via path B override. Gate 4 attribution
+    candidate.
+    """
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["get_multi_timeframe_snapshot"]
+    desc = tool.tool_def.description
+
+    assert "=== Multi-TF Snapshot" in desc
+    assert "MA fast-vs-slow per tf" in desc
+    assert "Range pos" in desc
+    assert "insufficient data" in desc, f"Degradation literal missing: {desc!r}"

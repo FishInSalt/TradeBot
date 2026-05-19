@@ -46,3 +46,76 @@ Examples:
     set_next_wake_at("foo", "...")
     → "Invalid target_time format: 'foo'. Expected 'HH:MM' UTC with 2-digit hour and minute (e.g., '10:37' or '03:05')."
 """
+
+
+GET_MARKET_DATA_DESCRIPTION = """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
+
+All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
+
+Markers in OHLCV table (upside-only thresholds): `vol↑` for bar volume > 2× SMA(20) of bar volumes; `range↑` for bar range (high - low) > 2× ATR(14); empty for neither threshold tripped. Time column shows candle open in UTC.
+
+Example call:
+    get_market_data(timeframe="5m", candle_count=30)
+
+Example output:
+    === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
+    Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
+    ...
+    === Recent Candles (5m, last 30, oldest-first by row) ===
+    Time (open UTC)   Open ... Vol     Markers
+    14:20         ...         245.3   vol↑
+    ...
+    === Period summary (last 5 closed candles vs prior 5 closed candles) ===
+    Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
+    Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
+    Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
+"""
+
+
+GET_HIGHER_TIMEFRAME_VIEW_DESCRIPTION = """Long-term structural view across one or more higher timeframes: ticker (authoritative live price), per-tf MA50/MA100/MA200 with raw value, price-vs-MA percentage, and MA slope (10-bar lookback); MA stack comparison; 100-period high and low with bars-ago and the candle open timestamp; range position within 100-period; 20-period high-low range width; last-bar volume vs 20-period SMA ratio (base volume); ATR(14) raw, percent of price, and ratio vs 20-period ATR average.
+
+All moving averages are simple moving averages (SMA) computed on the closed-bar series only (excluding the in-progress bar). The slope reference and all rolling averages use the closed-candle series.
+
+MA stack comparison uses ">" / "<" / "≈" with 0.1% tolerance: when |MAa - MAb| / MAb < 0.001, the operator collapses to "≈" (e.g., "MA50 ≈ MA100 < MA200").
+
+Per-tf MA periods: 4h / 1d / 1w use (50, 100, 200) — standard moving-average periods. 1M uses (12, 24, 60), corresponding to 1-year / 2-year / 5-year monthly cycles, matching crypto-industry monthly chart conventions; the 1M section header marks the period choice explicitly.
+
+Example call:
+    get_higher_timeframe_view(timeframes=["4h", "1d"])
+
+Example output:
+    === Higher Timeframe View (BTC/USDT:USDT @ 14:23:08 UTC) ===
+    Last: 81870.50
+
+    [4h] (last closed candle: open 2026-05-11 08:00 UTC)
+      MA50: 79200.00 (price vs MA: +3.4%; MA slope vs 10 bars ago: +0.8%)
+      ...
+      MA stack: MA50 > MA100 > MA200
+      100-period High: 82800.00 (32 bars ago, candle open 2026-05-06 00:00 UTC)
+      ...
+      Last bar vol (base): 1521.6 (5.0× SMA(20) avg)
+      ATR(14): 1572.30 (1.92% of price; 1.04× vs 20-period ATR(14) avg)
+    ...
+
+Per-tf degradation: "insufficient data (need N candles)" if OHLCV history is shorter than the longest MA period; "Error: Temporarily unavailable" if the OHLCV fetch for that tf fails. Overall returns header-only error if the ticker fetch fails.
+"""
+
+
+GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION = """Multi-timeframe snapshot — single fanout across N timeframes for fast cross-TF structural reads. Per TF: momentum vs MA20 (closed-bar series), MA20 / MA50 fast-vs-slow comparison, ATR percent of price + ratio vs 20-period ATR average, range position within 20-bar high/low. Header row gives ticker + per-tf "MA fast-vs-slow" digest line (e.g. "5m below | 1h above | 4h above | 1d below"). Last 3 closed-candle close-prices per TF for short-momentum read.
+
+All indicators computed on closed-bar series only (excluding the in-progress candle). Algorithm-lock invariant: MTS per-TF outputs match `get_higher_timeframe_view` per-TF (algorithm shared); end-to-end verified by `test_mts_htf_overlap_values_match`.
+
+Example call:
+    get_multi_timeframe_snapshot()
+
+Example output:
+    === Multi-TF Snapshot (BTC/USDT:USDT) ===
+    Last (ticker @ 14:23:08 UTC): 81870.50
+    MA fast-vs-slow per tf: 5m below | 1h above | 4h above | 1d below
+    Columns: ...
+    [5m]  Mom -0.3% (vs MA20) | MA20: 81960 < MA50: 82150 | ATR 0.15% (20p avg 0.18%, 0.83×) | Range pos 65%
+          Last 3 closes (closed @ 2026-05-11 14:20 UTC): 81870→81848→81870
+    ... (3 more tf rows)
+
+Per-TF degradation: "insufficient data" or "temporarily unavailable" per failed TF. Overall returns header-only error if all TFs fail or the ticker fetch fails.
+"""
