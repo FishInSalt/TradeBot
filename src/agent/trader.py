@@ -220,15 +220,17 @@ def create_trader_agent(
             self-check `gross − fees ≈ net` only holds exactly when no positions
             are open at compute time.
 
-            === Trade Stats === — Per-condition `Note: ...` caveat lines appear FIRST
-            (before metric values), in this order when applicable:
+            === Trade Stats === — Per-condition `Note: ...` caveat lines precede metric values, in this order when applicable:
             - `Note: net stats based on m/n trades (...)` when pre-iter legacy close
               fills are skipped (FIFO requires entry_price + amount).
             - `Note: N close fills had cache-miss entry_price (FIFO unaffected; audit
               trail incomplete for those trades).` when OKX cache-miss is present.
             - `Note: invariant violations: N fill(s) had no preceding open lot or
               corrupt amount/price (excluded from FIFO; investigate trade_actions
-              integrity).` when data integrity violations are detected.
+              integrity).` when data integrity violations are detected and at
+              least one trade completed (the zero-trades case of the same
+              condition surfaces as the `Stats unavailable: data invariant
+              violations ...` degradation response above instead).
 
             Metric values follow: Total Trades, Win Rate (gross / net), Avg Win/Loss
             (gross / net), Profit Factor (gross / net), Max Drawdown (net equity),

@@ -478,7 +478,7 @@ def test_get_performance_docstring_accuracy_caveats_and_scope():
     # Fix 1: invariant violations Note variant present
     assert "invariant violations" in desc, f"invariant violations caveat missing: {desc!r}"
     # Fix 2: caveats appear before stats values (positional accuracy)
-    assert "appear FIRST" in desc, f"caveat-before-stats position not clarified: {desc!r}"
+    assert "precede metric values" in desc, f"caveat-before-stats position not clarified: {desc!r}"
     # Fix 3: (all fills) scope + gross-fees-net arithmetic caveat
     assert "(all fills)" in desc, f"(all fills) scope missing: {desc!r}"
     assert "gross − fees ≈ net" in desc, f"arithmetic self-check caveat missing: {desc!r}"
