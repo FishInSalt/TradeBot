@@ -196,8 +196,6 @@ async def test_update_success_overwrites_price_and_reasoning_keeps_direction_and
     assert "id=a3f2b8c1 → id=" not in result
     # Direction preserved (still "above"), single direction token.
     assert "above 82100.00 → 82500.00" in result
-    # New reasoning carried — overwrite semantics.
-    assert '— "trail up after breakout"' in result
 
     # BaseExchange.update_price_level_alert called once with the new signature.
     deps.exchange.update_price_level_alert.assert_called_once_with(
@@ -351,11 +349,11 @@ def test_update_display_dispatch_registered():
     # 5.1.4.2: parser registered + correctly extracts direction + prices
     assert "update_price_level_alert" in _EXECUTION_PARSERS
     parser = _EXECUTION_PARSERS["update_price_level_alert"]
-    # New return shape (post iter-tool-opt-alert-age):
-    #   "Price level alert updated (id=AAAA): above 82100.00 → 82500.00 — \"reason\""
+    # New return shape (post iter-session-log-args-visibility §3.6):
+    #   "Price level alert updated (id=AAAA): above 82100.00 → 82500.00"
     sample = (
         'Price level alert updated (id=a3f2b8c1): '
-        'above 82100.00 → 82500.00 — "4h structural high"'
+        'above 82100.00 → 82500.00'
     )
     summary = parser(sample)
     assert "above" in summary
@@ -393,7 +391,7 @@ def test_cancel_idempotent_not_classified_as_error():
     # Update success — must NOT be error (new in-place return shape)
     update_success = (
         'Price level alert updated (id=a3f2b8c1): '
-        'above 82100.00 → 82500.00 — "4h structural high"'
+        'above 82100.00 → 82500.00'
     )
     assert is_tool_error(
         "update_price_level_alert", update_success, outcome="success",

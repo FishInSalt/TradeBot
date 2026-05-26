@@ -115,6 +115,105 @@ async def test_set_take_profit_calls_register_close_order_entry():
     deps.exchange.register_close_order_entry.assert_called_once_with("tp1", 80000.0)
 
 
+# === Task 4: SL/TP state-delta return + display regex sync ===
+
+
+@pytest.mark.asyncio
+async def test_set_stop_loss_old_new_prefix_when_existing():
+    """set_stop_loss return uses 'old → new' prefix when an existing stop is replaced."""
+    from src.agent.tools_execution import set_stop_loss
+
+    deps = _make_deps(order_id="sl_new", entry_price=80000.0)
+    existing_stop = Order(
+        id="sl_old", symbol="BTC/USDT:USDT", side="sell",
+        order_type="stop", amount=0.1, price=77100.00,
+        status="open", fee=None, is_algo=True, trigger_price=77100.00,
+    )
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[existing_stop])
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="sl_new", symbol="BTC/USDT:USDT", side="sell",
+        order_type="stop", amount=0.1, price=76950.00,
+        status="open", fee=None, is_algo=True, trigger_price=76950.00,
+    ))
+
+    result = await set_stop_loss(deps, price=76950.00, reasoning="trail up after MA reclaim")
+    assert "Stop loss set at 77100.00 → 76950.00" in result
+    assert "from" in result and "price" in result
+
+
+@pytest.mark.asyncio
+async def test_set_stop_loss_single_value_when_no_existing():
+    """set_stop_loss first-set: no '→' arrow, single-value shape."""
+    from src.agent.tools_execution import set_stop_loss
+
+    deps = _make_deps(order_id="sl_first", entry_price=80000.0)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="sl_first", symbol="BTC/USDT:USDT", side="sell",
+        order_type="stop", amount=0.1, price=76950.00,
+        status="open", fee=None, is_algo=True, trigger_price=76950.00,
+    ))
+
+    result = await set_stop_loss(deps, price=76950.00, reasoning="initial SL after entry")
+    assert "Stop loss set at 76950.00" in result
+    assert "→" not in result
+
+
+@pytest.mark.asyncio
+async def test_set_take_profit_old_new_prefix_when_existing():
+    from src.agent.tools_execution import set_take_profit
+
+    deps = _make_deps(order_id="tp_new", entry_price=80000.0)
+    existing_tp = Order(
+        id="tp_old", symbol="BTC/USDT:USDT", side="sell",
+        order_type="take_profit", amount=0.1, price=76300.00,
+        status="open", fee=None, is_algo=True, trigger_price=76300.00,
+    )
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[existing_tp])
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="tp_new", symbol="BTC/USDT:USDT", side="sell",
+        order_type="take_profit", amount=0.1, price=76200.00,
+        status="open", fee=None, is_algo=True, trigger_price=76200.00,
+    ))
+
+    result = await set_take_profit(deps, price=76200.00, reasoning="extend target")
+    assert "Take profit set at 76300.00 → 76200.00" in result
+
+
+@pytest.mark.asyncio
+async def test_set_take_profit_single_value_when_no_existing():
+    from src.agent.tools_execution import set_take_profit
+
+    deps = _make_deps(order_id="tp_first", entry_price=80000.0)
+    deps.exchange.create_order = AsyncMock(return_value=Order(
+        id="tp_first", symbol="BTC/USDT:USDT", side="sell",
+        order_type="take_profit", amount=0.1, price=76200.00,
+        status="open", fee=None, is_algo=True, trigger_price=76200.00,
+    ))
+
+    result = await set_take_profit(deps, price=76200.00, reasoning="initial TP")
+    assert "Take profit set at 76200.00" in result
+    assert "→" not in result
+
+
+def test_summarize_set_stop_loss_dual_shape_regex():
+    """display.py regex must handle both 'old → new' and single-value paths."""
+    from src.cli.display import _summarize_set_stop_loss
+    # Update path with arrow
+    update = "Stop loss set at 77100.00 → 76950.00 (+0.05% from mark price 76912.50) | Order: abc"
+    assert _summarize_set_stop_loss(update) == "SL @ $76,950 (+0.05%)"
+    # First-set path (no arrow)
+    first = "Stop loss set at 76950.00 (+0.05% from mark price 76912.50) | Order: abc"
+    assert _summarize_set_stop_loss(first) == "SL @ $76,950 (+0.05%)"
+
+
+def test_summarize_set_take_profit_dual_shape_regex():
+    from src.cli.display import _summarize_set_take_profit
+    update = "Take profit set at 76300.00 → 76200.00 (-0.05% from mark price 76250.00) | Order: abc"
+    assert _summarize_set_take_profit(update) == "TP @ $76,200 (-0.05%)"
+    first = "Take profit set at 76200.00 (-0.05% from mark price 76250.00) | Order: abc"
+    assert _summarize_set_take_profit(first) == "TP @ $76,200 (-0.05%)"
+
+
 # === Task 20: open_position Est. entry fee output ===
 
 def _make_open_deps(*, fee_rate=0.0005, free_usdt=1000.0, leverage=10, last=80000.0,
@@ -471,3 +570,71 @@ async def test_place_limit_order_does_not_register_on_open():
                             position_pct=100, leverage=10, reasoning="scale-in")
 
     deps.exchange.register_close_order_entry.assert_not_called()
+
+
+# ============ Task 5: 3 outlier tools reasoning-removal (spec §3.6) ============
+
+def _make_wake_deps():
+    """deps fixture for set_next_wake / set_next_wake_at."""
+    deps = MagicMock()
+    deps.set_next_wake_fn = MagicMock()
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.db_engine = None
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_update_price_level_alert_return_no_reasoning_suffix():
+    """spec §3.6: return is state-only, no `— "reasoning"` suffix."""
+    from src.agent.tools_execution import update_price_level_alert
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.db_engine = None
+    deps.exchange = MagicMock()
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[{
+        "id": "a3f2b8c1",
+        "direction": "above",
+        "price": 82100.00,
+        "symbol": "BTC/USDT:USDT",
+        "reasoning": "initial above target",
+    }])
+    deps.exchange.update_price_level_alert = MagicMock(return_value=True)
+
+    result = await update_price_level_alert(
+        deps, alert_id="a3f2b8c1", new_price=82500.00,
+        reasoning="trail up after breakout",
+    )
+    assert "82100.00 → 82500.00" in result
+    assert "—" not in result
+    assert "trail up" not in result
+
+
+@pytest.mark.asyncio
+async def test_set_next_wake_return_no_reasoning_suffix():
+    """spec §3.6: return is state-only, no 'Reason: ...' suffix."""
+    from src.agent.tools_execution import set_next_wake
+
+    deps = _make_wake_deps()
+    result = await set_next_wake(deps, minutes=18, reasoning="check 4h close")
+    assert "Next wake set to 18 min" in result
+    assert "Reason:" not in result
+    assert "check 4h" not in result
+
+
+@pytest.mark.asyncio
+async def test_set_next_wake_at_return_no_reasoning_suffix():
+    """spec §3.6: return is state-only, no 'Reason: ...' suffix."""
+    from src.agent.tools_execution import set_next_wake_at
+    from datetime import datetime, timezone, timedelta
+
+    deps = _make_wake_deps()
+    # Use 15 min ahead to safely satisfy wake_min/wake_max (1-60 min)
+    target_dt = datetime.now(timezone.utc) + timedelta(minutes=15)
+    target = target_dt.strftime("%H:%M")
+    result = await set_next_wake_at(deps, target_time=target, reasoning="align with candle close")
+    assert "UTC" in result
+    assert "in" in result and "min" in result
+    assert "Reason:" not in result
+    assert "align with" not in result

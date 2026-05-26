@@ -203,19 +203,17 @@ async def test_update_tool_return_string_shape(engine, session_with_row):
         handler=handler,
     )
 
-    # Shape: 'Price level alert updated (id=AAAA): above 82100.00 → 82500.00 — "..."'
+    # Shape: 'Price level alert updated (id=AAAA): above 82100.00 → 82500.00'
     pattern = re.compile(
         r'^Price level alert updated \(id=[0-9a-f]{8}\): '
-        r'(above|below) [\d.]+ → [\d.]+ '
-        r'— ".+"$',
+        r'(above|below) [\d.]+ → [\d.]+$',
         re.DOTALL,
     )
     assert pattern.match(result), f"unexpected shape: {result!r}"
 
-    # Anchored content: single id, preserved direction, new reasoning carried.
+    # Anchored content: single id, preserved direction.
     assert "id=a3f2b8c1" in result
     assert "above 82100.00 → 82500.00" in result
-    assert '— "trail up after breakout"' in result
 
     # New shape must NOT contain double direction or id transition.
     assert "→ above" not in result

@@ -177,15 +177,20 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
         return "No open position to set stop loss on."
     p = positions[0]
 
-    # Cancel existing stop orders
+    # Cancel existing stop orders + capture prev SL trigger_price for return
+    # (per spec §3.4: use trigger_price not price — base.py:54 R2-7 §4.7
+    # algo class contract; price is overloaded for limit-as-stop futures).
+    # Multiple stops is a rare case; take the last (matches cancel sequence).
+    prev_sl: float | None = None
     open_orders = await deps.exchange.fetch_open_orders(deps.symbol)
     for o in open_orders:
         if o.order_type == "stop":
+            prev_sl = o.trigger_price
             await deps.exchange.cancel_order(o.id, deps.symbol, is_algo=o.is_algo)
 
     side = "sell" if p.side == "long" else "buy"
     order = await deps.exchange.create_order(
-        symbol=deps.symbol, side=side, order_type="stop", amount=p.contracts, price=price
+        symbol=deps.symbol, side=side, order_type="stop", amount=p.contracts, price=price,
     )
     deps.exchange.register_close_order_entry(order.id, p.entry_price)
 
@@ -196,10 +201,15 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     trigger_ref = deps.exchange.algo_trigger_reference
+    # Shape: "old → new" prefix (update path) or single-value (first-set).
+    price_str = f"{prev_sl:.2f} → {price:.2f}" if prev_sl is not None else f"{price:.2f}"
     if ticker.last > 0:
         dist_pct = (price - ticker.last) / ticker.last * 100
-        return f"Stop loss set at {price:.2f} ({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
-    return f"Stop loss set at {price:.2f} | Order: {order.id}"
+        return (
+            f"Stop loss set at {price_str} "
+            f"({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
+        )
+    return f"Stop loss set at {price_str} | Order: {order.id}"
 
 
 async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> str:
@@ -209,15 +219,17 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
         return "No open position to set take profit on."
     p = positions[0]
 
-    # Cancel existing take profit orders
+    # Cancel existing take profit orders + capture prev TP trigger_price
+    prev_tp: float | None = None
     open_orders = await deps.exchange.fetch_open_orders(deps.symbol)
     for o in open_orders:
         if o.order_type == "take_profit":
+            prev_tp = o.trigger_price
             await deps.exchange.cancel_order(o.id, deps.symbol, is_algo=o.is_algo)
 
     side = "sell" if p.side == "long" else "buy"
     order = await deps.exchange.create_order(
-        symbol=deps.symbol, side=side, order_type="take_profit", amount=p.contracts, price=price
+        symbol=deps.symbol, side=side, order_type="take_profit", amount=p.contracts, price=price,
     )
     deps.exchange.register_close_order_entry(order.id, p.entry_price)
 
@@ -228,10 +240,14 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     trigger_ref = deps.exchange.algo_trigger_reference
+    price_str = f"{prev_tp:.2f} → {price:.2f}" if prev_tp is not None else f"{price:.2f}"
     if ticker.last > 0:
         dist_pct = (price - ticker.last) / ticker.last * 100
-        return f"Take profit set at {price:.2f} ({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
-    return f"Take profit set at {price:.2f} | Order: {order.id}"
+        return (
+            f"Take profit set at {price_str} "
+            f"({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
+        )
+    return f"Take profit set at {price_str} | Order: {order.id}"
 
 
 async def adjust_leverage(deps: TradingDeps, leverage: int, reasoning: str) -> str:
@@ -474,11 +490,10 @@ async def update_price_level_alert(
         reasoning=f"price {old_price:.2f} → {new_price:.2f} | {reasoning}",
     )
 
-    # Step 5: success return — new single-direction shape
+    # Step 5: success return — state-only (reasoning normalized to head args per spec §3.6)
     return (
         f"Price level alert updated (id={alert_id}): "
-        f"{direction} {old_price:.2f} → {new_price:.2f} "
-        f'— "{reasoning}"'
+        f"{direction} {old_price:.2f} → {new_price:.2f}"
     )
 
 
@@ -507,7 +522,7 @@ async def set_next_wake(
         deps, action="set_next_wake",
         reasoning=f"interval={minutes}min | {reasoning}",
     )
-    return f"Next wake set to {minutes} min. Reason: {reasoning}"
+    return f"Next wake set to {minutes} min"
 
 
 async def set_next_wake_at(
@@ -562,10 +577,7 @@ async def set_next_wake_at(
             f"interval={delta_minutes}min | {reasoning}"
         ),
     )
-    return (
-        f"Next wake set for {candidate_label} UTC (in {delta_minutes} min). "
-        f"Reason: {reasoning}"
-    )
+    return f"Next wake set for {candidate_label} UTC (in {delta_minutes} min)"
 
 
 async def place_limit_order(

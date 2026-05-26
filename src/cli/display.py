@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic_ai.messages import (
+    INVALID_JSON_KEY,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -185,9 +187,17 @@ def _summarize_close_position(content: str) -> str:
 
 
 def _summarize_set_stop_loss(content: str) -> str:
-    m = re.search(r"Stop loss set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    # First try dual-value shape (post iter-session-log-args-visibility update path):
+    #   "Stop loss set at 77100.00 → 76950.00 (+0.05% from ...) | ..."
+    # group(1) = old, group(2) = new, group(3) = distance
+    m = re.search(r"Stop loss set at\s+([\d.]+)\s*→\s*([\d.]+)\s*\(([^)]+)\)", content)
     if m:
-        return f"SL @ ${float(m.group(1)):,.0f} ({m.group(2).split('from')[0].strip()})"
+        new_price = float(m.group(2))
+        return f"SL @ ${new_price:,.0f} ({m.group(3).split('from')[0].strip()})"
+    # Fallback to single-value shape (first-set path / pre-iter return):
+    m1 = re.search(r"Stop loss set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m1:
+        return f"SL @ ${float(m1.group(1)):,.0f} ({m1.group(2).split('from')[0].strip()})"
     m2 = re.search(r"Stop loss set at\s+([\d.]+)", content)
     if m2:
         return f"SL @ ${float(m2.group(1)):,.0f}"
@@ -195,9 +205,15 @@ def _summarize_set_stop_loss(content: str) -> str:
 
 
 def _summarize_set_take_profit(content: str) -> str:
-    m = re.search(r"Take profit set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    # Dual-value shape first (update path)
+    m = re.search(r"Take profit set at\s+([\d.]+)\s*→\s*([\d.]+)\s*\(([^)]+)\)", content)
     if m:
-        return f"TP @ ${float(m.group(1)):,.0f} ({m.group(2).split('from')[0].strip()})"
+        new_price = float(m.group(2))
+        return f"TP @ ${new_price:,.0f} ({m.group(3).split('from')[0].strip()})"
+    # Fallback to single-value
+    m1 = re.search(r"Take profit set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m1:
+        return f"TP @ ${float(m1.group(1)):,.0f} ({m1.group(2).split('from')[0].strip()})"
     m2 = re.search(r"Take profit set at\s+([\d.]+)", content)
     if m2:
         return f"TP @ ${float(m2.group(1)):,.0f}"
@@ -263,7 +279,7 @@ def _summarize_set_next_wake(content: str) -> str:
 
 
 def _summarize_set_next_wake_at(content: str) -> str:
-    """Parse 'Next wake set for YYYY-MM-DD HH:MM UTC (in N min). Reason: ...'."""
+    """Parse 'Next wake set for YYYY-MM-DD HH:MM UTC (in N min)'."""
     m = re.search(r"\(in (\d+)\s*min\)", content)
     if m:
         return f"{m.group(1)}min"
@@ -346,7 +362,7 @@ def is_tool_error(tool_name: str, content: str, outcome: str = "success") -> boo
 #     的 `logger.debug return={content_str[:500]}` 是独立 raw dump，不走 parser chain
 #   - scripts/tool_call_summary.py (offline analysis 脚本)
 #
-# NOT consumed by _render_perception_tool (R2-8c multi-line render) — that path
+# NOT consumed by _render_tool_body (multi-line render) — that path
 # bypasses parser layer entirely and reads raw section content via _parse_sections.
 #
 # 重构这些 parser 应保持向后兼容（system log 形态不破），不影响 R2-8c display 路径。
@@ -443,42 +459,44 @@ def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...
     )
 
 
-def _render_perception_tool(tool_name: str, content: str) -> str:
-    """Multi-line section render for perception tools (D8 + D13 byte-equal, spec §4.3.3).
+def _render_tool_body(
+    tool_name: str,
+    content: str,
+    *,
+    head_icon: str = "⚙",
+    head_args: str | None = None,
+) -> str:
+    """Multi-line section render for tool body (by-content sectioned-or-plain).
+
+    Used by unified _render_action dispatch (spec §3.1 / §3.3). Body
+    dispatch is by content (presence of `=== ... ===` markers), not by
+    tool class — _render_tool_body works for any tool's return.
+
+    head_args: function-syntax args string (e.g. 'tool(k=v)'). If None,
+    falls back to bare tool_name() (used only by orphan / pre-refactor
+    call sites; new dispatch always passes head_args).
 
     Output format:
-      "  ⚙ {tool_name}\n"
-      "    === {section.header} ===\n"     # (if present; render re-wraps `=== ... ===`)
+      "  {icon} {head_args}\n"               # head (function syntax)
+      "    === {section.header} ===\n"       # (if present)
       "    {body line 1}\n"
       ...
-      "\n"                                 # blank between sections
+      "\n"                                   # blank between sections
       "    === {next section.header} ===\n"
       ...
-
-    Section.header stores the inner name only (e.g. "Account Balance") because
-    _parse_sections strips the `=== ... ===` wrapping at parse time; render
-    re-wraps so the rendered output matches the byte-equal Section convention
-    (T-RPT / T-BE-1 / batch snapshot tests all expect the wrapped form).
-
-    Escape applied to section header / body (markup attack surface — content
-    from tool returns may include LLM-or-API-sourced literal markup like
-    `[bold]`); framework markup (icon / indent / blank lines / `=== ===`
-    wrapping) preserved.
     """
+    head = head_args if head_args is not None else f"{tool_name}()"
     sections = _parse_sections(content)
-    lines = [f"  ⚙ {tool_name}"]
+    # escape head: when head_args is supplied by _render_action, it contains
+    # LLM-written reasoning that may include Rich markup ([bold] / [red] etc.)
+    lines = [f"  {head_icon} {escape(head)}"]
     for i, section in enumerate(sections):
         if i > 0:
-            lines.append("")  # display-only blank between sections
+            lines.append("")
         if section.header is not None:
             lines.append(f"    === {escape(section.header)} ===")
         clipped = _clip_body(section.body)
         for row in clipped:
-            # Empty body rows render as "" (no indent prefix) — avoids trailing
-            # whitespace in cycle log file output (cleaner cat / less / git diff).
-            # Section model byte-equal preserved (escape("") == "" + Section.body
-            # contains "" still parsed back identically via _strip_blanks
-            # internal-blank semantics).
             if row == "":
                 lines.append("")
             else:
@@ -513,6 +531,10 @@ _PERCEPTION_TOOL_NAMES: frozenset[str] = frozenset({
     "get_stablecoin_supply",
 })
 
+# Legacy alias retained for drift-guard partition test (test_dg_2_*).
+# Post-iter-session-log-args-visibility: dispatch is by-content, this set
+# no longer drives sectioned/plain rendering. Field kept (not deleted)
+# because partition test asserts frozenset coverage of all registered tools.
 _SECTIONED_PERCEPTION_TOOL_NAMES: frozenset[str] = _PERCEPTION_TOOL_NAMES
 
 _EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
@@ -795,15 +817,17 @@ def _render_action(
     returns_lookup: dict,
     cycle_id: str,
 ) -> str:
-    """Render Action section per spec §4.3 + §4.4 dispatch.
+    """Render Action section per spec §3.1 unified dispatch.
 
-    Dispatch (mutually exclusive, full coverage of 32 registered tools per T-DG-2):
-      1. ret None → R2-8a `[no return captured]` line (orphan tool_call_id)
-      2. is_tool_error → R2-8a `✗` single-line (L1 failure path)
-      3. tool_name == 'save_memory' → R2-8a `✎` single-line + summarize_save_memory (retired tool: iter-w2r3-memory-disable, branch kept for revert path)
-      4. tool_name in _EXECUTION_TOOL_NAMES → R2-8a `⚙` single-line + <22 padding
-      5. tool_name in _PERCEPTION_TOOL_NAMES → multi-line _render_perception_tool
-      6. else → R2-8a single-line + warning log (drift signal, T-EC-11)
+    Dispatch:
+      1. ret None → orphan single-line: `⚙ tool_name() [no return captured]`
+      2. is_tool_error → error single-line: `✗ tool_name(args) {fallback}`
+      3. happy path (perception / execution / save_memory / drift) →
+         unified head `{icon} {args_call}` + body (sectioned or plain
+         by content). icon = ✎ for save_memory, ⚙ otherwise.
+      4. Drift signal: tool_name not in any registered frozenset → log
+         warning (no rendering change; frozenset is drift guard only,
+         not dispatch driver — spec §3.1).
     """
     n = len(tool_calls)
     plural = "tool" if n == 1 else "tools"
@@ -816,56 +840,43 @@ def _render_action(
                 "tool_call_id mismatch for %s in cycle %s",
                 tcp.tool_name, cycle_id,
             )
-            lines.append(f"  ⚙ {tcp.tool_name:<22} [no return captured]")
+            lines.append(f"  ⚙ {tcp.tool_name}() [no return captured]")
             continue
 
         content_str = str(ret.content)
         outcome = getattr(ret, "outcome", "success")
+        args = tcp.args_as_dict()
+        args_call = _format_args_as_call(tcp.tool_name, args)
 
-        # Branch 2: L1 failure (R2-8a single-line + ✗) — does not enter multi-line
+        # Branch 2: L1 error single-line + ✗
+        # escape args_call: reasoning is LLM-written, may contain Rich markup
+        # like [bold] / [red] — must not be parsed as markup.
         if is_tool_error(tcp.tool_name, content_str, outcome):
             lines.append(
-                f"  ✗ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+                f"  ✗ {escape(args_call)} {escape(_fallback_summary(content_str))}"
             )
             continue
 
-        # Branch 3: save_memory (R2-8a single-line + ✎) — retired tool: iter-w2r3-memory-disable, branch kept for revert path
-        if tcp.tool_name == "save_memory":
-            try:
-                args = tcp.args_as_dict()
-            except Exception:
-                args = None
-            icon, summary = resolve_tool_display(
-                tcp.tool_name, content_str, outcome, args,
+        # Drift guard: warn for tools not in any registered frozenset
+        # (per spec §3.1 — frozenset is guard only, doesn't drive render).
+        if (
+            tcp.tool_name != "save_memory"
+            and tcp.tool_name not in _EXECUTION_TOOL_NAMES
+            and tcp.tool_name not in _PERCEPTION_TOOL_NAMES
+        ):
+            logger.warning(
+                "tool_name %s not in any registered frozenset "
+                "(perception / execution / save_memory) — drift signal",
+                tcp.tool_name,
             )
-            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
-            continue
 
-        # Branch 4: execution (R2-8a single-line + <22 padding)
-        if tcp.tool_name in _EXECUTION_TOOL_NAMES:
-            try:
-                args = tcp.args_as_dict()
-            except Exception:
-                args = None
-            icon, summary = resolve_tool_display(
-                tcp.tool_name, content_str, outcome, args,
-            )
-            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
-            continue
-
-        # Branch 5: perception (multi-line section render)
-        if tcp.tool_name in _PERCEPTION_TOOL_NAMES:
-            lines.append(_render_perception_tool(tcp.tool_name, content_str))
-            continue
-
-        # Branch 6: drift — unregistered tool name (T-EC-11)
-        logger.warning(
-            "tool_name %s not in _PERCEPTION_TOOL_NAMES / _EXECUTION_TOOL_NAMES "
-            "— falling back to R2-8a single-line",
-            tcp.tool_name,
-        )
+        # Unified head + body for all happy-path tools
+        icon = "✎" if tcp.tool_name == "save_memory" else "⚙"
         lines.append(
-            f"  ⚙ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+            _render_tool_body(
+                tcp.tool_name, content_str,
+                head_icon=icon, head_args=args_call,
+            )
         )
 
     return "\n".join(lines)
@@ -984,11 +995,59 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
     return "\n".join(lines)
 
 
+def _format_arg_value(v: object) -> str:
+    """Format a single arg value per spec §3.2.
+
+    Strings use json.dumps for proper escaping of embedded quotes / control
+    chars (e.g. reasoning='trail "after" MA reclaim' must not break syntax).
+    """
+    if v is None:
+        return "None"
+    if isinstance(v, bool):
+        return "True" if v else "False"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        # json.dumps handles " / \ / control-char escape + outputs double-quoted
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, list):
+        return "[" + ", ".join(_format_arg_value(item) for item in v) + "]"
+    if isinstance(v, dict):
+        inner = ", ".join(f"{k}: {_format_arg_value(val)}" for k, val in v.items())
+        if len(inner) > 40:
+            return "{...}"
+        return "{" + inner + "}"
+    return repr(v)
+
+
+def _format_args_as_call(tool_name: str, args: dict | None) -> str:
+    """Format tool call as Python-like function syntax: tool_name(k=v, k=v).
+
+    Empty args → tool_name(). INVALID_JSON_KEY (pydantic-ai unparseable
+    arg) → tool_name(...). reasoning is uniformly retained in head per
+    spec §3.2 (known divergence with tool_call_recorder.py:138 DB strip).
+
+    `tool_name` is currently only used for fallback display; future
+    extension point for per-tool customization (e.g. PII redaction).
+    """
+    if not args:
+        return f"{tool_name}()"
+    if INVALID_JSON_KEY in args:
+        logger.warning(
+            "tool %s args unparseable JSON: %r",
+            tool_name, args[INVALID_JSON_KEY],
+        )
+        return f"{tool_name}(...)"
+
+    parts = [f"{k}={_format_arg_value(v)}" for k, v in args.items()]
+    return f"{tool_name}({', '.join(parts)})"
+
+
 def summarize_tool(tool_name: str, content: str) -> str:
     """Summarize a tool's return value into a one-line display string.
 
     Used by system log INFO 摘要 path only (cli/app.py:332 resolve_tool_display
-    → line 335 logger.info chain). R2-8c display path uses _render_perception_tool
+    → line 335 logger.info chain). Display path uses _render_tool_body
     directly, bypassing this function.
     """
     content_str = str(content)
