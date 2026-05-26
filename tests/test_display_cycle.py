@@ -3496,6 +3496,7 @@ def test_clip_body_with_prelude_full_expansion():
     assert "MA fast-vs-slow: 5m above" in out
     assert "[5m] Mom +0.1%" in out
     assert "[1h] Mom +0.3%" in out
+    assert "omitted" not in "\n".join(out)
 
 
 def test_clip_body_group_cap_exceeded():
