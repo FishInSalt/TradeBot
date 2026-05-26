@@ -3622,3 +3622,26 @@ def test_clip_body_pure_prelude_no_anchor():
     out = _clip_body(body)
     # anchor_count=0 → 3 行 < 10 → short mode 全保留
     assert out == ("Last: 77540.00", "MA: above", "Columns: ...")
+
+
+def test_drift_guard_tools_perception_no_rich_markup():
+    """drift guard: tools_perception.py 不在 row body 中输出 Rich markup.
+
+    Design invariant — _clip_body anchor detection 不能区分 [bold] 这种 Rich
+    markup 与真正的 [<word>] anchor，所以工具层必须避免输出 Rich markup。
+    若未来引入，需配套调整 heuristic 或在 escape 之前对 body 做预清洗。
+    """
+    import re
+    from pathlib import Path
+
+    rich_markup_pattern = re.compile(
+        r"\[(bold|red|green|cyan|magenta|yellow|dim|italic|underline|reverse|strike|blink)\]"
+    )
+    src_path = Path("src/agent/tools_perception.py")
+    content = src_path.read_text()
+    matches = rich_markup_pattern.findall(content)
+    assert not matches, (
+        f"tools_perception.py contains Rich markup tokens {matches}; "
+        "violates _clip_body anchor heuristic invariant (per design spec §6.3). "
+        "Either remove Rich markup or escape it before _render_tool_body."
+    )
