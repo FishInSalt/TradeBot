@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic_ai.messages import (
+    INVALID_JSON_KEY,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -982,6 +984,54 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
 
     lines.append(_render_footer(ctx))
     return "\n".join(lines)
+
+
+def _format_arg_value(v: object) -> str:
+    """Format a single arg value per spec §3.2.
+
+    Strings use json.dumps for proper escaping of embedded quotes / control
+    chars (e.g. reasoning='trail "after" MA reclaim' must not break syntax).
+    """
+    if v is None:
+        return "None"
+    if isinstance(v, bool):
+        return "True" if v else "False"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        # json.dumps handles " / \ / control-char escape + outputs double-quoted
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, list):
+        return "[" + ", ".join(_format_arg_value(item) for item in v) + "]"
+    if isinstance(v, dict):
+        inner = ", ".join(f"{k}: {_format_arg_value(val)}" for k, val in v.items())
+        if len(inner) > 40:
+            return "{...}"
+        return "{" + inner + "}"
+    return repr(v)
+
+
+def _format_args_as_call(tool_name: str, args: dict | None) -> str:
+    """Format tool call as Python-like function syntax: tool_name(k=v, k=v).
+
+    Empty args → tool_name(). INVALID_JSON_KEY (pydantic-ai unparseable
+    arg) → tool_name(...). reasoning is uniformly retained in head per
+    spec §3.2 (known divergence with tool_call_recorder.py:138 DB strip).
+
+    `tool_name` is currently only used for fallback display; future
+    extension point for per-tool customization (e.g. PII redaction).
+    """
+    if not args:
+        return f"{tool_name}()"
+    if INVALID_JSON_KEY in args:
+        logger.warning(
+            "tool %s args unparseable JSON: %r",
+            tool_name, args[INVALID_JSON_KEY],
+        )
+        return f"{tool_name}(...)"
+
+    parts = [f"{k}={_format_arg_value(v)}" for k, v in args.items()]
+    return f"{tool_name}({', '.join(parts)})"
 
 
 def summarize_tool(tool_name: str, content: str) -> str:
