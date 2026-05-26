@@ -3496,4 +3496,52 @@ def test_clip_body_with_prelude_full_expansion():
     assert "MA fast-vs-slow: 5m above" in out
     assert "[5m] Mom +0.1%" in out
     assert "[1h] Mom +0.3%" in out
-    assert "omitted" not in "\n".join(out)
+
+
+def test_clip_body_group_cap_exceeded():
+    """structured-row mode cap-exceeded: 15 anchor groups → head[3] + omitted + tail[3]."""
+    from src.cli.display import _clip_body
+    body = [f"[a{i}] row {i}" for i in range(15)]  # 15 anchor groups, each 1 line
+    out = _clip_body(body)
+    # head 3 + 1 marker + tail 3 = 7 lines
+    assert len(out) == 7
+    assert out[0] == "[a0] row 0"
+    assert out[1] == "[a1] row 1"
+    assert out[2] == "[a2] row 2"
+    assert out[3] == "[... 9 groups omitted ...]"
+    assert out[4] == "[a12] row 12"
+    assert out[5] == "[a13] row 13"
+    assert out[6] == "[a14] row 14"
+
+
+def test_clip_body_group_cap_exact_boundary():
+    """cap 边界: len(groups) == 12 全展, == 13 触发 elide."""
+    from src.cli.display import _clip_body
+    # 12 groups → 全展
+    body12 = [f"[a{i}]" for i in range(12)]
+    out12 = _clip_body(body12)
+    assert len(out12) == 12
+    assert "omitted" not in "\n".join(out12)
+
+    # 13 groups → cap elide
+    body13 = [f"[a{i}]" for i in range(13)]
+    out13 = _clip_body(body13)
+    assert len(out13) == 7
+    assert "[... 7 groups omitted ...]" in out13
+
+
+def test_clip_body_cap_exceeded_with_continuation():
+    """cap-exceeded: groups 含 continuation 行时 head/tail 都带各自 continuation."""
+    from src.cli.display import _clip_body
+    body = []
+    for i in range(15):
+        body.append(f"[a{i}] head {i}")
+        body.append(f"  cont {i}")
+    out = _clip_body(body)
+    # head 3 groups × 2 lines + 1 marker + tail 3 groups × 2 lines = 13 lines
+    assert len(out) == 13
+    assert out[0] == "[a0] head 0"
+    assert out[1] == "  cont 0"
+    assert out[6] == "[... 9 groups omitted ...]"
+    assert out[7] == "[a12] head 12"
+    assert out[8] == "  cont 12"
