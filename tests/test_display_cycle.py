@@ -3307,3 +3307,28 @@ async def test_dg_1f_window_bearing_tool_degenerate_path(tool_name, header_patte
         f"{tool_name} degenerate-path first header dropped window field "
         f"(expected pattern {header_pattern!r}):\n{first_header!r}"
     )
+
+
+# === iter-session-log-structured-clip drift guards ===
+# 这些测试固化 D4 现有 list-like / short mode 行为；本 iter 改造不应破坏它们。
+
+
+def test_clip_body_drift_guard_list_like_30_row_no_anchor():
+    """drift guard: 30 行无 anchor body 仍走 D4 row-clip (head=2 + omitted + tail=2)."""
+    from src.cli.display import _clip_body
+    body = [f"  {i:02d}:00  77{500+i:03d}.00  candle data" for i in range(30)]
+    out = _clip_body(body)
+    assert len(out) == 5
+    assert out[0] == "  00:00  77500.00  candle data"
+    assert out[1] == "  01:00  77501.00  candle data"
+    assert out[2] == "[... 26 rows omitted ...]"
+    assert out[3] == "  28:00  77528.00  candle data"
+    assert out[4] == "  29:00  77529.00  candle data"
+
+
+def test_clip_body_drift_guard_short_body_keep_all():
+    """drift guard: < 10 行无 anchor body 全保留 (short mode)."""
+    from src.cli.display import _clip_body
+    body = ["row 0", "row 1", "row 2", "row 3", "row 4"]
+    out = _clip_body(body)
+    assert out == ("row 0", "row 1", "row 2", "row 3", "row 4")
