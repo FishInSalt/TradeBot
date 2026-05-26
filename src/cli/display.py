@@ -441,22 +441,127 @@ def _strip_blanks(lines: list[str]) -> list[str]:
     return lines[start:end]
 
 
-def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...]:
-    """D4 universal clipping (head=2 / tail=2, spec §4.3.2 review-校准).
+# === iter-session-log-structured-clip: by-anchor heuristic ===
+# Anchor row 识别正则。
+# Pattern 解释:
+#   ^\[            行首立即是 `[`（无 leading whitespace）
+#   (?!\.\.\.)     负向 lookahead 排除 [... omitted ...] / [...]
+#   [^\]\s]        `[` 后第 1 字符不是 `]` 也不是 whitespace（确保 [<word>] 有内容）
+_ANCHOR_RE = re.compile(r'^\[(?!\.\.\.)[^\]\s]')
 
-    body length:
-      < n  → keep all
-      >= n → (body[0], body[1],
-              f"[... {len(body)-4} rows omitted ...]",
-              body[-2], body[-1])
+
+def _is_anchor(line: str) -> bool:
+    """Return True iff line starts with [<word>] prefix (not [... omitted ...]).
+
+    Used by _clip_body to detect structured-row mode (≥ 2 anchor rows).
     """
-    if len(body) < n:
-        return tuple(body)
-    return (
-        body[0], body[1],
-        f"[... {len(body) - 4} rows omitted ...]",
-        body[-2], body[-1],
-    )
+    return bool(_ANCHOR_RE.match(line))
+
+
+def _group_by_anchor(
+    body: tuple[str, ...] | list[str],
+) -> list[tuple[str, list[str]]]:
+    """Split body into groups: each anchor line starts a new group;
+    non-anchor lines (blanks + plain text + continuation) attach to the
+    current group's continuation list.
+
+    Assumes body has had leading/trailing blanks stripped upstream by
+    `_strip_blanks` (display.py:433-441). I.e. body[0] is non-blank,
+    avoiding undefined "blank attaches to previous group" at body start.
+
+    Prelude rule (R4): body lines before the first anchor each form a
+    single-row group (head = the line itself, continuation = []).
+    A blank that appears between prelude lines and the first anchor
+    attaches to the LAST prelude group's continuation (per R3).
+
+    Returns list of (head_line, [continuation_lines]) tuples.
+    - In anchor-group: head is the anchor line.
+    - In prelude single-row group: head is the prelude line itself
+      (not a true anchor — semantically "group head line").
+    """
+    groups: list[tuple[str, list[str]]] = []
+    in_anchor_zone = False
+    for line in body:
+        if _is_anchor(line):
+            in_anchor_zone = True
+            groups.append((line, []))
+        else:
+            if in_anchor_zone and groups:
+                # Inside anchor zone: attach to current anchor group's continuation
+                groups[-1][1].append(line)
+            else:
+                # Prelude zone (no anchor seen yet): each non-anchor line is its own
+                # 1-row group, except blanks which attach to the last prelude group.
+                if groups and not line:
+                    groups[-1][1].append(line)
+                else:
+                    groups.append((line, []))
+    return groups
+
+
+def _clip_body(
+    body: tuple[str, ...] | list[str],
+    n: int = 10,
+    group_cap: int = 12,
+) -> tuple[str, ...]:
+    """Three-tier clip dispatch (per spec §2.3 / §4.3):
+
+    1. structured-row mode  (anchor_count >= 2)
+       → group-level handling: len(groups) <= group_cap 全展，
+         otherwise _flatten(head[:3]) + "[... N groups omitted ...]" + _flatten(tail[-3:])
+
+    2. list-like mode       (len(body) >= n, anchor_count < 2)
+       → existing D4 row-clip unchanged: (body[0], body[1],
+         "[... N rows omitted ...]", body[-2], body[-1])
+
+    3. short mode           (len(body) < n, anchor_count < 2)
+       → keep all (unchanged)
+
+    Symmetric head=3 / tail=3 design (structured-row cap-exceeded):
+    Renderer does not pre-assume per-tool semantic priority. Class A tools
+    have different internal ordering (news newest-first; trade_journal
+    oldest-first via reversed(actions); macro_calendar upcoming chronological).
+    Symmetric preserves both ends regardless of tool semantics.
+
+    Omission marker forms (semantically distinct, grep should differentiate):
+    - list-like:    "[... N rows omitted ...]"   (rows = line count)
+    - cap-exceeded: "[... N groups omitted ...]" (groups = group count)
+    """
+    # Branch detection
+    groups = _group_by_anchor(body)
+    anchor_count = sum(1 for g in groups if _is_anchor(g[0]))
+
+    if anchor_count >= 2:
+        # Branch 1: structured-row mode
+        if len(groups) <= group_cap:
+            # Full expansion
+            return tuple(_flatten_groups(groups))
+        else:
+            # cap-exceeded: head[:3] + omitted + tail[-3:]
+            omitted_count = len(groups) - 6
+            head_lines = _flatten_groups(groups[:3])
+            tail_lines = _flatten_groups(groups[-3:])
+            return tuple(head_lines + [f"[... {omitted_count} groups omitted ...]"] + tail_lines)
+
+    if len(body) >= n:
+        # Branch 2: list-like mode (D4 unchanged)
+        return (
+            body[0], body[1],
+            f"[... {len(body) - 4} rows omitted ...]",
+            body[-2], body[-1],
+        )
+
+    # Branch 3: short mode (unchanged)
+    return tuple(body)
+
+
+def _flatten_groups(groups: list[tuple[str, list[str]]]) -> list[str]:
+    """Flatten groups → flat line list: [head, *continuation, head, *continuation, ...]"""
+    out: list[str] = []
+    for head, continuation in groups:
+        out.append(head)
+        out.extend(continuation)
+    return out
 
 
 def _render_tool_body(
