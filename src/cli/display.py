@@ -348,7 +348,7 @@ def is_tool_error(tool_name: str, content: str, outcome: str = "success") -> boo
 #     的 `logger.debug return={content_str[:500]}` 是独立 raw dump，不走 parser chain
 #   - scripts/tool_call_summary.py (offline analysis 脚本)
 #
-# NOT consumed by _render_perception_tool (R2-8c multi-line render) — that path
+# NOT consumed by _render_tool_body (multi-line render) — that path
 # bypasses parser layer entirely and reads raw section content via _parse_sections.
 #
 # 重构这些 parser 应保持向后兼容（system log 形态不破），不影响 R2-8c display 路径。
@@ -445,8 +445,12 @@ def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...
     )
 
 
-def _render_perception_tool(tool_name: str, content: str) -> str:
-    """Multi-line section render for perception tools (D8 + D13 byte-equal, spec §4.3.3).
+def _render_tool_body(tool_name: str, content: str) -> str:
+    """Multi-line section render for tool body (by-content sectioned-or-plain).
+
+    Used by unified _render_action dispatch (spec §3.1 / §3.3). Body
+    dispatch is by content (presence of `=== ... ===` markers), not by
+    tool class — _render_tool_body works for any tool's return.
 
     Output format:
       "  ⚙ {tool_name}\n"
@@ -804,7 +808,7 @@ def _render_action(
       2. is_tool_error → R2-8a `✗` single-line (L1 failure path)
       3. tool_name == 'save_memory' → R2-8a `✎` single-line + summarize_save_memory (retired tool: iter-w2r3-memory-disable, branch kept for revert path)
       4. tool_name in _EXECUTION_TOOL_NAMES → R2-8a `⚙` single-line + <22 padding
-      5. tool_name in _PERCEPTION_TOOL_NAMES → multi-line _render_perception_tool
+      5. tool_name in _PERCEPTION_TOOL_NAMES → multi-line _render_tool_body (by-content)
       6. else → R2-8a single-line + warning log (drift signal, T-EC-11)
     """
     n = len(tool_calls)
@@ -857,7 +861,7 @@ def _render_action(
 
         # Branch 5: perception (multi-line section render)
         if tcp.tool_name in _PERCEPTION_TOOL_NAMES:
-            lines.append(_render_perception_tool(tcp.tool_name, content_str))
+            lines.append(_render_tool_body(tcp.tool_name, content_str))
             continue
 
         # Branch 6: drift — unregistered tool name (T-EC-11)
@@ -1038,7 +1042,7 @@ def summarize_tool(tool_name: str, content: str) -> str:
     """Summarize a tool's return value into a one-line display string.
 
     Used by system log INFO 摘要 path only (cli/app.py:332 resolve_tool_display
-    → line 335 logger.info chain). R2-8c display path uses _render_perception_tool
+    → line 335 logger.info chain). Display path uses _render_tool_body
     directly, bypassing this function.
     """
     content_str = str(content)

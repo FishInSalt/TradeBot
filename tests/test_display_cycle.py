@@ -1427,18 +1427,18 @@ def test_clip_body_exact_threshold_triggers_clipping():
     )
 
 
-# --- T-RPT: _render_perception_tool ---
+# --- T-RPT: _render_tool_body ---
 
 
-def test_render_perception_tool_single_section():
+def test_render_tool_body_single_section():
     """T-RPT-1: 单 section keep all → '  ⚙ tool\n    === Section ===\n    body...'."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = (
         "=== Account Balance ===\n"
         "Total: 998.00 USDT\n"
         "Free: 800.00"
     )
-    out = _render_perception_tool("get_account_balance", content)
+    out = _render_tool_body("get_account_balance", content)
     assert out == (
         "  ⚙ get_account_balance\n"
         "    === Account Balance ===\n"
@@ -1447,9 +1447,9 @@ def test_render_perception_tool_single_section():
     )
 
 
-def test_render_perception_tool_multi_section_blank_separator():
+def test_render_tool_body_multi_section_blank_separator():
     """T-RPT-2: 多 sections 间插入 display-only blank line。"""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = (
         "=== Sec A ===\n"
         "a1\n"
@@ -1458,7 +1458,7 @@ def test_render_perception_tool_multi_section_blank_separator():
         "=== Sec B ===\n"
         "b1"
     )
-    out = _render_perception_tool("get_market_data", content)
+    out = _render_tool_body("get_market_data", content)
     assert out == (
         "  ⚙ get_market_data\n"
         "    === Sec A ===\n"
@@ -1470,23 +1470,23 @@ def test_render_perception_tool_multi_section_blank_separator():
     )
 
 
-def test_render_perception_tool_dense_section_clipped():
+def test_render_tool_body_dense_section_clipped():
     """T-RPT-3: section body ≥ 10 → head/tail clipping in render output."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     body_lines = "\n".join(f"row {i}" for i in range(15))
     content = f"=== Recent Candles ===\n{body_lines}"
-    out = _render_perception_tool("get_market_data", content)
+    out = _render_tool_body("get_market_data", content)
     assert "    [... 11 rows omitted ...]" in out
     assert "    row 0" in out
     assert "    row 14" in out
     assert "    row 7" not in out  # middle row dropped
 
 
-def test_render_perception_tool_fallback_no_header():
+def test_render_tool_body_fallback_no_header():
     """T-RPT-4: content 无 sections → unnamed section fallback (get_memories backend path)."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = "Memory entry 1\nMemory entry 2"
-    out = _render_perception_tool("get_memories", content)
+    out = _render_tool_body("get_memories", content)
     assert out == (
         "  ⚙ get_memories\n"
         "    Memory entry 1\n"
@@ -1618,14 +1618,14 @@ def test_int_3_thinking_above_default_cap_truncated():
 
 # === R2-8c per-tool snapshot fixtures ===
 
-# Snapshot helper — invoke _render_perception_tool with raw tool content fixture
+# Snapshot helper — invoke _render_tool_body with raw tool content fixture
 # and verify output matches expected. Inline fixtures (spec §5.2 plan决议).
 
 
 def _assert_perception_render(tool_name: str, content: str, expected: str):
-    """Helper: run _render_perception_tool and assert output equals expected."""
-    from src.cli.display import _render_perception_tool
-    actual = _render_perception_tool(tool_name, content)
+    """Helper: run _render_tool_body and assert output equals expected."""
+    from src.cli.display import _render_tool_body
+    actual = _render_tool_body(tool_name, content)
     assert actual == expected, (
         f"Render mismatch for {tool_name}:\n"
         f"--- expected ---\n{expected}\n"
@@ -2199,8 +2199,8 @@ def test_snapshot_get_market_news_dense_general_news_clipped():
         entries.append(f"[2026-05-03 1{i:02d}:00] Headline {i}\n  Source: src{i} | Currencies: ALT{i}")
     content = "=== General Crypto News (12) ===\n" + "\n".join(entries)
     # Body: 12 × 2 = 24 lines, ≥ 10 → head=2 + omitted + tail=2
-    from src.cli.display import _render_perception_tool
-    out = _render_perception_tool("get_market_news", content)
+    from src.cli.display import _render_tool_body
+    out = _render_tool_body("get_market_news", content)
     assert "    === General Crypto News (12) ===" in out
     assert "    [2026-05-03 100:00] Headline 0" in out  # head[0]
     assert "      Source: src0 | Currencies: ALT0" in out  # head[1]
@@ -2660,8 +2660,8 @@ def test_snapshot_get_performance_happy_path():
 
 def test_ec_1_no_section_header_fallback():
     """T-EC-1: tool 输出无 === Section === → unnamed section render (legacy / get_memories)."""
-    from src.cli.display import _render_perception_tool
-    out = _render_perception_tool("get_memories", "Memory entry 1\nMemory entry 2")
+    from src.cli.display import _render_tool_body
+    out = _render_tool_body("get_memories", "Memory entry 1\nMemory entry 2")
     assert "  ⚙ get_memories" in out
     assert "    Memory entry 1" in out
 
@@ -2687,21 +2687,21 @@ def test_ec_2_l1_failure_single_line_x_icon():
 
 def test_ec_3_l2_error_inline_in_multi_line():
     """T-EC-3: tool 内捕获异常 + success outcome 返回 Option D 'Error:' inline → 进 multi-line, body 显示。"""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = (
         "=== Higher Timeframe View (BTC/USDT:USDT, 4h) ===\n"
         "Error: Temporarily unavailable."
     )
-    out = _render_perception_tool("get_higher_timeframe_view", content)
+    out = _render_tool_body("get_higher_timeframe_view", content)
     assert "    === Higher Timeframe View (BTC/USDT:USDT, 4h) ===" in out
     assert "    Error: Temporarily unavailable." in out
 
 
 def test_ec_4_section_body_one_line():
     """T-EC-4: section body 仅 1 行 → keep all (< 10)."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = "=== Account Balance ===\nTotal: 998.00 USDT"
-    out = _render_perception_tool("get_account_balance", content)
+    out = _render_tool_body("get_account_balance", content)
     assert out == (
         "  ⚙ get_account_balance\n"
         "    === Account Balance ===\n"
@@ -2711,9 +2711,9 @@ def test_ec_4_section_body_one_line():
 
 def test_ec_5_section_body_zero_lines_render_header_only():
     """T-EC-5: section body 0 行 → header alone."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = "=== Empty Section ===\n"
-    out = _render_perception_tool("get_market_data", content)
+    out = _render_tool_body("get_market_data", content)
     assert out == (
         "  ⚙ get_market_data\n"
         "    === Empty Section ==="
@@ -2722,26 +2722,26 @@ def test_ec_5_section_body_zero_lines_render_header_only():
 
 def test_ec_6_section_header_markup_literal_escaped():
     """T-EC-6: section header 含 markup 字面值 → escape 为 \\[red]Critical[/]."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = "=== [red]Critical[/] ===\nbody"
-    out = _render_perception_tool("get_market_news", content)
+    out = _render_tool_body("get_market_news", content)
     assert r"\[red]" in out  # rich.markup.escape 转 \[red]
 
 
 def test_ec_7_section_body_markup_literal_escaped():
     """T-EC-7: section body 含 markup 字面值（如新闻 [bold]）→ escape."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     content = "=== Symbol News ===\nHeadline: [bold]BREAKING[/] something"
-    out = _render_perception_tool("get_market_news", content)
+    out = _render_tool_body("get_market_news", content)
     assert r"\[bold]" in out
 
 
 def test_ec_8_long_url_line_no_wrapping_in_helper():
     """T-EC-8: 极长单行（如 URL ≥ terminal width）— helper 不主动 wrap, 由 Rich render 处理."""
-    from src.cli.display import _render_perception_tool
+    from src.cli.display import _render_tool_body
     long_url = "https://example.com/" + "x" * 200
     content = f"=== Symbol News ===\n{long_url}"
-    out = _render_perception_tool("get_market_news", content)
+    out = _render_tool_body("get_market_news", content)
     assert long_url in out
 
 
@@ -2784,7 +2784,7 @@ def test_be_1_byte_equal_section_model_invariant():
         Section,
         _parse_sections,
         _clip_body,
-        _render_perception_tool,
+        _render_tool_body,
     )
     from rich.markup import escape
 
@@ -2795,7 +2795,7 @@ def test_be_1_byte_equal_section_model_invariant():
     )
 
     # Re-parse the rendered output (strip 4-space indent + tool_name line)
-    rendered = _render_perception_tool("get_market_data", content)
+    rendered = _render_tool_body("get_market_data", content)
     rendered_lines = rendered.split("\n")
     assert rendered_lines[0] == "  ⚙ get_market_data"
     # Strip 4-space indent from all subsequent lines, then re-parse
