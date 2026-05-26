@@ -445,46 +445,44 @@ def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...
     )
 
 
-def _render_tool_body(tool_name: str, content: str) -> str:
+def _render_tool_body(
+    tool_name: str,
+    content: str,
+    *,
+    head_icon: str = "⚙",
+    head_args: str | None = None,
+) -> str:
     """Multi-line section render for tool body (by-content sectioned-or-plain).
 
     Used by unified _render_action dispatch (spec §3.1 / §3.3). Body
     dispatch is by content (presence of `=== ... ===` markers), not by
     tool class — _render_tool_body works for any tool's return.
 
+    head_args: function-syntax args string (e.g. 'tool(k=v)'). If None,
+    falls back to bare tool_name() (used only by orphan / pre-refactor
+    call sites; new dispatch always passes head_args).
+
     Output format:
-      "  ⚙ {tool_name}\n"
-      "    === {section.header} ===\n"     # (if present; render re-wraps `=== ... ===`)
+      "  {icon} {head_args}\n"               # head (function syntax)
+      "    === {section.header} ===\n"       # (if present)
       "    {body line 1}\n"
       ...
-      "\n"                                 # blank between sections
+      "\n"                                   # blank between sections
       "    === {next section.header} ===\n"
       ...
-
-    Section.header stores the inner name only (e.g. "Account Balance") because
-    _parse_sections strips the `=== ... ===` wrapping at parse time; render
-    re-wraps so the rendered output matches the byte-equal Section convention
-    (T-RPT / T-BE-1 / batch snapshot tests all expect the wrapped form).
-
-    Escape applied to section header / body (markup attack surface — content
-    from tool returns may include LLM-or-API-sourced literal markup like
-    `[bold]`); framework markup (icon / indent / blank lines / `=== ===`
-    wrapping) preserved.
     """
+    head = head_args if head_args is not None else f"{tool_name}()"
     sections = _parse_sections(content)
-    lines = [f"  ⚙ {tool_name}"]
+    # escape head: when head_args is supplied by _render_action, it contains
+    # LLM-written reasoning that may include Rich markup ([bold] / [red] etc.)
+    lines = [f"  {head_icon} {escape(head)}"]
     for i, section in enumerate(sections):
         if i > 0:
-            lines.append("")  # display-only blank between sections
+            lines.append("")
         if section.header is not None:
             lines.append(f"    === {escape(section.header)} ===")
         clipped = _clip_body(section.body)
         for row in clipped:
-            # Empty body rows render as "" (no indent prefix) — avoids trailing
-            # whitespace in cycle log file output (cleaner cat / less / git diff).
-            # Section model byte-equal preserved (escape("") == "" + Section.body
-            # contains "" still parsed back identically via _strip_blanks
-            # internal-blank semantics).
             if row == "":
                 lines.append("")
             else:
@@ -519,6 +517,10 @@ _PERCEPTION_TOOL_NAMES: frozenset[str] = frozenset({
     "get_stablecoin_supply",
 })
 
+# Legacy alias retained for drift-guard partition test (test_dg_2_*).
+# Post-iter-session-log-args-visibility: dispatch is by-content, this set
+# no longer drives sectioned/plain rendering. Field kept (not deleted)
+# because partition test asserts frozenset coverage of all registered tools.
 _SECTIONED_PERCEPTION_TOOL_NAMES: frozenset[str] = _PERCEPTION_TOOL_NAMES
 
 _EXECUTION_TOOL_NAMES: frozenset[str] = frozenset({
@@ -801,15 +803,17 @@ def _render_action(
     returns_lookup: dict,
     cycle_id: str,
 ) -> str:
-    """Render Action section per spec §4.3 + §4.4 dispatch.
+    """Render Action section per spec §3.1 unified dispatch.
 
-    Dispatch (mutually exclusive, full coverage of 32 registered tools per T-DG-2):
-      1. ret None → R2-8a `[no return captured]` line (orphan tool_call_id)
-      2. is_tool_error → R2-8a `✗` single-line (L1 failure path)
-      3. tool_name == 'save_memory' → R2-8a `✎` single-line + summarize_save_memory (retired tool: iter-w2r3-memory-disable, branch kept for revert path)
-      4. tool_name in _EXECUTION_TOOL_NAMES → R2-8a `⚙` single-line + <22 padding
-      5. tool_name in _PERCEPTION_TOOL_NAMES → multi-line _render_tool_body (by-content)
-      6. else → R2-8a single-line + warning log (drift signal, T-EC-11)
+    Dispatch:
+      1. ret None → orphan single-line: `⚙ tool_name() [no return captured]`
+      2. is_tool_error → error single-line: `✗ tool_name(args) {fallback}`
+      3. happy path (perception / execution / save_memory / drift) →
+         unified head `{icon} {args_call}` + body (sectioned or plain
+         by content). icon = ✎ for save_memory, ⚙ otherwise.
+      4. Drift signal: tool_name not in any registered frozenset → log
+         warning (no rendering change; frozenset is drift guard only,
+         not dispatch driver — spec §3.1).
     """
     n = len(tool_calls)
     plural = "tool" if n == 1 else "tools"
@@ -822,56 +826,43 @@ def _render_action(
                 "tool_call_id mismatch for %s in cycle %s",
                 tcp.tool_name, cycle_id,
             )
-            lines.append(f"  ⚙ {tcp.tool_name:<22} [no return captured]")
+            lines.append(f"  ⚙ {tcp.tool_name}() [no return captured]")
             continue
 
         content_str = str(ret.content)
         outcome = getattr(ret, "outcome", "success")
+        args = tcp.args_as_dict()
+        args_call = _format_args_as_call(tcp.tool_name, args)
 
-        # Branch 2: L1 failure (R2-8a single-line + ✗) — does not enter multi-line
+        # Branch 2: L1 error single-line + ✗
+        # escape args_call: reasoning is LLM-written, may contain Rich markup
+        # like [bold] / [red] — must not be parsed as markup.
         if is_tool_error(tcp.tool_name, content_str, outcome):
             lines.append(
-                f"  ✗ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+                f"  ✗ {escape(args_call)} {escape(_fallback_summary(content_str))}"
             )
             continue
 
-        # Branch 3: save_memory (R2-8a single-line + ✎) — retired tool: iter-w2r3-memory-disable, branch kept for revert path
-        if tcp.tool_name == "save_memory":
-            try:
-                args = tcp.args_as_dict()
-            except Exception:
-                args = None
-            icon, summary = resolve_tool_display(
-                tcp.tool_name, content_str, outcome, args,
+        # Drift guard: warn for tools not in any registered frozenset
+        # (per spec §3.1 — frozenset is guard only, doesn't drive render).
+        if (
+            tcp.tool_name != "save_memory"
+            and tcp.tool_name not in _EXECUTION_TOOL_NAMES
+            and tcp.tool_name not in _PERCEPTION_TOOL_NAMES
+        ):
+            logger.warning(
+                "tool_name %s not in any registered frozenset "
+                "(perception / execution / save_memory) — drift signal",
+                tcp.tool_name,
             )
-            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
-            continue
 
-        # Branch 4: execution (R2-8a single-line + <22 padding)
-        if tcp.tool_name in _EXECUTION_TOOL_NAMES:
-            try:
-                args = tcp.args_as_dict()
-            except Exception:
-                args = None
-            icon, summary = resolve_tool_display(
-                tcp.tool_name, content_str, outcome, args,
-            )
-            lines.append(f"  {icon} {tcp.tool_name:<22} {escape(summary)}")
-            continue
-
-        # Branch 5: perception (multi-line section render)
-        if tcp.tool_name in _PERCEPTION_TOOL_NAMES:
-            lines.append(_render_tool_body(tcp.tool_name, content_str))
-            continue
-
-        # Branch 6: drift — unregistered tool name (T-EC-11)
-        logger.warning(
-            "tool_name %s not in _PERCEPTION_TOOL_NAMES / _EXECUTION_TOOL_NAMES "
-            "— falling back to R2-8a single-line",
-            tcp.tool_name,
-        )
+        # Unified head + body for all happy-path tools
+        icon = "✎" if tcp.tool_name == "save_memory" else "⚙"
         lines.append(
-            f"  ⚙ {tcp.tool_name:<22} {escape(_fallback_summary(content_str))}"
+            _render_tool_body(
+                tcp.tool_name, content_str,
+                head_icon=icon, head_args=args_call,
+            )
         )
 
     return "\n".join(lines)
