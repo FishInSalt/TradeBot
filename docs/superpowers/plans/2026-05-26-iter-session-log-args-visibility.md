@@ -17,13 +17,13 @@
 | File | Role |
 |---|---|
 | `src/cli/display.py` | Add `_format_args_as_call` / `_format_arg_value` helpers; refactor `_render_action` to unified dispatch; rename `_render_perception_tool` → `_render_tool_body`; update `_render_tool_body` signature to accept `head_icon` / `head_args` |
-| `src/agent/tools_execution.py` | `set_stop_loss` / `set_take_profit` capture `o.trigger_price` and return `(was X)`; 3 outlier tools (`update_price_level_alert` / `set_next_wake` / `set_next_wake_at`) remove reasoning from return |
+| `src/agent/tools_execution.py` | `set_stop_loss` / `set_take_profit` capture `o.trigger_price` and return `old → new` prefix (update path) or single value (first-set); 3 outlier tools (`update_price_level_alert` / `set_next_wake` / `set_next_wake_at`) remove reasoning from return |
 | `src/agent/tools_descriptions.py` | `SET_NEXT_WAKE_DESCRIPTION` / `SET_NEXT_WAKE_AT_DESCRIPTION` Examples: remove `Reason: ...` suffix (LLM-visible fact-provider sync) |
 | `tests/test_args_format.py` | NEW: `_format_args_as_call` unit tests covering all value types + INVALID_JSON_KEY fallback |
-| `tests/test_display_cycle.py` | Rebuild 51 byte-equal snapshots (44 `test_snapshot_*` + 3 `test_render_action_*` + 4 `test_format_cycle_output_*`) |
+| `tests/test_display_cycle.py` | Rebuild 48 byte-equal snapshots (44 `test_snapshot_*` + 4 `test_render_perception_tool_*`) + audit 8 loose-assertion tests (3 `test_render_action_*` + 4 `test_format_cycle_output_*` + `test_int_1_render_action_mixed_perception_execution`) |
 | `tests/test_tools_execution.py` | SL/TP return string assertions + first-set unset case + 3 outlier reasoning-removal assertions |
 | `tests/test_alert_age.py` | `test_update_tool_return_string_shape` regex updated (remove `— ".+"$` suffix + content assert) |
-| `tests/test_alert_family.py` | Sample strings refresh (line 357, 395) to drop `— "..."` (no behavior change) |
+| `tests/test_alert_family.py` | Delete `assert '— "trail up after breakout"' in result` (line 200, Task 5 hard-fail) + sample refresh (line 358 `sample` / 396 `update_success` — read-only). **Not in scope**: line 154 (cancel_price_level_alert reasoning is state-delta, not arg echo) |
 | ~~`scripts/verify_args_visibility_log_size.py`~~ | ~~offline re-render~~ — **dropped**: re-render infeasible (messages not persisted in DB); replaced by manual sample review on live sim (Task 6) |
 
 ---
@@ -144,13 +144,15 @@ pytest tests/test_args_format.py -v
 
 Expected: ImportError (`cannot import name '_format_args_as_call'`)
 
-- [ ] **Step 1.3: Implement `_format_arg_value` and `_format_args_as_call`**
+- [ ] **Step 1.3a: Add stdlib imports to file top**
+
+Add `import json` to the stdlib imports section near `src/cli/display.py:1-12`. Also add `from pydantic_ai.messages import INVALID_JSON_KEY` to the pydantic-ai imports group (avoid inline import inside hot-path helper).
+
+- [ ] **Step 1.3b: Implement `_format_arg_value` and `_format_args_as_call`**
 
 Add to `src/cli/display.py` after the existing parsers section (after line ~985):
 
 ```python
-import json
-
 def _format_arg_value(v: object) -> str:
     """Format a single arg value per spec §3.2.
 
@@ -186,8 +188,6 @@ def _format_args_as_call(tool_name: str, args: dict | None) -> str:
     `tool_name` is currently only used for fallback display; future
     extension point for per-tool customization (e.g. PII redaction).
     """
-    from pydantic_ai.messages import INVALID_JSON_KEY
-
     if not args:
         return f"{tool_name}()"
     if INVALID_JSON_KEY in args:
@@ -243,7 +243,7 @@ Expected: ~40 lines spanning `src/cli/display.py` + multiple test files
 
 - [ ] **Step 2.2: Rename across codebase**
 
-Use the Edit tool with `replace_all=true` per file (do NOT use shell sed — preserve file framework hooks).
+Use the Edit tool with `replace_all=true` per file (do NOT use shell sed — Edit framework allows precise per-occurrence review and prevents accidental mutation of string literals / test fixtures that incidentally contain the symbol name).
 
 For each file containing matches, run Edit:
 - `old_string`: `_render_perception_tool`
@@ -297,7 +297,7 @@ EOF
 - Modify: `src/cli/display.py:793-871` `_render_action` (collapse 6 branches into unified head + body)
 - Modify: `src/cli/display.py:446-486` `_render_tool_body` (add `head_icon` / `head_args` kwargs)
 - Modify: `src/cli/display.py:516` `_SECTIONED_PERCEPTION_TOOL_NAMES` dead field cleanup decision
-- Modify: `tests/test_display_cycle.py` — update `_assert_perception_render` helper signature + rebuild all 51 byte-equal snapshots + 4 T-RPT tests + test_dg_2 (if cleanup)
+- Modify: `tests/test_display_cycle.py` — update `_assert_perception_render` helper signature + rebuild all 48 byte-equal snapshots + 4 T-RPT tests + test_dg_2 (if cleanup)
 
 This task is large; split commits within: code change first, snapshot rebuild second.
 
@@ -442,7 +442,7 @@ Expected: All passing (unit tests for helpers not affected; snapshot tests fail 
 pytest tests/test_display_cycle.py -v 2>&1 | tee /tmp/snapshot_failures.txt | tail -10
 ```
 
-Expected: ~51 failures with diff output showing head form change `⚙ tool_name` → `⚙ tool_name(args)`. Save the output for systematic rebuild.
+Expected: **~48 byte-equal failures** showing head form change `⚙ tool_name` → `⚙ tool_name(args)`, plus a handful of loose-assertion failures (audited in Step 3.5d). Save the output for systematic rebuild.
 
 - [ ] **Step 3.5a: Update `_assert_perception_render` helper signature**
 
@@ -501,14 +501,19 @@ For each:
 
 Also rename the test function names to `test_render_tool_body_*` for consistency (4 occurrences).
 
-- [ ] **Step 3.5d: Rebuild `test_render_action_*` (3 tests) and `test_format_cycle_output_*` (4 tests)**
+- [ ] **Step 3.5d: Audit 8 loose-assertion tests (3 `test_render_action_*` + 4 `test_format_cycle_output_*` + `test_int_1_render_action_mixed_perception_execution`)**
 
-These integration tests construct full `tool_calls + returns` fixtures with ToolCallPart args populated. The head form changes from `⚙ tool_name` / `⚙ tool_name {summary}` (execution) to `⚙ tool_name(actual_args_from_fixture)`.
+These tests construct `tool_calls + returns` fixtures and use `in out` substring assertions. Most assertions are unaffected by the head form change (e.g. `"▾ Action (1 tool)" in out` / `"[no return captured]" in out` / `"  ⚙ get_market_data" in out` still matches the prefix of `"⚙ get_market_data()"`). Audit each, fix only those with conflicting literals:
 
-For each:
-1. Read the fixture's ToolCallPart args dict
-2. Update the `expected` golden string head line to `⚙ tool_name(args_formatted)` using actual fixture args
-3. For execution tool integration tests, the body may need rebuilding too (previously single-line `summary` form, now body is from `tool_return.content` per by-content dispatch)
+| Test | Line | Risk | Action |
+|---|---|---|---|
+| `test_int_1_render_action_mixed_perception_execution` | 1557-1589 | `assert "  ⚙ set_next_wake          5min" in out` — R2-8a padded literal no longer in new dispatch | **Update**: change assertion to `assert "  ⚙ set_next_wake(minutes=5)" in out` + verify body line `"Next wake set to 5 min" in out` |
+| `test_render_action_multi_tools` | ~729 | `"get_market_data" in out` substring matches new form | No change |
+| `test_render_action_single_tool_singular` | ~753 | `"▾ Action (1 tool)" in out` unchanged | No change |
+| `test_render_action_missing_return_fallback` | ~767 | `"[no return captured]" in out` unchanged | Verify head is now `"⚙ tool_name() [no return captured]"` (parens added) — update assertion if it uses bare `tool_name` literal |
+| `test_format_cycle_output_basic / with_memory / with_error / outcome_failed` | 446-511 | mostly loose | Audit each; update any padded-literal assertions |
+
+Use `pytest -k "test_int_1 or test_render_action or test_format_cycle_output" -v 2>&1 | grep -E "FAILED\|PASSED" | head -20` to identify which actually fail.
 
 - [ ] **Step 3.5e: Decide `_SECTIONED_PERCEPTION_TOOL_NAMES` cleanup**
 
@@ -526,13 +531,13 @@ _SECTIONED_PERCEPTION_TOOL_NAMES: frozenset[str] = _PERCEPTION_TOOL_NAMES
 
 No test changes needed for `test_dg_2_*` — its partition assertion remains valid (it tests that perception + execution + save_memory frozensets cover all registered tools, independent of dispatch logic).
 
-- [ ] **Step 3.6: Verify all 51 snapshot tests pass**
+- [ ] **Step 3.6: Verify all 48 snapshot tests pass**
 
 ```bash
 pytest tests/test_display_cycle.py -v 2>&1 | tail -10
 ```
 
-Expected: 0 failed, all 51 byte-equal tests pass.
+Expected: 0 failed, all 48 byte-equal tests pass.
 
 - [ ] **Step 3.7: Run full test suite**
 
@@ -567,7 +572,7 @@ EOF
 
 git add tests/test_display_cycle.py
 git commit -m "$(cat <<'EOF'
-test(display): rebuild 51 snapshots + helper + T-RPT for function-syntax head
+test(display): rebuild 48 snapshots + helper + T-RPT for function-syntax head
 
 Head form changed: ⚙ tool_name → ⚙ tool_name(args). Updates:
 - _assert_perception_render helper signature: accepts optional args dict,
@@ -589,11 +594,18 @@ EOF
 
 ---
 
-## Task 4: SL/TP return state-delta
+## Task 4: SL/TP return state-delta (old → new prefix) + display regex sync
+
+**Shape decision (spec §3.4)**：方案 2 `old → new prefix` 与 `update_price_level_alert` 同构。
+- update path: `Stop loss set at 77100.00 → 76950.00 ({dist}% ...) | Order: abc`
+- first-set path (no prev SL): `Stop loss set at 76950.00 ({dist}% ...) | Order: abc` (沿用现有 single-value shape)
+
+`_summarize_set_stop_loss` / `_summarize_set_take_profit` (display.py:188/198) 必须同步扩展，先 try dual-value regex，fallback 现有 single-value regex（否则 update path 走 fallback → display group(1) 错抓 old price）。
 
 **Files:**
 - Modify: `src/agent/tools_execution.py:173-202` `set_stop_loss`
 - Modify: `src/agent/tools_execution.py:205-234` `set_take_profit`
+- Modify: `src/cli/display.py:188 / 198` `_summarize_set_stop_loss` / `_summarize_set_take_profit` (regex dual-shape support)
 - Modify: `tests/test_tools_execution.py` (assertions)
 - Modify: `tests/test_display_cycle.py` (snapshot rebuild for SL/TP-affected tests)
 
@@ -602,32 +614,53 @@ EOF
 Add to `tests/test_tools_execution.py`:
 
 ```python
-async def test_set_stop_loss_includes_prev_sl_when_existing():
-    """set_stop_loss return includes (was X) when an existing stop order is replaced."""
+async def test_set_stop_loss_old_new_prefix_when_existing():
+    """set_stop_loss return uses 'old → new' prefix when an existing stop is replaced."""
     deps = _make_deps_with_position_and_existing_stop(prev_sl=77100.00)
     result = await set_stop_loss(deps, price=76950.00, reasoning="trail up after MA reclaim")
-    assert "(was 77100.00)" in result
-    assert "Stop loss set at 76950.00" in result
+    assert "Stop loss set at 77100.00 → 76950.00" in result
+    # Distance and trigger ref preserved in distance parens
+    assert "from" in result and "price" in result
 
 
-async def test_set_stop_loss_unset_when_no_existing():
-    """set_stop_loss return includes (was unset) when no prior stop order."""
+async def test_set_stop_loss_single_value_when_no_existing():
+    """set_stop_loss first-set: no '→' arrow, single-value shape (sustains existing summary regex)."""
     deps = _make_deps_with_position_no_stop()
     result = await set_stop_loss(deps, price=76950.00, reasoning="initial SL after entry")
-    assert "(was unset)" in result
     assert "Stop loss set at 76950.00" in result
+    assert "→" not in result  # no arrow for first-set
 
 
-async def test_set_take_profit_includes_prev_tp_when_existing():
+async def test_set_take_profit_old_new_prefix_when_existing():
     deps = _make_deps_with_position_and_existing_tp(prev_tp=76300.00)
     result = await set_take_profit(deps, price=76200.00, reasoning="extend target")
-    assert "(was 76300.00)" in result
+    assert "Take profit set at 76300.00 → 76200.00" in result
 
 
-async def test_set_take_profit_unset_when_no_existing():
+async def test_set_take_profit_single_value_when_no_existing():
     deps = _make_deps_with_position_no_tp()
     result = await set_take_profit(deps, price=76200.00, reasoning="initial TP")
-    assert "(was unset)" in result
+    assert "Take profit set at 76200.00" in result
+    assert "→" not in result
+
+
+async def test_summarize_set_stop_loss_dual_shape_regex():
+    """display.py:188 regex must handle both 'old → new' and single-value paths."""
+    from src.cli.display import _summarize_set_stop_loss
+    # Update path with arrow
+    update = "Stop loss set at 77100.00 → 76950.00 (+0.05% from mark price 76912.50) | Order: abc"
+    assert _summarize_set_stop_loss(update) == "SL @ $76,950 (+0.05%)"
+    # First-set path (no arrow)
+    first = "Stop loss set at 76950.00 (+0.05% from mark price 76912.50) | Order: abc"
+    assert _summarize_set_stop_loss(first) == "SL @ $76,950 (+0.05%)"
+
+
+async def test_summarize_set_take_profit_dual_shape_regex():
+    from src.cli.display import _summarize_set_take_profit
+    update = "Take profit set at 76300.00 → 76200.00 (-0.05% from mark price 76250.00) | Order: abc"
+    assert _summarize_set_take_profit(update) == "TP @ $76,200 (-0.05%)"
+    first = "Take profit set at 76200.00 (-0.05% from mark price 76250.00) | Order: abc"
+    assert _summarize_set_take_profit(first) == "TP @ $76,200 (-0.05%)"
 ```
 
 If `_make_deps_with_position_and_existing_stop` etc. don't exist, build them. Reference existing fixture patterns in `tests/test_tools_execution.py`.
@@ -635,12 +668,12 @@ If `_make_deps_with_position_and_existing_stop` etc. don't exist, build them. Re
 - [ ] **Step 4.2: Run new tests to verify they fail**
 
 ```bash
-pytest tests/test_tools_execution.py -v -k "set_stop_loss_includes_prev or set_stop_loss_unset or set_take_profit_includes or set_take_profit_unset" 2>&1 | tail -10
+pytest tests/test_tools_execution.py -v -k "set_stop_loss_old_new or set_stop_loss_single or set_take_profit_old_new or set_take_profit_single or summarize_set_stop_loss_dual or summarize_set_take_profit_dual" 2>&1 | tail -15
 ```
 
-Expected: 4 FAILED (assertions about `(was X)` not matching).
+Expected: 6 FAILED (assertions about `→` prefix / dual-shape regex not matching).
 
-- [ ] **Step 4.3: Implement SL prev-state capture**
+- [ ] **Step 4.3: Implement SL prev-state capture (old → new prefix)**
 
 Update `src/agent/tools_execution.py` `set_stop_loss`:
 
@@ -676,14 +709,16 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     trigger_ref = deps.exchange.algo_trigger_reference
-    prev_str = f"(was {prev_sl:.2f}) " if prev_sl is not None else "(was unset) "
+    # Shape: "old → new" prefix (update path) or single-value (first-set).
+    # Same shape as update_price_level_alert per spec §3.4 / §2.1 选项 D 范式统一.
+    price_str = f"{prev_sl:.2f} → {price:.2f}" if prev_sl is not None else f"{price:.2f}"
     if ticker.last > 0:
         dist_pct = (price - ticker.last) / ticker.last * 100
         return (
-            f"Stop loss set at {price:.2f} {prev_str}"
+            f"Stop loss set at {price_str} "
             f"({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
         )
-    return f"Stop loss set at {price:.2f} {prev_str}| Order: {order.id}"
+    return f"Stop loss set at {price_str} | Order: {order.id}"
 ```
 
 - [ ] **Step 4.4: Implement TP prev-state capture (symmetric to SL)**
@@ -719,23 +754,64 @@ async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> st
 
     ticker = await deps.market_data.get_ticker(deps.symbol)
     trigger_ref = deps.exchange.algo_trigger_reference
-    prev_str = f"(was {prev_tp:.2f}) " if prev_tp is not None else "(was unset) "
+    price_str = f"{prev_tp:.2f} → {price:.2f}" if prev_tp is not None else f"{price:.2f}"
     if ticker.last > 0:
         dist_pct = (price - ticker.last) / ticker.last * 100
         return (
-            f"Take profit set at {price:.2f} {prev_str}"
+            f"Take profit set at {price_str} "
             f"({dist_pct:+.2f}% from {trigger_ref} price {ticker.last:.2f}) | Order: {order.id}"
         )
-    return f"Take profit set at {price:.2f} {prev_str}| Order: {order.id}"
+    return f"Take profit set at {price_str} | Order: {order.id}"
 ```
+
+- [ ] **Step 4.4b: Sync `_summarize_set_stop_loss` / `_summarize_set_take_profit` regex (dual-shape)**
+
+Update `src/cli/display.py:187-204`:
+
+```python
+def _summarize_set_stop_loss(content: str) -> str:
+    # First try dual-value shape (post iter-session-log-args-visibility update path):
+    #   "Stop loss set at 77100.00 → 76950.00 (+0.05% from ...) | ..."
+    # group(1) = old, group(2) = new, group(3) = distance
+    m = re.search(r"Stop loss set at\s+([\d.]+)\s*→\s*([\d.]+)\s*\(([^)]+)\)", content)
+    if m:
+        new_price = float(m.group(2))
+        return f"SL @ ${new_price:,.0f} ({m.group(3).split('from')[0].strip()})"
+    # Fallback to single-value shape (first-set path / pre-iter return):
+    m1 = re.search(r"Stop loss set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m1:
+        return f"SL @ ${float(m1.group(1)):,.0f} ({m1.group(2).split('from')[0].strip()})"
+    m2 = re.search(r"Stop loss set at\s+([\d.]+)", content)
+    if m2:
+        return f"SL @ ${float(m2.group(1)):,.0f}"
+    return _fallback_summary(content)
+
+
+def _summarize_set_take_profit(content: str) -> str:
+    # Dual-value shape first (update path)
+    m = re.search(r"Take profit set at\s+([\d.]+)\s*→\s*([\d.]+)\s*\(([^)]+)\)", content)
+    if m:
+        new_price = float(m.group(2))
+        return f"TP @ ${new_price:,.0f} ({m.group(3).split('from')[0].strip()})"
+    # Fallback to single-value
+    m1 = re.search(r"Take profit set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m1:
+        return f"TP @ ${float(m1.group(1)):,.0f} ({m1.group(2).split('from')[0].strip()})"
+    m2 = re.search(r"Take profit set at\s+([\d.]+)", content)
+    if m2:
+        return f"TP @ ${float(m2.group(1)):,.0f}"
+    return _fallback_summary(content)
+```
+
+This dual-shape support ensures system.log INFO summary path renders `SL @ $76,950 (+0.05%)` correctly for both update (with arrow) and first-set (without arrow) returns — without it, dual-value shape would fall through to fallback regex catching old price as group(1), silent display retrogression.
 
 - [ ] **Step 4.5: Run new tests to verify they pass**
 
 ```bash
-pytest tests/test_tools_execution.py -v -k "set_stop_loss_includes_prev or set_stop_loss_unset or set_take_profit_includes or set_take_profit_unset" 2>&1 | tail -10
+pytest tests/test_tools_execution.py -v -k "set_stop_loss_old_new or set_stop_loss_single or set_take_profit_old_new or set_take_profit_single or summarize_set_stop_loss_dual or summarize_set_take_profit_dual" 2>&1 | tail -15
 ```
 
-Expected: 4 PASSED.
+Expected: 6 PASSED.
 
 - [ ] **Step 4.6: Run full tests and rebuild affected snapshots**
 
@@ -743,7 +819,7 @@ Expected: 4 PASSED.
 pytest tests/test_tools_execution.py tests/test_display_cycle.py -v 2>&1 | tail -20
 ```
 
-If snapshot tests for SL/TP-rendered content fail, locate them (typically `test_snapshot_set_stop_loss*` / `test_snapshot_set_take_profit*` / `test_render_action_*` integration cases), and update the `expected` golden string to include `(was X)` / `(was unset)` per Step 4.3-4.4 return shape.
+If snapshot tests for SL/TP-rendered content fail, locate them (typically `test_snapshot_set_stop_loss*` / `test_snapshot_set_take_profit*` / `test_render_action_*` integration cases), and update the `expected` golden string body to use `old → new` prefix (update path) or single value (first-set) per Step 4.3-4.4 return shape.
 
 - [ ] **Step 4.7: Run full test suite**
 
@@ -756,16 +832,23 @@ Expected: All passing.
 - [ ] **Step 4.8: Commit**
 
 ```bash
-git add src/agent/tools_execution.py tests/test_tools_execution.py tests/test_display_cycle.py
+git add src/agent/tools_execution.py src/cli/display.py tests/test_tools_execution.py tests/test_display_cycle.py
 git commit -m "$(cat <<'EOF'
-feat(tools_execution): SL/TP return includes prev state delta
+feat(tools_execution): SL/TP return uses 'old → new' prefix on update path
 
-set_stop_loss and set_take_profit now include '(was X)' or '(was unset)'
-in return string by capturing trigger_price of the existing stop/TP
-order before cancellation. Adds forensic state-delta context (spec §3.4).
+set_stop_loss and set_take_profit return shape:
+- update path: 'Stop loss set at 77100.00 → 76950.00 (+0.05% ...) | ...'
+  (same shape as update_price_level_alert per spec §3.4 范式统一)
+- first-set path: 'Stop loss set at 76950.00 (+0.05% ...) | ...'
+  (sustains existing single-value shape)
 
 Use o.trigger_price (not o.price) per base.py:54 R2-7 §4.7 algo class
 contract — avoids future limit-as-stop ambiguity.
+
+display.py:188 / 198 _summarize_set_stop_loss / _summarize_set_take_profit
+extended to dual-shape regex: try arrow form first, fallback to single
+value. Ensures system.log INFO summary path unaffected (silent display
+retrogression prevented).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -783,7 +866,9 @@ EOF
 - Modify: `src/agent/tools_descriptions.py:13-45` (sync `SET_NEXT_WAKE_DESCRIPTION` + `SET_NEXT_WAKE_AT_DESCRIPTION` Examples)
 - Modify: `src/cli/display.py:266` `_summarize_set_next_wake_at` docstring (remove `Reason: ...` mention)
 - Modify: `tests/test_alert_age.py:207-218` `test_update_tool_return_string_shape` (regex update)
-- Modify: `tests/test_alert_family.py:357, 395` (sample string refresh)
+- Modify: `tests/test_alert_family.py:200` (delete `assert '— "trail up after breakout"' in result` — hard-fail in Task 5)
+- Modify: `tests/test_alert_family.py:358, 396` (sample / update_success refresh — read-only)
+- **Not in scope**: `tests/test_alert_family.py:154` cancel_price_level_alert (reasoning is state-delta not arg echo)
 - Modify: `tests/test_tools_execution.py` (3 outlier return assertions)
 - Modify: `tests/test_display_cycle.py` (3 outlier snapshot rebuild)
 
@@ -952,21 +1037,46 @@ Old asserts (line 218):
 
 Delete this assertion entirely (reasoning is no longer in return).
 
-- [ ] **Step 5.10: Refresh `tests/test_alert_family.py` sample strings**
+- [ ] **Step 5.10a: Delete hard-fail assertion at `tests/test_alert_family.py:200`**
 
-Look at `tests/test_alert_family.py` lines 357 and 395 (the `update_success` sample strings). They contain `— "4h structural high"` or similar reasoning suffixes. Remove the `— "..."` portion to keep samples accurate. This is a read-only refresh — these strings are inputs for `is_tool_error` checks, behavior is unchanged.
+Locate `tests/test_alert_family.py:200`:
 
-Example edit at line 357 (and similarly at line 395):
+```python
+assert '— "trail up after breakout"' in result
+```
+
+**Delete this line entirely** — `update_price_level_alert` normalize (Step 5.3) removes the reasoning suffix from return; this assertion becomes a hard-fail. Adjacent assertions (line 198 `above 82100.00 → 82500.00`, line 195 `id=a3f2b8c1`) remain valid and unchanged.
+
+- [ ] **Step 5.10b: Refresh sample / update_success strings (read-only)**
+
+Two refresh targets with different semantics:
+
+| Line | Variable | Purpose | Action |
+|---|---|---|---|
+| `tests/test_alert_family.py:358` | `sample` (parser input fixture for `_summarize_update_price_level_alert`) | parser regex doesn't depend on reasoning — refresh keeps fixture realistic | Remove `— "4h structural high"` from string literal |
+| `tests/test_alert_family.py:396` | `update_success` (input fixture for `is_tool_error`) | `is_tool_error` matches success prefix only — refresh keeps fixture realistic | Remove `— "4h structural high"` from string literal |
+
+**Not in scope**: `tests/test_alert_family.py:154` `cancel_price_level_alert` test's `assert '— "4h structural high"' in result` — that string is the cancelled alert's stored reasoning (state-delta), not arg echo. §3.6 normalize only touches `update_price_level_alert` / `set_next_wake` / `set_next_wake_at`; `cancel_price_level_alert` return retains `— "{alert.reasoning}"` legitimately.
+
+Example edit at line 358:
 
 Old:
 ```python
-update_success = 'Price level alert updated (id=abc12345): above 82100.00 → 82500.00 — "4h structural high"'
+sample = (
+    'Price level alert updated (id=a3f2b8c1): '
+    'above 82100.00 → 82500.00 — "4h structural high"'
+)
 ```
 
 New:
 ```python
-update_success = 'Price level alert updated (id=abc12345): above 82100.00 → 82500.00'
+sample = (
+    'Price level alert updated (id=a3f2b8c1): '
+    'above 82100.00 → 82500.00'
+)
 ```
+
+Same pattern at line 396.
 
 - [ ] **Step 5.11: Run full test suite and rebuild affected snapshots**
 
@@ -1004,9 +1114,13 @@ the old shape — H3 fix from third review round).
 display.py:266 _summarize_set_next_wake_at docstring sync (parser regex
 unaffected, docstring description accuracy only).
 
-Note: test_alert_family.py sample string refresh (lines 357, 395) is
-read-only — strings are inputs to is_tool_error tests; success_prefix
-match unchanged, no behavior change. Sample accuracy refresh only.
+Note on test_alert_family.py changes:
+- line 200: HARD delete (assertion against removed reasoning suffix —
+  behavior gated)
+- line 358, 396: read-only sample refresh (parser / is_tool_error
+  inputs; underlying semantics unchanged, samples just stay accurate)
+- line 154: NOT touched (cancel_price_level_alert reasoning is
+  state-delta of cancelled alert, not arg echo — out of §3.6 scope)
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1066,7 +1180,9 @@ For 3-5 sample cycles, confirm the following structural properties:
 | `_render_action` icon | `⚙` for normal / `✗` for error / `✎` for save_memory if any | Task 3 icon resolution broken |
 | reasoning in head args (execution tools) | quoted string, may fold 2-4 physical lines at width=120 | json.dumps escape working (Issue 4 fix) |
 | 3 outlier tools (update_price_level_alert / set_next_wake / set_next_wake_at) | body has NO `Reason: ...` / `— "..."` | Task 5 normalize broken |
-| SL/TP body | contains `(was X)` or `(was unset)` | Task 4 prev capture broken |
+| SL/TP head (update path) | `Stop loss set at 77100.00 → 76950.00 (...)` (old → new prefix) | Task 4 prev capture broken |
+| SL/TP head (first-set path) | `Stop loss set at 76950.00 (...)` (single value, no arrow) | Task 4 first-set fallback broken |
+| System.log INFO summary for SL/TP | `SL @ $76,950 (+0.05%)` (distance preserved) | Step 4.4b dual-shape regex broken |
 | Sectioned vs plain body | sectioned for perception (`=== ... ===` markers), plain (no markers) for execution returns | by-content dispatch broken |
 | Rich markup safety | reasoning containing `[bold]` etc. shows verbatim (not parsed as Rich markup) | escape() coverage broken (Issue 5 fix) |
 
@@ -1112,7 +1228,7 @@ Record this commitment in commit / memory; no script needed at impl time.
 git log --oneline iter-session-log-args-visibility ^main
 ```
 
-Expected: **~8 commits in this iter** — 2 docs already landed (`e8641a7` spec / `b326156` plan) + 6 impl commits:
+Expected: **~9 commits in this iter** — 3 docs already landed (`e8641a7` spec / `294864e` plan / `ef5a65e` round-4 fix) + 6 impl commits:
 - Task 1: `_format_args_as_call` helper + unit tests
 - Task 2: rename `_render_perception_tool` → `_render_tool_body`
 - Task 3 (split into 2): dispatch refactor / snapshot rebuild
@@ -1141,7 +1257,7 @@ gh pr create --title "iter-session-log-args-visibility: unify ⚙ tool_name(args
 
 - Unifies session log tool call rendering to Python function-syntax head: `⚙ tool_name(arg=value, ...)` + body
 - Normalizes 3 outlier execution tools (`update_price_level_alert` / `set_next_wake` / `set_next_wake_at`) to remove duplicate `Reason: {reasoning}` from return body (reasoning is single-point displayed in head args)
-- Adds `(was X)` state-delta to `set_stop_loss` / `set_take_profit` returns for forensic visibility
+- Adds `old → new` prefix to `set_stop_loss` / `set_take_profit` returns on update path (same shape as `update_price_level_alert`)；first-set path 沿用现 single-value shape；`_summarize_*` regex 同步扩展 dual-shape
 - Renames `_render_perception_tool` → `_render_tool_body` (function now serves all tools via by-content dispatch)
 
 **Spec:** `docs/superpowers/specs/2026-05-26-iter-session-log-args-visibility-design.md`
@@ -1163,12 +1279,14 @@ gh pr create --title "iter-session-log-args-visibility: unify ⚙ tool_name(args
 
 ## Test plan
 
-- [x] `_format_args_as_call` unit tests (13 cases covering all value types + INVALID_JSON_KEY fallback)
-- [x] SL/TP `(was X)` / `(was unset)` assertions
-- [x] 3 outlier tools reasoning-removal assertions
-- [x] 51 byte-equal snapshot tests rebuilt
+- [x] `_format_args_as_call` unit tests (16 cases: 13 base value types + 3 escape edge cases — quote / backslash / newline)
+- [x] SL/TP `old → new` prefix (update path) + single-value (first-set path) assertions
+- [x] `_summarize_set_stop_loss` / `_summarize_set_take_profit` dual-shape regex tests (system.log INFO summary distance preservation)
+- [x] 3 outlier tools reasoning-removal assertions (`update_price_level_alert` / `set_next_wake` / `set_next_wake_at`)
+- [x] 48 byte-equal snapshot tests rebuilt (44 `test_snapshot_*` + 4 `test_render_perception_tool_*`)
+- [x] 8 loose-assertion tests audited (Step 3.5d — `test_int_1` etc.; padded-literal assertions updated)
 - [x] `test_alert_age.py` regex updated
-- [x] `tests/test_alert_family.py` sample strings refreshed
+- [x] `tests/test_alert_family.py:200` assertion deleted (hard-fail after normalize); line 358 / 396 sample refresh; line 154 retained (cancel_price_level_alert state-delta, not in scope)
 - [x] Manual structural review on live sim (Task 6 — sample 3-5 cycles for head form / SL/TP delta / 3-outlier normalize / Rich escape safety)
 - [x] Soft inflation estimate vs W3 sim #10 baseline (Step 6.4, expected avg/cycle ratio 1.03-1.10)
 - [ ] W4 forensic head-args reasoning hit-rate review (1 week post-merge, result → memory; decision: < 10% hit → strip mini-iter per spec §6)
