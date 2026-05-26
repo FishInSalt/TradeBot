@@ -3365,3 +3365,58 @@ def test_is_anchor_rejects_non_bracket_lines():
     assert _is_anchor("Mom +0.1%") is False
     assert _is_anchor("") is False
     assert _is_anchor("=== Section ===") is False
+
+
+def test_group_by_anchor_pure_anchor_body():
+    """_group_by_anchor: 全 anchor body → 每 anchor 一 group, continuation=[]."""
+    from src.cli.display import _group_by_anchor
+    body = ["[5m] Mom +0.1%", "[1h] Mom +0.3%", "[4h] Mom -0.5%", "[1d] Mom +1.0%"]
+    groups = _group_by_anchor(body)
+    assert len(groups) == 4
+    assert groups[0] == ("[5m] Mom +0.1%", [])
+    assert groups[3] == ("[1d] Mom +1.0%", [])
+
+
+def test_group_by_anchor_with_continuation_rows():
+    """_group_by_anchor: anchor + 续行 + blank → 续行 + blank 都归属当前 group."""
+    from src.cli.display import _group_by_anchor
+    body = [
+        "[5m] Mom +0.1%",
+        "      Last 3 closes: ...",
+        "",
+        "[1h] Mom +0.3%",
+        "      Last 3 closes: ...",
+    ]
+    groups = _group_by_anchor(body)
+    assert len(groups) == 2
+    assert groups[0] == ("[5m] Mom +0.1%", ["      Last 3 closes: ...", ""])
+    assert groups[1] == ("[1h] Mom +0.3%", ["      Last 3 closes: ..."])
+
+
+def test_group_by_anchor_prelude_each_line_single_group():
+    """_group_by_anchor: prelude (非 anchor 起首行) 每行各自单独 1-row group."""
+    from src.cli.display import _group_by_anchor
+    body = [
+        "Last: 77540.00",
+        "MA fast-vs-slow: 5m above | 1h below",
+        "Columns: ...",
+        "",
+        "[5m] Mom +0.1%",
+        "[1h] Mom +0.3%",
+    ]
+    groups = _group_by_anchor(body)
+    # 3 prelude single-row groups + 2 anchor groups = 5 groups
+    # blank 在 anchor 出现前归属上一个 prelude group (Columns:) 的 continuation
+    assert len(groups) == 5
+    assert groups[0] == ("Last: 77540.00", [])
+    assert groups[1] == ("MA fast-vs-slow: 5m above | 1h below", [])
+    assert groups[2] == ("Columns: ...", [""])  # blank 进入 prelude 3 的 continuation
+    assert groups[3] == ("[5m] Mom +0.1%", [])
+    assert groups[4] == ("[1h] Mom +0.3%", [])
+
+
+def test_group_by_anchor_empty_body():
+    """_group_by_anchor: 空 body 返回空 list."""
+    from src.cli.display import _group_by_anchor
+    assert _group_by_anchor([]) == []
+    assert _group_by_anchor(()) == []

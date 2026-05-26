@@ -458,6 +458,47 @@ def _is_anchor(line: str) -> bool:
     return bool(_ANCHOR_RE.match(line))
 
 
+def _group_by_anchor(
+    body: tuple[str, ...] | list[str],
+) -> list[tuple[str, list[str]]]:
+    """Split body into groups: each anchor line starts a new group;
+    non-anchor lines (blanks + plain text + continuation) attach to the
+    current group's continuation list.
+
+    Assumes body has had leading/trailing blanks stripped upstream by
+    `_strip_blanks` (display.py:433-441). I.e. body[0] is non-blank,
+    avoiding undefined "blank attaches to previous group" at body start.
+
+    Prelude rule (R4): body lines before the first anchor each form a
+    single-row group (head = the line itself, continuation = []).
+    A blank that appears between prelude lines and the first anchor
+    attaches to the LAST prelude group's continuation (per R3).
+
+    Returns list of (head_line, [continuation_lines]) tuples.
+    - In anchor-group: head is the anchor line.
+    - In prelude single-row group: head is the prelude line itself
+      (not a true anchor — semantically "group head line").
+    """
+    groups: list[tuple[str, list[str]]] = []
+    in_anchor_zone = False
+    for line in body:
+        if _is_anchor(line):
+            in_anchor_zone = True
+            groups.append((line, []))
+        else:
+            if in_anchor_zone and groups:
+                # Inside anchor zone: attach to current anchor group's continuation
+                groups[-1][1].append(line)
+            else:
+                # Prelude zone (no anchor seen yet): each non-anchor line is its own
+                # 1-row group, except blanks which attach to the last prelude group.
+                if groups and not line:
+                    groups[-1][1].append(line)
+                else:
+                    groups.append((line, []))
+    return groups
+
+
 def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...]:
     """D4 universal clipping (head=2 / tail=2, spec §4.3.2 review-校准).
 
