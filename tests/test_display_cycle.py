@@ -322,26 +322,24 @@ def test_summarize_add_price_level_alert():
 
 def test_summarize_set_next_wake():
     from src.cli.display import summarize_tool
-    content = "Next wake set to 30 min. Reason: market quiet, no position"
+    content = "Next wake set to 30 min"
     result = summarize_tool("set_next_wake", content)
     assert "30" in result
     assert "min" in result
-    assert "Reason" not in result  # reasoning should be truncated
 
 
 def test_summarize_set_next_wake_at():
     from src.cli.display import summarize_tool
-    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: align 1h close"
+    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min)"
     result = summarize_tool("set_next_wake_at", content)
     assert "14" in result
     assert "min" in result
-    assert "Reason" not in result
 
 
 def test_is_tool_error_set_next_wake_at_success():
     """set_next_wake_at success message must not be flagged as error."""
     from src.cli.display import is_tool_error
-    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min). Reason: test"
+    content = "Next wake set for 2026-05-12 10:37 UTC (in 14 min)"
     assert is_tool_error("set_next_wake_at", content) is False
 
 
@@ -1588,6 +1586,48 @@ def test_int_1_render_action_mixed_perception_execution():
     # Execution: unified dispatch → function-syntax head + body
     assert "  ⚙ set_next_wake(minutes=5)" in out
     assert "Next wake set to 5 min" in out
+
+
+def test_int_1b_render_action_head_args_escapes_rich_markup():
+    """spec §3.2 / §3.3 escape closure: LLM-written reasoning containing Rich
+    markup (e.g. [bold] / [red]) MUST be escaped in head args — _render_action
+    happy-path and error-path both pass head_args through escape() to neutralize
+    Rich console markup attack surface."""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+
+    calls = [
+        ToolCallPart(
+            tool_name="set_next_wake",
+            args={"minutes": 5, "reasoning": "trail [bold]up[/] after MA reclaim"},
+            tool_call_id="c1",
+        ),
+        # Error path: tool return is a reject; head still must escape reasoning.
+        ToolCallPart(
+            tool_name="set_next_wake",
+            args={"minutes": 999, "reasoning": "force [red]wake[/]"},
+            tool_call_id="c2",
+        ),
+    ]
+    returns = {
+        "c1": ToolReturnPart(
+            tool_name="set_next_wake", tool_call_id="c1",
+            content="Next wake set to 5 min",
+        ),
+        "c2": ToolReturnPart(
+            tool_name="set_next_wake", tool_call_id="c2",
+            content="Cannot set wake to 999 min: exceeds wake_max=60 min for this session.",
+        ),
+    }
+    out = _render_action(calls, returns, cycle_id="abcd1234")
+
+    # Happy-path head: [bold] / [/] both escaped (single escape from _render_tool_body)
+    assert r"trail \[bold]up\[/] after MA reclaim" in out
+    # Raw markup must NOT appear unescaped anywhere
+    assert "[bold]" not in out.replace(r"\[bold]", "")
+    # Error-path head: [red] / [/] both escaped (single escape from _render_action branch 2)
+    assert r"force \[red]wake\[/]" in out
+    assert "[red]" not in out.replace(r"\[red]", "")
 
 
 # --- T-INT-3: _render_reasoning thinking 截断 (R2-8c D10 / R2-8d D6) ---
