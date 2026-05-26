@@ -499,22 +499,69 @@ def _group_by_anchor(
     return groups
 
 
-def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...]:
-    """D4 universal clipping (head=2 / tail=2, spec §4.3.2 review-校准).
+def _clip_body(
+    body: tuple[str, ...] | list[str],
+    n: int = 10,
+    group_cap: int = 12,
+) -> tuple[str, ...]:
+    """Three-tier clip dispatch (per spec §2.3 / §4.3):
 
-    body length:
-      < n  → keep all
-      >= n → (body[0], body[1],
-              f"[... {len(body)-4} rows omitted ...]",
-              body[-2], body[-1])
+    1. structured-row mode  (anchor_count >= 2)
+       → group-level handling: len(groups) <= group_cap 全展，
+         otherwise _flatten(head[:3]) + "[... N groups omitted ...]" + _flatten(tail[-3:])
+
+    2. list-like mode       (len(body) >= n, anchor_count < 2)
+       → existing D4 row-clip unchanged: (body[0], body[1],
+         "[... N rows omitted ...]", body[-2], body[-1])
+
+    3. short mode           (len(body) < n, anchor_count < 2)
+       → keep all (unchanged)
+
+    Symmetric head=3 / tail=3 design (structured-row cap-exceeded):
+    Renderer does not pre-assume per-tool semantic priority. Class A tools
+    have different internal ordering (news newest-first; trade_journal
+    oldest-first via reversed(actions); macro_calendar upcoming chronological).
+    Symmetric preserves both ends regardless of tool semantics.
+
+    Omission marker forms (semantically distinct, grep should differentiate):
+    - list-like:    "[... N rows omitted ...]"   (rows = line count)
+    - cap-exceeded: "[... N groups omitted ...]" (groups = group count)
     """
-    if len(body) < n:
-        return tuple(body)
-    return (
-        body[0], body[1],
-        f"[... {len(body) - 4} rows omitted ...]",
-        body[-2], body[-1],
-    )
+    # Branch detection
+    groups = _group_by_anchor(body)
+    anchor_count = sum(1 for g in groups if _is_anchor(g[0]))
+
+    if anchor_count >= 2:
+        # Branch 1: structured-row mode
+        if len(groups) <= group_cap:
+            # Full expansion
+            return tuple(_flatten_groups(groups))
+        else:
+            # cap-exceeded: head[:3] + omitted + tail[-3:]
+            omitted_count = len(groups) - 6
+            head_lines = _flatten_groups(groups[:3])
+            tail_lines = _flatten_groups(groups[-3:])
+            return tuple(head_lines + [f"[... {omitted_count} groups omitted ...]"] + tail_lines)
+
+    if len(body) >= n:
+        # Branch 2: list-like mode (D4 unchanged)
+        return (
+            body[0], body[1],
+            f"[... {len(body) - 4} rows omitted ...]",
+            body[-2], body[-1],
+        )
+
+    # Branch 3: short mode (unchanged)
+    return tuple(body)
+
+
+def _flatten_groups(groups: list[tuple[str, list[str]]]) -> list[str]:
+    """Flatten groups → flat line list: [head, *continuation, head, *continuation, ...]"""
+    out: list[str] = []
+    for head, continuation in groups:
+        out.append(head)
+        out.extend(continuation)
+    return out
 
 
 def _render_tool_body(

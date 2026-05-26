@@ -2245,25 +2245,24 @@ def test_snapshot_get_market_news_happy_short():
     _assert_perception_render("get_market_news", content, expected)
 
 
-def test_snapshot_get_market_news_dense_general_news_clipped():
-    """Snapshot — General Crypto News with 12 entries (each 2 lines = 24 body lines)
-    triggers head=2/tail=2 clipping. Multi-entry boundary trade-off (spec §4.3.2)
-    acknowledged: head/tail may split entries — trader sees first 2 + last 2 lines.
+def test_snapshot_get_market_news_dense_general_news_full_expansion():
+    """Snapshot — General Crypto News with 12 entries (each 2 lines = 24 body lines).
+    Timestamp anchors [2026-05-03 ...] trigger structured-row mode (anchor_count=12 ≥ 2).
+    12 groups == cap=12 → full expansion (no clipping).
     """
     entries = []
     for i in range(12):
         entries.append(f"[2026-05-03 1{i:02d}:00] Headline {i}\n  Source: src{i} | Currencies: ALT{i}")
     content = "=== General Crypto News (12) ===\n" + "\n".join(entries)
-    # Body: 12 × 2 = 24 lines, ≥ 10 → head=2 + omitted + tail=2
+    # structured-row: 12 anchor groups ≤ cap=12 → full expansion
     from src.cli.display import _render_tool_body
     out = _render_tool_body("get_market_news", content)
     assert "    === General Crypto News (12) ===" in out
-    assert "    [2026-05-03 100:00] Headline 0" in out  # head[0]
-    assert "      Source: src0 | Currencies: ALT0" in out  # head[1]
-    assert "    [... 20 rows omitted ...]" in out
-    # Last 2 lines of body — entry 11's two lines
-    assert "    [2026-05-03 111:00] Headline 11" in out  # tail[-2]
-    assert "      Source: src11 | Currencies: ALT11" in out  # tail[-1]
+    assert "    [2026-05-03 100:00] Headline 0" in out  # first entry
+    assert "      Source: src0 | Currencies: ALT0" in out
+    assert "    [2026-05-03 111:00] Headline 11" in out  # last entry visible
+    assert "      Source: src11 | Currencies: ALT11" in out
+    assert "omitted" not in out  # no clipping
 
 
 def test_snapshot_get_order_book_happy_path():
@@ -3420,3 +3419,81 @@ def test_group_by_anchor_empty_body():
     from src.cli.display import _group_by_anchor
     assert _group_by_anchor([]) == []
     assert _group_by_anchor(()) == []
+
+
+def test_clip_body_structured_row_mode_multi_tf_like():
+    """structured-row mode: 4 anchor groups × 2 行 → 全展（cap 内）."""
+    from src.cli.display import _clip_body
+    body = [
+        "[5m] Mom +0.1%",
+        "      Last 3 closes: ...",
+        "[1h] Mom +0.3%",
+        "      Last 3 closes: ...",
+        "[4h] Mom -0.5%",
+        "      Last 3 closes: ...",
+        "[1d] Mom +1.0%",
+        "      Last 3 closes: ...",
+    ]
+    out = _clip_body(body)
+    # 4 groups × 2 行 = 8 行；全展不 clip
+    assert len(out) == 8
+    joined = "\n".join(out)
+    assert "[5m]" in joined and "[1h]" in joined and "[4h]" in joined and "[1d]" in joined
+    assert "omitted" not in joined
+
+
+def test_clip_body_structured_row_mode_threshold_2_anchors():
+    """structured-row mode: 边界 — anchor_count == 2 触发模式."""
+    from src.cli.display import _clip_body
+    body = ["[a] 1", "[b] 2"]
+    out = _clip_body(body)
+    assert out == ("[a] 1", "[b] 2")
+
+
+def test_clip_body_single_anchor_fallback_to_list_like():
+    """边界 — anchor_count = 1 不进 structured，走 list-like (≥10) 或 short (<10)."""
+    from src.cli.display import _clip_body
+    # 1 anchor + 9 续行 = 10 行，走 list-like D4
+    body = ["[5m] Mom"] + [f"  cont {i}" for i in range(9)]
+    out = _clip_body(body)
+    assert len(out) == 5
+    assert "rows omitted" in out[2]
+
+
+def test_clip_body_structured_row_8_anchors_no_d4_clip():
+    """structured-row: 8 anchor groups × 2 行 = 16 行（≥10）触发 D4 但 anchor≥2 → structured 全展."""
+    from src.cli.display import _clip_body
+    body = []
+    for i in range(8):
+        body.append(f"[a{i}] row {i}")
+        body.append(f"      cont {i}")
+    # 16 行 ≥ n=10；D4 会 clip 成 5 行
+    # 但 structured 应全展 16 行
+    out = _clip_body(body)
+    assert len(out) == 16, f"expected 16 lines, got {len(out)}: {out}"
+    joined = "\n".join(out)
+    for i in range(8):
+        assert f"[a{i}]" in joined
+    assert "omitted" not in joined
+
+
+def test_clip_body_with_prelude_full_expansion():
+    """structured-row + prelude: prelude 单行 group + anchor group 都保留."""
+    from src.cli.display import _clip_body
+    body = [
+        "Last: 77540.00",
+        "MA fast-vs-slow: 5m above",
+        "",
+        "[5m] Mom +0.1%",
+        "      Last 3 closes: ...",
+        "[1h] Mom +0.3%",
+        "      Last 3 closes: ...",
+    ]
+    out = _clip_body(body)
+    # 2 prelude single-row groups (blank 归属 group[1]) + 2 anchor groups = 4 groups
+    # 全展输出含全部 lines
+    assert "Last: 77540.00" in out
+    assert "MA fast-vs-slow: 5m above" in out
+    assert "[5m] Mom +0.1%" in out
+    assert "[1h] Mom +0.3%" in out
+    assert "omitted" not in "\n".join(out)
