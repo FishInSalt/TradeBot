@@ -582,7 +582,6 @@ async def test_set_next_wake_at_happy_path(deps, monkeypatch):
     deps.set_next_wake_fn.assert_called_once_with(14)
     assert "Next wake set for 2026-05-12 10:37 UTC" in result
     assert "in 14 min" in result
-    assert "align 1h close" in result
 
 
 async def test_set_next_wake_at_cross_day(deps, monkeypatch):

@@ -279,7 +279,7 @@ def _summarize_set_next_wake(content: str) -> str:
 
 
 def _summarize_set_next_wake_at(content: str) -> str:
-    """Parse 'Next wake set for YYYY-MM-DD HH:MM UTC (in N min). Reason: ...'."""
+    """Parse 'Next wake set for YYYY-MM-DD HH:MM UTC (in N min)'."""
     m = re.search(r"\(in (\d+)\s*min\)", content)
     if m:
         return f"{m.group(1)}min"

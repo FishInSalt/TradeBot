@@ -570,3 +570,71 @@ async def test_place_limit_order_does_not_register_on_open():
                             position_pct=100, leverage=10, reasoning="scale-in")
 
     deps.exchange.register_close_order_entry.assert_not_called()
+
+
+# ============ Task 5: 3 outlier tools reasoning-removal (spec §3.6) ============
+
+def _make_wake_deps():
+    """deps fixture for set_next_wake / set_next_wake_at."""
+    deps = MagicMock()
+    deps.set_next_wake_fn = MagicMock()
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.db_engine = None
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_update_price_level_alert_return_no_reasoning_suffix():
+    """spec §3.6: return is state-only, no `— "reasoning"` suffix."""
+    from src.agent.tools_execution import update_price_level_alert
+
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.db_engine = None
+    deps.exchange = MagicMock()
+    deps.exchange.get_price_level_alerts = MagicMock(return_value=[{
+        "id": "a3f2b8c1",
+        "direction": "above",
+        "price": 82100.00,
+        "symbol": "BTC/USDT:USDT",
+        "reasoning": "initial above target",
+    }])
+    deps.exchange.update_price_level_alert = MagicMock(return_value=True)
+
+    result = await update_price_level_alert(
+        deps, alert_id="a3f2b8c1", new_price=82500.00,
+        reasoning="trail up after breakout",
+    )
+    assert "82100.00 → 82500.00" in result
+    assert "—" not in result
+    assert "trail up" not in result
+
+
+@pytest.mark.asyncio
+async def test_set_next_wake_return_no_reasoning_suffix():
+    """spec §3.6: return is state-only, no 'Reason: ...' suffix."""
+    from src.agent.tools_execution import set_next_wake
+
+    deps = _make_wake_deps()
+    result = await set_next_wake(deps, minutes=18, reasoning="check 4h close")
+    assert "Next wake set to 18 min" in result
+    assert "Reason:" not in result
+    assert "check 4h" not in result
+
+
+@pytest.mark.asyncio
+async def test_set_next_wake_at_return_no_reasoning_suffix():
+    """spec §3.6: return is state-only, no 'Reason: ...' suffix."""
+    from src.agent.tools_execution import set_next_wake_at
+    from datetime import datetime, timezone, timedelta
+
+    deps = _make_wake_deps()
+    # Use 15 min ahead to safely satisfy wake_min/wake_max (1-60 min)
+    target_dt = datetime.now(timezone.utc) + timedelta(minutes=15)
+    target = target_dt.strftime("%H:%M")
+    result = await set_next_wake_at(deps, target_time=target, reasoning="align with candle close")
+    assert "UTC" in result
+    assert "in" in result and "min" in result
+    assert "Reason:" not in result
+    assert "align with" not in result

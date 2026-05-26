@@ -490,11 +490,10 @@ async def update_price_level_alert(
         reasoning=f"price {old_price:.2f} → {new_price:.2f} | {reasoning}",
     )
 
-    # Step 5: success return — new single-direction shape
+    # Step 5: success return — state-only (reasoning normalized to head args per spec §3.6)
     return (
         f"Price level alert updated (id={alert_id}): "
-        f"{direction} {old_price:.2f} → {new_price:.2f} "
-        f'— "{reasoning}"'
+        f"{direction} {old_price:.2f} → {new_price:.2f}"
     )
 
 
@@ -523,7 +522,7 @@ async def set_next_wake(
         deps, action="set_next_wake",
         reasoning=f"interval={minutes}min | {reasoning}",
     )
-    return f"Next wake set to {minutes} min. Reason: {reasoning}"
+    return f"Next wake set to {minutes} min"
 
 
 async def set_next_wake_at(
@@ -578,10 +577,7 @@ async def set_next_wake_at(
             f"interval={delta_minutes}min | {reasoning}"
         ),
     )
-    return (
-        f"Next wake set for {candidate_label} UTC (in {delta_minutes} min). "
-        f"Reason: {reasoning}"
-    )
+    return f"Next wake set for {candidate_label} UTC (in {delta_minutes} min)"
 
 
 async def place_limit_order(
