@@ -3546,3 +3546,79 @@ def test_clip_body_cap_exceeded_with_continuation():
     assert out[6] == "[... 9 groups omitted ...]"
     assert out[7] == "[a12] head 12"
     assert out[8] == "  cont 12"
+
+
+def test_clip_body_news_like_date_anchor_body():
+    """date-anchor `[2026-05-25 14:30]` 内含空格不被 [^\\]\\s] 误判，仍触发 structured."""
+    from src.cli.display import _clip_body
+    body = []
+    for i in range(5):
+        body.append(f"[2026-05-25 1{i}:00] Headline {i}")
+        body.append(f"  Source: src{i} | Currencies: ALT{i}")
+    out = _clip_body(body)
+    # 5 anchor groups × 2 行 = 10 行，全展
+    assert len(out) == 10
+    joined = "\n".join(out)
+    for i in range(5):
+        assert f"[2026-05-25 1{i}:00] Headline {i}" in joined
+        assert f"Source: src{i}" in joined
+    assert "omitted" not in joined
+
+
+def test_clip_body_htf_like_indented_continuation():
+    """HTF-like: [4h] + 多个缩进续行（MA50 / ATR 各一行）正确归属."""
+    from src.cli.display import _clip_body
+    body = [
+        "[4h] (last closed candle: open 2026-05-25 12:00 UTC)",
+        "  MA50: 77920.40 (vs price: -0.49%)",
+        "  MA stack: MA50 < MA100 < MA200",
+        "  Last bar vol: 1521.6",
+        "  ATR(14): 1572.30 (1.92% of price)",
+        "[1d] (last closed candle: open 2026-05-25 00:00 UTC)",
+        "  MA50: 76747.64",
+        "  MA stack: MA50 < MA100 < MA200",
+        "  ATR(14): 2050.20",
+    ]
+    out = _clip_body(body)
+    # 2 anchor groups, total 9 行；structured 全展
+    assert len(out) == 9
+    assert out[0] == "[4h] (last closed candle: open 2026-05-25 12:00 UTC)"
+    assert out[5] == "[1d] (last closed candle: open 2026-05-25 00:00 UTC)"
+
+
+def test_clip_body_omitted_marker_not_recognized_as_anchor():
+    """body 含 `[... 11 rows omitted ...]` 不增加 anchor_count（recursive 防护）."""
+    from src.cli.display import _clip_body
+    body = [
+        "row 0", "row 1",
+        "[... 11 rows omitted ...]",
+        "row 14", "row 15",
+    ]
+    out = _clip_body(body)
+    # 5 行 < n=10 → short mode 全保留
+    assert out == ("row 0", "row 1", "[... 11 rows omitted ...]", "row 14", "row 15")
+
+
+def test_clip_body_rich_markup_in_body_no_misdetect_single_line():
+    """单行 Rich markup `[bold red]` → anchor_count=1 → fallback list-like / short."""
+    from src.cli.display import _clip_body
+    body = ["[bold red]Warning[/red]", "row 1", "row 2"]
+    out = _clip_body(body)
+    # anchor=1 不进 structured；3 行 < 10 → short
+    assert out == ("[bold red]Warning[/red]", "row 1", "row 2")
+
+
+def test_clip_body_empty_body():
+    """空 body → 空 tuple."""
+    from src.cli.display import _clip_body
+    assert _clip_body([]) == ()
+    assert _clip_body(()) == ()
+
+
+def test_clip_body_pure_prelude_no_anchor():
+    """body 全 non-anchor (prelude only, no anchor) → 每行单独 group, anchor_count=0 → list-like 或 short."""
+    from src.cli.display import _clip_body
+    body = ["Last: 77540.00", "MA: above", "Columns: ..."]
+    out = _clip_body(body)
+    # anchor_count=0 → 3 行 < 10 → short mode 全保留
+    assert out == ("Last: 77540.00", "MA: above", "Columns: ...")
