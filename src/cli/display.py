@@ -187,9 +187,17 @@ def _summarize_close_position(content: str) -> str:
 
 
 def _summarize_set_stop_loss(content: str) -> str:
-    m = re.search(r"Stop loss set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    # First try dual-value shape (post iter-session-log-args-visibility update path):
+    #   "Stop loss set at 77100.00 → 76950.00 (+0.05% from ...) | ..."
+    # group(1) = old, group(2) = new, group(3) = distance
+    m = re.search(r"Stop loss set at\s+([\d.]+)\s*→\s*([\d.]+)\s*\(([^)]+)\)", content)
     if m:
-        return f"SL @ ${float(m.group(1)):,.0f} ({m.group(2).split('from')[0].strip()})"
+        new_price = float(m.group(2))
+        return f"SL @ ${new_price:,.0f} ({m.group(3).split('from')[0].strip()})"
+    # Fallback to single-value shape (first-set path / pre-iter return):
+    m1 = re.search(r"Stop loss set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m1:
+        return f"SL @ ${float(m1.group(1)):,.0f} ({m1.group(2).split('from')[0].strip()})"
     m2 = re.search(r"Stop loss set at\s+([\d.]+)", content)
     if m2:
         return f"SL @ ${float(m2.group(1)):,.0f}"
@@ -197,9 +205,15 @@ def _summarize_set_stop_loss(content: str) -> str:
 
 
 def _summarize_set_take_profit(content: str) -> str:
-    m = re.search(r"Take profit set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    # Dual-value shape first (update path)
+    m = re.search(r"Take profit set at\s+([\d.]+)\s*→\s*([\d.]+)\s*\(([^)]+)\)", content)
     if m:
-        return f"TP @ ${float(m.group(1)):,.0f} ({m.group(2).split('from')[0].strip()})"
+        new_price = float(m.group(2))
+        return f"TP @ ${new_price:,.0f} ({m.group(3).split('from')[0].strip()})"
+    # Fallback to single-value
+    m1 = re.search(r"Take profit set at\s+([\d.]+)\s*\(([^)]+)\)", content)
+    if m1:
+        return f"TP @ ${float(m1.group(1)):,.0f} ({m1.group(2).split('from')[0].strip()})"
     m2 = re.search(r"Take profit set at\s+([\d.]+)", content)
     if m2:
         return f"TP @ ${float(m2.group(1)):,.0f}"
