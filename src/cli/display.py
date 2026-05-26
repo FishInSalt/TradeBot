@@ -441,6 +441,23 @@ def _strip_blanks(lines: list[str]) -> list[str]:
     return lines[start:end]
 
 
+# === iter-session-log-structured-clip: by-anchor heuristic ===
+# Anchor row 识别正则。
+# Pattern 解释:
+#   ^\[            行首立即是 `[`（无 leading whitespace）
+#   (?!\.\.\.)     负向 lookahead 排除 [... omitted ...] / [...]
+#   [^\]\s]        `[` 后第 1 字符不是 `]` 也不是 whitespace（确保 [<word>] 有内容）
+_ANCHOR_RE = re.compile(r'^\[(?!\.\.\.)[^\]\s]')
+
+
+def _is_anchor(line: str) -> bool:
+    """Return True iff line starts with [<word>] prefix (not [... omitted ...]).
+
+    Used by _clip_body to detect structured-row mode (≥ 2 anchor rows).
+    """
+    return bool(_ANCHOR_RE.match(line))
+
+
 def _clip_body(body: tuple[str, ...] | list[str], n: int = 10) -> tuple[str, ...]:
     """D4 universal clipping (head=2 / tail=2, spec §4.3.2 review-校准).
 

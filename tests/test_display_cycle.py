@@ -3332,3 +3332,36 @@ def test_clip_body_drift_guard_short_body_keep_all():
     body = ["row 0", "row 1", "row 2", "row 3", "row 4"]
     out = _clip_body(body)
     assert out == ("row 0", "row 1", "row 2", "row 3", "row 4")
+
+
+def test_is_anchor_matches_bracket_word_prefix():
+    """_is_anchor: 行首立即是 [<word>] 返回 True."""
+    from src.cli.display import _is_anchor
+    assert _is_anchor("[5m]  Mom +0.1% ...") is True
+    assert _is_anchor("[1h] (last closed candle: ...)") is True
+    assert _is_anchor("[2026-05-25 14:30] Headline") is True
+    assert _is_anchor("[STOP] BUY 0.1 @ ...") is True  # 行首无 leading space 才匹配
+
+
+def test_is_anchor_rejects_leading_space():
+    """_is_anchor: 行首含 leading space 不匹配（orders 渲染前 body 内 2 空格缩进）."""
+    from src.cli.display import _is_anchor
+    assert _is_anchor("  [STOP] BUY ...") is False  # 2 空格缩进
+    assert _is_anchor(" [LIMIT] ...") is False  # 1 空格
+
+
+def test_is_anchor_rejects_omitted_marker():
+    """_is_anchor: [... N rows omitted ...] 不视为 anchor (recursive 防护)."""
+    from src.cli.display import _is_anchor
+    assert _is_anchor("[... 11 rows omitted ...]") is False
+    assert _is_anchor("[... 9 groups omitted ...]") is False
+    assert _is_anchor("[...]") is False
+
+
+def test_is_anchor_rejects_non_bracket_lines():
+    """_is_anchor: 非 [<word>] 起手不匹配."""
+    from src.cli.display import _is_anchor
+    assert _is_anchor("plain text") is False
+    assert _is_anchor("Mom +0.1%") is False
+    assert _is_anchor("") is False
+    assert _is_anchor("=== Section ===") is False
