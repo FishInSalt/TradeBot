@@ -1,5 +1,6 @@
 .superpowers/
-.claude/
+.claude/*
+!.claude/skills/
 .vscode/
 .env
 data/
