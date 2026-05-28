@@ -123,7 +123,6 @@ class TestFmtCandleTime:
 
 # === Task 2: RVol column ===
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from tests.fixtures.multi_tf_ohlcv import (
