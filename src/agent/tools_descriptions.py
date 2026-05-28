@@ -31,8 +31,8 @@ SET_NEXT_WAKE_AT_DESCRIPTION = """Schedule the next scheduler wake-up at an abso
 Returns a confirmation containing the resolved date-time, or a reject message describing the violation. Alerts, fills, and conditional triggers always interrupt scheduled wake.
 
 Examples:
-    set_next_wake_at("10:37", "align with 1h candle close at 11:00 UTC")
-    → "Next wake set for 2026-05-12 10:37 UTC (in 14 min)"
+    set_next_wake_at("10:31", "review 15m candle close at 10:30 UTC")
+    → "Next wake set for 2026-05-12 10:31 UTC (in 8 min)"
 
     set_next_wake_at("12:00", "...")
     → "Cannot wake at 12:00 UTC: nearest future 2026-05-12 12:00 UTC (in 97 min) exceeds wake_max=60 min for this session."

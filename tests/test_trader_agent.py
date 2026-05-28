@@ -359,7 +359,7 @@ def test_set_next_wake_at_description_carries_examples_block():
     desc = tool.tool_def.description
 
     assert "Examples:" in desc
-    assert "candle close at 11:00 UTC" in desc, f"success-outcome example missing: {desc!r}"
+    assert "candle close at 10:30 UTC" in desc, f"success-outcome example missing: {desc!r}"
     assert "nearest future" in desc, f"resolution-semantics literal missing: {desc!r}"
     assert "resolves to tomorrow" in desc, f"tomorrow-resolution outcome missing: {desc!r}"
     assert "Invalid target_time format" in desc, f"format-reject outcome missing: {desc!r}"
