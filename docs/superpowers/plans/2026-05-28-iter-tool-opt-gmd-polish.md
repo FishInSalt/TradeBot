@@ -199,13 +199,15 @@ Expected: all tests FAIL with `ImportError: cannot import name '_to_pd_timestamp
 
 - [ ] **Step 3: Implement helpers in `src/utils/ohlcv_utils.py`**
 
-Append to `src/utils/ohlcv_utils.py` (after existing `_atr_series`):
+**Import addition** — `ohlcv_utils.py` already has `from typing import Any` (line 13), `import pandas as pd` (line 14). Only one new import needed. Add **at the top of the file** (after line 15, before any function definitions):
 
 ```python
-import pandas as pd
 from pandas.tseries.offsets import DateOffset
+```
 
+**Helper implementation** — append to end of `src/utils/ohlcv_utils.py` (after existing `_atr_series`):
 
+```python
 # === iter-tool-opt-gmd-polish: shared helpers ===
 
 TF_OFFSETS: dict[str, pd.Timedelta | DateOffset] = {
@@ -250,28 +252,14 @@ def _fmt_candle_time(dt: pd.Timestamp, tf: str) -> str:
     Unified dispatch shared by OHLCV table row rendering AND in-progress
     candle hint rendering (both consumers in tools_perception.get_market_data).
 
+    The OKX/CCXT timeframe `"1M"` is **case-sensitive** (uppercase M = month,
+    lowercase m = minute) — `"1M"` is checked first BEFORE `tf.lower()` to
+    avoid the lowered `"1m"` accidentally matching the month branch.
+
     Unknown tf falls back to `%Y-%m-%d` (matches existing default fallback at
     tools_perception.py:175). Does NOT raise — preserves backward-compat.
     """
-    tf_lower = tf.lower()
-    if tf_lower in ("1m", "3m", "5m", "15m", "30m"):
-        return dt.strftime("%H:%M")
-    if tf_lower in ("1h", "2h", "4h", "6h", "8h", "12h"):
-        return dt.strftime("%m-%d %H:%M")
-    if tf_lower in ("1d", "3d", "1w"):
-        return dt.strftime("%Y-%m-%d")
-    if tf_lower == "1m" or tf == "1M":  # note: 1M (month) is case-sensitive
-        return dt.strftime("%Y-%m")
-    return dt.strftime("%Y-%m-%d")  # degraded fallback
-```
-
-**Note** on the `1M` branch: the OKX/CCXT timeframe `"1M"` is **case-sensitive** (uppercase M = month, lowercase m = minute). Use `tf == "1M"` not `tf_lower`. The previous branch already covered `"1m"` via `tf_lower`, so the `"1M"` check is unambiguous below it.
-
-Fix the branch order to avoid the ambiguity above. Use this version instead:
-
-```python
-def _fmt_candle_time(dt: pd.Timestamp, tf: str) -> str:
-    if tf == "1M":  # month — case-sensitive uppercase
+    if tf == "1M":  # month — case-sensitive uppercase; must be checked before lower()
         return dt.strftime("%Y-%m")
     tf_lower = tf.lower()
     if tf_lower in ("1m", "3m", "5m", "15m", "30m"):
@@ -280,14 +268,8 @@ def _fmt_candle_time(dt: pd.Timestamp, tf: str) -> str:
         return dt.strftime("%m-%d %H:%M")
     if tf_lower in ("1d", "3d", "1w"):
         return dt.strftime("%Y-%m-%d")
-    return dt.strftime("%Y-%m-%d")  # degraded fallback
+    return dt.strftime("%Y-%m-%d")  # degraded fallback for unknown tf
 ```
-
-Also add at the top of `ohlcv_utils.py` (after existing imports):
-```python
-from typing import Any
-```
-if `Any` is not already imported.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -395,8 +377,10 @@ class TestRVolColumn:
         from src.agent.tools_perception import get_market_data
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
         out = await get_market_data(deps)
-        # Extract OHLCV section
-        section = out.split("=== Recent Candles")[1].split("===")[0]
+        # Extract OHLCV section: split at next section header `=== Period`
+        # NOT just `===` (the Recent Candles header has its own closing `===`
+        # that would truncate the section to just the header tail).
+        section = out.split("=== Recent Candles")[1].split("=== Period")[0]
         # At least one row should have a `N.NN×` value
         assert re.search(r"\d+\.\d{2}×", section), \
             f"No RVol value with × suffix found in OHLCV section: {section[:600]}"
@@ -424,10 +408,18 @@ class TestRVolColumn:
     async def test_rvol_marker_consistency_high_volume(
         self, fake_ticker_81870, df_5m_anomaly,
     ):
-        """Issue 1: when bar volume = 6× SMA(20) baseline, RVol shows ~6.00×
-        AND vol↑ marker present. Tests common case (not FP-boundary).
+        """Issue 1: when bar volume = 6× the baseline (input ratio), RVol on
+        rendered table shows ≈ 4.8× AND vol↑ marker present. Tests common
+        case (not FP-boundary).
 
-        df_5m_anomaly: bar 127 volume = 600 vs SMA baseline 100 → RVol ≈ 6.00×.
+        df_5m_anomaly: bar 127 volume = 600 vs baseline 100. The rendered
+        RVol uses `rolling(20).mean()` AT bar 127, which **includes** bar
+        127's anomalous volume in the SMA window: SMA = (19×100 + 600)/20 =
+        125 → RVol = 600/125 = 4.8× (matches df_4h_recent_vol_spike fixture
+        docstring math). The 6× input ratio gets attenuated by the SMA
+        self-inclusion to ~4.8× — this is by design (RVol shows the bar's
+        volume relative to its own 20-bar context, not a forward-looking
+        baseline).
         """
         from src.agent.tools_perception import get_market_data
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_anomaly})
@@ -746,7 +738,6 @@ Replace with:
     # disambiguation; degraded fallback for unknown tf per spec §2.2)
     in_progress_suffix = ""
     if not display_df.empty:
-        from src.utils.ohlcv_utils import TF_OFFSETS
         offset = TF_OFFSETS.get(timeframe)
         if offset is not None:
             last_closed_dt = _to_pd_timestamp_utc(display_df["timestamp"].iloc[-1])
@@ -763,6 +754,17 @@ Replace with:
         + "\n".join(candle_lines)
     )
 ```
+
+**Import placement**: `TF_OFFSETS` must be added to the existing helper-import block at the top of `get_market_data` function body (line 88-90 from Task 2 Step 3). The full import block should read:
+
+```python
+    from src.utils.ohlcv_utils import (
+        _live_price, _closed_bars, _atr_series,
+        _to_pd_timestamp_utc, _fmt_candle_time, TF_OFFSETS,
+    )
+```
+
+Do NOT do the conditional `from src.utils.ohlcv_utils import TF_OFFSETS` inside the `if not display_df.empty:` block — function-internal conditional imports re-resolve on each call (Python caches but the lookup still runs), and obscure the dependency graph.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1079,9 +1081,31 @@ class TestDocstringRewrite:
         assert "Avg range" not in desc, \
             f"Avg range should be removed from Period summary docs: {desc!r}"
 
-        # candle_count clamp explicit (issue 6):
-        assert "Clamped to [10, 80]" in desc or "clamped" in desc.lower(), \
-            f"candle_count clamp explicit text missing: {desc!r}"
+    def test_candle_count_clamp_text_in_params_schema(self):
+        """Issue 6: clamp explicit text reaches LLM via path A Args section
+        (parameters_json_schema), NOT via path B description.
+
+        Per spec §2.5: Args section stays google-style in path A docstring;
+        pydantic-ai parses it via griffe into parameters_json_schema. This
+        is the active channel for parameter-level docs (path B only carries
+        the function-level description).
+        """
+        from src.agent.trader import create_trader_agent
+        from src.config import PersonaConfig
+
+        agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+        tool = agent._function_toolset.tools["get_market_data"]
+        schema = tool.tool_def.parameters_json_schema
+        candle_count_desc = schema["properties"]["candle_count"]["description"]
+
+        # Clamp explicit per issue 6:
+        assert "Clamped to [10, 80]" in candle_count_desc, \
+            f"candle_count clamp explicit text missing in params schema: {candle_count_desc!r}"
+        # Reasoning behind floor / cap:
+        assert "minimum useful window" in candle_count_desc or "below 10" in candle_count_desc, \
+            f"floor=10 reasoning missing: {candle_count_desc!r}"
+        assert "exchange API" in candle_count_desc or "above 80" in candle_count_desc, \
+            f"cap=80 reasoning missing: {candle_count_desc!r}"
 ```
 
 - [ ] **Step 2: Run test to verify failure**
@@ -1243,13 +1267,27 @@ If any test fails, diagnose and fix inline. **Do not skip / xfail**.
 
 - [ ] **Step 2: Hand-inspect one GMD sample to verify visual correctness**
 
-Run a real GMD render against the sim #12 paused session (or any test fixture):
+Run a real GMD render against an inline-built fixture (cannot call `@pytest.fixture`-decorated functions directly outside pytest — they raise `Fixtures are not meant to be called directly`):
 
 ```bash
 uv run python -c "
-import asyncio, pandas as pd
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from tests.fixtures.multi_tf_ohlcv import df_5m_anomaly, fake_ticker_81870
+from tests.fixtures.multi_tf_ohlcv import _build  # underlying builder (not @fixture)
+
+# Inline df_5m_anomaly body (avoids pytest fixture invocation):
+closes = [81000.0 + (i % 10) * 5.0 for i in range(130)]
+df = _build(start_ms=1_700_000_000_000, tf='5m', closes=closes)
+df.loc[127, 'volume'] = 600.0       # anomaly bar (RVol ≈ 4.8×)
+df.loc[128, 'high'] = df.loc[128, 'close'] + 200.0
+df.loc[128, 'low'] = df.loc[128, 'close'] - 200.0
+
+# Inline fake_ticker_81870 body:
+ticker = SimpleNamespace(
+    last=81870.50, bid=81870.40, ask=81870.60,
+    high=82500.00, low=81000.00, base_volume=1234.56,
+)
 
 async def main():
     from src.agent.tools_perception import get_market_data
@@ -1259,8 +1297,8 @@ async def main():
     deps.timeframe = '5m'
     deps.technical = TechnicalAnalysisService()
     deps.market_data = MagicMock()
-    deps.market_data.get_ticker = AsyncMock(return_value=fake_ticker_81870())
-    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df_5m_anomaly())
+    deps.market_data.get_ticker = AsyncMock(return_value=ticker)
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df)
     out = await get_market_data(deps)
     print(out)
 
@@ -1283,9 +1321,9 @@ Cross-reference each AC in `docs/superpowers/specs/2026-05-28-iter-tool-opt-gmd-
 - [ ] AC1: `pytest tests/` passes (Step 1)
 - [ ] AC2: snapshot tests in `test_iter_tool_opt_gmd_polish.py` cover all visual changes (Tasks 2-5 tests)
 - [ ] AC3: path A inline + path B block-style synced (Task 6 + test_path_b_description_contains_new_content)
-- [ ] AC4: RVol > 2 ↔ vol↑ marker consistency (Task 2 tests)
+- [ ] AC4: **strict `>` boundary (RVol == 2.0 must NOT trigger marker)** — per spec §2.1 / §5.2 deliberate decision to skip ε-boundary unit test (audit empirical RVol range 0.18×-3.90× has no values near 2.0; synthetic FP-boundary test would be brittle). AC4 verified by Step 2 hand-inspect spot-check + Task 2 common-case tests (`high_volume` RVol ≈ 4.8× → marker present; `low_volume` RVol ≈ 1.00× → marker absent). **No unit test asserts the strict `>` semantics directly** — this is a documented coverage gap, not a bug
 - [ ] AC5: in-progress time arithmetic across tfs (Task 3 tests including monthly)
-- [ ] AC6: candle_count clamp explicit in path A + B (Task 6 test)
+- [ ] AC6: candle_count clamp explicit in path A Args (via `parameters_json_schema`) — verified by Task 6 `test_candle_count_clamp_text_in_params_schema`; path B description only carries function-level docs per spec §2.5 channel separation
 - [ ] AC7: sim smoke 1 cycle no crash — Step 2 hand-inspect is the proxy
 
 - [ ] **Step 4: Verify total source change <100 lines (mini-iter safeguard)**
@@ -1306,11 +1344,18 @@ If all checks pass, the feature branch `iter-tool-opt-gmd-polish` is ready for e
 
 ---
 
-## Self-review checklist (before declaring plan done)
+## Self-review checklist (re-walked after second-pass review fixes)
+
+This checklist was re-walked after applying 8 review fixes (S1 string-split bug, S2 channel-confused clamp assertion, S3 fixture-as-function anti-pattern, M1 duplicate `_fmt_candle_time` versions, M2 RVol 6.00 docstring math error, M3 redundant import, M4 conditional import inside function body, AC4 explicit ε-boundary skip rationale). Each box ticked after **mental dry-run** of the corresponding step content, not just structural presence:
 
 - [x] **Spec coverage**: each spec §1.2 issue (1-6) has a dedicated task (Tasks 2-6); spec §1.2 issue 7a/7b are out-of-scope per spec §2.6 / wontfix-by-cost — no task needed
-- [x] **No placeholders**: every step has exact code / commands / expected output; no "TBD" or "implement later"
-- [x] **Type consistency**: helper signatures (`_to_pd_timestamp_utc(Any) -> pd.Timestamp`; `_fmt_candle_time(pd.Timestamp, str) -> str`; `TF_OFFSETS: dict[str, pd.Timedelta | DateOffset]`) match across Tasks 1-3
-- [x] **Existing test impact**: Task 5 inline-updates `test_gmd_period_summary_section`; other existing tests verified to still pass
-- [x] **Path A / B distinction**: Tasks 6 + tests assert correct direction (A inline, B block-style); Task 6 commit message documents the channel responsibility
+- [x] **No placeholders**: every step has exact code / commands / expected output; no "TBD" or "implement later". Self-check: scanned for `TBD` / `TODO` / `fill in` keywords — none present
+- [x] **Type consistency**: helper signatures (`_to_pd_timestamp_utc(Any) -> pd.Timestamp`; `_fmt_candle_time(pd.Timestamp, str) -> str`; `TF_OFFSETS: dict[str, pd.Timedelta | DateOffset]`) match across Tasks 1-3. Task 3 import block updated to include `TF_OFFSETS` per M4 fix
+- [x] **Existing test impact**: Task 5 inline-updates `test_gmd_period_summary_section`; `test_get_market_data_description_carries_example_output` still passes (asserts surviving content); `test_get_market_data_fact_only` still passes (banned-words scan, structural-agnostic); `test_get_market_data_candle_count_clamp` still passes (clamp behavior unchanged)
+- [x] **Path A / B distinction**: Task 6 Step 3 path B keeps block-style (per spec §2.5 / PR #59 / memory `project_griffe_example_stripped`); test for clamp text correctly targets `parameters_json_schema` (path A Args channel) NOT `tool_def.description` (path B function-level channel) — S2 fix
 - [x] **Iteration ordering**: Task 1 (helpers) before Task 2 (RVol uses `_fmt_candle_time`) and Task 3 (in-progress uses `_to_pd_timestamp_utc` + `TF_OFFSETS` + `_fmt_candle_time`); Tasks 4-6 independent of helpers
+- [x] **Test code dry-run** (S1/S2 class): `test_rvol_values_have_x_suffix` split path verified — `.split("=== Period")[0]` reaches data rows (S1 fix); `test_path_b_description_contains_new_content` no longer asserts clamp on path B desc (S2 fix); `test_candle_count_clamp_text_in_params_schema` new — asserts on `schema["properties"]["candle_count"]["description"]`
+- [x] **Fixture invocation safety**: Task 7 Step 2 hand-inspect script inlines fixture bodies (df_5m_anomaly + fake_ticker_81870), uses `_build` underlying builder + `SimpleNamespace` directly (S3 fix). No `@pytest.fixture`-decorated function called outside pytest
+- [x] **Import hygiene**: Task 1 Step 3 only adds `from pandas.tseries.offsets import DateOffset` (other imports already in `ohlcv_utils.py` line 13-14 per file head verification). Task 3 import block consolidates `TF_OFFSETS` with other helpers at function top, not inside conditional (M3/M4 fix)
+- [x] **Helper code single source**: Task 1 Step 3 only contains the corrected `_fmt_candle_time` (`1M` checked before `tf.lower()` to avoid lowered "1m" minute-branch shadow). No duplicate / dead-branch first version (M1 fix)
+- [x] **AC4 coverage gap explicit**: §6 AC4 documents the deliberate skip of ε-boundary unit test for strict `>` semantics; verified via Task 2 common-case tests + Task 7 Step 2 hand-inspect rather than synthetic FP-boundary unit test. Coverage gap acknowledged, not hidden
