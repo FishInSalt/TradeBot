@@ -56,7 +56,7 @@ def _atr_series(df_closed: pd.DataFrame, period: int = 14) -> pd.Series:
     )
 
 
-# === iter-tool-opt-gmd-polish: shared helpers ===
+# === GMD/OHLCV time-format helpers (TF offsets, tz coercion, per-tf strftime) ===
 
 TF_OFFSETS: dict[str, pd.Timedelta | DateOffset] = {
     # Intraday minute

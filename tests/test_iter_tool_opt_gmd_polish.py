@@ -40,7 +40,19 @@ class TestToPdTimestampUtc:
         aware = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
         ts = _to_pd_timestamp_utc(aware)
         assert ts.tz is not None
+        assert ts.tz.utcoffset(None).total_seconds() == 0
         assert ts.hour == 12
+
+    def test_aware_non_utc_gets_converted(self):
+        """Non-UTC aware datetime must be CONVERTED (not just preserved)
+        so the resulting wall-clock time reflects UTC, not the source tz."""
+        from datetime import timedelta
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc
+        # UTC+8 noon = UTC 04:00
+        aware_utc8 = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+        ts = _to_pd_timestamp_utc(aware_utc8)
+        assert ts.tz.utcoffset(None).total_seconds() == 0
+        assert ts.hour == 4
 
 
 class TestTfOffsets:
