@@ -394,9 +394,19 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     if mark_price > 0:
         if current_price > 0:
             drift_pct = (current_price - mark_price) / mark_price * 100
-            risk_lines.append(
-                f"Mark: {mark_price:.2f} (Last: {current_price:.2f}, drift {drift_pct:+.2f}%)"
-            )
+            drift_str = f"{drift_pct:+.2f}%"
+            # Suppress the (Last:..., drift ...) suffix when the displayed
+            # drift rounds to zero — under sim, mark==last by construction
+            # (simulated.py:130-142), so the suffix is dead 100% of the time
+            # there. Format-string comparison (not abs(drift_pct) < epsilon)
+            # so the suppression boundary tracks the .2f display precision
+            # exactly: any value that would render +0.00%/-0.00% is dropped.
+            if drift_str in ("+0.00%", "-0.00%"):
+                risk_lines.append(f"Mark: {mark_price:.2f}")
+            else:
+                risk_lines.append(
+                    f"Mark: {mark_price:.2f} (Last: {current_price:.2f}, drift {drift_str})"
+                )
         else:
             risk_lines.append(f"Mark: {mark_price:.2f} (Last: unavailable)")
 

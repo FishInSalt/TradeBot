@@ -149,7 +149,7 @@ def create_trader_agent(
         both entry and last price). Liquidation distance is computed against
         mark price.
 
-        Output also includes Fee & Breakeven section: entry_fee paid (= entry × contracts × rate)
+        Output also includes Fee & Breakeven section: entry_fee paid (= entry × contracts × contract_size × rate)
         and breakeven price = entry × (1 ± 2 × fee_rate) — the fill price at which the
         position is exactly flat on a taker round-trip.
 
