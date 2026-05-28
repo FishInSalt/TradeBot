@@ -89,7 +89,7 @@ async def get_market_data(
     from datetime import datetime, timezone
     from src.utils.ohlcv_utils import (
         _live_price, _closed_bars, _atr_series,
-        _to_pd_timestamp_utc, _fmt_candle_time,
+        _to_pd_timestamp_utc, _fmt_candle_time, TF_OFFSETS,
     )
 
     symbol = symbol or deps.symbol
@@ -193,8 +193,23 @@ async def get_market_data(
             f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  "
             f"{rvol_str:>12}  {marker_str}".rstrip()
         )
+    # Build in-progress candle hint header suffix (issue 2: agent time-window
+    # disambiguation; degraded fallback for unknown tf per spec §2.2)
+    in_progress_suffix = ""
+    if not display_df.empty:
+        offset = TF_OFFSETS.get(timeframe)
+        if offset is not None:
+            last_closed_dt = _to_pd_timestamp_utc(display_df["timestamp"].iloc[-1])
+            in_progress_open = last_closed_dt + offset
+            in_progress_close = in_progress_open + offset
+            in_progress_suffix = (
+                f"; in-progress {_fmt_candle_time(in_progress_open, timeframe)} "
+                f"still open, closes at {_fmt_candle_time(in_progress_close, timeframe)}"
+            )
+
     sections.append(
-        f"=== Recent Candles ({timeframe}, last {display_count}, oldest-first by row) ===\n"
+        f"=== Recent Candles ({timeframe}, last {display_count}, "
+        f"oldest-first by row{in_progress_suffix}) ===\n"
         + "\n".join(candle_lines)
     )
 
