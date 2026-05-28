@@ -410,3 +410,33 @@ class TestDeletedNCandleHL:
         # Market Context section should still exist (ATR / Last bar vol remain)
         assert "=== Market Context ===" in out
         assert "ATR(14):" in out
+
+
+# === Task 5: delete Avg range from Period summary ===
+
+class TestPeriodSummaryNoAvgRange:
+    @pytest.mark.asyncio
+    async def test_period_summary_no_avg_range(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Period summary section no longer contains Avg range row.
+        Audit: ~3% adoption (1.5% verbatim + 1.9% concept) — dead metric."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        # Old: `Avg range (H-L):    last 5 N / prior 5 M (R×)`
+        assert "Avg range" not in out, \
+            f"Avg range should be deleted from Period summary; out={out[:1200]}"
+
+    @pytest.mark.asyncio
+    async def test_period_summary_keeps_avg_vol_and_net_delta(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Period summary retains Avg vol (~10-15% adoption) and Net Δclose
+        (~20-25% adoption)."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "=== Period summary" in out
+        assert "Avg vol:" in out, f"Avg vol should remain; out={out[:1200]}"
+        assert "Net Δclose:" in out, f"Net Δclose should remain; out={out[:1200]}"

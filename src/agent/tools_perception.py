@@ -214,16 +214,12 @@ async def get_market_data(
         avg_vol_last = float(last_5["volume"].mean())
         avg_vol_prior = float(prior_5["volume"].mean())
         vol_ratio = avg_vol_last / avg_vol_prior if avg_vol_prior > 0 else 0.0
-        avg_rng_last = float((last_5["high"] - last_5["low"]).mean())
-        avg_rng_prior = float((prior_5["high"] - prior_5["low"]).mean())
-        rng_ratio = avg_rng_last / avg_rng_prior if avg_rng_prior > 0 else 0.0
         net_delta_last = float(df_closed["close"].iloc[-1] - df_closed["close"].iloc[-5])
         net_delta_prior = float(df_closed["close"].iloc[-6] - df_closed["close"].iloc[-10])
         summary = (
             "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===\n"
-            f"Avg vol:            last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
-            f"Avg range (H-L):    last 5 {avg_rng_last:.1f} / prior 5 {avg_rng_prior:.1f} ({rng_ratio:.2f}×)\n"
-            f"Net Δclose:         last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
+            f"Avg vol:     last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
+            f"Net Δclose:  last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
         )
         sections.append(summary)
 
