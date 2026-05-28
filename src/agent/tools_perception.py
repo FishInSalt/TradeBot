@@ -193,8 +193,8 @@ async def get_market_data(
             f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  "
             f"{rvol_str:>12}  {marker_str}".rstrip()
         )
-    # Build in-progress candle hint header suffix (issue 2: agent time-window
-    # disambiguation; degraded fallback for unknown tf per spec §2.2)
+    # In-progress candle hint: extrapolate next bar's open/close from the
+    # most-recent closed bar + tf offset. Unknown tf → empty suffix (degraded).
     in_progress_suffix = ""
     if not display_df.empty:
         offset = TF_OFFSETS.get(timeframe)
