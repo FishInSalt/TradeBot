@@ -57,7 +57,7 @@ Example call:
     get_market_data(timeframe="5m", candle_count=30)
 
 Example output:
-    === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
+    === Ticker (BTC/USDT:USDT @ 14:27:30 UTC) ===
     Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
     24h High: 82400.10 | 24h Low: 80120.00 | 24h base vol: 12345.67
 
@@ -71,9 +71,9 @@ Example output:
 
     === Recent Candles (5m, last 30, oldest-first by row; in-progress 14:25 still open, closes at 14:30) ===
     Time (open UTC)        Open       High        Low      Close        Vol  RVol(×SMA20)  Markers
-    14:20              81865.00   81910.00   81860.00   81895.00      178.6         1.35×
-    14:15              81830.00   81870.00   81825.00   81865.00      400.0         3.02×  vol↑
     ...
+    14:15              81830.00   81870.00   81825.00   81865.00      400.0         3.02×  vol↑
+    14:20              81865.00   81910.00   81860.00   81895.00      178.6         1.35×
 
     === Period summary (last 5 closed candles vs prior 5 closed candles) ===
     Avg vol:     last 5 178.6 / prior 5 132.4 (1.35×)
