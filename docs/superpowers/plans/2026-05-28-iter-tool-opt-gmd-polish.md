@@ -4,9 +4,9 @@
 
 **Goal:** Polish `get_market_data` per `docs/superpowers/specs/2026-05-28-iter-tool-opt-gmd-polish-design.md` — 6 issues (1 P1 + 1 P2 + 4 P3) covering RVol column, in-progress candle hint, dead field deletions, and docstring rewrite.
 
-**Architecture:** All changes in `src/agent/tools_perception.py` (get_market_data renderer + helpers) + `src/agent/tools_descriptions.py` (path B description) + `src/agent/trader.py` (path C inner docstring) + `src/utils/ohlcv_utils.py` (shared helpers). No service-layer changes, no schema/DB/migration.
+**Architecture:** All changes in `src/agent/tools_perception.py` (get_market_data renderer + helpers + dev-only impl docstring) + `src/agent/tools_descriptions.py` (CH-DESC `GET_MARKET_DATA_DESCRIPTION` override) + `src/agent/trader.py` (CH-ARGS — inner ctx-receiver Args block) + `src/utils/ohlcv_utils.py` (shared helpers). No service-layer changes, no schema/DB/migration.
 
-**Tech Stack:** Python 3.13 / pydantic-ai 1.78 / pandas / pytest-asyncio / griffe (docstring parsing for path A; bypassed for path B via `@tool(description=DESC_X)`).
+**Tech Stack:** Python 3.13 / pydantic-ai 1.78 / pandas / pytest-asyncio / griffe (parses `trader.py:124-140` inner ctx-receiver docstring → CH-ARGS via `parameters_json_schema`; CH-DESC description bypasses griffe via `@tool(description=DESC_X)`).
 
 ---
 
@@ -14,12 +14,15 @@
 
 ### Project conventions (must know before touching code)
 
-- **Path A / Path B / Path C docstring channels** (per memory `project_griffe_example_stripped`):
-  - **Path A** = function docstring in `tools_perception.py`. Goes through griffe → `tool.tool_def.description` for LLM. Block-style admonitions (`Example:` + indented block) **get stripped by griffe**. Inline same-line text survives.
-  - **Path B** = constant in `tools_descriptions.py` passed via `@tool(description=DESC_X)`. **Bypasses griffe entirely** — block-style admonitions survive verbatim to LLM. This is the **main LLM channel** for tools that have a path B (per PR #59 design).
-  - **Path C** = inner docstring at `trader.py:124-140`. Dev-facing only; overridden by `@tool(description=...)`.
-  - **CRITICAL**: When updating docstrings, keep **path A inline-style** (block would be stripped) and **path B block-style** (survives, no need to inline). Do NOT inline path B.
-- **`_create_dual_mode_tool`** at `trader.py:58` provides `@tool` (no override) and `@tool(description=DESC)` (override) modes. `Args:` section always parsed from docstring via griffe even when description is overridden (drift guard: `require_parameter_descriptions=True`).
+- **Docstring channels — empirical truth via `test_dual_mode_tool_wrapper` (test_trader_agent.py:272)**:
+  - **CH-DESC** = `tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION` constant passed via `@tool(description=DESC_X)` at `trader.py:124`. Verbatim into `tool_def.description` — **bypasses griffe entirely**, block-style admonitions (`Example call:` / `Example output:`) survive intact.
+  - **CH-ARGS** = `trader.py:124-140` **inner `get_market_data` ctx-receiver docstring's `Args:` block**. Griffe parses this into `parameters_json_schema["properties"][...]["description"]`. **This is the LLM-facing parameter documentation channel** — irrespective of whether `description=` override is used (per `test_dual_mode_tool_wrapper` dual-mode assertion).
+  - **dev-only** = `tools_perception.py:51` impl `get_market_data(deps, ...)` docstring. **Never read by pydantic-ai** — it's only invoked via `from src.agent.tools_perception import get_market_data as _impl; await _impl(...)` from the inner ctx-receiver. Pure backend/dev documentation.
+  - **CRITICAL**: When updating docstrings:
+    - Put new content for `tool_def.description` into **`tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION`** (block-style OK, bypasses griffe).
+    - Put new `Args:` content (e.g. clamp explanation) into **`trader.py:124-140` inner ctx-receiver docstring** — NOT `tools_perception.py:51` impl docstring (which doesn't reach LLM).
+    - `tools_perception.py:51` impl docstring is dev-only; fact-correct it (drop "volume ratio" etc.) but don't write it for LLM-facing style.
+- **`_create_dual_mode_tool`** at `trader.py:58` provides `@tool` (no override) and `@tool(description=DESC)` (override) modes. `Args:` section always parsed from the **decorated function's docstring** via griffe (i.e. from the `trader.py:124-140` inner function, NOT from the impl) — drift guard: `require_parameter_descriptions=True`.
 - **OHLCV closed-bar semantics**: `_closed_bars(df)` at `src/utils/ohlcv_utils.py:31` strips the in-progress (last) bar. All GMD indicators / OHLCV table rows / period summary work on `df_closed` only.
 - **Display window**: `display_count = candle_count` when `available_closed >= candle_count + 50`, else fallback `max(10, available_closed - 50)` (line 109-112). RVol fallback `—` covers the degraded path edge case where SMA(20) hasn't started.
 - **Timestamp dispatch quirk**: `display_df["timestamp"]` may be `int` ms-epoch OR `datetime`. Existing code at `tools_perception.py:164-168` already isinstance-dispatches. New helper `_to_pd_timestamp_utc` must mirror this dispatch.
@@ -34,7 +37,7 @@
 ### Affected existing tests (will need inline fix)
 
 - `tests/test_iter_w2r2_next_d_goldens.py:241-251` `test_gmd_period_summary_section` asserts `"Avg range (H-L):"` — Task 5 deletes this, update the test.
-- `tests/test_trader_agent.py:369` `test_get_market_data_description_carries_example_output` asserts Ticker / Recent Candles / Period summary / vol↑ / range↑ — these all remain after path B rewrite, should still pass. **No action required**, but verify it passes after Task 6.
+- `tests/test_trader_agent.py:369` `test_get_market_data_description_carries_example_output` asserts Ticker / Recent Candles / Period summary / vol↑ / range↑ — these all remain after CH-DESC rewrite, should still pass. **No action required**, but verify it passes after Task 6.
 - `tests/test_tool_enhancement.py:641` `test_get_market_data_candle_count_clamp` — behavior unchanged, should still pass. **No action required**.
 - Other GMD tests should still pass; verify in Task 7.
 
@@ -54,11 +57,11 @@ uv run pytest tests/ -v                                    # full suite (~1859 t
 | File | Responsibility | Lines changed |
 |---|---|---|
 | `src/utils/ohlcv_utils.py` | Add `TF_OFFSETS` constant, `_to_pd_timestamp_utc()`, `_fmt_candle_time()` helpers | ~25 |
-| `src/agent/tools_perception.py:51-219` | `get_market_data` renderer: add RVol column / in-progress hint / delete N-candle row / delete Avg range; replace inline strftime with `_fmt_candle_time`; update path A docstring (inline-style) | ~40 |
-| `src/agent/tools_descriptions.py:48-69` | Rewrite `GET_MARKET_DATA_DESCRIPTION` — keep block-style; update content (RVol column / in-progress hint / removed fields / clamp docstring) | ~25 |
-| `src/agent/trader.py:124-140` | Inner docstring (path C) — sync content with path A | ~5 |
+| `src/agent/tools_perception.py:51-219` | `get_market_data` renderer: add RVol column / in-progress hint / delete N-candle row / delete Avg range; replace inline strftime with `_fmt_candle_time`; **impl docstring**: lightweight dev cleanup (drop "volume ratio" fact-drift, add brief RVol note) — pure dev doc, NOT LLM-facing | ~35 |
+| `src/agent/tools_descriptions.py:48-69` | Rewrite `GET_MARKET_DATA_DESCRIPTION` (CH-DESC) — keep block-style; update content (RVol column / in-progress hint / removed fields). **Main LLM-facing description channel** | ~25 |
+| `src/agent/trader.py:124-140` | Inner ctx-receiver docstring: short description summary + **detailed Args block** for `parameters_json_schema` (CH-ARGS). Must contain full clamp text per issue 6 ("Clamped to [10, 80]. Below 10 raised to 10 (minimum useful window for indicators); above 80 capped (exchange API single-call limit)") | ~5 |
 | `tests/test_iter_w2r2_next_d_goldens.py` | Add new GMD golden assertions in `TestGMDGolden` class; update `test_gmd_period_summary_section` | ~30 |
-| `tests/test_iter_tool_opt_gmd_polish.py` (**new**) | New test file for issues that need finer fixtures (in-progress time arithmetic across tfs, RVol marker consistency, unsupported tf fallback, path B verify) | ~80 |
+| `tests/test_iter_tool_opt_gmd_polish.py` (**new**) | New test file for issues that need finer fixtures (in-progress time arithmetic across tfs, RVol marker consistency, unsupported tf fallback, CH-DESC + CH-ARGS verify) | ~80 |
 
 Estimated src change: **75 lines** (under mini-iter direct-merge cap 100 lines, per `feedback_docs_only_direct_merge`).
 
@@ -333,13 +336,20 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from tests.fixtures.multi_tf_ohlcv import (
-    df_5m_130bars, df_5m_anomaly, fake_ticker_81870,
+    df_5m_130bars, df_5m_anomaly,
+    df_4h_250bars, df_1d_250bars,  # used by TestInProgressHint (Task 3)
+    fake_ticker_81870,
 )
 
 
 def _build_gmd_deps(ticker, ohlcv_by_tf, symbol="BTC/USDT:USDT", tf="5m"):
-    """Local copy of _build_deps from test_iter_w2r2_next_d_goldens to avoid
-    cross-file imports."""
+    """Local copy of _build_deps from test_iter_w2r2_next_d_goldens.
+
+    Intentional copy (not import) to avoid coupling this iter's tests to a
+    sibling test file's internal helper. If `_build_deps` proves stable across
+    iter boundaries, a future refactor can promote it to
+    `tests/fixtures/multi_tf_ohlcv.py` co-located with the fixtures it consumes.
+    """
     from src.services.technical import TechnicalAnalysisService
     deps = MagicMock()
     deps.symbol = symbol
@@ -1028,29 +1038,33 @@ EOF
 
 ---
 
-## Task 6: 议题 5+6 — Docstring rewrite (path A inline + path B block-style + path C)
+## Task 6: 议题 5+6 — Docstring updates across 3 channels (CH-DESC block-style + CH-ARGS detailed + dev-only cleanup)
 
 **Files:**
-- Modify: `src/agent/tools_perception.py:51-87` (path A docstring + Args section)
-- Modify: `src/agent/tools_descriptions.py:48-69` (path B `GET_MARKET_DATA_DESCRIPTION`)
-- Modify: `src/agent/trader.py:124-140` (path C inner docstring)
+- Modify: `src/agent/trader.py:124-140` — inner ctx-receiver docstring; **Args block** is the LLM-facing parameter doc channel (CH-ARGS via `parameters_json_schema`); issue 6 clamp text lives here
+- Modify: `src/agent/tools_descriptions.py:48-69` — `GET_MARKET_DATA_DESCRIPTION` (CH-DESC, LLM-facing description via `@tool(description=...)` override, bypasses griffe, block-style preserved)
+- Modify: `src/agent/tools_perception.py:51-87` — impl docstring is **dev-only** (NOT read by pydantic-ai); lightweight cleanup only (drop "volume ratio" drift)
 - Test: `tests/test_iter_tool_opt_gmd_polish.py` (append)
 
-**Critical**: Path A keeps **inline style** (block-style would be stripped by griffe). Path B keeps **block style** (bypasses griffe, block survives to LLM). See spec §2.5 path A vs B table.
+**Critical**: per spec §2.5 channel summary (verified by `test_dual_mode_tool_wrapper`):
+- **CH-DESC** (`tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION`): block-style preserved — passed verbatim via `@tool(description=...)`, bypasses griffe. This is the main LLM-facing description channel.
+- **CH-ARGS** (`trader.py:124-140` inner ctx-receiver Args block): griffe parses into `parameters_json_schema`. This is the **only** LLM-facing parameter doc channel — issue 6 clamp text **must** live here.
+- **dev-only** (`tools_perception.py:51` impl docstring): NOT read by pydantic-ai. Lightweight cleanup only; do NOT craft for LLM style.
 
-- [ ] **Step 1: Write failing test for path B content**
+- [ ] **Step 1: Write failing tests for CH-DESC + CH-ARGS content**
 
 Append to `tests/test_iter_tool_opt_gmd_polish.py`:
 
 ```python
-# === Task 6: docstring rewrite ===
+# === Task 6: docstring updates across 3 channels ===
 
 class TestDocstringRewrite:
-    def test_path_b_description_contains_new_content(self):
-        """Issue 5+6: path B GET_MARKET_DATA_DESCRIPTION reflects new OHLCV
-        table format (RVol column + in-progress hint), drops 'volume ratio'
-        fact-only drift, adds candle_count clamp explicit text. Block-style
-        Example call/output preserved (bypasses griffe per PR #59)."""
+    def test_ch_desc_description_contains_new_content(self):
+        """Issue 5: CH-DESC (tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION
+        override → tool_def.description) reflects new OHLCV table format
+        (RVol column + in-progress hint), drops 'volume ratio' fact-drift.
+        Block-style Example call/output preserved (bypasses griffe per
+        @tool(description=...) override; verified by test_dual_mode_tool_wrapper)."""
         from src.agent.trader import create_trader_agent
         from src.config import PersonaConfig
 
@@ -1058,37 +1072,41 @@ class TestDocstringRewrite:
         tool = agent._function_toolset.tools["get_market_data"]
         desc = tool.tool_def.description
 
-        # Block-style sections still present (path B bypasses griffe)
-        assert "=== Ticker" in desc, "Ticker section header missing from path B"
+        # Block-style sections still present (CH-DESC bypasses griffe)
+        assert "=== Ticker" in desc, "Ticker section header missing from CH-DESC"
         assert "=== Recent Candles" in desc, "Recent Candles header missing"
         assert "=== Period summary" in desc, "Period summary header missing"
 
         # New content from this iter:
         assert "RVol(×SMA20)" in desc or "RVol" in desc, \
-            f"RVol column documentation missing in path B: {desc!r}"
+            f"RVol column documentation missing in CH-DESC: {desc!r}"
         assert "in-progress" in desc, \
-            f"in-progress hint documentation missing in path B: {desc!r}"
+            f"in-progress hint documentation missing in CH-DESC: {desc!r}"
 
         # Markers semantics preserved:
         assert "vol↑" in desc, "vol↑ marker semantics missing"
         assert "range↑" in desc, "range↑ marker semantics missing"
 
-        # Fact-only fix: 'volume ratio' no longer claimed in Technical Indicators
-        # (Avg range still appears nowhere; vol ratio fact: appears as `RVol`)
-        # We don't assert absence of the literal word "volume ratio" since the
-        # Last bar vol line still uses ratio concept; instead assert the new
+        # Fact-only fix: 'volume ratio' historical drift cleaned up
+        # (technical service does not surface volume ratio in indicators;
+        # actual ratio is in `Last bar vol (X× SMA(20) avg)` callout and new RVol column).
+        # We don't assert absence of literal word "volume ratio" since the
+        # Last bar vol line still uses "ratio" concept; instead assert the new
         # RVol semantics and the deletion of Avg range from Period summary docs.
         assert "Avg range" not in desc, \
             f"Avg range should be removed from Period summary docs: {desc!r}"
 
     def test_candle_count_clamp_text_in_params_schema(self):
-        """Issue 6: clamp explicit text reaches LLM via path A Args section
-        (parameters_json_schema), NOT via path B description.
+        """Issue 6: clamp explicit text reaches LLM via CH-ARGS channel
+        (trader.py:124-140 inner ctx-receiver docstring's Args block →
+        parameters_json_schema), NOT via CH-DESC (which carries only the
+        function-level description).
 
-        Per spec §2.5: Args section stays google-style in path A docstring;
-        pydantic-ai parses it via griffe into parameters_json_schema. This
-        is the active channel for parameter-level docs (path B only carries
-        the function-level description).
+        Per spec §2.5 channel mapping (verified by test_dual_mode_tool_wrapper):
+        griffe parses the decorated function's own Args block — which for
+        get_market_data lives at trader.py:124-140 inner ctx-receiver,
+        NOT at tools_perception.py:51 impl (which is never decorated and
+        never reaches LLM).
         """
         from src.agent.trader import create_trader_agent
         from src.config import PersonaConfig
@@ -1114,11 +1132,11 @@ class TestDocstringRewrite:
 uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestDocstringRewrite -v
 ```
 
-Expected: FAIL (path B not yet rewritten).
+Expected: both tests FAIL (CH-DESC content + CH-ARGS clamp text not yet written).
 
-- [ ] **Step 3: Rewrite path B `GET_MARKET_DATA_DESCRIPTION` in `src/agent/tools_descriptions.py:48-69`**
+- [ ] **Step 3: Rewrite `GET_MARKET_DATA_DESCRIPTION` (CH-DESC) in `src/agent/tools_descriptions.py:48-69`**
 
-Replace the constant with block-style (preserve `Example call:` / `Example output:` admonitions — path B bypasses griffe so block survives to LLM):
+Replace the constant with block-style (preserve `Example call:` / `Example output:` admonitions — CH-DESC bypasses griffe so block survives to LLM):
 
 ```python
 GET_MARKET_DATA_DESCRIPTION = """Single-timeframe market data: ticker (last + bid/ask + 24h H/L + base volume), technical indicators (RSI / MACD / BB / ATR), market context (ATR percent of price + last-bar volume with SMA(20) ratio), the most recent N closed candles in OHLCV table form with per-bar volume ratio (RVol = vol / SMA(20)) and anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, net Δclose).
@@ -1157,35 +1175,9 @@ Example output:
 """
 ```
 
-- [ ] **Step 4: Rewrite path A docstring + Args in `src/agent/tools_perception.py:51-87`**
+- [ ] **Step 4: Rewrite `trader.py:124-140` inner ctx-receiver docstring (CH-ARGS channel)**
 
-Keep **inline style** for the main description (block would be stripped by griffe). Args section stays google-style (parsed via griffe into `parameters_json_schema`).
-
-```python
-async def get_market_data(
-    deps: TradingDeps,
-    symbol: str | None = None,
-    timeframe: str | None = None,
-    candle_count: int = 30,
-) -> str:
-    """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR), market context (ATR with percent of price, last-bar volume with SMA(20) ratio), the most recent N closed candles in OHLCV table form with per-bar volume ratio (RVol = vol / SMA(20)) and anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, net Δclose).
-
-    All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row; the section header reports the in-progress candle's open and expected close timestamps.
-
-    OHLCV columns: Time (open UTC), Open, High, Low, Close, Vol, RVol(×SMA20), Markers. RVol = bar volume / SMA(20) of bar volumes (`2.95×` means 2.95× the 20-bar average); rendered for every closed bar with `—` when SMA(20) has not yet started. Markers (upside-only thresholds): `vol↑` for bar volume > 2× SMA(20); `range↑` for bar range > 2× ATR(14); empty for neither. Markers remain alongside RVol — RVol provides the magnitude, markers provide a visual scan cue. Time column shows candle open in UTC.
-
-    Args:
-        symbol: Trading symbol. Defaults to session symbol.
-        timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
-        candle_count: Number of closed candles in the OHLCV table. Default 30. Clamped to [10, 80]: values below 10 are raised to 10 (minimum useful window for indicators); values above 80 are capped to 80 (exchange API single-call limit).
-    """
-```
-
-Removed: `Example call:` / `Example output:` / explicit `Markers in ...:` block — these would be stripped by griffe. The path B description carries the full block-style example to the LLM; path A serves as dev-facing fallback.
-
-- [ ] **Step 5: Update path C inner docstring in `src/agent/trader.py:124-140`**
-
-The inner docstring is dev-facing (overridden by `description=GET_MARKET_DATA_DESCRIPTION`). Keep it concise but accurate:
+This is the **LLM-facing Args channel** — griffe parses this `Args:` block into `parameters_json_schema["properties"][...]["description"]` and ships it to the LLM, irrespective of `description=` override (verified in `test_dual_mode_tool_wrapper`). Issue 6 clamp text **must** live here.
 
 ```python
     @tool(description=GET_MARKET_DATA_DESCRIPTION)
@@ -1195,18 +1187,58 @@ The inner docstring is dev-facing (overridden by `description=GET_MARKET_DATA_DE
         timeframe: str | None = None,
         candle_count: int = 30,
     ) -> str:
-        """Get single-timeframe market data with indicators + OHLCV (RVol column +
-        in-progress hint). LLM-visible description: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION.
+        """Single-timeframe market data: ticker + indicators + OHLCV table (with RVol column + in-progress hint) + period summary. LLM-visible description override: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION (carries Example block).
 
         Args:
             symbol: Trading symbol. Defaults to session symbol.
             timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
-            candle_count: Number of closed candles in the OHLCV table. Default 30. Clamped to [10, 80].
+            candle_count: Number of closed candles in the OHLCV table. Default 30. Clamped to [10, 80]: values below 10 are raised to 10 (minimum useful window for indicators); values above 80 are capped to 80 (exchange API single-call limit).
         """
         from src.agent.tools_perception import get_market_data as _impl
 
         return await _impl(ctx.deps, symbol, timeframe, candle_count)
 ```
+
+**Key change vs current code**: line 136 currently has `candle_count: ... Range 10-80 (capped by exchange API).` — this is updated to the full "Clamped to [10, 80]: ... minimum useful window ... exchange API single-call limit" text. Issue 6 clamp explicit lives **here**.
+
+- [ ] **Step 5: Lightweight dev cleanup of `tools_perception.py:51` impl docstring**
+
+This docstring is **dev-only** — pydantic-ai does NOT read it (it's only invoked via `from ... import get_market_data as _impl; await _impl(...)`). Fact-correct it (drop drifted "volume ratio" mention; add brief note about new RVol column) but do **not** craft it for LLM-facing style. Aim for ~5 line cleanup, not the full content sync that the previous version called for.
+
+```python
+async def get_market_data(
+    deps: TradingDeps,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    candle_count: int = 30,
+) -> str:
+    """Single-timeframe market data implementation.
+
+    Renders: Ticker (last + bid/ask + 24h H/L + base volume); Technical Indicators
+    (RSI / MACD / BB / ATR via TechnicalAnalysisService); Market Context (ATR % of
+    price + last-bar vol/SMA(20) ratio); Recent Candles OHLCV table with per-bar
+    RVol(×SMA20) column + vol↑/range↑ markers + in-progress candle hint in the
+    section header; Period summary (Avg vol, Net Δclose) across last 5 vs prior 5.
+
+    All indicators / OHLCV rows / period summary are computed on closed bars
+    (via `_closed_bars(df)`); the in-progress candle is excluded from data but
+    its expected open/close timestamps appear in the section header.
+
+    NOTE: This impl docstring is dev-facing only. LLM-facing description comes
+    from `src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION` via the
+    `@tool(description=...)` override at `src.agent.trader.py:124`. Args
+    documentation for the LLM lives in the ctx-receiver docstring at the same
+    site (parsed by griffe into parameters_json_schema).
+
+    Args:
+        deps: TradingDeps with .exchange / .market_data / .technical wired
+        symbol: trading symbol (defaults to deps.symbol)
+        timeframe: CCXT timeframe (defaults to deps.timeframe)
+        candle_count: number of closed candles in OHLCV table; clamped to [10, 80]
+    """
+```
+
+The crucial points are: (1) tells future devs where the LLM-facing copy lives, (2) describes the rendered output faithfully without the drifted "volume ratio" claim, (3) keeps `Args:` for IDE / type tooling consistency but with concise descriptions (this Args is **not** the LLM-facing Args; it can be brief).
 
 - [ ] **Step 6: Run all docstring-related tests**
 
@@ -1217,14 +1249,14 @@ uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestDocstringRewrite \
               tests/test_trader_agent.py::test_set_next_wake_description_carries_examples_block -v
 ```
 
-Expected: all PASS. The existing `test_get_market_data_description_carries_example_output` asserts Ticker / Recent Candles / Period summary / vol↑ / range↑ — all still present in the new path B.
+Expected: all PASS. The existing `test_get_market_data_description_carries_example_output` asserts Ticker / Recent Candles / Period summary / vol↑ / range↑ — all still present in the new CH-DESC.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/agent/tools_perception.py src/agent/tools_descriptions.py src/agent/trader.py tests/test_iter_tool_opt_gmd_polish.py
 git commit -m "$(cat <<'EOF'
-iter-tool-opt-gmd-polish (6/7): docstring rewrite (path A + B + C)
+iter-tool-opt-gmd-polish (6/7): docstring updates across 3 channels
 
 Issues 5+6 (P3) — sync all 3 docstring channels to reflect new OHLCV
 table format (RVol column + in-progress hint), drop "volume ratio" drift
@@ -1232,15 +1264,17 @@ from Technical Indicators description (fact-only: per technical.py:25-28,
 volume ratio is intentionally NOT in indicators output; was a historical
 docstring leak), and make candle_count clamp explicit.
 
-Channel responsibilities (per spec §2.5 + memory project_griffe_example_stripped):
-- Path A (tools_perception.py docstring): inline style — block-style
-  admonitions get stripped by griffe. Args section stays google for
-  parameters_json_schema parsing.
-- Path B (tools_descriptions.py GET_MARKET_DATA_DESCRIPTION): block style
-  preserved — passed verbatim via @tool(description=), bypasses griffe.
-  Carries full Example call/output to LLM.
-- Path C (trader.py inner docstring): dev-facing only, overridden by
-  description=. Simplified to summary + Args.
+Channel responsibilities (per spec §2.5 + test_dual_mode_tool_wrapper empirical):
+- CH-DESC (tools_descriptions.py GET_MARKET_DATA_DESCRIPTION):
+  block-style preserved — passed verbatim via @tool(description=),
+  bypasses griffe. Carries full Example call/output + RVol/in-progress
+  text to LLM.
+- CH-ARGS (trader.py:124-140 inner ctx-receiver docstring Args block):
+  THE LLM-facing parameter docs channel. Issue 6 clamp text lives here:
+  parameters_json_schema["properties"]["candle_count"]["description"].
+- dev-only (tools_perception.py:51 impl docstring): NOT read by
+  pydantic-ai; lightweight cleanup only (drop drifted "volume ratio",
+  note where LLM-facing copy lives).
 
 Spec: §2.5
 
@@ -1320,10 +1354,10 @@ Cross-reference each AC in `docs/superpowers/specs/2026-05-28-iter-tool-opt-gmd-
 
 - [ ] AC1: `pytest tests/` passes (Step 1)
 - [ ] AC2: snapshot tests in `test_iter_tool_opt_gmd_polish.py` cover all visual changes (Tasks 2-5 tests)
-- [ ] AC3: path A inline + path B block-style synced (Task 6 + test_path_b_description_contains_new_content)
+- [ ] AC3: CH-DESC (`GET_MARKET_DATA_DESCRIPTION` override) carries new OHLCV section description + RVol column + in-progress hint + drop Avg range, block-style preserved; CH-ARGS (`trader.py:124-140` inner Args) carries full clamp text; dev-only impl docstring fact-cleaned (drop "volume ratio"). Verified via Task 6 `test_path_b_description_contains_new_content` (CH-DESC) + `test_candle_count_clamp_text_in_params_schema` (CH-ARGS) + visual inspection of impl docstring
 - [ ] AC4: **strict `>` boundary (RVol == 2.0 must NOT trigger marker)** — per spec §2.1 / §5.2 deliberate decision to skip ε-boundary unit test (audit empirical RVol range 0.18×-3.90× has no values near 2.0; synthetic FP-boundary test would be brittle). AC4 verified by Step 2 hand-inspect spot-check + Task 2 common-case tests (`high_volume` RVol ≈ 4.8× → marker present; `low_volume` RVol ≈ 1.00× → marker absent). **No unit test asserts the strict `>` semantics directly** — this is a documented coverage gap, not a bug
 - [ ] AC5: in-progress time arithmetic across tfs (Task 3 tests including monthly)
-- [ ] AC6: candle_count clamp explicit in path A Args (via `parameters_json_schema`) — verified by Task 6 `test_candle_count_clamp_text_in_params_schema`; path B description only carries function-level docs per spec §2.5 channel separation
+- [ ] AC6: candle_count clamp explicit in **CH-ARGS** (`trader.py:124-140` inner Args → `parameters_json_schema`) — verified by Task 6 `test_candle_count_clamp_text_in_params_schema`; CH-DESC carries only the function-level description per spec §2.5 channel separation
 - [ ] AC7: sim smoke 1 cycle no crash — Step 2 hand-inspect is the proxy
 
 - [ ] **Step 4: Verify total source change <100 lines (mini-iter safeguard)**
@@ -1344,18 +1378,21 @@ If all checks pass, the feature branch `iter-tool-opt-gmd-polish` is ready for e
 
 ---
 
-## Self-review checklist (re-walked after second-pass review fixes)
+## Self-review checklist (re-walked after third-pass review fixes)
 
-This checklist was re-walked after applying 8 review fixes (S1 string-split bug, S2 channel-confused clamp assertion, S3 fixture-as-function anti-pattern, M1 duplicate `_fmt_candle_time` versions, M2 RVol 6.00 docstring math error, M3 redundant import, M4 conditional import inside function body, AC4 explicit ε-boundary skip rationale). Each box ticked after **mental dry-run** of the corresponding step content, not just structural presence:
+This checklist was re-walked after applying second-pass fixes (S1 string-split, S2 channel-confused clamp, S3 fixture-as-function, M1 duplicate helper version, M2 RVol math error, M3 redundant import, M4 conditional import, AC4 explicit skip note) AND third-pass fixes (Critical 1 docstring channel architecture inverted: real LLM-facing channels are `tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION` for CH-DESC and `trader.py:124-140` inner docstring `Args:` for CH-ARGS; `tools_perception.py:51` impl docstring is dev-only and never reaches LLM; Major 2 path A inline rewrite labor was wasted, simplified to dev cleanup; Major 3 fixture import gap for df_4h_250bars / df_1d_250bars; Minor 4 helper copy intentional with comment). Each box ticked after **mental dry-run** of the corresponding step content, not just structural presence:
 
 - [x] **Spec coverage**: each spec §1.2 issue (1-6) has a dedicated task (Tasks 2-6); spec §1.2 issue 7a/7b are out-of-scope per spec §2.6 / wontfix-by-cost — no task needed
 - [x] **No placeholders**: every step has exact code / commands / expected output; no "TBD" or "implement later". Self-check: scanned for `TBD` / `TODO` / `fill in` keywords — none present
 - [x] **Type consistency**: helper signatures (`_to_pd_timestamp_utc(Any) -> pd.Timestamp`; `_fmt_candle_time(pd.Timestamp, str) -> str`; `TF_OFFSETS: dict[str, pd.Timedelta | DateOffset]`) match across Tasks 1-3. Task 3 import block updated to include `TF_OFFSETS` per M4 fix
 - [x] **Existing test impact**: Task 5 inline-updates `test_gmd_period_summary_section`; `test_get_market_data_description_carries_example_output` still passes (asserts surviving content); `test_get_market_data_fact_only` still passes (banned-words scan, structural-agnostic); `test_get_market_data_candle_count_clamp` still passes (clamp behavior unchanged)
-- [x] **Path A / B distinction**: Task 6 Step 3 path B keeps block-style (per spec §2.5 / PR #59 / memory `project_griffe_example_stripped`); test for clamp text correctly targets `parameters_json_schema` (path A Args channel) NOT `tool_def.description` (path B function-level channel) — S2 fix
+- [x] **Channel mapping** (re-corrected per third-pass review): Task 6 Step 3 `GET_MARKET_DATA_DESCRIPTION` (CH-DESC) keeps block-style; Step 4 places full clamp text in `trader.py:124-140` inner ctx-receiver docstring's `Args:` block (CH-ARGS — the true LLM-facing parameter channel per `test_dual_mode_tool_wrapper` evidence); Step 5 reduces `tools_perception.py:51` impl docstring to lightweight dev cleanup (not LLM-facing). Test `test_candle_count_clamp_text_in_params_schema` targets `parameters_json_schema` (CH-ARGS), not `tool_def.description` (CH-DESC)
 - [x] **Iteration ordering**: Task 1 (helpers) before Task 2 (RVol uses `_fmt_candle_time`) and Task 3 (in-progress uses `_to_pd_timestamp_utc` + `TF_OFFSETS` + `_fmt_candle_time`); Tasks 4-6 independent of helpers
-- [x] **Test code dry-run** (S1/S2 class): `test_rvol_values_have_x_suffix` split path verified — `.split("=== Period")[0]` reaches data rows (S1 fix); `test_path_b_description_contains_new_content` no longer asserts clamp on path B desc (S2 fix); `test_candle_count_clamp_text_in_params_schema` new — asserts on `schema["properties"]["candle_count"]["description"]`
+- [x] **Test code dry-run** (S1/S2 class): `test_rvol_values_have_x_suffix` split path verified — `.split("=== Period")[0]` reaches data rows (S1 fix); `test_ch_desc_description_contains_new_content` no longer asserts clamp on CH-DESC (S2 fix); `test_candle_count_clamp_text_in_params_schema` new — asserts on `schema["properties"]["candle_count"]["description"]` (CH-ARGS channel)
 - [x] **Fixture invocation safety**: Task 7 Step 2 hand-inspect script inlines fixture bodies (df_5m_anomaly + fake_ticker_81870), uses `_build` underlying builder + `SimpleNamespace` directly (S3 fix). No `@pytest.fixture`-decorated function called outside pytest
 - [x] **Import hygiene**: Task 1 Step 3 only adds `from pandas.tseries.offsets import DateOffset` (other imports already in `ohlcv_utils.py` line 13-14 per file head verification). Task 3 import block consolidates `TF_OFFSETS` with other helpers at function top, not inside conditional (M3/M4 fix)
 - [x] **Helper code single source**: Task 1 Step 3 only contains the corrected `_fmt_candle_time` (`1M` checked before `tf.lower()` to avoid lowered "1m" minute-branch shadow). No duplicate / dead-branch first version (M1 fix)
 - [x] **AC4 coverage gap explicit**: §6 AC4 documents the deliberate skip of ε-boundary unit test for strict `>` semantics; verified via Task 2 common-case tests + Task 7 Step 2 hand-inspect rather than synthetic FP-boundary unit test. Coverage gap acknowledged, not hidden
+- [x] **Docstring channels grounded in codebase** (Critical 1 fix): plan's CH-DESC / CH-ARGS / dev-only mapping verified against `trader.py:124-140` (decorated inner ctx-receiver) and `test_dual_mode_tool_wrapper` (test_trader_agent.py:272 — both `@tool` and `@tool(description=...)` modes parse Args from the decorated function's own docstring). `tools_perception.py:51` impl docstring confirmed dev-only (invoked via `from ... import as _impl; await _impl(...)`, never decorated)
+- [x] **Task 3 fixture imports** (Major 3 fix): Task 2 Step 1 fixture import block now includes `df_4h_250bars` + `df_1d_250bars` consumed by Task 3 `TestInProgressHint`. pytest fixture discovery requires fixture symbols imported into the test module namespace
+- [x] **Issue 6 (clamp) test target** (Critical 1 fix): `test_candle_count_clamp_text_in_params_schema` reads `parameters_json_schema["properties"]["candle_count"]["description"]` which sources from `trader.py:124-140` inner ctx-receiver Args section (Step 4); Step 4 contains the full "Clamped to [10, 80]... minimum useful window... exchange API single-call limit" text. Step 5 (impl dev cleanup) does **not** need this text since impl docstring isn't read by pydantic-ai

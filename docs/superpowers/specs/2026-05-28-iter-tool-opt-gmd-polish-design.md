@@ -204,60 +204,56 @@ Net Δclose:         last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prio
 
 **改动**：删 `Avg range` 行 + 相关计算（`avg_rng_last` / `avg_rng_prior` / `rng_ratio`）。保留 `Avg vol` + `Net Δclose`。
 
-### 2.5 议题 5+6：docstring 整段重写（path A 源 + path B `GET_MARKET_DATA_DESCRIPTION` 同步）
+### 2.5 议题 5+6：docstring 跨 3 通道更新（CH-DESC 主 description + CH-ARGS 详尽 Args + dev-only impl 清理）
 
-**约束 1：Args section 保持 google docstring 风格不动**。docstring 主体重写时 Args section 必须维持 `Args:\n    <param>: <description>` 格式 —— 这是 pydantic-ai 通过 griffe 解析进 `parameters_json_schema` 的活跃通道，与 path B description override 不冲突（path A description 块被 path B 覆盖；Args 仍走 path A 解析）。本 iter 只改 Args 描述文案（议题 6 candle_count clamp 说明），不改结构。Drift guard：既有 `require_parameter_descriptions=True` 兜底。
+**约束 1：CH-ARGS 通道保持 google docstring 风格**。`trader.py:124-140` inner ctx-receiver docstring 的 `Args:` block 是 LLM-facing 参数文档**唯一通道**（pydantic-ai 通过 griffe 解析进 `parameters_json_schema["properties"][...]["description"]`，per `test_dual_mode_tool_wrapper` 验证 `@tool` 和 `@tool(description=...)` 两种模式下 Args 都走被装饰函数自身 docstring）。CH-ARGS 必须维持 `Args:\n    <param>: <description>` google 格式；`@tool(description=...)` override 只影响 description 字段，不影响 Args 解析。本 iter 在 CH-ARGS 改 Args 描述文案（议题 6 candle_count clamp 说明）+ 同步其他 Args 文案，不改结构。Drift guard：既有 `require_parameter_descriptions=True` 兜底。
 
 **约束 2：移除 "volume ratio" 的 fact-only 修正**。原 docstring `technical indicators (RSI / MACD / BB / ATR / volume ratio)` 中的 "volume ratio" 是历史遗留 —— 实际 `src/services/technical.py:25-28` 注释明确 `Volume ratio intentionally not surfaced here — GMD/HTF inline their own "Last bar vol (X× SMA(20) avg)" rendering`，Technical Indicators section 本身**不含**volume ratio 字段。这是 docstring 与实际行为的 drift（疑似 G-calc-rigor-audit §G-4 修法时遗漏的 docstring 更新）。本 iter 顺便清理为 fact-only。
 
-**Path A** (`src/agent/tools_perception.py:51-87`)：
+**实施文案分工**（per 紧接 §2.5 通道汇总修正后的实证理解）：
+
+新增 / 修订内容按 LLM 可见性通道分配如下：
+
+| 内容 | 入口 | 文件 / 位置 | 风格约束 |
+|---|---|---|---|
+| 主 description 散文 + Example call/output 块（含新 OHLCV 表格 + RVol 列说明 + in-progress hint） | CH-DESC | `tools_descriptions.py:48-69` `GET_MARKET_DATA_DESCRIPTION` | block-style 保留（bypass griffe） |
+| candle_count clamp 完整文案（议题 6） + 其他 Args 描述 | CH-ARGS | `trader.py:124-140` inner ctx-receiver docstring 的 `Args:` block | google docstring（griffe 解析进 `parameters_json_schema`） |
+| 删 "volume ratio" 历史漂移 + RVol 列存在的简述 + 标注 LLM-facing 文案在哪 | dev-only | `tools_perception.py:51-87` impl docstring | 自由风格（不到 LLM，仅 dev 注释） |
+
+**dev-only 通道**（`tools_perception.py:51` impl）轻量修订示意：
 
 ```diff
 - """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
--
-- All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
--
-- Markers in OHLCV table (upside-only thresholds):
--     "vol↑"   — bar volume > 2× SMA(20) of bar volumes
--     "range↑" — bar range (high - low) > 2× ATR(14)
--     Empty    — neither threshold tripped.
--
-- Time column shows candle open in UTC.
 - ...
 - candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
-- ...
 
-+ """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR), market context (ATR with percent of price, last-bar volume with SMA(20) ratio), the most recent N closed candles in OHLCV table form with per-bar volume ratio (RVol = vol / SMA(20)) and anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, net Δclose).
++ """Single-timeframe market data implementation. Renders Ticker / Indicators / Market Context / Recent Candles OHLCV table (with RVol(×SMA20) column + in-progress hint in header) / Period summary (Avg vol + Net Δclose).
 +
-+ All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row; the section header reports the in-progress candle's open/close timestamps.
-+
-+ OHLCV columns: Time (open UTC) | Open | High | Low | Close | Vol | RVol(×SMA20) | Markers.
-+ - RVol = bar volume / SMA(20) of bar volumes; e.g. `2.95×` means the bar's volume is 2.95× the 20-bar average. Rendered for every closed bar.
-+ - Markers (upside-only thresholds): `vol↑` for RVol > 2; `range↑` for bar range > 2× ATR(14); empty for neither threshold tripped. Markers remain alongside RVol — RVol provides the magnitude, markers provide a visual scan cue.
++ NOTE: LLM-facing description comes from `src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION`
++ via `@tool(description=...)` override at `src.agent.trader.py:124`. Args documentation for the
++ LLM lives in the ctx-receiver docstring at the same site (parsed by griffe into parameters_json_schema).
 + ...
-+ candle_count: Number of closed candles in the OHLCV table. Default 30. Clamped to [10, 80]: values below 10 are raised to 10 (minimum useful window for indicators), values above 80 are capped to 80 (exchange API single-call limit).
-+ ...
++ candle_count: number of closed candles in OHLCV table; clamped to [10, 80]
 ```
 
-`Example call:` / `Example output:` 块同步更新 — sample 输出含新 `RVol(×SMA20)` 列、删 `<N>-candle High-Low` 行、删 `Avg range` 行、Recent Candles header 含 in-progress 指示。
+**CH-DESC 通道**（`tools_descriptions.py:48-69`）block-style 完整内容由 plan Task 6 Step 3 落地。**CH-ARGS 通道**（`trader.py:124-140` Args）的 candle_count clamp 完整文案由 plan Task 6 Step 4 落地。两处都是 LLM-facing，不是 impl docstring。
 
-**Path B** (`src/agent/tools_descriptions.py:48-69` `GET_MARKET_DATA_DESCRIPTION`)：**维持 block-style admonition 不变**（`Example call:` / `Example output:` / 多 section）—— path B 通过 `@tool(description=DESC_X)` 把字符串 verbatim 传给 pydantic-ai，**bypass griffe 整体**（per `tools_descriptions.py:5-6` 文件头明示 "passed verbatim ... to bypass griffe parsing and reach the LLM"），这正是 PR #59 引入 path B 的目的（path A 的 block-style 被 griffe 剥离，迁 path B 是为了**保留** block-style 到达 LLM）。本 iter 只更新 path B 内容反映新 OHLCV 表格 + RVol 列 + in-progress hint + 删 N-candle / Avg range 行，**格式风格不动**。
+### Docstring 通道实证修正（spec review fix）
 
-**Path A vs B 通道汇总**（清晰化避免混淆）：
+前版 spec 把 path A 错定位为 `tools_perception.py:51` impl docstring。**实证修正**（per `tests/test_trader_agent.py::test_dual_mode_tool_wrapper` 验证）：pydantic-ai/griffe 解析的是 **被 `@tool` 装饰的 inner function 自身的 docstring**（即 `trader.py:124-140` 的 ctx-receiver `get_market_data`），与 `tools_perception.py:51` 的 impl 函数（仅被 inner function `import + call`）**无关**。`tools_perception.py:51` docstring 是纯 dev 文档，**从不到达 LLM**。
 
-| Path | 入口 | 处理通道 | LLM 可见性 |
+**真正的 LLM-facing docstring 通道汇总**：
+
+| Channel | 入口 | 处理 | LLM 可见性 |
 |---|---|---|---|
-| **A: description 块**（`tools_perception.py:51` docstring 主体 + Example 块） | python docstring | griffe sniff → `tool.tool_def.description` | **被 griffe 剥 block-style admonition**（`<词>:` + 缩进会被剥），inline 散文 / Args / Returns 通道 survives |
-| **A: Args section** | python docstring `Args:` 块 | griffe sniff → `parameters_json_schema` | 完整到达 LLM（参数 schema） |
-| **B: description override** | `tools_descriptions.py` 常量 + `@tool(description=DESC_X)` | **bypass griffe**，verbatim 传 pydantic-ai | **完整到达 LLM**，block-style survives |
-| **C: trader.py inner docstring** | `trader.py:124-140` docstring | 被 path B `description=` override 覆盖，griffe 也读但 description 字段被 override 抢占 | **不到 LLM**（dev-facing only） |
+| **CH-DESC**：description override (path B 之前的名称) | `src/agent/tools_descriptions.py:48` `GET_MARKET_DATA_DESCRIPTION` 常量 → `@tool(description=DESC_X)` | **bypass griffe**，verbatim 传 pydantic-ai 进 `tool_def.description` | **完整到达 LLM**，block-style admonition 也 survives（`Example call:` / `Example output:` 块均保留） |
+| **CH-ARGS**：Args section (parameters_json_schema) | **`src/agent/trader.py:124-140` inner `get_market_data` ctx-receiver 的 `Args:` block** | griffe sniff inner docstring → `parameters_json_schema["properties"][...]["description"]` | **完整到达 LLM**（参数 schema 通道），即使 description 被 override 也仍解析（per `test_dual_mode_tool_wrapper` 双 mode 都验过） |
+| **dev-only**：impl backend | `src/agent/tools_perception.py:51` `get_market_data(deps, ...)` impl docstring | **不被 pydantic-ai 读取** —— 仅在 inner ctx-receiver `return await _impl(...)` 时调用，docstring 不参与任何 LLM 链路 | **永不到 LLM** |
 
-议题 5/6 docstring 重写涉及 path A + B + C，每路径目标不同：
-- **Path A**: 内容修正（删 "volume ratio" / 加 RVol 解释 / 同步 candle_count clamp 文案），保留**现有 inline 风格**（因为 griffe 会剥 block）—— path A description 主体作为 fallback；inline 散文 survives 进 LLM 的 `<summary>`
-- **Path B**: 内容同 path A 但**保留 block-style**，作为**主 LLM 通道**（PR #59 之后 path B 是 LLM-facing 主路径）
-- **Path C**: 简化 dev-facing 说明，与 path A / B 内容一致即可，格式自由
-
-**Path C** (`src/agent/trader.py:124-140`)：inner docstring 简化版，被 `@tool(description=GET_MARKET_DATA_DESCRIPTION)` override，不直接到 LLM，但仍同步精确化以防 dev confusion。
+议题 5/6 docstring 重写按通道分工：
+- **CH-DESC**（`tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION`）：**保留 block-style**，更新内容反映新 OHLCV 表格（RVol 列 + in-progress hint）+ 删 N-candle / Avg range；议题 5 docstring 主体的所有内容修订都体现在这里。
+- **CH-ARGS**（`trader.py:124-140` inner docstring `Args:`）：**必须含 full clamp text**（议题 6 的 "Clamped to [10, 80]: below 10 raised to 10 (minimum useful window for indicators); above 80 capped (exchange API single-call limit)"）—— 这是 LLM-facing 参数文档**唯一通道**。inner docstring 主段（description fallback）可简短，但 Args 必须详尽。
+- **dev-only**（`tools_perception.py:51` impl）：内容跟随事实修正（删 "volume ratio" 引用，加 RVol 列简述），但**不要求 inline 风格**，也无需对齐 LLM —— 纯开发者注释。前版 spec 计算的"path A inline 化"工时是无效的，本 iter 实际改动可降至 ~5 行 dev cleanup。
 
 ### 2.6 议题 7（out-of-scope）
 
@@ -302,12 +298,13 @@ ROI 论证回归原则 5（接口闭环）而非 token 算账。Token 净增 +60
 
 | 文件 | 改动 | 估行数 |
 |---|---|---:|
-| `src/agent/tools_perception.py:51-219` | get_market_data 渲染 + docstring + 算法（议题 1/2/3/4/5/6 + `_fmt_candle_time` helper + `_to_pd_timestamp_utc` helper + TF_OFFSETS 字典） | ~45 |
-| `src/agent/tools_descriptions.py:48-69` | path B `GET_MARKET_DATA_DESCRIPTION` 内容同步（**保留 block-style** —— per §2.5 path B bypass griffe，不改风格只改内容反映新表格） | ~25 |
-| `src/agent/trader.py:124-140` | inner docstring 同步（path C） | ~5 |
-| `tests/` | snapshot rebuild + new assertions（RVol 列 / in-progress hint / N-candle 行 / Avg range 行 / fmt dispatch / path B verify） | ~35 |
+| `src/agent/tools_perception.py:51-219` | get_market_data 渲染 + 算法（议题 1/2/3/4：RVol 列 / in-progress hint / 删 N-candle row / 删 Avg range）；impl docstring **轻量 dev cleanup**（删过时的 "volume ratio" 提及，事实纠正即可，不要求 LLM-facing 风格） | ~35 |
+| `src/utils/ohlcv_utils.py` | `TF_OFFSETS` 字典 + `_to_pd_timestamp_utc` + `_fmt_candle_time` helpers | ~25 |
+| `src/agent/tools_descriptions.py:48-69` | `GET_MARKET_DATA_DESCRIPTION` 内容同步（议题 5：保留 block-style，更新 OHLCV 表格描述 + Example output；这是 LLM-facing **主 description 通道**） | ~25 |
+| `src/agent/trader.py:124-140` | inner `get_market_data` ctx-receiver docstring 的 **Args section 详尽更新**（议题 6：candle_count clamp 完整文案，**这是 LLM-facing 参数 schema 唯一通道**）；description 主段简短即可（被 override） | ~5 |
+| `tests/` | snapshot rebuild + new assertions（RVol 列 / in-progress hint / N-candle 行 / Avg range 行 / fmt dispatch / description verify / Args clamp text in parameters_json_schema） | ~35 |
 
-预估 source change **~75 行**（tools_perception 45 + tools_descriptions 25 + trader 5），离 mini-iter 上限 100 行仍有 25 行余量，符合 mini-iter direct-merge 路径（per memory `feedback_docs_only_direct_merge`）。
+预估 source change **~90 行**（tools_perception 35 + ohlcv_utils 25 + tools_descriptions 25 + trader 5），离 mini-iter 上限 100 行仍有 10 行余量，符合 mini-iter direct-merge 路径（per memory `feedback_docs_only_direct_merge`）。比前版 75 行高 — 因 helpers 拆到 ohlcv_utils.py 独立计数。
 
 **Safeguard**：若实现期 src 改动累计超 100 行（例如 docstring 内容扩展比预估长 / RVol 列对齐复杂度超预期 / fmt helper / TF_OFFSETS 设计需独立 module），切走标准 GitHub PR 路径，不走 direct-merge。6 议题数本身偏多，reviewer 视角可能 push back，PR 路径降低风险。
 
@@ -344,8 +341,9 @@ GMD 输出格式相关测试需 rebuild：
 - `test_gmd_period_summary_keeps_avg_vol_and_net_delta` — Period summary 仍含 `Avg vol` + `Net Δclose`
 
 **议题 5/6 docstring**：
-- `test_gmd_description_matches_path_a_path_b_intent` — path B `GET_MARKET_DATA_DESCRIPTION` 含 RVol column + in-progress hint + clamp 文案
-- 已有 path B verbatim drift guard 测试 `test_dual_mode_tool_wrapper` + `test_set_next_wake_description_carries_examples_block` (tests/test_trader_agent.py:272, :326) 验证 `@tool(description=DESC_X)` bypass griffe + block-style 完整到达 LLM，本 iter 不修；新增 path B verify 测试 `test_gmd_description_matches_path_a_path_b_intent` 复用同款断言模式
+- `test_gmd_description_contains_new_content` — `tool_def.description`（来自 `GET_MARKET_DATA_DESCRIPTION` override）含 RVol column section + in-progress hint + 删去 Avg range；**不** 在此通道断言 clamp text（clamp 文案走 Args/parameters_json_schema 通道）
+- `test_candle_count_clamp_text_in_params_schema` — `tool_def.parameters_json_schema["properties"]["candle_count"]["description"]` 含完整 clamp 文案（"Clamped to [10, 80]" / "minimum useful window" / "exchange API"）—— 这是议题 6 LLM-facing 唯一通道
+- 已有 description verbatim drift guard `test_dual_mode_tool_wrapper` + `test_set_next_wake_description_carries_examples_block` (tests/test_trader_agent.py:272, :326) 验证 `@tool(description=DESC_X)` bypass griffe + block-style 完整到达 LLM，本 iter 不修
 
 ### 5.3 端到端 smoke
 
@@ -355,10 +353,10 @@ GMD 输出格式相关测试需 rebuild：
 
 - [ ] AC1：`pytest tests/` 全通过（snapshot rebuild + new tests）
 - [ ] AC2：渲染结构 snapshot test 覆盖（auto-verified via §5.2 tests `test_gmd_rvol_column_present_in_ohlcv_table` + `test_gmd_ohlcv_header_contains_in_progress_indicator` + `test_gmd_no_n_candle_high_low_row` + `test_gmd_period_summary_no_avg_range` + `test_gmd_period_summary_keeps_avg_vol_and_net_delta`），覆盖 RVol 列 / in-progress hint / 无 N-candle H-L / 无 Avg range / 保留 Net Δclose + Avg vol
-- [ ] AC3：path A docstring + path B `GET_MARKET_DATA_DESCRIPTION` 同步——**内容一致，格式差异**（**path A 保持 inline 风格**避免 block-style 被 griffe 从 `tool.tool_def.description` 剥离；**path B 保留 block-style**（`Example call:` / `Example output:` 等），通过 `@tool(description=DESC_X)` bypass griffe 完整到达 LLM，per §2.5 通道汇总）
+- [ ] AC3：**CH-DESC** (`tool_def.description` ← `GET_MARKET_DATA_DESCRIPTION` override) 含新 OHLCV 表格描述 + RVol 列说明 + in-progress hint + 删 Avg range；保留 block-style admonition（`Example call:` / `Example output:` 等）—— `@tool(description=DESC_X)` bypass griffe 完整到达 LLM。**CH-ARGS** (`parameters_json_schema` ← `trader.py:124-140` inner docstring `Args:`) 含完整 clamp 文案。**dev-only** (`tools_perception.py:51` impl docstring) 是开发者注释，事实纠正即可（删过时的 "volume ratio" 提及），无 LLM-facing 约束。详见 §2.5 通道汇总。
 - [ ] AC4：议题 1 RVol 与现有 `vol↑` marker 不冲突 — `vol↑` 存在 iff RVol > 2（严格 >，与源码一致），markers 仍渲染
 - [ ] AC5：议题 2 in-progress 时间算术正确 — last_closed + tf_offset = in-progress_open / + 2×tf_offset = in-progress_close。**覆盖代表性 tf 子集**（intraday minute: 5m/15m；hour: 1h/4h；day: 1d；week: 1w；**month: 1M calendar-aware via `pd.DateOffset(months=1)`** —— 验证 28/29/30/31 日月长不固定下正确性）。**新增 tf 由 §2.2 TF_OFFSETS 字典 driven**，§5.2 `test_gmd_in_progress_time_arithmetic_*` + `test_gmd_unsupported_tf_degraded_fallback` 含 unit test 兜底全 CCXT 集
-- [ ] AC6：议题 6 candle_count clamp 明示文案在 path A + path B 同步
+- [ ] AC6：议题 6 candle_count clamp 完整文案在 **CH-ARGS 通道**（`trader.py:124-140` inner docstring 的 `Args:` block → `parameters_json_schema["properties"]["candle_count"]["description"]`），含 "Clamped to [10, 80]" / "minimum useful window" / "exchange API" 三段事实。**不要求**在 CH-DESC 通道重复（per spec §2.5 通道分工）
 - [ ] AC7：sim smoke 1 cycle 不 crash，渲染字段齐
 
 ## 7. 风险 / 回滚
@@ -366,7 +364,7 @@ GMD 输出格式相关测试需 rebuild：
 **主要风险**：
 - 议题 1 加列后 OHLCV table 宽度增加 ~14 chars，可能在某些极端 candle_count 配置下触发对齐边界——pytest snapshot 测试可 catch
 - 议题 2 in-progress 时间算术：`1M` 需 `pd.DateOffset(months=1)` 而非 `Timedelta`（月长 28-31 天不固定），见 §2.2 算法 + AC5；本 session 全是 15m / 5m 触发不到 calendar-aware 路径，但代码路径需 cover 全 tf 集
-- **Path A vs Path B 通道方向不要搞反**（per memory `project_griffe_example_stripped` + PR #59 设计意图）：path A docstring 走 griffe 会被剥 block-style；path B `@tool(description=DESC_X)` **bypass griffe** 保留 block-style。本 iter 实施期若误把 path B 改成 inline 风格 → 反方向降低 LLM 可见信息（path B 的 block 本来 survives，inline 化反而没必要）。Drift guard：`test_dual_mode_tool_wrapper` + `test_set_next_wake_description_carries_examples_block` 兜底 path B 完整性
+- **Docstring 通道映射不要搞反**（per memory `project_griffe_example_stripped` + PR #59 设计意图 + `test_dual_mode_tool_wrapper` 实证）：**CH-DESC** 入口是 `tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION` 通过 `@tool(description=...)` override → bypass griffe → block-style admonition survives；**CH-ARGS** 入口是 `trader.py:124-140` inner ctx-receiver 的 `Args:` block → griffe 解析 → `parameters_json_schema`。`tools_perception.py:51` impl docstring **从不到达 LLM**（仅 dev 文档）。本 iter 实施期若把 clamp 文案错放到 `tools_perception.py` impl 而非 `trader.py` inner → LLM-facing 参数 schema 缺失，test 失败。Drift guard：`test_dual_mode_tool_wrapper` + `test_set_next_wake_description_carries_examples_block` 兜底 description 完整性
 - **议题 1 加 RVol 列后 W4+ sim adoption 不达预期风险**：若 W4 sim 观察到 RVol 列 adoption 仍 < 5%，议题 1 可能需 rollback / 重设计；本 iter 不预设 adoption 阈值，按 W4 数据决定。详见 §8 backlog
 
 **回滚**：
