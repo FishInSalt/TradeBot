@@ -87,7 +87,10 @@ async def get_market_data(
     """
     import pandas as pd
     from datetime import datetime, timezone
-    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+    from src.utils.ohlcv_utils import (
+        _live_price, _closed_bars, _atr_series,
+        _to_pd_timestamp_utc, _fmt_candle_time,
+    )
 
     symbol = symbol or deps.symbol
     timeframe = timeframe or deps.timeframe
@@ -153,32 +156,30 @@ async def get_market_data(
         ctx_lines.append("Range: N/A")
     sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
 
-    # === Recent Candles (OHLCV with markers) ===
+    # === Recent Candles (OHLCV with markers + RVol column) ===
     vol_sma = df_closed["volume"].rolling(20).mean()
     atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None
     candle_lines: list[str] = [
-        f"{'Time (open UTC)':<16} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10} {'Vol':>10}  Markers"
+        f"{'Time (open UTC)':<16} {'Open':>10} {'High':>10} {'Low':>10} "
+        f"{'Close':>10} {'Vol':>10}  {'RVol(×SMA20)':>12}  Markers"
     ]
     for idx in display_df.index:
         row = df_closed.loc[idx]
         ts_val = row["timestamp"]
-        if isinstance(ts_val, (int, float)):
-            dt = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc)
-        else:
-            dt = ts_val
-        tf_short = timeframe.lower()
-        if tf_short in ("1m", "5m", "15m"):
-            time_str = dt.strftime("%H:%M")
-        elif tf_short in ("1h", "4h"):
-            time_str = dt.strftime("%m-%d %H:%M")
-        else:
-            time_str = dt.strftime("%Y-%m-%d")
+        # Use shared helper for both pd.Timestamp coercion and tf-aware formatting
+        dt = _to_pd_timestamp_utc(ts_val)
+        time_str = _fmt_candle_time(dt, timeframe)
 
         markers: list[str] = []
         vol_sma_at = vol_sma.loc[idx] if idx in vol_sma.index else None
+        # Compute RVol; degraded fallback `—` when SMA(20) not yet ready
         if vol_sma_at is not None and not pd.isna(vol_sma_at) and float(vol_sma_at) > 0:
+            rvol = float(row["volume"]) / float(vol_sma_at)
+            rvol_str = f"{rvol:.2f}×"
             if float(row["volume"]) > 2 * float(vol_sma_at):
                 markers.append("vol↑")
+        else:
+            rvol_str = "—"
         atr_at = None
         if atr_series is not None and idx in atr_series.index:
             atr_at = atr_series.loc[idx]
@@ -189,7 +190,8 @@ async def get_market_data(
 
         candle_lines.append(
             f"{time_str:<16} {row['open']:>10.2f} {row['high']:>10.2f} "
-            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  {marker_str}".rstrip()
+            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  "
+            f"{rvol_str:>12}  {marker_str}".rstrip()
         )
     sections.append(
         f"=== Recent Candles ({timeframe}, last {display_count}, oldest-first by row) ===\n"
