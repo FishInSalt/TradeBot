@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 import pandas_ta as ta  # type: ignore[import-untyped]
+from pandas.tseries.offsets import DateOffset
 
 
 def _live_price(ticker: Any) -> float:
@@ -53,3 +54,66 @@ def _atr_series(df_closed: pd.DataFrame, period: int = 14) -> pd.Series:
         df_closed["high"], df_closed["low"], df_closed["close"],
         length=period, mamode="rma",
     )
+
+
+# === GMD/OHLCV time-format helpers (TF offsets, tz coercion, per-tf strftime) ===
+
+TF_OFFSETS: dict[str, pd.Timedelta | DateOffset] = {
+    # Intraday minute
+    "1m":  pd.Timedelta(minutes=1),
+    "3m":  pd.Timedelta(minutes=3),
+    "5m":  pd.Timedelta(minutes=5),
+    "15m": pd.Timedelta(minutes=15),
+    "30m": pd.Timedelta(minutes=30),
+    # Hour
+    "1h":  pd.Timedelta(hours=1),
+    "2h":  pd.Timedelta(hours=2),
+    "4h":  pd.Timedelta(hours=4),
+    "6h":  pd.Timedelta(hours=6),
+    "8h":  pd.Timedelta(hours=8),
+    "12h": pd.Timedelta(hours=12),
+    # Day / week
+    "1d":  pd.Timedelta(days=1),
+    "3d":  pd.Timedelta(days=3),
+    "1w":  pd.Timedelta(weeks=1),
+    # Month (calendar-aware; 28-31 days not fixed)
+    "1M":  DateOffset(months=1),
+}
+
+
+def _to_pd_timestamp_utc(ts_val: Any) -> pd.Timestamp:
+    """Coerce OHLCV timestamp to tz-aware pd.Timestamp UTC.
+
+    Mirrors the isinstance dispatch at tools_perception.py:164-168 — OHLCV
+    timestamp column may be int/float ms-epoch OR datetime depending on the
+    exchange adapter. Both produce equivalent UTC pd.Timestamp here.
+    """
+    if isinstance(ts_val, (int, float)):
+        return pd.Timestamp(ts_val, unit="ms", tz="UTC")
+    ts = pd.Timestamp(ts_val)
+    return ts.tz_localize("UTC") if ts.tz is None else ts.tz_convert("UTC")
+
+
+def _fmt_candle_time(dt: pd.Timestamp, tf: str) -> str:
+    """Format a candle's open-time per tf granularity.
+
+    Unified dispatch shared by OHLCV table row rendering AND in-progress
+    candle hint rendering (both consumers in tools_perception.get_market_data).
+
+    The OKX/CCXT timeframe `"1M"` is **case-sensitive** (uppercase M = month,
+    lowercase m = minute) — `"1M"` is checked first BEFORE `tf.lower()` to
+    avoid the lowered `"1m"` accidentally matching the month branch.
+
+    Unknown tf falls back to `%Y-%m-%d` (matches existing default fallback at
+    tools_perception.py:175). Does NOT raise — preserves backward-compat.
+    """
+    if tf == "1M":  # month — case-sensitive uppercase; must be checked before lower()
+        return dt.strftime("%Y-%m")
+    tf_lower = tf.lower()
+    if tf_lower in ("1m", "3m", "5m", "15m", "30m"):
+        return dt.strftime("%H:%M")
+    if tf_lower in ("1h", "2h", "4h", "6h", "8h", "12h"):
+        return dt.strftime("%m-%d %H:%M")
+    if tf_lower in ("1d", "3d", "1w"):
+        return dt.strftime("%Y-%m-%d")
+    return dt.strftime("%Y-%m-%d")  # degraded fallback for unknown tf

@@ -54,40 +54,36 @@ async def get_market_data(
     timeframe: str | None = None,
     candle_count: int = 30,
 ) -> str:
-    """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
+    """Single-timeframe market data implementation.
 
-    All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
+    Renders: Ticker (last + bid/ask + 24h H/L + base volume); Technical Indicators
+    (RSI / MACD / BB / ATR via TechnicalAnalysisService); Market Context (ATR % of
+    price + last-bar vol/SMA(20) ratio); Recent Candles OHLCV table with per-bar
+    RVol(×SMA20) column + vol↑/range↑ markers + in-progress candle hint in the
+    section header; Period summary (Avg vol, Net Δclose) across last 5 vs prior 5.
 
-    Markers in OHLCV table (upside-only thresholds):
-        "vol↑"   — bar volume > 2× SMA(20) of bar volumes
-        "range↑" — bar range (high - low) > 2× ATR(14)
-        Empty    — neither threshold tripped.
+    All indicators / OHLCV rows / period summary are computed on closed bars
+    (via `_closed_bars(df)`); the in-progress candle is excluded from data but
+    its expected open/close timestamps appear in the section header.
 
-    Time column shows candle open in UTC.
+    NOTE: This impl docstring is dev-facing only. LLM-facing description comes
+    from `src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION` via the
+    `@tool(description=...)` override at `src.agent.trader.py:124`. Args
+    documentation for the LLM lives in the ctx-receiver docstring at the same
+    site (parsed by griffe into parameters_json_schema).
 
     Args:
-        symbol: Trading symbol. Defaults to session symbol.
-        timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
-        candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
-
-    Example call:
-        get_market_data(timeframe="5m", candle_count=30)
-    Example output:
-        === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
-        Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
-        ...
-        === Recent Candles (5m, last 30, oldest-first by row) ===
-        Time (open UTC)   Open ... Vol     Markers
-        14:20         ...         245.3   vol↑
-        ...
-        === Period summary (last 5 closed candles vs prior 5 closed candles) ===
-        Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
-        Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
-        Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
+        deps: TradingDeps with .exchange / .market_data / .technical wired
+        symbol: trading symbol (defaults to deps.symbol)
+        timeframe: CCXT timeframe (defaults to deps.timeframe)
+        candle_count: number of closed candles in OHLCV table; clamped to [10, 80]
     """
     import pandas as pd
     from datetime import datetime, timezone
-    from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+    from src.utils.ohlcv_utils import (
+        _live_price, _closed_bars, _atr_series,
+        _to_pd_timestamp_utc, _fmt_candle_time, TF_OFFSETS,
+    )
 
     symbol = symbol or deps.symbol
     timeframe = timeframe or deps.timeframe
@@ -145,40 +141,32 @@ async def get_market_data(
     else:
         ctx_lines.append("Last bar vol: N/A")
 
-    if not display_df.empty:
-        ctx_lines.append(
-            f"{display_count}-candle High-Low: {display_df['low'].min():.0f} — {display_df['high'].max():.0f}"
-        )
-    else:
-        ctx_lines.append("Range: N/A")
     sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
 
-    # === Recent Candles (OHLCV with markers) ===
+    # === Recent Candles (OHLCV with markers + RVol column) ===
     vol_sma = df_closed["volume"].rolling(20).mean()
     atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None
     candle_lines: list[str] = [
-        f"{'Time (open UTC)':<16} {'Open':>10} {'High':>10} {'Low':>10} {'Close':>10} {'Vol':>10}  Markers"
+        f"{'Time (open UTC)':<16} {'Open':>10} {'High':>10} {'Low':>10} "
+        f"{'Close':>10} {'Vol':>10}  {'RVol(×SMA20)':>12}  Markers"
     ]
     for idx in display_df.index:
         row = df_closed.loc[idx]
         ts_val = row["timestamp"]
-        if isinstance(ts_val, (int, float)):
-            dt = datetime.fromtimestamp(ts_val / 1000, tz=timezone.utc)
-        else:
-            dt = ts_val
-        tf_short = timeframe.lower()
-        if tf_short in ("1m", "5m", "15m"):
-            time_str = dt.strftime("%H:%M")
-        elif tf_short in ("1h", "4h"):
-            time_str = dt.strftime("%m-%d %H:%M")
-        else:
-            time_str = dt.strftime("%Y-%m-%d")
+        # Use shared helper for both pd.Timestamp coercion and tf-aware formatting
+        dt = _to_pd_timestamp_utc(ts_val)
+        time_str = _fmt_candle_time(dt, timeframe)
 
         markers: list[str] = []
         vol_sma_at = vol_sma.loc[idx] if idx in vol_sma.index else None
+        # Compute RVol; degraded fallback `—` when SMA(20) not yet ready
         if vol_sma_at is not None and not pd.isna(vol_sma_at) and float(vol_sma_at) > 0:
+            rvol = float(row["volume"]) / float(vol_sma_at)
+            rvol_str = f"{rvol:.2f}×"
             if float(row["volume"]) > 2 * float(vol_sma_at):
                 markers.append("vol↑")
+        else:
+            rvol_str = "—"
         atr_at = None
         if atr_series is not None and idx in atr_series.index:
             atr_at = atr_series.loc[idx]
@@ -189,10 +177,26 @@ async def get_market_data(
 
         candle_lines.append(
             f"{time_str:<16} {row['open']:>10.2f} {row['high']:>10.2f} "
-            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  {marker_str}".rstrip()
+            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  "
+            f"{rvol_str:>12}  {marker_str}".rstrip()
         )
+    # In-progress candle hint: extrapolate next bar's open/close from the
+    # most-recent closed bar + tf offset. Unknown tf → empty suffix (degraded).
+    in_progress_suffix = ""
+    if not display_df.empty:
+        offset = TF_OFFSETS.get(timeframe)
+        if offset is not None:
+            last_closed_dt = _to_pd_timestamp_utc(display_df["timestamp"].iloc[-1])
+            in_progress_open = last_closed_dt + offset
+            in_progress_close = in_progress_open + offset
+            in_progress_suffix = (
+                f"; in-progress {_fmt_candle_time(in_progress_open, timeframe)} "
+                f"still open, closes at {_fmt_candle_time(in_progress_close, timeframe)}"
+            )
+
     sections.append(
-        f"=== Recent Candles ({timeframe}, last {display_count}, oldest-first by row) ===\n"
+        f"=== Recent Candles ({timeframe}, last {display_count}, "
+        f"oldest-first by row{in_progress_suffix}) ===\n"
         + "\n".join(candle_lines)
     )
 
@@ -203,16 +207,12 @@ async def get_market_data(
         avg_vol_last = float(last_5["volume"].mean())
         avg_vol_prior = float(prior_5["volume"].mean())
         vol_ratio = avg_vol_last / avg_vol_prior if avg_vol_prior > 0 else 0.0
-        avg_rng_last = float((last_5["high"] - last_5["low"]).mean())
-        avg_rng_prior = float((prior_5["high"] - prior_5["low"]).mean())
-        rng_ratio = avg_rng_last / avg_rng_prior if avg_rng_prior > 0 else 0.0
         net_delta_last = float(df_closed["close"].iloc[-1] - df_closed["close"].iloc[-5])
         net_delta_prior = float(df_closed["close"].iloc[-6] - df_closed["close"].iloc[-10])
         summary = (
             "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===\n"
-            f"Avg vol:            last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
-            f"Avg range (H-L):    last 5 {avg_rng_last:.1f} / prior 5 {avg_rng_prior:.1f} ({rng_ratio:.2f}×)\n"
-            f"Net Δclose:         last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
+            f"Avg vol:     last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
+            f"Net Δclose:  last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
         )
         sections.append(summary)
 

@@ -128,12 +128,12 @@ def create_trader_agent(
         timeframe: str | None = None,
         candle_count: int = 30,
     ) -> str:
-        """Get single-timeframe market data with indicators + OHLCV.
+        """Single-timeframe market data: ticker + indicators + OHLCV table (with RVol column + in-progress hint) + period summary. LLM-visible description override: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION (carries Example block).
 
         Args:
             symbol: Trading symbol. Defaults to session symbol.
             timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
-            candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
+            candle_count: Number of closed candles in the OHLCV table. Default 30. Clamped to [10, 80]: values below 10 are raised to 10 (minimum useful window for indicators); values above 80 are capped to 80 (exchange API single-call limit).
         """
         from src.agent.tools_perception import get_market_data as _impl
 

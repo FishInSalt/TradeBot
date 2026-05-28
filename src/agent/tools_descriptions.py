@@ -45,27 +45,39 @@ Examples:
 """
 
 
-GET_MARKET_DATA_DESCRIPTION = """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
+GET_MARKET_DATA_DESCRIPTION = """Single-timeframe market data: ticker (last + bid/ask + 24h H/L + base volume), technical indicators (RSI / MACD / BB / ATR), market context (ATR percent of price + last-bar volume with SMA(20) ratio), the most recent N closed candles in OHLCV table form with per-bar volume ratio (RVol = vol / SMA(20)) and anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, net Δclose).
 
-All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
+All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row; the section header reports the in-progress candle's open and expected close timestamps.
 
-Markers in OHLCV table (upside-only thresholds): `vol↑` for bar volume > 2× SMA(20) of bar volumes; `range↑` for bar range (high - low) > 2× ATR(14); empty for neither threshold tripped. Time column shows candle open in UTC.
+OHLCV columns: Time (open UTC) | Open | High | Low | Close | Vol | RVol(×SMA20) | Markers.
+- RVol = bar volume / SMA(20) of bar volumes (`2.95×` means the bar's volume is 2.95× the 20-bar average). Rendered for every closed bar; `—` when SMA(20) has not yet started (degraded display window).
+- Markers (upside-only thresholds): `vol↑` for bar volume > 2× SMA(20) of bar volumes; `range↑` for bar range (high - low) > 2× ATR(14); empty for neither threshold tripped.
 
 Example call:
     get_market_data(timeframe="5m", candle_count=30)
 
 Example output:
-    === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
+    === Ticker (BTC/USDT:USDT @ 14:27:30 UTC) ===
     Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
+    24h High: 82400.10 | 24h Low: 80120.00 | 24h base vol: 12345.67
+
+    === Technical Indicators (5m) ===
+    RSI(14): 58.20
     ...
-    === Recent Candles (5m, last 30, oldest-first by row) ===
-    Time (open UTC)   Open ... Vol     Markers
-    14:20         ...         245.3   vol↑
+
+    === Market Context ===
+    ATR(14): 245.30 (0.30% of price, 5m candles)
+    Last bar vol: 178.6 (1.35× SMA(20) avg)
+
+    === Recent Candles (5m, last 30, oldest-first by row; in-progress 14:25 still open, closes at 14:30) ===
+    Time (open UTC)        Open       High        Low      Close        Vol  RVol(×SMA20)  Markers
     ...
+    14:15              81830.00   81870.00   81825.00   81865.00      400.0         3.02×  vol↑
+    14:20              81865.00   81910.00   81860.00   81895.00      178.6         1.35×
+
     === Period summary (last 5 closed candles vs prior 5 closed candles) ===
-    Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
-    Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
-    Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
+    Avg vol:     last 5 178.6 / prior 5 132.4 (1.35×)
+    Net Δclose:  last 5 -25.0 USDT / prior 5 +120.0 USDT
 """
 
 

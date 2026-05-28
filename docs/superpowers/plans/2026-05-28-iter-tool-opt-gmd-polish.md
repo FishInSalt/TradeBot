@@ -1,0 +1,1398 @@
+# iter-tool-opt-gmd-polish Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Polish `get_market_data` per `docs/superpowers/specs/2026-05-28-iter-tool-opt-gmd-polish-design.md` — 6 issues (1 P1 + 1 P2 + 4 P3) covering RVol column, in-progress candle hint, dead field deletions, and docstring rewrite.
+
+**Architecture:** All changes in `src/agent/tools_perception.py` (get_market_data renderer + helpers + dev-only impl docstring) + `src/agent/tools_descriptions.py` (CH-DESC `GET_MARKET_DATA_DESCRIPTION` override) + `src/agent/trader.py` (CH-ARGS — inner ctx-receiver Args block) + `src/utils/ohlcv_utils.py` (shared helpers). No service-layer changes, no schema/DB/migration.
+
+**Tech Stack:** Python 3.13 / pydantic-ai 1.78 / pandas / pytest-asyncio / griffe (parses `trader.py:124-140` inner ctx-receiver docstring → CH-ARGS via `parameters_json_schema`; CH-DESC description bypasses griffe via `@tool(description=DESC_X)`).
+
+---
+
+## Context for the implementer
+
+### Project conventions (must know before touching code)
+
+- **Docstring channels — empirical truth via `test_dual_mode_tool_wrapper` (test_trader_agent.py:272)**:
+  - **CH-DESC** = `tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION` constant passed via `@tool(description=DESC_X)` at `trader.py:124`. Verbatim into `tool_def.description` — **bypasses griffe entirely**, block-style admonitions (`Example call:` / `Example output:`) survive intact.
+  - **CH-ARGS** = `trader.py:124-140` **inner `get_market_data` ctx-receiver docstring's `Args:` block**. Griffe parses this into `parameters_json_schema["properties"][...]["description"]`. **This is the LLM-facing parameter documentation channel** — irrespective of whether `description=` override is used (per `test_dual_mode_tool_wrapper` dual-mode assertion).
+  - **dev-only** = `tools_perception.py:51` impl `get_market_data(deps, ...)` docstring. **Never read by pydantic-ai** — it's only invoked via `from src.agent.tools_perception import get_market_data as _impl; await _impl(...)` from the inner ctx-receiver. Pure backend/dev documentation.
+  - **CRITICAL**: When updating docstrings:
+    - Put new content for `tool_def.description` into **`tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION`** (block-style OK, bypasses griffe).
+    - Put new `Args:` content (e.g. clamp explanation) into **`trader.py:124-140` inner ctx-receiver docstring** — NOT `tools_perception.py:51` impl docstring (which doesn't reach LLM).
+    - `tools_perception.py:51` impl docstring is dev-only; fact-correct it (drop "volume ratio" etc.) but don't write it for LLM-facing style.
+- **`_create_dual_mode_tool`** at `trader.py:58` provides `@tool` (no override) and `@tool(description=DESC)` (override) modes. `Args:` section always parsed from the **decorated function's docstring** via griffe (i.e. from the `trader.py:124-140` inner function, NOT from the impl) — drift guard: `require_parameter_descriptions=True`.
+- **OHLCV closed-bar semantics**: `_closed_bars(df)` at `src/utils/ohlcv_utils.py:31` strips the in-progress (last) bar. All GMD indicators / OHLCV table rows / period summary work on `df_closed` only.
+- **Display window**: `display_count = candle_count` when `available_closed >= candle_count + 50`, else fallback `max(10, available_closed - 50)` (line 109-112). RVol fallback `—` covers the degraded path edge case where SMA(20) hasn't started.
+- **Timestamp dispatch quirk**: `display_df["timestamp"]` may be `int` ms-epoch OR `datetime`. Existing code at `tools_perception.py:164-168` already isinstance-dispatches. New helper `_to_pd_timestamp_utc` must mirror this dispatch.
+
+### Test infrastructure
+
+- Test fixtures: `tests/fixtures/multi_tf_ohlcv.py` provides `df_5m_130bars`, `df_5m_anomaly`, `df_4h_250bars`, `df_1d_250bars`, `df_1h_250bars`, `fake_ticker_81870`.
+- `tests/fixtures/multi_tf_ohlcv.py:_build()` builds OHLCV with deterministic closes + integer ms timestamps. `df_5m_130bars` has 129 closed + 1 in-progress.
+- GMD golden test class: `TestGMDGolden` in `tests/test_iter_w2r2_next_d_goldens.py` (line 178). New tests can go in this class or a new dedicated file.
+- `_build_deps()` at `tests/test_iter_w2r2_next_d_goldens.py:18` builds a minimal `TradingDeps` mock with real `TechnicalAnalysisService`.
+
+### Affected existing tests (will need inline fix)
+
+- `tests/test_iter_w2r2_next_d_goldens.py:241-251` `test_gmd_period_summary_section` asserts `"Avg range (H-L):"` — Task 5 deletes this, update the test.
+- `tests/test_trader_agent.py:369` `test_get_market_data_description_carries_example_output` asserts Ticker / Recent Candles / Period summary / vol↑ / range↑ — these all remain after CH-DESC rewrite, should still pass. **No action required**, but verify it passes after Task 6.
+- `tests/test_tool_enhancement.py:641` `test_get_market_data_candle_count_clamp` — behavior unchanged, should still pass. **No action required**.
+- Other GMD tests should still pass; verify in Task 7.
+
+### Run tests
+
+```bash
+cd /Users/z/Z/TradeBot
+uv run pytest tests/test_iter_w2r2_next_d_goldens.py -v   # GMD golden
+uv run pytest tests/test_trader_agent.py::test_get_market_data_description_carries_example_output -v
+uv run pytest tests/ -v                                    # full suite (~1859 tests)
+```
+
+---
+
+## File Structure
+
+| File | Responsibility | Lines changed |
+|---|---|---|
+| `src/utils/ohlcv_utils.py` | Add `TF_OFFSETS` constant, `_to_pd_timestamp_utc()`, `_fmt_candle_time()` helpers | ~25 |
+| `src/agent/tools_perception.py:51-219` | `get_market_data` renderer: add RVol column / in-progress hint / delete N-candle row / delete Avg range; replace inline strftime with `_fmt_candle_time`; **impl docstring**: lightweight dev cleanup (drop "volume ratio" fact-drift, add brief RVol note) — pure dev doc, NOT LLM-facing | ~35 |
+| `src/agent/tools_descriptions.py:48-69` | Rewrite `GET_MARKET_DATA_DESCRIPTION` (CH-DESC) — keep block-style; update content (RVol column / in-progress hint / removed fields). **Main LLM-facing description channel** | ~25 |
+| `src/agent/trader.py:124-140` | Inner ctx-receiver docstring: short description summary + **detailed Args block** for `parameters_json_schema` (CH-ARGS). Must contain full clamp text per issue 6 ("Clamped to [10, 80]. Below 10 raised to 10 (minimum useful window for indicators); above 80 capped (exchange API single-call limit)") | ~5 |
+| `tests/test_iter_w2r2_next_d_goldens.py` | Add new GMD golden assertions in `TestGMDGolden` class; update `test_gmd_period_summary_section` | ~30 |
+| `tests/test_iter_tool_opt_gmd_polish.py` (**new**) | New test file for issues that need finer fixtures (in-progress time arithmetic across tfs, RVol marker consistency, unsupported tf fallback, CH-DESC + CH-ARGS verify) | ~80 |
+
+Estimated src change: **75 lines** (under mini-iter direct-merge cap 100 lines, per `feedback_docs_only_direct_merge`).
+
+---
+
+## Task 1: Foundation — TF_OFFSETS, `_to_pd_timestamp_utc`, `_fmt_candle_time` helpers
+
+**Files:**
+- Modify: `src/utils/ohlcv_utils.py` (add at end of module)
+- Test: `tests/test_iter_tool_opt_gmd_polish.py` (new file)
+
+These are shared helpers used by Task 2 (RVol column) and Task 3 (in-progress hint). TDD: write helper tests first.
+
+- [ ] **Step 1: Create new test file with failing tests for helpers**
+
+Create `tests/test_iter_tool_opt_gmd_polish.py`:
+
+```python
+"""Tests for iter-tool-opt-gmd-polish — shared helpers (Task 1) +
+issue-specific assertions (Tasks 2-6).
+
+Helpers tested here:
+- _to_pd_timestamp_utc (Task 1)
+- _fmt_candle_time (Task 1)
+- TF_OFFSETS dict (Task 1)
+"""
+from __future__ import annotations
+from datetime import datetime, timezone
+
+import pandas as pd
+import pytest
+
+
+# === Task 1: helpers ===
+
+class TestToPdTimestampUtc:
+    def test_int_ms_epoch(self):
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc
+        ts = _to_pd_timestamp_utc(1_700_000_000_000)
+        assert ts.tz is not None
+        assert ts.tz.utcoffset(None).total_seconds() == 0  # UTC
+        assert ts.year == 2023 and ts.month == 11
+
+    def test_float_ms_epoch(self):
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc
+        ts = _to_pd_timestamp_utc(1_700_000_000_000.0)
+        assert ts.tz is not None
+
+    def test_naive_datetime_gets_localized_utc(self):
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc
+        naive = datetime(2026, 5, 28, 12, 0, 0)
+        ts = _to_pd_timestamp_utc(naive)
+        assert ts.tz is not None
+        assert ts.tz.utcoffset(None).total_seconds() == 0
+
+    def test_aware_datetime_passthrough(self):
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc
+        aware = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
+        ts = _to_pd_timestamp_utc(aware)
+        assert ts.tz is not None
+        assert ts.hour == 12
+
+
+class TestTfOffsets:
+    @pytest.mark.parametrize("tf,expected_seconds", [
+        ("1m", 60), ("3m", 180), ("5m", 300), ("15m", 900), ("30m", 1800),
+        ("1h", 3600), ("2h", 7200), ("4h", 14400), ("6h", 21600),
+        ("8h", 28800), ("12h", 43200),
+        ("1d", 86400), ("3d", 259200), ("1w", 604800),
+    ])
+    def test_timedelta_tfs(self, tf, expected_seconds):
+        from src.utils.ohlcv_utils import TF_OFFSETS
+        assert TF_OFFSETS[tf].total_seconds() == expected_seconds
+
+    def test_1M_is_dateoffset(self):
+        from src.utils.ohlcv_utils import TF_OFFSETS
+        from pandas.tseries.offsets import DateOffset
+        assert isinstance(TF_OFFSETS["1M"], DateOffset)
+
+    def test_1M_advances_calendar_aware(self):
+        """1M must respect calendar month length (28-31 days), not be a fixed
+        30-day delta."""
+        from src.utils.ohlcv_utils import TF_OFFSETS
+        jan = pd.Timestamp("2026-01-31", tz="UTC")
+        feb = jan + TF_OFFSETS["1M"]
+        # Feb has 28 days in 2026 → Jan 31 + 1M = Feb 28 (pandas DateOffset behavior)
+        assert feb.month == 2
+
+    def test_unknown_tf_absent(self):
+        from src.utils.ohlcv_utils import TF_OFFSETS
+        assert "7m" not in TF_OFFSETS
+        assert "2d" not in TF_OFFSETS
+
+
+class TestFmtCandleTime:
+    @pytest.mark.parametrize("tf,expected", [
+        ("1m", "12:34"), ("3m", "12:34"), ("5m", "12:34"),
+        ("15m", "12:34"), ("30m", "12:34"),
+    ])
+    def test_intraday_minute(self, tf, expected):
+        from src.utils.ohlcv_utils import _fmt_candle_time
+        dt = pd.Timestamp("2026-05-28 12:34:00", tz="UTC")
+        assert _fmt_candle_time(dt, tf) == expected
+
+    @pytest.mark.parametrize("tf", ["1h", "2h", "4h", "6h", "8h", "12h"])
+    def test_hour_tfs(self, tf):
+        from src.utils.ohlcv_utils import _fmt_candle_time
+        dt = pd.Timestamp("2026-05-28 12:00:00", tz="UTC")
+        assert _fmt_candle_time(dt, tf) == "05-28 12:00"
+
+    @pytest.mark.parametrize("tf", ["1d", "3d", "1w"])
+    def test_day_week_tfs(self, tf):
+        from src.utils.ohlcv_utils import _fmt_candle_time
+        dt = pd.Timestamp("2026-05-28", tz="UTC")
+        assert _fmt_candle_time(dt, tf) == "2026-05-28"
+
+    def test_1M_month_format(self):
+        from src.utils.ohlcv_utils import _fmt_candle_time
+        dt = pd.Timestamp("2026-05-01", tz="UTC")
+        assert _fmt_candle_time(dt, "1M") == "2026-05"
+
+    def test_unknown_tf_degraded_fallback(self):
+        """Unknown tf returns ISO date — degraded fallback, no raise."""
+        from src.utils.ohlcv_utils import _fmt_candle_time
+        dt = pd.Timestamp("2026-05-28 12:34:00", tz="UTC")
+        result = _fmt_candle_time(dt, "7m")  # synthetic unknown
+        assert result == "2026-05-28"  # falls back to %Y-%m-%d
+```
+
+- [ ] **Step 2: Run tests to verify they all fail**
+
+```bash
+cd /Users/z/Z/TradeBot
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py -v
+```
+
+Expected: all tests FAIL with `ImportError: cannot import name '_to_pd_timestamp_utc' from 'src.utils.ohlcv_utils'` (and similar for TF_OFFSETS / _fmt_candle_time).
+
+- [ ] **Step 3: Implement helpers in `src/utils/ohlcv_utils.py`**
+
+**Import addition** — `ohlcv_utils.py` already has `from typing import Any` (line 13), `import pandas as pd` (line 14). Only one new import needed. Add **at the top of the file** (after line 15, before any function definitions):
+
+```python
+from pandas.tseries.offsets import DateOffset
+```
+
+**Helper implementation** — append to end of `src/utils/ohlcv_utils.py` (after existing `_atr_series`):
+
+```python
+# === iter-tool-opt-gmd-polish: shared helpers ===
+
+TF_OFFSETS: dict[str, pd.Timedelta | DateOffset] = {
+    # Intraday minute
+    "1m":  pd.Timedelta(minutes=1),
+    "3m":  pd.Timedelta(minutes=3),
+    "5m":  pd.Timedelta(minutes=5),
+    "15m": pd.Timedelta(minutes=15),
+    "30m": pd.Timedelta(minutes=30),
+    # Hour
+    "1h":  pd.Timedelta(hours=1),
+    "2h":  pd.Timedelta(hours=2),
+    "4h":  pd.Timedelta(hours=4),
+    "6h":  pd.Timedelta(hours=6),
+    "8h":  pd.Timedelta(hours=8),
+    "12h": pd.Timedelta(hours=12),
+    # Day / week
+    "1d":  pd.Timedelta(days=1),
+    "3d":  pd.Timedelta(days=3),
+    "1w":  pd.Timedelta(weeks=1),
+    # Month (calendar-aware; 28-31 days not fixed)
+    "1M":  DateOffset(months=1),
+}
+
+
+def _to_pd_timestamp_utc(ts_val: Any) -> pd.Timestamp:
+    """Coerce OHLCV timestamp to tz-aware pd.Timestamp UTC.
+
+    Mirrors the isinstance dispatch at tools_perception.py:164-168 — OHLCV
+    timestamp column may be int/float ms-epoch OR datetime depending on the
+    exchange adapter. Both produce equivalent UTC pd.Timestamp here.
+    """
+    if isinstance(ts_val, (int, float)):
+        return pd.Timestamp(ts_val, unit="ms", tz="UTC")
+    ts = pd.Timestamp(ts_val)
+    return ts.tz_localize("UTC") if ts.tz is None else ts.tz_convert("UTC")
+
+
+def _fmt_candle_time(dt: pd.Timestamp, tf: str) -> str:
+    """Format a candle's open-time per tf granularity.
+
+    Unified dispatch shared by OHLCV table row rendering AND in-progress
+    candle hint rendering (both consumers in tools_perception.get_market_data).
+
+    The OKX/CCXT timeframe `"1M"` is **case-sensitive** (uppercase M = month,
+    lowercase m = minute) — `"1M"` is checked first BEFORE `tf.lower()` to
+    avoid the lowered `"1m"` accidentally matching the month branch.
+
+    Unknown tf falls back to `%Y-%m-%d` (matches existing default fallback at
+    tools_perception.py:175). Does NOT raise — preserves backward-compat.
+    """
+    if tf == "1M":  # month — case-sensitive uppercase; must be checked before lower()
+        return dt.strftime("%Y-%m")
+    tf_lower = tf.lower()
+    if tf_lower in ("1m", "3m", "5m", "15m", "30m"):
+        return dt.strftime("%H:%M")
+    if tf_lower in ("1h", "2h", "4h", "6h", "8h", "12h"):
+        return dt.strftime("%m-%d %H:%M")
+    if tf_lower in ("1d", "3d", "1w"):
+        return dt.strftime("%Y-%m-%d")
+    return dt.strftime("%Y-%m-%d")  # degraded fallback for unknown tf
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py -v
+```
+
+Expected: all 14 helper tests PASS.
+
+- [ ] **Step 5: Run full GMD suite to confirm no regressions**
+
+```bash
+uv run pytest tests/test_iter_w2r2_next_d_goldens.py tests/test_tool_enhancement.py tests/test_tools.py tests/test_trader_agent.py -v
+```
+
+Expected: all pre-existing tests PASS (helpers are not yet wired into get_market_data).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/utils/ohlcv_utils.py tests/test_iter_tool_opt_gmd_polish.py
+git commit -m "$(cat <<'EOF'
+iter-tool-opt-gmd-polish (1/7): TF_OFFSETS + helpers
+
+Add shared helpers used by RVol column rendering (Task 2) and in-progress
+candle hint (Task 3):
+
+- TF_OFFSETS: CCXT 15-tf duration dict (1m/3m/5m/15m/30m/1h/2h/4h/6h/
+  8h/12h/1d/3d/1w/1M); 1M uses pd.DateOffset for calendar-aware month
+- _to_pd_timestamp_utc: coerce int ms-epoch OR datetime → tz-aware
+  pd.Timestamp UTC, mirrors tools_perception.py:164-168 dispatch
+- _fmt_candle_time: unified strftime per tf, replaces inline 3-branch
+  dispatch at tools_perception.py:169-175; degraded fallback for unknown
+  tf returns ISO date (no raise, backward-compat preserved)
+
+No behavior change yet; helpers wired in subsequent tasks.
+
+Spec: docs/superpowers/specs/2026-05-28-iter-tool-opt-gmd-polish-design.md §2.2
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 2: 议题 1 — `RVol(×SMA20)` column in OHLCV table
+
+**Files:**
+- Modify: `src/agent/tools_perception.py:157-198` (OHLCV table rendering)
+- Test: `tests/test_iter_tool_opt_gmd_polish.py` (append)
+
+- [ ] **Step 1: Write failing tests for RVol column**
+
+Append to `tests/test_iter_tool_opt_gmd_polish.py`:
+
+```python
+# === Task 2: RVol column ===
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+from tests.fixtures.multi_tf_ohlcv import (
+    df_5m_130bars, df_5m_anomaly,
+    df_4h_250bars, df_1d_250bars,  # used by TestInProgressHint (Task 3)
+    fake_ticker_81870,
+)
+
+
+def _build_gmd_deps(ticker, ohlcv_by_tf, symbol="BTC/USDT:USDT", tf="5m"):
+    """Local copy of _build_deps from test_iter_w2r2_next_d_goldens.
+
+    Intentional copy (not import) to avoid coupling this iter's tests to a
+    sibling test file's internal helper. If `_build_deps` proves stable across
+    iter boundaries, a future refactor can promote it to
+    `tests/fixtures/multi_tf_ohlcv.py` co-located with the fixtures it consumes.
+    """
+    from src.services.technical import TechnicalAnalysisService
+    deps = MagicMock()
+    deps.symbol = symbol
+    deps.timeframe = tf
+    deps.technical = TechnicalAnalysisService()
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=ticker)
+
+    async def _ohlcv(sym, t, limit):
+        if t not in ohlcv_by_tf:
+            raise RuntimeError(f"no fixture for {t}")
+        return ohlcv_by_tf[t]
+
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=_ohlcv)
+    return deps
+
+
+class TestRVolColumn:
+    @pytest.mark.asyncio
+    async def test_rvol_column_header_present(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 1: OHLCV table header has RVol(×SMA20) column."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "RVol(×SMA20)" in out, f"RVol column header missing: {out[:600]}"
+
+    @pytest.mark.asyncio
+    async def test_rvol_values_have_x_suffix(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 1: each RVol value renders with × suffix (e.g. `1.00×`)."""
+        import re
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        # Extract OHLCV section: split at next section header `=== Period`
+        # NOT just `===` (the Recent Candles header has its own closing `===`
+        # that would truncate the section to just the header tail).
+        section = out.split("=== Recent Candles")[1].split("=== Period")[0]
+        # At least one row should have a `N.NN×` value
+        assert re.search(r"\d+\.\d{2}×", section), \
+            f"No RVol value with × suffix found in OHLCV section: {section[:600]}"
+
+    @pytest.mark.asyncio
+    async def test_rvol_numeric_matches_vol_over_sma20(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 1: RVol value == bar.volume / SMA(20) of last 20 closed bars
+        ending at that bar.
+
+        df_5m_130bars has constant volume=100, so every bar's vol / SMA(20) = 1.0.
+        """
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        section = out.split("=== Recent Candles")[1].split("=== Period")[0]
+        # Every visible RVol value (vol / 100 = 1.0) should render as `1.00×`
+        # — assert at least one such value appears (full match across all
+        # rows is brittle to column-alignment whitespace; presence is enough).
+        assert "1.00×" in section, \
+            f"Expected RVol 1.00× (vol/SMA=1.0 for constant-vol fixture); section={section[:600]}"
+
+    @pytest.mark.asyncio
+    async def test_rvol_marker_consistency_high_volume(
+        self, fake_ticker_81870, df_5m_anomaly,
+    ):
+        """Issue 1: when bar volume = 6× the baseline (input ratio), RVol on
+        rendered table shows ≈ 4.8× AND vol↑ marker present. Tests common
+        case (not FP-boundary).
+
+        df_5m_anomaly: bar 127 volume = 600 vs baseline 100. The rendered
+        RVol uses `rolling(20).mean()` AT bar 127, which **includes** bar
+        127's anomalous volume in the SMA window: SMA = (19×100 + 600)/20 =
+        125 → RVol = 600/125 = 4.8× (matches df_4h_recent_vol_spike fixture
+        docstring math). The 6× input ratio gets attenuated by the SMA
+        self-inclusion to ~4.8× — this is by design (RVol shows the bar's
+        volume relative to its own 20-bar context, not a forward-looking
+        baseline).
+        """
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_anomaly})
+        out = await get_market_data(deps)
+        # Common case: very-high RVol bar
+        # Find a row with a RVol ratio > 4 — should be the anomaly bar
+        import re
+        # Match `<digit(s)>.<digit><digit>×` and look for high values
+        rvol_matches = re.findall(r"(\d+)\.(\d{2})×", out)
+        high_rvols = [float(f"{a}.{b}") for a, b in rvol_matches if int(a) >= 4]
+        assert high_rvols, \
+            f"Expected at least one RVol ≥ 4.00× from anomaly fixture; out: {out[:600]}"
+        assert "vol↑" in out, \
+            f"vol↑ marker should accompany high RVol; out: {out[:600]}"
+
+    @pytest.mark.asyncio
+    async def test_rvol_marker_consistency_low_volume(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 1: when RVol << 2, no vol↑ marker.
+
+        df_5m_130bars: constant volume → RVol ≈ 1.00×, no vol↑.
+        """
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        # In a constant-volume fixture, no bar should trigger vol↑
+        section = out.split("=== Recent Candles")[1].split("=== Period")[0]
+        assert "vol↑" not in section, \
+            f"vol↑ should not fire on constant-volume fixture; section: {section[:600]}"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestRVolColumn -v
+```
+
+Expected: all 5 tests FAIL (RVol column not yet implemented).
+
+- [ ] **Step 3: Implement RVol column in `src/agent/tools_perception.py`**
+
+Modify `src/agent/tools_perception.py:157-198` (OHLCV table generation block). Replace the existing header line and per-row formatting:
+
+```python
+    # === Recent Candles (OHLCV with markers + RVol column) ===
+    vol_sma = df_closed["volume"].rolling(20).mean()
+    atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None
+    candle_lines: list[str] = [
+        f"{'Time (open UTC)':<16} {'Open':>10} {'High':>10} {'Low':>10} "
+        f"{'Close':>10} {'Vol':>10}  {'RVol(×SMA20)':>12}  Markers"
+    ]
+    for idx in display_df.index:
+        row = df_closed.loc[idx]
+        ts_val = row["timestamp"]
+        # Use shared helper for both pd.Timestamp coercion and tf-aware formatting
+        dt = _to_pd_timestamp_utc(ts_val)
+        time_str = _fmt_candle_time(dt, timeframe)
+
+        markers: list[str] = []
+        vol_sma_at = vol_sma.loc[idx] if idx in vol_sma.index else None
+        # Compute RVol; degraded fallback `—` when SMA(20) not yet ready
+        if vol_sma_at is not None and not pd.isna(vol_sma_at) and float(vol_sma_at) > 0:
+            rvol = float(row["volume"]) / float(vol_sma_at)
+            rvol_str = f"{rvol:.2f}×"
+            if float(row["volume"]) > 2 * float(vol_sma_at):
+                markers.append("vol↑")
+        else:
+            rvol_str = "—"
+        atr_at = None
+        if atr_series is not None and idx in atr_series.index:
+            atr_at = atr_series.loc[idx]
+        if atr_at is not None and not pd.isna(atr_at) and float(atr_at) > 0:
+            if (float(row["high"]) - float(row["low"])) > 2 * float(atr_at):
+                markers.append("range↑")
+        marker_str = " ".join(markers)
+
+        candle_lines.append(
+            f"{time_str:<16} {row['open']:>10.2f} {row['high']:>10.2f} "
+            f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  "
+            f"{rvol_str:>12}  {marker_str}".rstrip()
+        )
+```
+
+Also import the helpers — at the top of `get_market_data` function body (currently has `from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series`), add the new helpers:
+
+```python
+    from src.utils.ohlcv_utils import (
+        _live_price, _closed_bars, _atr_series,
+        _to_pd_timestamp_utc, _fmt_candle_time,
+    )
+```
+
+Remove the now-unused `from datetime import datetime, timezone` import inside this function ONLY if it has no other use. **Check**: it's also used at line 98 (`fetch_ts = datetime.now(...)`) → keep the import.
+
+Delete the now-dead inline dispatch lines 165-175 (replaced by helper calls above) — see the diff in Step 3 already replaces them.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestRVolColumn -v
+```
+
+Expected: all 5 tests PASS.
+
+- [ ] **Step 5: Run full GMD suite to catch regressions**
+
+```bash
+uv run pytest tests/test_iter_w2r2_next_d_goldens.py::TestGMDGolden tests/test_tool_enhancement.py -v -k "get_market_data"
+```
+
+Expected: all pre-existing tests PASS (RVol is additive — doesn't break existing column / marker assertions).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/agent/tools_perception.py tests/test_iter_tool_opt_gmd_polish.py
+git commit -m "$(cat <<'EOF'
+iter-tool-opt-gmd-polish (2/7): RVol(×SMA20) column in OHLCV table
+
+Issue 1 (P1) — close 29.6% systematic agent hand-compute of vol/SMA(20)
+ratio per principle 5 (interface loop closure).
+
+Add per-bar RVol column to OHLCV table:
+- Header: `RVol(×SMA20)` right-aligned width 12, between Vol and Markers
+- Values: `<X.XX>×` format matching agent reasoning idiom ("1.56× SMA avg")
+- Degraded fallback `—` when SMA(20) not yet ready (degraded display window)
+- `vol↑` marker preserved as visual-scan cue (RVol provides magnitude)
+
+Also replace inline 3-branch tf strftime dispatch (line 169-175) with
+shared `_fmt_candle_time` helper (Task 1) — unifies OHLCV row rendering
+with in-progress hint formatting (Task 3 will consume same helper).
+
+Spec: §2.1
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 3: 议题 2 — in-progress candle hint in OHLCV header
+
+**Files:**
+- Modify: `src/agent/tools_perception.py:194-197` (Recent Candles section header)
+- Test: `tests/test_iter_tool_opt_gmd_polish.py` (append)
+
+- [ ] **Step 1: Write failing tests for in-progress hint**
+
+Append to `tests/test_iter_tool_opt_gmd_polish.py`:
+
+```python
+# === Task 3: in-progress candle hint ===
+
+class TestInProgressHint:
+    @pytest.mark.asyncio
+    async def test_in_progress_indicator_5m(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 2: OHLCV header contains 'in-progress HH:MM still open, closes at HH:MM'
+        for intraday 5m tf."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        # df_5m_130bars uses start_ms=1_700_000_000_000 (= 2023-11-14 22:13:20 UTC)
+        # so the in-progress bar = closed[129] open
+        # We assert presence of marker + closes-at clause, not exact times
+        # (start_ms makes exact-time assertion brittle if fixture changes).
+        assert "in-progress " in out
+        assert "still open, closes at " in out
+
+    @pytest.mark.asyncio
+    async def test_in_progress_indicator_4h_format(
+        self, fake_ticker_81870, df_4h_250bars,
+    ):
+        """Issue 2: 4h tf uses MM-DD HH:MM format in in-progress hint."""
+        import re
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(
+            fake_ticker_81870, {"4h": df_4h_250bars}, tf="4h",
+        )
+        out = await get_market_data(deps, timeframe="4h")
+        # Header should contain `in-progress <MM-DD HH:MM> still open, closes at <MM-DD HH:MM>`
+        m = re.search(
+            r"in-progress (\d{2}-\d{2} \d{2}:\d{2}) still open, closes at (\d{2}-\d{2} \d{2}:\d{2})",
+            out,
+        )
+        assert m, f"4h in-progress hint missing or wrong format; out={out[:1200]}"
+
+    @pytest.mark.asyncio
+    async def test_in_progress_indicator_1d_format(
+        self, fake_ticker_81870, df_1d_250bars,
+    ):
+        """Issue 2: 1d tf uses YYYY-MM-DD format."""
+        import re
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(
+            fake_ticker_81870, {"1d": df_1d_250bars}, tf="1d",
+        )
+        out = await get_market_data(deps, timeframe="1d")
+        m = re.search(
+            r"in-progress (\d{4}-\d{2}-\d{2}) still open, closes at (\d{4}-\d{2}-\d{2})",
+            out,
+        )
+        assert m, f"1d in-progress hint missing or wrong format; out={out[:1200]}"
+
+    @pytest.mark.asyncio
+    async def test_in_progress_time_arithmetic_intraday(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 2: in-progress_open == last_closed_open + tf_offset.
+        in-progress_close == in-progress_open + tf_offset.
+
+        Use a custom 5m fixture with predictable last-closed timestamp.
+        """
+        import re, pandas as pd
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc, TF_OFFSETS
+        from src.agent.tools_perception import get_market_data
+
+        # Manually take df_5m_130bars and compute expected times
+        df = df_5m_130bars
+        # df has 129 closed + 1 in-progress; _closed_bars drops the last bar,
+        # so last closed = df.iloc[-2] (index 128).
+        last_closed_ts_raw = df["timestamp"].iloc[-2]
+        last_closed_dt = _to_pd_timestamp_utc(last_closed_ts_raw)
+        expected_open = last_closed_dt + TF_OFFSETS["5m"]
+        expected_close = expected_open + TF_OFFSETS["5m"]
+
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df})
+        out = await get_market_data(deps)
+        assert expected_open.strftime("%H:%M") in out, \
+            f"Expected in-progress open {expected_open.strftime('%H:%M')} in out; out={out[:1200]}"
+        assert expected_close.strftime("%H:%M") in out, \
+            f"Expected in-progress close {expected_close.strftime('%H:%M')} in out; out={out[:1200]}"
+
+    @pytest.mark.asyncio
+    async def test_in_progress_time_arithmetic_monthly(
+        self, fake_ticker_81870,
+    ):
+        """Issue 2: 1M tf must use pd.DateOffset (calendar-aware), not Timedelta
+        (months are 28-31 days, not fixed)."""
+        import pandas as pd
+        from tests.fixtures.multi_tf_ohlcv import _build
+        from src.agent.tools_perception import get_market_data
+
+        # Build a 1M fixture: 80 closed bars + 1 in-progress, starting 2020-01-01
+        # so last closed is around 2026-08-01 → in-progress=2026-09-01, closes=2026-10-01
+        # (or wherever the timeline lands — assert relative arithmetic, not absolutes)
+        closes = [50000.0 + i * 100 for i in range(81)]
+        df_1M = _build(
+            start_ms=int(pd.Timestamp("2020-01-01", tz="UTC").value / 1e6),
+            tf="1M", closes=closes,
+        )
+
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc, TF_OFFSETS
+        last_closed_dt = _to_pd_timestamp_utc(df_1M["timestamp"].iloc[-2])
+        expected_open = last_closed_dt + TF_OFFSETS["1M"]
+        expected_close = expected_open + TF_OFFSETS["1M"]
+
+        deps = _build_gmd_deps(fake_ticker_81870, {"1M": df_1M}, tf="1M")
+        out = await get_market_data(deps, timeframe="1M")
+
+        # 1M format = %Y-%m
+        assert expected_open.strftime("%Y-%m") in out, \
+            f"Expected monthly in-progress open {expected_open.strftime('%Y-%m')}; out={out[:1200]}"
+        assert expected_close.strftime("%Y-%m") in out, \
+            f"Expected monthly in-progress close {expected_close.strftime('%Y-%m')}; out={out[:1200]}"
+
+    @pytest.mark.asyncio
+    async def test_unsupported_tf_degraded_fallback(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 2: unknown tf → degraded fallback (no in-progress hint),
+        no raise. Backward-compat with existing default-fallback at line 175."""
+        from src.agent.tools_perception import get_market_data
+        # Synthesize a fixture with non-CCXT tf label "7m"
+        df = df_5m_130bars
+        deps = _build_gmd_deps(fake_ticker_81870, {"7m": df}, tf="7m")
+        # Should NOT raise
+        out = await get_market_data(deps, timeframe="7m")
+        # In-progress hint should be absent (or replaced by base header)
+        assert "in-progress" not in out, \
+            f"Unknown tf should skip in-progress hint; out={out[:1200]}"
+        # Recent Candles header should still appear (degraded fallback, not crash)
+        assert "=== Recent Candles" in out
+```
+
+**Note**: `df_5m_130bars` fixture has 130 rows = 129 closed + 1 in-progress (per fixture docstring). `_closed_bars(df)` at `ohlcv_utils.py:31` drops the last row, so `df_closed.iloc[-1]` is the last *closed* bar (open at row 128) and we compute in-progress hint relative to that. The 130th row of the input df is the *in-progress* candle's open time (but not used directly for hint — we add tf offset to the last *closed* candle's open time).
+
+Verify this assumption: read `tests/fixtures/multi_tf_ohlcv.py:_build()` to confirm row N has `timestamp = start_ms + N * tf_ms`. If row 128 has `timestamp = start + 128 * tf_ms`, then expected in-progress open = `start + 129 * tf_ms` (= row 129's timestamp = the in-progress candle's actual open time, which is exactly `row[-1].timestamp` in the un-closed df). So `last_closed_dt + tf_offset == df["timestamp"].iloc[-1]` (the in-progress bar's stamp). Tests rely on this equality.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestInProgressHint -v
+```
+
+Expected: all 6 tests FAIL (in-progress hint not yet implemented).
+
+- [ ] **Step 3: Implement in-progress hint in `src/agent/tools_perception.py`**
+
+Locate the `Recent Candles` section header at line 194-197 (currently):
+
+```python
+    sections.append(
+        f"=== Recent Candles ({timeframe}, last {display_count}, oldest-first by row) ===\n"
+        + "\n".join(candle_lines)
+    )
+```
+
+Replace with:
+
+```python
+    # Build in-progress candle hint header suffix (issue 2: agent time-window
+    # disambiguation; degraded fallback for unknown tf per spec §2.2)
+    in_progress_suffix = ""
+    if not display_df.empty:
+        offset = TF_OFFSETS.get(timeframe)
+        if offset is not None:
+            last_closed_dt = _to_pd_timestamp_utc(display_df["timestamp"].iloc[-1])
+            in_progress_open = last_closed_dt + offset
+            in_progress_close = in_progress_open + offset
+            in_progress_suffix = (
+                f"; in-progress {_fmt_candle_time(in_progress_open, timeframe)} "
+                f"still open, closes at {_fmt_candle_time(in_progress_close, timeframe)}"
+            )
+
+    sections.append(
+        f"=== Recent Candles ({timeframe}, last {display_count}, "
+        f"oldest-first by row{in_progress_suffix}) ===\n"
+        + "\n".join(candle_lines)
+    )
+```
+
+**Import placement**: `TF_OFFSETS` must be added to the existing helper-import block at the top of `get_market_data` function body (line 88-90 from Task 2 Step 3). The full import block should read:
+
+```python
+    from src.utils.ohlcv_utils import (
+        _live_price, _closed_bars, _atr_series,
+        _to_pd_timestamp_utc, _fmt_candle_time, TF_OFFSETS,
+    )
+```
+
+Do NOT do the conditional `from src.utils.ohlcv_utils import TF_OFFSETS` inside the `if not display_df.empty:` block — function-internal conditional imports re-resolve on each call (Python caches but the lookup still runs), and obscure the dependency graph.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestInProgressHint -v
+```
+
+Expected: all 6 tests PASS.
+
+- [ ] **Step 5: Run full GMD suite to check existing test compatibility**
+
+```bash
+uv run pytest tests/test_iter_w2r2_next_d_goldens.py::TestGMDGolden -v
+```
+
+Expected: pre-existing `test_gmd_ohlcv_table_has_markers_column` still passes (it asserts `"oldest-first by row"` substring, which remains).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/agent/tools_perception.py tests/test_iter_tool_opt_gmd_polish.py
+git commit -m "$(cat <<'EOF'
+iter-tool-opt-gmd-polish (3/7): in-progress candle hint in OHLCV header
+
+Issue 2 (P2) — disambiguate candle time-window for agent (cycle 2c09
+outlier wasted 3 GMD calls + 30s + ~3K tokens finding the in-progress
+candle).
+
+OHLCV Recent Candles header now includes:
+  "; in-progress <HH:MM> still open, closes at <HH:MM>"
+computed as last_closed_open + TF_OFFSETS[tf] and + 2× offset.
+
+Time format unified across OHLCV row + in-progress hint via
+_fmt_candle_time helper. 1M uses pd.DateOffset (calendar-aware).
+Unknown tf → degraded fallback (no hint, no crash) per spec §2.2.
+
+Spec: §2.2
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 4: 议题 3 — Delete `<N>-candle High-Low` row from Market Context
+
+**Files:**
+- Modify: `src/agent/tools_perception.py:148-153` (delete N-candle H-L block)
+- Test: `tests/test_iter_tool_opt_gmd_polish.py` (append)
+
+- [ ] **Step 1: Write failing test**
+
+Append to `tests/test_iter_tool_opt_gmd_polish.py`:
+
+```python
+# === Task 4: delete N-candle High-Low row ===
+
+class TestDeletedNCandleHL:
+    @pytest.mark.asyncio
+    async def test_no_n_candle_high_low_row(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 3: Market Context section no longer contains `<N>-candle High-Low`
+        row. 1.1% adoption in audit; 24h H/L (ticker section, 54.4% adoption)
+        is the surviving anchor."""
+        import re
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        # Old format: `30-candle High-Low: 76430 — 77594`
+        assert not re.search(r"\d+-candle High-Low:", out), \
+            f"N-candle High-Low row should be deleted; out={out[:1200]}"
+        # 24h H/L (from ticker) should still be present
+        assert "24h High:" in out and "24h Low:" in out, \
+            f"24h H/L should still be in ticker section as surviving anchor"
+        # Market Context section should still exist (ATR / Last bar vol remain)
+        assert "=== Market Context ===" in out
+        assert "ATR(14):" in out
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestDeletedNCandleHL -v
+```
+
+Expected: FAIL — `N-candle High-Low:` still in output.
+
+- [ ] **Step 3: Delete the N-candle High-Low block**
+
+In `src/agent/tools_perception.py:148-153`, remove this block:
+
+```python
+    if not display_df.empty:
+        ctx_lines.append(
+            f"{display_count}-candle High-Low: {display_df['low'].min():.0f} — {display_df['high'].max():.0f}"
+        )
+    else:
+        ctx_lines.append("Range: N/A")
+```
+
+Market Context section now has only `ATR(14)` + `Last bar vol` lines.
+
+- [ ] **Step 4: Run tests to verify pass**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestDeletedNCandleHL tests/test_iter_w2r2_next_d_goldens.py::TestGMDGolden -v
+```
+
+Expected: new test PASS; existing GMD tests still PASS (none asserts the deleted row).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/agent/tools_perception.py tests/test_iter_tool_opt_gmd_polish.py
+git commit -m "$(cat <<'EOF'
+iter-tool-opt-gmd-polish (4/7): delete N-candle High-Low row
+
+Issue 3 (P3) — 1.1% adoption (3/270 GMD reasoning blocks); agent mental
+model prefers time-anchored swing high/low (25.2%) or 24h H/L (54.4%)
+over abstract N-candle numeric range. Per spec §1.5 redundancy argument:
+24h H/L already carries the same anchor role; deletion is path pruning,
+not signal loss.
+
+Spec: §2.3
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 5: 议题 4 — Delete `Avg range` from Period summary
+
+**Files:**
+- Modify: `src/agent/tools_perception.py:200-217` (Period summary block)
+- Test: `tests/test_iter_tool_opt_gmd_polish.py` (append)
+- Update: `tests/test_iter_w2r2_next_d_goldens.py:241-251` `test_gmd_period_summary_section`
+
+- [ ] **Step 1: Write failing tests for Avg range deletion**
+
+Append to `tests/test_iter_tool_opt_gmd_polish.py`:
+
+```python
+# === Task 5: delete Avg range from Period summary ===
+
+class TestPeriodSummaryNoAvgRange:
+    @pytest.mark.asyncio
+    async def test_period_summary_no_avg_range(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 4: Period summary section no longer contains Avg range row.
+        ~3% adoption (1.5% verbatim + 1.9% concept) — dead metric."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        # Old: `Avg range (H-L):    last 5 N / prior 5 M (R×)`
+        assert "Avg range" not in out, \
+            f"Avg range should be deleted from Period summary; out={out[:1200]}"
+
+    @pytest.mark.asyncio
+    async def test_period_summary_keeps_avg_vol_and_net_delta(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Issue 4: Period summary retains Avg vol (~10-15% adoption) and
+        Net Δclose (~20-25% adoption)."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "=== Period summary" in out
+        assert "Avg vol:" in out, f"Avg vol should remain; out={out[:1200]}"
+        assert "Net Δclose:" in out, f"Net Δclose should remain; out={out[:1200]}"
+```
+
+- [ ] **Step 2: Update existing test that will break**
+
+In `tests/test_iter_w2r2_next_d_goldens.py:241-251`, modify `test_gmd_period_summary_section`:
+
+```python
+    @pytest.mark.asyncio
+    async def test_gmd_period_summary_section(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """B4: Period summary section after OHLCV table; 2 fields (Avg vol +
+        Net Δclose) post iter-tool-opt-gmd-polish issue 4 deletion of
+        Avg range (~3% adoption)."""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===" in out
+        assert "Avg vol:" in out
+        assert "Net Δclose:" in out
+        # Avg range deleted per iter-tool-opt-gmd-polish issue 4 (~3% adoption)
+        assert "Avg range" not in out
+```
+
+- [ ] **Step 3: Run tests to verify the new ones fail and the updated existing one fails too (until impl)**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestPeriodSummaryNoAvgRange tests/test_iter_w2r2_next_d_goldens.py::TestGMDGolden::test_gmd_period_summary_section -v
+```
+
+Expected: all 3 tests FAIL (Avg range still in output).
+
+- [ ] **Step 4: Implement deletion in `src/agent/tools_perception.py:200-217`**
+
+Replace the Period summary block:
+
+```python
+    # === Period summary ===
+    if len(df_closed) >= 10:
+        last_5 = df_closed.iloc[-5:]
+        prior_5 = df_closed.iloc[-10:-5]
+        avg_vol_last = float(last_5["volume"].mean())
+        avg_vol_prior = float(prior_5["volume"].mean())
+        vol_ratio = avg_vol_last / avg_vol_prior if avg_vol_prior > 0 else 0.0
+        net_delta_last = float(df_closed["close"].iloc[-1] - df_closed["close"].iloc[-5])
+        net_delta_prior = float(df_closed["close"].iloc[-6] - df_closed["close"].iloc[-10])
+        summary = (
+            "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===\n"
+            f"Avg vol:     last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
+            f"Net Δclose:  last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
+        )
+        sections.append(summary)
+```
+
+Removed: `avg_rng_last`, `avg_rng_prior`, `rng_ratio` computations + the `Avg range (H-L):` line. Tightened the label column from 20 chars to 13 (`"Avg vol:     "` / `"Net Δclose:  "`) since the 3rd-line label `Avg range (H-L):` was the longest.
+
+- [ ] **Step 5: Run tests to verify pass**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestPeriodSummaryNoAvgRange tests/test_iter_w2r2_next_d_goldens.py::TestGMDGolden -v
+```
+
+Expected: all PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/agent/tools_perception.py tests/test_iter_tool_opt_gmd_polish.py tests/test_iter_w2r2_next_d_goldens.py
+git commit -m "$(cat <<'EOF'
+iter-tool-opt-gmd-polish (5/7): delete Avg range from Period summary
+
+Issue 4 (P3) — Avg range (H-L) only ~3% adoption (1.5% verbatim + 1.9%
+concept) per brainstorm field-level evidence; Avg vol kept (~10-15%
+adoption) and Net Δclose kept (~20-25%). Period summary now 2 metrics
+instead of 3.
+
+Also update test_gmd_period_summary_section in existing golden file
+to drop Avg range assertion and add a `not in` guard against future
+re-introduction.
+
+Spec: §2.4
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 6: 议题 5+6 — Docstring updates across 3 channels (CH-DESC block-style + CH-ARGS detailed + dev-only cleanup)
+
+**Files:**
+- Modify: `src/agent/trader.py:124-140` — inner ctx-receiver docstring; **Args block** is the LLM-facing parameter doc channel (CH-ARGS via `parameters_json_schema`); issue 6 clamp text lives here
+- Modify: `src/agent/tools_descriptions.py:48-69` — `GET_MARKET_DATA_DESCRIPTION` (CH-DESC, LLM-facing description via `@tool(description=...)` override, bypasses griffe, block-style preserved)
+- Modify: `src/agent/tools_perception.py:51-87` — impl docstring is **dev-only** (NOT read by pydantic-ai); lightweight cleanup only (drop "volume ratio" drift)
+- Test: `tests/test_iter_tool_opt_gmd_polish.py` (append)
+
+**Critical**: per spec §2.5 channel summary (verified by `test_dual_mode_tool_wrapper`):
+- **CH-DESC** (`tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION`): block-style preserved — passed verbatim via `@tool(description=...)`, bypasses griffe. This is the main LLM-facing description channel.
+- **CH-ARGS** (`trader.py:124-140` inner ctx-receiver Args block): griffe parses into `parameters_json_schema`. This is the **only** LLM-facing parameter doc channel — issue 6 clamp text **must** live here.
+- **dev-only** (`tools_perception.py:51` impl docstring): NOT read by pydantic-ai. Lightweight cleanup only; do NOT craft for LLM style.
+
+- [ ] **Step 1: Write failing tests for CH-DESC + CH-ARGS content**
+
+Append to `tests/test_iter_tool_opt_gmd_polish.py`:
+
+```python
+# === Task 6: docstring updates across 3 channels ===
+
+class TestDocstringRewrite:
+    def test_ch_desc_description_contains_new_content(self):
+        """Issue 5: CH-DESC (tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION
+        override → tool_def.description) reflects new OHLCV table format
+        (RVol column + in-progress hint), drops 'volume ratio' fact-drift.
+        Block-style Example call/output preserved (bypasses griffe per
+        @tool(description=...) override; verified by test_dual_mode_tool_wrapper)."""
+        from src.agent.trader import create_trader_agent
+        from src.config import PersonaConfig
+
+        agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+        tool = agent._function_toolset.tools["get_market_data"]
+        desc = tool.tool_def.description
+
+        # Block-style sections still present (CH-DESC bypasses griffe)
+        assert "=== Ticker" in desc, "Ticker section header missing from CH-DESC"
+        assert "=== Recent Candles" in desc, "Recent Candles header missing"
+        assert "=== Period summary" in desc, "Period summary header missing"
+
+        # New content from this iter:
+        assert "RVol(×SMA20)" in desc or "RVol" in desc, \
+            f"RVol column documentation missing in CH-DESC: {desc!r}"
+        assert "in-progress" in desc, \
+            f"in-progress hint documentation missing in CH-DESC: {desc!r}"
+
+        # Markers semantics preserved:
+        assert "vol↑" in desc, "vol↑ marker semantics missing"
+        assert "range↑" in desc, "range↑ marker semantics missing"
+
+        # Fact-only fix: 'volume ratio' historical drift cleaned up
+        # (technical service does not surface volume ratio in indicators;
+        # actual ratio is in `Last bar vol (X× SMA(20) avg)` callout and new RVol column).
+        # We don't assert absence of literal word "volume ratio" since the
+        # Last bar vol line still uses "ratio" concept; instead assert the new
+        # RVol semantics and the deletion of Avg range from Period summary docs.
+        assert "Avg range" not in desc, \
+            f"Avg range should be removed from Period summary docs: {desc!r}"
+
+    def test_candle_count_clamp_text_in_params_schema(self):
+        """Issue 6: clamp explicit text reaches LLM via CH-ARGS channel
+        (trader.py:124-140 inner ctx-receiver docstring's Args block →
+        parameters_json_schema), NOT via CH-DESC (which carries only the
+        function-level description).
+
+        Per spec §2.5 channel mapping (verified by test_dual_mode_tool_wrapper):
+        griffe parses the decorated function's own Args block — which for
+        get_market_data lives at trader.py:124-140 inner ctx-receiver,
+        NOT at tools_perception.py:51 impl (which is never decorated and
+        never reaches LLM).
+        """
+        from src.agent.trader import create_trader_agent
+        from src.config import PersonaConfig
+
+        agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+        tool = agent._function_toolset.tools["get_market_data"]
+        schema = tool.tool_def.parameters_json_schema
+        candle_count_desc = schema["properties"]["candle_count"]["description"]
+
+        # Clamp explicit per issue 6:
+        assert "Clamped to [10, 80]" in candle_count_desc, \
+            f"candle_count clamp explicit text missing in params schema: {candle_count_desc!r}"
+        # Reasoning behind floor / cap:
+        assert "minimum useful window" in candle_count_desc or "below 10" in candle_count_desc, \
+            f"floor=10 reasoning missing: {candle_count_desc!r}"
+        assert "exchange API" in candle_count_desc or "above 80" in candle_count_desc, \
+            f"cap=80 reasoning missing: {candle_count_desc!r}"
+```
+
+- [ ] **Step 2: Run test to verify failure**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestDocstringRewrite -v
+```
+
+Expected: both tests FAIL (CH-DESC content + CH-ARGS clamp text not yet written).
+
+- [ ] **Step 3: Rewrite `GET_MARKET_DATA_DESCRIPTION` (CH-DESC) in `src/agent/tools_descriptions.py:48-69`**
+
+Replace the constant with block-style (preserve `Example call:` / `Example output:` admonitions — CH-DESC bypasses griffe so block survives to LLM):
+
+```python
+GET_MARKET_DATA_DESCRIPTION = """Single-timeframe market data: ticker (last + bid/ask + 24h H/L + base volume), technical indicators (RSI / MACD / BB / ATR), market context (ATR percent of price + last-bar volume with SMA(20) ratio), the most recent N closed candles in OHLCV table form with per-bar volume ratio (RVol = vol / SMA(20)) and anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, net Δclose).
+
+All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row; the section header reports the in-progress candle's open and expected close timestamps.
+
+OHLCV columns: Time (open UTC) | Open | High | Low | Close | Vol | RVol(×SMA20) | Markers.
+- RVol = bar volume / SMA(20) of bar volumes (`2.95×` means the bar's volume is 2.95× the 20-bar average). Rendered for every closed bar; `—` when SMA(20) has not yet started (degraded display window).
+- Markers (upside-only thresholds): `vol↑` for bar volume > 2× SMA(20) of bar volumes; `range↑` for bar range (high - low) > 2× ATR(14); empty for neither threshold tripped. Markers remain alongside RVol — RVol provides the magnitude, markers provide a visual scan cue.
+
+Example call:
+    get_market_data(timeframe="5m", candle_count=30)
+
+Example output:
+    === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
+    Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
+    24h High: 82400.10 | 24h Low: 80120.00 | 24h base vol: 12345.67
+
+    === Technical Indicators (5m) ===
+    RSI(14): 58.20
+    ...
+
+    === Market Context ===
+    ATR(14): 245.30 (0.30% of price, 5m candles)
+    Last bar vol: 178.6 (1.35× SMA(20) avg)
+
+    === Recent Candles (5m, last 30, oldest-first by row; in-progress 14:25 still open, closes at 14:30) ===
+    Time (open UTC)        Open       High        Low      Close        Vol  RVol(×SMA20)  Markers
+    14:20              81865.00   81910.00   81860.00   81895.00      178.6         1.35×
+    14:15              81830.00   81870.00   81825.00   81865.00      400.0         3.02×  vol↑
+    ...
+
+    === Period summary (last 5 closed candles vs prior 5 closed candles) ===
+    Avg vol:     last 5 178.6 / prior 5 132.4 (1.35×)
+    Net Δclose:  last 5 -25.0 USDT / prior 5 +120.0 USDT
+"""
+```
+
+- [ ] **Step 4: Rewrite `trader.py:124-140` inner ctx-receiver docstring (CH-ARGS channel)**
+
+This is the **LLM-facing Args channel** — griffe parses this `Args:` block into `parameters_json_schema["properties"][...]["description"]` and ships it to the LLM, irrespective of `description=` override (verified in `test_dual_mode_tool_wrapper`). Issue 6 clamp text **must** live here.
+
+```python
+    @tool(description=GET_MARKET_DATA_DESCRIPTION)
+    async def get_market_data(
+        ctx: RunContext[TradingDeps],
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        candle_count: int = 30,
+    ) -> str:
+        """Single-timeframe market data: ticker + indicators + OHLCV table (with RVol column + in-progress hint) + period summary. LLM-visible description override: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION (carries Example block).
+
+        Args:
+            symbol: Trading symbol. Defaults to session symbol.
+            timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
+            candle_count: Number of closed candles in the OHLCV table. Default 30. Clamped to [10, 80]: values below 10 are raised to 10 (minimum useful window for indicators); values above 80 are capped to 80 (exchange API single-call limit).
+        """
+        from src.agent.tools_perception import get_market_data as _impl
+
+        return await _impl(ctx.deps, symbol, timeframe, candle_count)
+```
+
+**Key change vs current code**: line 136 currently has `candle_count: ... Range 10-80 (capped by exchange API).` — this is updated to the full "Clamped to [10, 80]: ... minimum useful window ... exchange API single-call limit" text. Issue 6 clamp explicit lives **here**.
+
+- [ ] **Step 5: Lightweight dev cleanup of `tools_perception.py:51` impl docstring**
+
+This docstring is **dev-only** — pydantic-ai does NOT read it (it's only invoked via `from ... import get_market_data as _impl; await _impl(...)`). Fact-correct it (drop drifted "volume ratio" mention; add brief note about new RVol column) but do **not** craft it for LLM-facing style. Aim for ~5 line cleanup, not the full content sync that the previous version called for.
+
+```python
+async def get_market_data(
+    deps: TradingDeps,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    candle_count: int = 30,
+) -> str:
+    """Single-timeframe market data implementation.
+
+    Renders: Ticker (last + bid/ask + 24h H/L + base volume); Technical Indicators
+    (RSI / MACD / BB / ATR via TechnicalAnalysisService); Market Context (ATR % of
+    price + last-bar vol/SMA(20) ratio); Recent Candles OHLCV table with per-bar
+    RVol(×SMA20) column + vol↑/range↑ markers + in-progress candle hint in the
+    section header; Period summary (Avg vol, Net Δclose) across last 5 vs prior 5.
+
+    All indicators / OHLCV rows / period summary are computed on closed bars
+    (via `_closed_bars(df)`); the in-progress candle is excluded from data but
+    its expected open/close timestamps appear in the section header.
+
+    NOTE: This impl docstring is dev-facing only. LLM-facing description comes
+    from `src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION` via the
+    `@tool(description=...)` override at `src.agent.trader.py:124`. Args
+    documentation for the LLM lives in the ctx-receiver docstring at the same
+    site (parsed by griffe into parameters_json_schema).
+
+    Args:
+        deps: TradingDeps with .exchange / .market_data / .technical wired
+        symbol: trading symbol (defaults to deps.symbol)
+        timeframe: CCXT timeframe (defaults to deps.timeframe)
+        candle_count: number of closed candles in OHLCV table; clamped to [10, 80]
+    """
+```
+
+The crucial points are: (1) tells future devs where the LLM-facing copy lives, (2) describes the rendered output faithfully without the drifted "volume ratio" claim, (3) keeps `Args:` for IDE / type tooling consistency but with concise descriptions (this Args is **not** the LLM-facing Args; it can be brief).
+
+- [ ] **Step 6: Run all docstring-related tests**
+
+```bash
+uv run pytest tests/test_iter_tool_opt_gmd_polish.py::TestDocstringRewrite \
+              tests/test_trader_agent.py::test_get_market_data_description_carries_example_output \
+              tests/test_trader_agent.py::test_dual_mode_tool_wrapper \
+              tests/test_trader_agent.py::test_set_next_wake_description_carries_examples_block -v
+```
+
+Expected: all PASS. The existing `test_get_market_data_description_carries_example_output` asserts Ticker / Recent Candles / Period summary / vol↑ / range↑ — all still present in the new CH-DESC.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/agent/tools_perception.py src/agent/tools_descriptions.py src/agent/trader.py tests/test_iter_tool_opt_gmd_polish.py
+git commit -m "$(cat <<'EOF'
+iter-tool-opt-gmd-polish (6/7): docstring updates across 3 channels
+
+Issues 5+6 (P3) — sync all 3 docstring channels to reflect new OHLCV
+table format (RVol column + in-progress hint), drop "volume ratio" drift
+from Technical Indicators description (fact-only: per technical.py:25-28,
+volume ratio is intentionally NOT in indicators output; was a historical
+docstring leak), and make candle_count clamp explicit.
+
+Channel responsibilities (per spec §2.5 + test_dual_mode_tool_wrapper empirical):
+- CH-DESC (tools_descriptions.py GET_MARKET_DATA_DESCRIPTION):
+  block-style preserved — passed verbatim via @tool(description=),
+  bypasses griffe. Carries full Example call/output + RVol/in-progress
+  text to LLM.
+- CH-ARGS (trader.py:124-140 inner ctx-receiver docstring Args block):
+  THE LLM-facing parameter docs channel. Issue 6 clamp text lives here:
+  parameters_json_schema["properties"]["candle_count"]["description"].
+- dev-only (tools_perception.py:51 impl docstring): NOT read by
+  pydantic-ai; lightweight cleanup only (drop drifted "volume ratio",
+  note where LLM-facing copy lives).
+
+Spec: §2.5
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 7: AC sweep + full-suite verification + ready-to-merge
+
+**Files:** None modified (verification only)
+
+- [ ] **Step 1: Run full test suite to detect any regression**
+
+```bash
+uv run pytest tests/ -v 2>&1 | tail -40
+```
+
+Expected: all tests PASS. Pre-iter baseline was 1859 tests; this iter adds ~14 new tests and modifies 1 (`test_gmd_period_summary_section`), so expected count ≈ 1873.
+
+If any test fails, diagnose and fix inline. **Do not skip / xfail**.
+
+- [ ] **Step 2: Hand-inspect one GMD sample to verify visual correctness**
+
+Run a real GMD render against an inline-built fixture (cannot call `@pytest.fixture`-decorated functions directly outside pytest — they raise `Fixtures are not meant to be called directly`):
+
+```bash
+uv run python -c "
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+from tests.fixtures.multi_tf_ohlcv import _build  # underlying builder (not @fixture)
+
+# Inline df_5m_anomaly body (avoids pytest fixture invocation):
+closes = [81000.0 + (i % 10) * 5.0 for i in range(130)]
+df = _build(start_ms=1_700_000_000_000, tf='5m', closes=closes)
+df.loc[127, 'volume'] = 600.0       # anomaly bar (RVol ≈ 4.8×)
+df.loc[128, 'high'] = df.loc[128, 'close'] + 200.0
+df.loc[128, 'low'] = df.loc[128, 'close'] - 200.0
+
+# Inline fake_ticker_81870 body:
+ticker = SimpleNamespace(
+    last=81870.50, bid=81870.40, ask=81870.60,
+    high=82500.00, low=81000.00, base_volume=1234.56,
+)
+
+async def main():
+    from src.agent.tools_perception import get_market_data
+    from src.services.technical import TechnicalAnalysisService
+    deps = MagicMock()
+    deps.symbol = 'BTC/USDT:USDT'
+    deps.timeframe = '5m'
+    deps.technical = TechnicalAnalysisService()
+    deps.market_data = MagicMock()
+    deps.market_data.get_ticker = AsyncMock(return_value=ticker)
+    deps.market_data.get_ohlcv_dataframe = AsyncMock(return_value=df)
+    out = await get_market_data(deps)
+    print(out)
+
+asyncio.run(main())
+" 2>&1 | head -60
+```
+
+Verify visually:
+- ✓ `RVol(×SMA20)` column header present in Recent Candles table
+- ✓ Each row has `<X.XX>×` value (or `—` for SMA-not-ready)
+- ✓ Recent Candles header includes `in-progress <time> still open, closes at <time>`
+- ✓ No `<N>-candle High-Low:` row in Market Context section
+- ✓ Period summary has 2 lines: `Avg vol:` and `Net Δclose:` (no `Avg range`)
+- ✓ Markers column still shows `vol↑` / `range↑` where appropriate
+
+- [ ] **Step 3: Check spec ACs**
+
+Cross-reference each AC in `docs/superpowers/specs/2026-05-28-iter-tool-opt-gmd-polish-design.md` §6:
+
+- [ ] AC1: `pytest tests/` passes (Step 1)
+- [ ] AC2: snapshot tests in `test_iter_tool_opt_gmd_polish.py` cover all visual changes (Tasks 2-5 tests)
+- [ ] AC3: CH-DESC (`GET_MARKET_DATA_DESCRIPTION` override) carries new OHLCV section description + RVol column + in-progress hint + drop Avg range, block-style preserved; CH-ARGS (`trader.py:124-140` inner Args) carries full clamp text; dev-only impl docstring fact-cleaned (drop "volume ratio"). Verified via Task 6 `test_path_b_description_contains_new_content` (CH-DESC) + `test_candle_count_clamp_text_in_params_schema` (CH-ARGS) + visual inspection of impl docstring
+- [ ] AC4: **strict `>` boundary (RVol == 2.0 must NOT trigger marker)** — per spec §2.1 / §5.2 deliberate decision to skip ε-boundary unit test (audit empirical RVol range 0.18×-3.90× has no values near 2.0; synthetic FP-boundary test would be brittle). AC4 verified by Step 2 hand-inspect spot-check + Task 2 common-case tests (`high_volume` RVol ≈ 4.8× → marker present; `low_volume` RVol ≈ 1.00× → marker absent). **No unit test asserts the strict `>` semantics directly** — this is a documented coverage gap, not a bug
+- [ ] AC5: in-progress time arithmetic across tfs (Task 3 tests including monthly)
+- [ ] AC6: candle_count clamp explicit in **CH-ARGS** (`trader.py:124-140` inner Args → `parameters_json_schema`) — verified by Task 6 `test_candle_count_clamp_text_in_params_schema`; CH-DESC carries only the function-level description per spec §2.5 channel separation
+- [ ] AC7: sim smoke 1 cycle no crash — Step 2 hand-inspect is the proxy
+
+- [ ] **Step 4: Verify total source change <100 lines (mini-iter safeguard)**
+
+```bash
+git diff --stat be123a4..HEAD -- src/
+```
+
+Expected: combined src changes (tools_perception.py + tools_descriptions.py + trader.py + ohlcv_utils.py) ≈ 75-85 lines. If >100, decision: mini-iter direct-merge path no longer applies, prepare standard PR per spec §4 safeguard.
+
+- [ ] **Step 5: Final commit (if any cleanup needed) or proceed to merge**
+
+If all checks pass, the feature branch `iter-tool-opt-gmd-polish` is ready for either:
+- **Mini-iter direct-merge** (≤100 lines src, simple issues): `git checkout main && git merge --no-ff iter-tool-opt-gmd-polish`
+- **Standard PR**: `gh pr create` (if exceeded mini-iter cap or user prefers review)
+
+**Do not merge / PR without explicit user instruction.** Report status and wait for user direction.
+
+---
+
+## Self-review checklist (re-walked after third-pass review fixes)
+
+This checklist was re-walked after applying second-pass fixes (S1 string-split, S2 channel-confused clamp, S3 fixture-as-function, M1 duplicate helper version, M2 RVol math error, M3 redundant import, M4 conditional import, AC4 explicit skip note) AND third-pass fixes (Critical 1 docstring channel architecture inverted: real LLM-facing channels are `tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION` for CH-DESC and `trader.py:124-140` inner docstring `Args:` for CH-ARGS; `tools_perception.py:51` impl docstring is dev-only and never reaches LLM; Major 2 path A inline rewrite labor was wasted, simplified to dev cleanup; Major 3 fixture import gap for df_4h_250bars / df_1d_250bars; Minor 4 helper copy intentional with comment). Each box ticked after **mental dry-run** of the corresponding step content, not just structural presence:
+
+- [x] **Spec coverage**: each spec §1.2 issue (1-6) has a dedicated task (Tasks 2-6); spec §1.2 issue 7a/7b are out-of-scope per spec §2.6 / wontfix-by-cost — no task needed
+- [x] **No placeholders**: every step has exact code / commands / expected output; no "TBD" or "implement later". Self-check: scanned for `TBD` / `TODO` / `fill in` keywords — none present
+- [x] **Type consistency**: helper signatures (`_to_pd_timestamp_utc(Any) -> pd.Timestamp`; `_fmt_candle_time(pd.Timestamp, str) -> str`; `TF_OFFSETS: dict[str, pd.Timedelta | DateOffset]`) match across Tasks 1-3. Task 3 import block updated to include `TF_OFFSETS` per M4 fix
+- [x] **Existing test impact**: Task 5 inline-updates `test_gmd_period_summary_section`; `test_get_market_data_description_carries_example_output` still passes (asserts surviving content); `test_get_market_data_fact_only` still passes (banned-words scan, structural-agnostic); `test_get_market_data_candle_count_clamp` still passes (clamp behavior unchanged)
+- [x] **Channel mapping** (re-corrected per third-pass review): Task 6 Step 3 `GET_MARKET_DATA_DESCRIPTION` (CH-DESC) keeps block-style; Step 4 places full clamp text in `trader.py:124-140` inner ctx-receiver docstring's `Args:` block (CH-ARGS — the true LLM-facing parameter channel per `test_dual_mode_tool_wrapper` evidence); Step 5 reduces `tools_perception.py:51` impl docstring to lightweight dev cleanup (not LLM-facing). Test `test_candle_count_clamp_text_in_params_schema` targets `parameters_json_schema` (CH-ARGS), not `tool_def.description` (CH-DESC)
+- [x] **Iteration ordering**: Task 1 (helpers) before Task 2 (RVol uses `_fmt_candle_time`) and Task 3 (in-progress uses `_to_pd_timestamp_utc` + `TF_OFFSETS` + `_fmt_candle_time`); Tasks 4-6 independent of helpers
+- [x] **Test code dry-run** (S1/S2 class): `test_rvol_values_have_x_suffix` split path verified — `.split("=== Period")[0]` reaches data rows (S1 fix); `test_ch_desc_description_contains_new_content` no longer asserts clamp on CH-DESC (S2 fix); `test_candle_count_clamp_text_in_params_schema` new — asserts on `schema["properties"]["candle_count"]["description"]` (CH-ARGS channel)
+- [x] **Fixture invocation safety**: Task 7 Step 2 hand-inspect script inlines fixture bodies (df_5m_anomaly + fake_ticker_81870), uses `_build` underlying builder + `SimpleNamespace` directly (S3 fix). No `@pytest.fixture`-decorated function called outside pytest
+- [x] **Import hygiene**: Task 1 Step 3 only adds `from pandas.tseries.offsets import DateOffset` (other imports already in `ohlcv_utils.py` line 13-14 per file head verification). Task 3 import block consolidates `TF_OFFSETS` with other helpers at function top, not inside conditional (M3/M4 fix)
+- [x] **Helper code single source**: Task 1 Step 3 only contains the corrected `_fmt_candle_time` (`1M` checked before `tf.lower()` to avoid lowered "1m" minute-branch shadow). No duplicate / dead-branch first version (M1 fix)
+- [x] **AC4 coverage gap explicit**: §6 AC4 documents the deliberate skip of ε-boundary unit test for strict `>` semantics; verified via Task 2 common-case tests + Task 7 Step 2 hand-inspect rather than synthetic FP-boundary unit test. Coverage gap acknowledged, not hidden
+- [x] **Docstring channels grounded in codebase** (Critical 1 fix): plan's CH-DESC / CH-ARGS / dev-only mapping verified against `trader.py:124-140` (decorated inner ctx-receiver) and `test_dual_mode_tool_wrapper` (test_trader_agent.py:272 — both `@tool` and `@tool(description=...)` modes parse Args from the decorated function's own docstring). `tools_perception.py:51` impl docstring confirmed dev-only (invoked via `from ... import as _impl; await _impl(...)`, never decorated)
+- [x] **Task 3 fixture imports** (Major 3 fix): Task 2 Step 1 fixture import block now includes `df_4h_250bars` + `df_1d_250bars` consumed by Task 3 `TestInProgressHint`. pytest fixture discovery requires fixture symbols imported into the test module namespace
+- [x] **Issue 6 (clamp) test target** (Critical 1 fix): `test_candle_count_clamp_text_in_params_schema` reads `parameters_json_schema["properties"]["candle_count"]["description"]` which sources from `trader.py:124-140` inner ctx-receiver Args section (Step 4); Step 4 contains the full "Clamped to [10, 80]... minimum useful window... exchange API single-call limit" text. Step 5 (impl dev cleanup) does **not** need this text since impl docstring isn't read by pydantic-ai
