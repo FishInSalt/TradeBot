@@ -448,9 +448,9 @@ class TestDocstringRewrite:
     def test_ch_desc_description_contains_new_content(self):
         """CH-DESC (tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION
         override → tool_def.description) reflects new OHLCV table format
-        (RVol column + in-progress hint), drops 'volume ratio' fact-drift.
-        Block-style Example call/output preserved (bypasses griffe per
-        @tool(description=...) override; verified by test_dual_mode_tool_wrapper)."""
+        (RVol column + in-progress hint). Block-style Example call/output
+        preserved (bypasses griffe per @tool(description=...) override;
+        verified by test_dual_mode_tool_wrapper)."""
         from src.agent.trader import create_trader_agent
         from src.config import PersonaConfig
 
@@ -464,8 +464,8 @@ class TestDocstringRewrite:
         assert "=== Period summary" in desc, "Period summary header missing"
 
         # New content from this iter:
-        assert "RVol(×SMA20)" in desc or "RVol" in desc, \
-            f"RVol column documentation missing in CH-DESC: {desc!r}"
+        assert "RVol(×SMA20)" in desc, \
+            f"RVol column header (literal `RVol(×SMA20)`) missing in CH-DESC: {desc!r}"
         assert "in-progress" in desc, \
             f"in-progress hint documentation missing in CH-DESC: {desc!r}"
 
@@ -495,8 +495,8 @@ class TestDocstringRewrite:
         # Clamp explicit:
         assert "Clamped to [10, 80]" in candle_count_desc, \
             f"candle_count clamp explicit text missing in params schema: {candle_count_desc!r}"
-        # Reasoning behind floor / cap:
-        assert "minimum useful window" in candle_count_desc or "below 10" in candle_count_desc, \
-            f"floor=10 reasoning missing: {candle_count_desc!r}"
-        assert "exchange API" in candle_count_desc or "above 80" in candle_count_desc, \
-            f"cap=80 reasoning missing: {candle_count_desc!r}"
+        # Reasoning behind floor / cap (strict — match the implementation literal):
+        assert "minimum useful window" in candle_count_desc, \
+            f"floor=10 reasoning ('minimum useful window') missing: {candle_count_desc!r}"
+        assert "exchange API" in candle_count_desc, \
+            f"cap=80 reasoning ('exchange API') missing: {candle_count_desc!r}"
