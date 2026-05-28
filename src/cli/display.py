@@ -10,6 +10,7 @@ from pydantic_ai.messages import (
     INVALID_JSON_KEY,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     TextPart,
     ThinkingPart,
     ToolCallPart,
@@ -921,11 +922,15 @@ def _render_action(
     tool_calls: list,
     returns_lookup: dict,
     cycle_id: str,
+    retry_lookup: dict | None = None,
 ) -> str:
     """Render Action section per spec §3.1 unified dispatch.
 
     Dispatch:
-      1. ret None → orphan single-line: `⚙ tool_name() [no return captured]`
+      1a. ret None + retry present → `✗ tool_name() [invalid call: <first line>]`
+          (pydantic-ai _wrap_error_as_retry — unknown tool / arg-validation 等)
+      1b. ret None + retry absent → `⚙ tool_name() [no return captured]`
+          (genuine orphan — tool_call_id mismatch; should not happen)
       2. is_tool_error → error single-line: `✗ tool_name(args) {fallback}`
       3. happy path (perception / execution / save_memory / drift) →
          unified head `{icon} {args_call}` + body (sectioned or plain
@@ -933,19 +938,46 @@ def _render_action(
       4. Drift signal: tool_name not in any registered frozenset → log
          warning (no rendering change; frozenset is drift guard only,
          not dispatch driver — spec §3.1).
+
+    retry_lookup: 可选 {tool_call_id → RetryPromptPart} map. `format_cycle_output`
+    构建后传入;既有 testsite 不传 → 默认 None → 走 1b 真 orphan 分支保持原行为.
     """
     n = len(tool_calls)
     plural = "tool" if n == 1 else "tools"
     lines = [f"\n▾ Action ({n} {plural})"]
+    retry_lookup = retry_lookup or {}
 
     for tcp in tool_calls:
         ret = returns_lookup.get(tcp.tool_call_id)
         if ret is None:
-            logger.warning(
-                "tool_call_id mismatch for %s in cycle %s",
-                tcp.tool_name, cycle_id,
-            )
-            lines.append(f"  ⚙ {tcp.tool_name}() [no return captured]")
+            retry = retry_lookup.get(tcp.tool_call_id)
+            if retry is not None:
+                # pydantic-ai 拒绝该 call (unknown tool / arg-validation 等;
+                # 均经 _wrap_error_as_retry → RetryPromptPart 同一路径).
+                # content 类型为 list[ErrorDetails] | str (messages.py:1321):
+                #   ModelRetry     → content: str
+                #   ValidationError → content: list[ErrorDetails]
+                content = retry.content
+                if isinstance(content, list):
+                    first_line = "; ".join(
+                        f"{'.'.join(map(str, e.get('loc', ())))}: {e.get('msg', '?')}"
+                        for e in content[:3]
+                    )[:100]
+                else:
+                    first_line = content.split("\n")[0][:100]
+                lines.append(
+                    f"  ✗ {escape(tcp.tool_name)}() "
+                    f"{escape(f'[invalid call: {first_line}]')}"
+                )
+            else:
+                logger.warning(
+                    "tool_call_id mismatch for %s in cycle %s",
+                    tcp.tool_name, cycle_id,
+                )
+                lines.append(
+                    f"  ⚙ {escape(tcp.tool_name)}() "
+                    f"{escape('[no return captured]')}"
+                )
             continue
 
         content_str = str(ret.content)
@@ -1062,13 +1094,19 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
         lines.append(_render_footer(ctx))
         return "\n".join(lines)
 
-    # === Build tool_call_id → ToolReturnPart map ===
+    # === Build tool_call_id → ToolReturnPart / RetryPromptPart maps ===
+    # RetryPromptPart 出现在 ModelRequest.parts (同位置不同类型 vs ToolReturnPart),
+    # 由 pydantic-ai _wrap_error_as_retry 在 unknown tool / arg-validation 等 reject
+    # 场景生成,需独立 capture 让 _render_action 可区分 retry-reject vs 真 orphan.
     tool_returns_lookup: dict = {}
+    retry_lookup: dict = {}
     for msg in ctx.messages:
         if isinstance(msg, ModelRequest):
             for part in msg.parts:
                 if isinstance(part, ToolReturnPart):
                     tool_returns_lookup[part.tool_call_id] = part
+                elif isinstance(part, RetryPromptPart) and part.tool_call_id is not None:
+                    retry_lookup[part.tool_call_id] = part
 
     # === ②③ 时序段 ===
     response_msgs = [m for m in ctx.messages if isinstance(m, ModelResponse)]
@@ -1084,7 +1122,10 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
             lines.append(_render_reasoning(thinking))
 
         if tool_calls:
-            lines.append(_render_action(tool_calls, tool_returns_lookup, ctx.cycle_id))
+            lines.append(_render_action(
+                tool_calls, tool_returns_lookup, ctx.cycle_id,
+                retry_lookup=retry_lookup,
+            ))
 
     # === Decision 段 ===
     # spec §4.4.2: 数据源 = ctx.final_text (= result.output) — 单源真相，

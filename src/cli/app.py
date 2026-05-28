@@ -334,6 +334,15 @@ def _render_recent_summaries(
     return f"{header_top}\n\n" + "\n\n".join(blocks)
 
 
+def _format_price_level_alert_trigger(context: PriceLevelAlertInfo) -> str:
+    """Build the PRICE LEVEL trigger suffix exposing alert_id for lifecycle joins."""
+    return (
+        f"\n\nPRICE LEVEL: {context.symbol} reached {context.current_price:.2f} "
+        f"(alert id={context.alert_id} {context.direction} {context.target_price:.2f} "
+        f"— {context.reasoning})"
+    )
+
+
 async def _build_recent_summaries_block(
     engine, session_id: str, n: int = 3,
 ) -> str:
@@ -512,11 +521,7 @@ async def run_agent_cycle(
         prompt += msg
     elif trigger_type == "alert" and context is not None:
         if isinstance(context, PriceLevelAlertInfo):
-            prompt += (
-                f"\n\nPRICE LEVEL: {context.symbol} reached {context.current_price:.2f} "
-                f"(your alert: {context.direction} {context.target_price:.2f} "
-                f"— {context.reasoning})"
-            )
+            prompt += _format_price_level_alert_trigger(context)
         else:
             direction = "dropped" if context.change_pct < 0 else "surged"
             prompt += (
