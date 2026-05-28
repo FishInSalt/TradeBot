@@ -475,10 +475,6 @@ def create_trader_agent(
         """Set stop loss on the current position.
 
         Auto-cancels any existing stop orders before placing the new one.
-        On OKX, stop and take_profit orders sharing an algoId render as `[OCO]`
-        in get_open_orders and are atomic — cancelling or triggering one leg
-        removes both. To replace only one leg, re-create the other leg
-        immediately after.
 
         Args:
             price: trigger price for the stop loss.
@@ -493,10 +489,6 @@ def create_trader_agent(
         """Set take profit on the current position.
 
         Auto-cancels any existing take_profit orders before placing the new one.
-        On OKX, stop and take_profit orders sharing an algoId render as `[OCO]`
-        in get_open_orders and are atomic — cancelling or triggering one leg
-        removes both. To replace only one leg, re-create the other leg
-        immediately after.
 
         Args:
             price: trigger price for the take profit.

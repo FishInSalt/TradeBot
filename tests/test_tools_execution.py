@@ -638,3 +638,41 @@ async def test_set_next_wake_at_return_no_reasoning_suffix():
     assert "in" in result and "min" in result
     assert "Reason:" not in result
     assert "align with" not in result
+
+
+# === iter-tool-opt-sl-tp-oco-strip: docstring drift guards ===
+# OCO/algoId not produced on current write path: set_stop_loss + set_take_profit
+# go through two independent create_order calls (only stopLossPrice or
+# takeProfitPrice), generating two ordType="conditional" algos with different
+# algoIds — never the ordType="oco" pair. Wrapper docstring must not describe
+# OCO behavior that the path does not produce.
+
+
+def _extract_wrapper_docstring(name: str) -> str:
+    import ast
+    tree = ast.parse(_TRADER_PY.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)):
+                return node.body[0].value.value
+    raise AssertionError(f"{name} wrapper docstring not found in trader.py")
+
+
+def test_set_stop_loss_wrapper_docstring_no_oco_drift():
+    doc = _extract_wrapper_docstring("set_stop_loss")
+    lower = doc.lower()
+    assert "oco" not in lower
+    assert "algoid" not in lower
+    assert "atomic" not in lower
+    # Invariant — the contract sentence must remain.
+    assert "Auto-cancels any existing stop orders" in doc
+
+
+def test_set_take_profit_wrapper_docstring_no_oco_drift():
+    doc = _extract_wrapper_docstring("set_take_profit")
+    lower = doc.lower()
+    assert "oco" not in lower
+    assert "algoid" not in lower
+    assert "atomic" not in lower
+    assert "Auto-cancels any existing take_profit orders" in doc

@@ -171,7 +171,7 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
 
 
 async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
-    """Set stop loss on current position. Auto-cancels existing stop orders."""
+    """Set stop loss on the current position. Auto-cancels existing stop orders."""
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if not positions:
         return "No open position to set stop loss on."
@@ -213,7 +213,7 @@ async def set_stop_loss(deps: TradingDeps, price: float, reasoning: str) -> str:
 
 
 async def set_take_profit(deps: TradingDeps, price: float, reasoning: str) -> str:
-    """Set take profit on current position. Auto-cancels existing take profit orders."""
+    """Set take profit on the current position. Auto-cancels existing take_profit orders."""
     positions = await deps.exchange.fetch_positions(deps.symbol)
     if not positions:
         return "No open position to set take profit on."
