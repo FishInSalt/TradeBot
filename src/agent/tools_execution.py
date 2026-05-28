@@ -341,7 +341,22 @@ async def add_price_level_alert(
     direction: str,
     reasoning: str,
 ) -> str:
-    """Set a one-shot price level alert. direction: 'above' or 'below'."""
+    """Set a one-shot price level alert at a specific price level.
+
+    The alert is evaluated on every market tick. It fires once the
+    condition holds, then is removed. If the condition already holds
+    at creation time, the alert fires on the next tick (the success
+    return string includes a "fires on next tick" suffix in that case).
+
+    Max 20 active alerts per session; all alerts for a symbol are
+    auto-cleared when the position on that symbol fully closes.
+
+    Args:
+        price: trigger price level.
+        direction: 'above' (fires when price >= level) or
+                   'below' (fires when price <= level).
+        reasoning: brief rationale for the alert (audit-only).
+    """
     if direction not in ("above", "below"):
         return f"Invalid direction: must be 'above' or 'below', got '{direction}'"
 
@@ -356,18 +371,20 @@ async def add_price_level_alert(
         reasoning=f"{direction} {price} | {reasoning}",
     )
 
-    # Immediate trigger warning
-    latest = deps.exchange._latest_price
-    if latest is not None:
-        if (direction == "above" and latest >= price) or \
-           (direction == "below" and latest <= price):
-            return (
-                f"Alert set (id={alert_id}), but WARNING: current price ({latest:.2f}) "
-                f"already {'above' if direction == 'above' else 'below'} {price:.2f}, "
-                f"may trigger immediately"
-            )
+    base = f"Price level alert set: {direction} {price:.2f} (id={alert_id})"
 
-    return f"Price level alert set: {direction} {price:.2f} (id={alert_id})"
+    # Already-met case → fires on next tick (success-path suffix, not a warning)
+    latest = deps.exchange._latest_price
+    if latest is not None and (
+        (direction == "above" and latest >= price)
+        or (direction == "below" and latest <= price)
+    ):
+        return (
+            f"{base} — fires on next tick "
+            f"(current {latest:.2f} already {direction} {price:.2f})"
+        )
+
+    return base
 
 
 def _lookup_alert(exchange, alert_id: str) -> dict | None:

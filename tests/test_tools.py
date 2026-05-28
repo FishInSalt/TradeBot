@@ -474,13 +474,16 @@ async def test_add_price_level_alert_limit_reached(deps):
 
 
 async def test_add_price_level_alert_immediate_warning(deps):
-    """When current price already past target, return warning."""
+    """When current price already past target, return string carries
+    `— fires on next tick` suffix on top of the unified success prefix
+    (iter-tool-opt-apla-docstring-return)."""
     from src.agent.tools_execution import add_price_level_alert
     deps.exchange.add_price_level_alert = MagicMock(return_value="abc123")
     deps.exchange._latest_price = 57000.0  # already below 58000
     result = await add_price_level_alert(deps, 58000.0, "below", reasoning="support")
-    assert "warning" in result.lower()
-    assert "immediately" in result.lower()
+    assert result.startswith("Price level alert set: below 58000.00 (id=abc123)")
+    assert "fires on next tick" in result
+    assert "already below 58000.00" in result
 
 
 async def test_set_next_wake_success(deps):
