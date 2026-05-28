@@ -54,36 +54,29 @@ async def get_market_data(
     timeframe: str | None = None,
     candle_count: int = 30,
 ) -> str:
-    """Single-timeframe market data: ticker, technical indicators (RSI / MACD / BB / ATR / volume ratio), market context (ATR with percent of price, last-bar volume with average ratio, display-window range), the most recent N closed candles in OHLCV table form with anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, avg range, net Δclose).
+    """Single-timeframe market data implementation.
 
-    All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row.
+    Renders: Ticker (last + bid/ask + 24h H/L + base volume); Technical Indicators
+    (RSI / MACD / BB / ATR via TechnicalAnalysisService); Market Context (ATR % of
+    price + last-bar vol/SMA(20) ratio); Recent Candles OHLCV table with per-bar
+    RVol(×SMA20) column + vol↑/range↑ markers + in-progress candle hint in the
+    section header; Period summary (Avg vol, Net Δclose) across last 5 vs prior 5.
 
-    Markers in OHLCV table (upside-only thresholds):
-        "vol↑"   — bar volume > 2× SMA(20) of bar volumes
-        "range↑" — bar range (high - low) > 2× ATR(14)
-        Empty    — neither threshold tripped.
+    All indicators / OHLCV rows / period summary are computed on closed bars
+    (via `_closed_bars(df)`); the in-progress candle is excluded from data but
+    its expected open/close timestamps appear in the section header.
 
-    Time column shows candle open in UTC.
+    NOTE: This impl docstring is dev-facing only. LLM-facing description comes
+    from `src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION` via the
+    `@tool(description=...)` override at `src.agent.trader.py:124`. Args
+    documentation for the LLM lives in the ctx-receiver docstring at the same
+    site (parsed by griffe into parameters_json_schema).
 
     Args:
-        symbol: Trading symbol. Defaults to session symbol.
-        timeframe: CCXT timeframe ("1m", "5m", "1h", etc.). Defaults to session primary timeframe.
-        candle_count: Number of closed candles in the OHLCV table. Default 30. Range 10-80 (capped by exchange API).
-
-    Example call:
-        get_market_data(timeframe="5m", candle_count=30)
-    Example output:
-        === Ticker (BTC/USDT:USDT @ 14:23:08 UTC) ===
-        Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
-        ...
-        === Recent Candles (5m, last 30, oldest-first by row) ===
-        Time (open UTC)   Open ... Vol     Markers
-        14:20         ...         245.3   vol↑
-        ...
-        === Period summary (last 5 closed candles vs prior 5 closed candles) ===
-        Avg vol:            last 5 178.6 / prior 5 132.4 (1.35×)
-        Avg range (H-L):    last 5 38.2 / prior 5 24.8 (1.54×)
-        Net Δclose:         last 5 -25.0 USDT / prior 5 +120.0 USDT
+        deps: TradingDeps with .exchange / .market_data / .technical wired
+        symbol: trading symbol (defaults to deps.symbol)
+        timeframe: CCXT timeframe (defaults to deps.timeframe)
+        candle_count: number of closed candles in OHLCV table; clamped to [10, 80]
     """
     import pandas as pd
     from datetime import datetime, timezone

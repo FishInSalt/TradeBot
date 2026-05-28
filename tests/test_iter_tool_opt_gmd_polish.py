@@ -440,3 +440,63 @@ class TestPeriodSummaryNoAvgRange:
         assert "=== Period summary" in out
         assert "Avg vol:" in out, f"Avg vol should remain; out={out[:1200]}"
         assert "Net Δclose:" in out, f"Net Δclose should remain; out={out[:1200]}"
+
+
+# === Task 6: docstring updates across 3 channels ===
+
+class TestDocstringRewrite:
+    def test_ch_desc_description_contains_new_content(self):
+        """CH-DESC (tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION
+        override → tool_def.description) reflects new OHLCV table format
+        (RVol column + in-progress hint), drops 'volume ratio' fact-drift.
+        Block-style Example call/output preserved (bypasses griffe per
+        @tool(description=...) override; verified by test_dual_mode_tool_wrapper)."""
+        from src.agent.trader import create_trader_agent
+        from src.config import PersonaConfig
+
+        agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+        tool = agent._function_toolset.tools["get_market_data"]
+        desc = tool.tool_def.description
+
+        # Block-style sections still present (CH-DESC bypasses griffe)
+        assert "=== Ticker" in desc, "Ticker section header missing from CH-DESC"
+        assert "=== Recent Candles" in desc, "Recent Candles header missing"
+        assert "=== Period summary" in desc, "Period summary header missing"
+
+        # New content from this iter:
+        assert "RVol(×SMA20)" in desc or "RVol" in desc, \
+            f"RVol column documentation missing in CH-DESC: {desc!r}"
+        assert "in-progress" in desc, \
+            f"in-progress hint documentation missing in CH-DESC: {desc!r}"
+
+        # Markers semantics preserved:
+        assert "vol↑" in desc, "vol↑ marker semantics missing"
+        assert "range↑" in desc, "range↑ marker semantics missing"
+
+        # Avg range deletion reflected:
+        assert "Avg range" not in desc, \
+            f"Avg range should be removed from Period summary docs: {desc!r}"
+
+    def test_candle_count_clamp_text_in_params_schema(self):
+        """Clamp explicit text reaches LLM via CH-ARGS channel (trader.py:124-140
+        inner ctx-receiver docstring's Args block → parameters_json_schema),
+        NOT via CH-DESC. Per spec §2.5 / test_dual_mode_tool_wrapper: griffe
+        parses the decorated function's own Args block — which for
+        get_market_data lives at trader.py:124-140 inner ctx-receiver, NOT at
+        tools_perception.py:51 impl."""
+        from src.agent.trader import create_trader_agent
+        from src.config import PersonaConfig
+
+        agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+        tool = agent._function_toolset.tools["get_market_data"]
+        schema = tool.tool_def.parameters_json_schema
+        candle_count_desc = schema["properties"]["candle_count"]["description"]
+
+        # Clamp explicit:
+        assert "Clamped to [10, 80]" in candle_count_desc, \
+            f"candle_count clamp explicit text missing in params schema: {candle_count_desc!r}"
+        # Reasoning behind floor / cap:
+        assert "minimum useful window" in candle_count_desc or "below 10" in candle_count_desc, \
+            f"floor=10 reasoning missing: {candle_count_desc!r}"
+        assert "exchange API" in candle_count_desc or "above 80" in candle_count_desc, \
+            f"cap=80 reasoning missing: {candle_count_desc!r}"
