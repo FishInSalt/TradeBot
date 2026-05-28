@@ -148,12 +148,6 @@ async def get_market_data(
     else:
         ctx_lines.append("Last bar vol: N/A")
 
-    if not display_df.empty:
-        ctx_lines.append(
-            f"{display_count}-candle High-Low: {display_df['low'].min():.0f} — {display_df['high'].max():.0f}"
-        )
-    else:
-        ctx_lines.append("Range: N/A")
     sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
 
     # === Recent Candles (OHLCV with markers + RVol column) ===

@@ -385,3 +385,28 @@ class TestInProgressHint:
             f"Unknown tf should skip in-progress hint; out={out[:1200]}"
         # Recent Candles header should still appear (degraded fallback, not crash)
         assert "=== Recent Candles" in out
+
+
+# === Task 4: delete N-candle High-Low row ===
+
+class TestDeletedNCandleHL:
+    @pytest.mark.asyncio
+    async def test_no_n_candle_high_low_row(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """Market Context no longer contains `<N>-candle High-Low` row.
+        Audit: 1.1% adoption; 24h H/L (ticker section, 54.4% adoption) is the
+        surviving anchor."""
+        import re
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        # Old format: `30-candle High-Low: 76430 — 77594`
+        assert not re.search(r"\d+-candle High-Low:", out), \
+            f"N-candle High-Low row should be deleted; out={out[:1200]}"
+        # 24h H/L (from ticker) should still be present
+        assert "24h High:" in out and "24h Low:" in out, \
+            f"24h H/L should still be in ticker section as surviving anchor"
+        # Market Context section should still exist (ATR / Last bar vol remain)
+        assert "=== Market Context ===" in out
+        assert "ATR(14):" in out
