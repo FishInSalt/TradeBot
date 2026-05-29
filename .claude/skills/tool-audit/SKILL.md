@@ -79,11 +79,13 @@ User 的请求落在以下任何一种语境，就该用这个 skill：
 
 **通用工具**（细节模板见 `references/empirical-queries.md`）：
 
+> **脚本路径区分（必读，防误调）**：下列步骤里有两类脚本。① **项目根 `scripts/`**：`tool_call_summary.py` / `fetch_session_ohlcv.py` / `analyze_sim.py` / `diff_sim.py`——shell cwd 即项目根，直接 `python scripts/xxx.py` 可跑。② **本 skill 自带 `scripts/`**：仅 `parse_session_log.py`——**不在**项目 `scripts/` 下，直接写 `scripts/parse_session_log.py` 会 FileNotFound；必须用 skill 起手宣告的 base directory（`<skill_base_dir>/scripts/parse_session_log.py`）。
+
 1. **Schema 侦察** (D1): `PRAGMA table_info(tool_calls)` + `PRAGMA table_info(agent_cycles)` + `SELECT name FROM sqlite_master WHERE type='table'`
 2. **Locate**：`grep -n "⚙ <tool_name>(" <session.log>` + DB `SELECT COUNT, GROUP BY args` 全量枚举调用
 3. **Quantitative** (D2): `scripts/tool_call_summary.py --session <id> --since all` + raw sqlite 对账。脚本默认 `--since=1d` 静默截断已知坑，**必加 `--since all` 或对账**
 4. **共享字段枚举** (D8)：读目标工具 + 同类工具源码 / 一个渲染样本，输出字段独占性表（哪些字段是目标工具独占、哪些与 MTS / HTF / Ticker 共享）。这表是下一步 attribution 分桶的前置依据
-5. **Pairing dump** (D3a)：用 `scripts/parse_session_log.py <session.log> <out.jsonl> <target_tool>` 把 session log 切成 (Action tools, Reasoning text) 记录
+5. **Pairing dump** (D3a)：用 **skill 自带脚本**（位于本 skill 目录下 `scripts/parse_session_log.py`，**不是**项目根的 `scripts/`——shell cwd 是项目根，必须用 skill 起手宣告的 base directory 拼绝对/相对路径，如 `python <skill_base_dir>/scripts/parse_session_log.py <session.log> <out.jsonl>`）把 session log 切成 (Action tools, Reasoning text) 记录。**只收 2 个位置参数**（session log + 输出 JSONL）；按目标工具过滤是下游步骤 6/8 在 JSONL 上做，脚本本身不收 target_tool 参数
 6. **Adoption attribution** (D3a)：对每个待量化标签（来自步骤 4 的字段独占性表），在五桶下分别统计 mentions，得出 per-bucket adoption rate
 7. **Attribution 模型自检** (D3b)：选 1-2 个已知 tool-only 的对照标签（不是目标工具的，是**邻居工具独占的**，如 MTS-only 的 `Range pos` / HTF-only 的 `100-period high`），跑同一 attribution 流程。期望：该标签 ≥80% 命中在对应桶、其他桶仅噪声（<10%）。通不过 → 配对脚本 bug，回炉
 8. **Co-call 模式分析**：从配对 JSONL 统计目标工具同 Action 共调的工具频次分布。`alone %`、`+ MTS`、`+ HTF`、`+ get_position`、`+ get_active_alerts` 等。揭示工具实际使用上下文 + adoption 上限边界 + 接口闭环候选议题（同 Action 内 ≥2 次目标工具 = multi-call 议题候选）
