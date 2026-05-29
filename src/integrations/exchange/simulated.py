@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -79,7 +80,6 @@ class SimulatedExchange(BaseExchange):
         self._pending_orders: list[_PendingOrder] = []
         self._leverage: dict[str, int] = {}
         self._latest_ticker: Ticker | None = None
-        self._prev_ticker: Ticker | None = None
         self._running = False
         self._lock = asyncio.Lock()
         self._error_count = 0
@@ -628,7 +628,6 @@ class SimulatedExchange(BaseExchange):
 
     async def _process_tick(self, ticker: Ticker) -> None:
         """Process a single tick -- match market orders, check liquidations, conditional orders, alerts."""
-        self._prev_ticker = self._latest_ticker  # save previous before overwrite (for fetch_trades bias)
         self._latest_ticker = ticker
         self._latest_price = ticker.last
 
@@ -1180,61 +1179,48 @@ class SimulatedExchange(BaseExchange):
         logger.info("SimulatedExchange closed")
 
     async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook:
-        """Synthesize order book from ticker (best bid/ask + ±0.01% steps)."""
-        import time
-        if self._latest_ticker is None:
-            return OrderBook(symbol=symbol, bids=[], asks=[], timestamp=None)
-        bid_price = self._latest_ticker.bid
-        ask_price = self._latest_ticker.ask
-        bids = [
-            OrderBookLevel(
-                price=round(bid_price * (1 - 0.0001 * i), 2),
-                amount=round(0.01 * (1 + i * 0.1), 4),
-            )
-            for i in range(depth)
-        ]
-        asks = [
-            OrderBookLevel(
-                price=round(ask_price * (1 + 0.0001 * i), 2),
-                amount=round(0.01 * (1 + i * 0.1), 4),
-            )
-            for i in range(depth)
-        ]
-        return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=int(time.time() * 1000))
+        """Fetch real order book via _ccxt (ccxtpro.okx public /market/books)."""
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            data = await self._ccxt.fetch_order_book(symbol, limit=depth)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim order book: {e}") from e
+        # CCXT-parsed entries are [price, amount, count?]; *_ swallows count.
+        # None-safe: skip malformed levels rather than crash on float(None).
+        bids = [OrderBookLevel(price=float(p), amount=float(a))
+                for p, a, *_ in data.get("bids", []) if p is not None and a is not None]
+        asks = [OrderBookLevel(price=float(p), amount=float(a))
+                for p, a, *_ in data.get("asks", []) if p is not None and a is not None]
+        # Explicit sort — self-enforce best-first instead of depending on CCXT's
+        # internal parse_order_book sort_by (untested-in-prod assumption otherwise).
+        bids.sort(key=lambda l: l.price, reverse=True)
+        asks.sort(key=lambda l: l.price)
+        # is None (not falsy) — a legitimate timestamp of 0 must not fall to wall-clock,
+        # mirroring fetch_trades' None-guard for cross-method consistency.
+        raw_ts = data.get("timestamp")
+        ts = raw_ts if raw_ts is not None else int(time.time() * 1000)
+        return OrderBook(symbol=symbol, bids=bids, asks=asks, timestamp=ts)
 
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
-        """Synthesize ~20-50 trades with direction biased by ticker change.
-
-        Note: `limit` is accepted for BaseExchange compatibility but unused — synthesis
-        count is fixed at random.randint(20, 50) regardless of requested limit. Safe in
-        practice because tool-layer callers always pass limit=500 and synthesized count
-        is far below, so no truncation scenario occurs.
-        """
-        import random
-        import time
-        if self._latest_ticker is None:
-            return []
-        # Direction bias based on prev → latest bid change
-        if self._prev_ticker is not None and self._prev_ticker.bid > 0:
-            price_change_pct = (self._latest_ticker.bid - self._prev_ticker.bid) / self._prev_ticker.bid
-        else:
-            price_change_pct = 0.0
-        buy_prob = 0.5 + max(-0.15, min(0.15, price_change_pct * 20))
-        n_trades = random.randint(20, 50)
-        mid = (self._latest_ticker.bid + self._latest_ticker.ask) / 2
-        now_ms = int(time.time() * 1000)
-        window_ms = 300_000  # 5 min, matches RECENT_TRADES_WINDOW_DEFAULT
+        """Fetch real recent trades via _ccxt (ccxtpro.okx public /market/trades)."""
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            data = await self._ccxt.fetch_trades(symbol, limit=limit)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim recent trades: {e}") from e
         trades: list[Trade] = []
-        for _ in range(n_trades):
-            side = "buy" if random.random() < buy_prob else "sell"
-            price = round(mid * (1 + random.uniform(-0.0002, 0.0002)), 2)
-            amount = round(random.uniform(0.001, 0.01), 4)
-            age_ms = random.randint(0, window_ms - 1)
-            trades.append(Trade(
-                timestamp=now_ms - age_ms,
-                side=side, price=price, amount=amount,
-                trade_id=None,
-            ))
+        for r in data:
+            ts, side, px, amt = r.get("timestamp"), r.get("side"), r.get("price"), r.get("amount")
+            if ts is None or side is None or px is None or amt is None:
+                continue  # None-safe: CCXT safe_* may return None on malformed rows
+            tid = r.get("id")
+            trades.append(Trade(timestamp=int(ts), side=str(side), price=float(px),
+                                amount=float(amt), trade_id=str(tid) if tid is not None else None))
+        trades.sort(key=lambda t: t.timestamp)
         return trades
 
     async def get_contract_size(self, symbol: str) -> float:

@@ -1,10 +1,12 @@
 """Tests for BaseExchange.fetch_order_book / fetch_trades / get_contract_size across OKX and Sim implementations."""
 from __future__ import annotations
 import pytest
-import random
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
-from src.integrations.exchange.base import OrderBook, OrderBookLevel, Trade, Ticker
+import ccxt as ccxt_sync
+import ccxt.async_support as ccxt
+
+from src.integrations.exchange.base import OrderBook
 from src.integrations.exchange.simulated import SimulatedExchange
 
 
@@ -22,108 +24,169 @@ def _make_sim(symbol: str = "BTC/USDT:USDT") -> SimulatedExchange:
     )
 
 
-def _prime_sim_ticker(ex: SimulatedExchange, last: float = 50000.0) -> None:
-    """Directly seed SimulatedExchange._latest_ticker without routing through _process_tick.
-
-    Exists because SimulatedExchange has no public set_ticker method —
-    real price updates come through the internal tick loop which we don't want
-    to exercise in unit tests.
-    """
-    ex._latest_ticker = Ticker(
-        symbol="BTC/USDT:USDT", last=last, bid=last - 0.5, ask=last + 0.5,
-        high=last + 100, low=last - 100, base_volume=1000.0, timestamp=0,
-    )
+def _sim_with_ccxt(symbol: str = "BTC/USDT:USDT") -> SimulatedExchange:
+    """_make_sim + 挂一个 MagicMock _ccxt（换源后两方法依赖 self._ccxt）。"""
+    ex = _make_sim(symbol)
+    ex._ccxt = MagicMock()
+    return ex
 
 
 @pytest.mark.asyncio
-async def test_sim_fetch_order_book_structure():
-    """Sim fetch_order_book returns correctly-structured OrderBook synthesized from ticker."""
-    ex = _make_sim()
-    _prime_sim_ticker(ex, last=50000.0)
+async def test_sim_fetch_order_book_maps_ccxt():
+    """映射 CCXT-parsed bids/asks → OrderBookLevel，保留 symbol + timestamp。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_order_book = AsyncMock(return_value={
+        "bids": [[100.0, 1.5, 1], [99.0, 2.0, 1]],
+        "asks": [[101.0, 1.0, 1], [102.0, 3.0, 1]],
+        "timestamp": 1700000000000,
+    })
     ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
     assert isinstance(ob, OrderBook)
     assert ob.symbol == "BTC/USDT:USDT"
-    assert len(ob.bids) == 20
-    assert len(ob.asks) == 20
-    # Bids descending (best first)
-    assert all(ob.bids[i].price >= ob.bids[i+1].price for i in range(len(ob.bids) - 1))
-    # Asks ascending
-    assert all(ob.asks[i].price <= ob.asks[i+1].price for i in range(len(ob.asks) - 1))
-    # Best bid below best ask
-    assert ob.bids[0].price < ob.asks[0].price
+    assert ob.timestamp == 1700000000000
+    assert [(l.price, l.amount) for l in ob.bids] == [(100.0, 1.5), (99.0, 2.0)]
+    assert [(l.price, l.amount) for l in ob.asks] == [(101.0, 1.0), (102.0, 3.0)]
 
 
 @pytest.mark.asyncio
-async def test_sim_fetch_order_book_custom_depth():
-    """Depth parameter respected."""
-    ex = _make_sim()
-    _prime_sim_ticker(ex, last=50000.0)
-    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=5)
-    assert len(ob.bids) == 5
-    assert len(ob.asks) == 5
+async def test_sim_fetch_order_book_explicit_sort():
+    """乱序输入 → 输出 bids 价降序 / asks 价升序（不依赖 CCXT 内部 sort）。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_order_book = AsyncMock(return_value={
+        "bids": [[98.0, 1.0], [100.0, 1.0], [99.0, 1.0]],
+        "asks": [[103.0, 1.0], [101.0, 1.0], [102.0, 1.0]],
+        "timestamp": 0,
+    })
+    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
+    assert [l.price for l in ob.bids] == [100.0, 99.0, 98.0]
+    assert [l.price for l in ob.asks] == [101.0, 102.0, 103.0]
 
 
 @pytest.mark.asyncio
-async def test_sim_fetch_trades_structure():
-    """Sim fetch_trades returns Trade list with valid fields."""
-    ex = _make_sim()
-    _prime_sim_ticker(ex, last=50000.0)
+async def test_sim_fetch_order_book_skips_none_fields():
+    """price/amount 为 None 的档位被跳过，不崩。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_order_book = AsyncMock(return_value={
+        "bids": [[100.0, 1.0], [None, 1.0], [99.0, None]],
+        "asks": [[101.0, 1.0]],
+        "timestamp": 0,
+    })
+    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
+    assert [l.price for l in ob.bids] == [100.0]
+    assert [l.price for l in ob.asks] == [101.0]
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_order_book_handles_2_and_3_element():
+    """2 元素 [p,a] 与 3 元素 [p,a,count] 都能映射（*_ 解包）。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_order_book = AsyncMock(return_value={
+        "bids": [[100.0, 1.0], [99.0, 2.0, 5]],
+        "asks": [[101.0, 1.0, 5], [102.0, 2.0]],
+        "timestamp": 0,
+    })
+    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
+    assert len(ob.bids) == 2 and len(ob.asks) == 2
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_order_book_depth_forwarded():
+    """depth 透传给 _ccxt.fetch_order_book(limit=depth)。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_order_book = AsyncMock(return_value={"bids": [[100.0, 1.0]], "asks": [[101.0, 1.0]], "timestamp": 0})
+    await ex.fetch_order_book("BTC/USDT:USDT", depth=5)
+    ex._ccxt.fetch_order_book.assert_awaited_once_with("BTC/USDT:USDT", limit=5)
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_order_book_not_started():
+    """未 start（无 _ccxt）→ RuntimeError。"""
+    ex = _make_sim()  # 不挂 _ccxt
+    with pytest.raises(RuntimeError, match="not started"):
+        await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_order_book_ratelimit():
+    """_ccxt 抛 RateLimitExceeded → 转 RateLimitHit。"""
+    from src.utils.cache import RateLimitHit
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_order_book = AsyncMock(side_effect=ccxt.RateLimitExceeded("429"))
+    with pytest.raises(RateLimitHit):
+        await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_trades_maps_ccxt():
+    """映射 CCXT unified trade dict → Trade。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_trades = AsyncMock(return_value=[
+        {"timestamp": 1700000000000, "side": "buy", "price": 70000.0, "amount": 0.01, "id": "t1"},
+        {"timestamp": 1700000001000, "side": "sell", "price": 70010.0, "amount": 0.02, "id": "t2"},
+    ])
     trades = await ex.fetch_trades("BTC/USDT:USDT", limit=500)
-    assert isinstance(trades, list)
-    assert 20 <= len(trades) <= 50
-    for t in trades:
-        assert isinstance(t, Trade)
-        assert t.side in ("buy", "sell")
-        assert t.price > 0
-        assert 0.001 <= t.amount <= 0.01
-        assert t.timestamp > 0
+    assert [(t.side, t.price, t.amount, t.trade_id) for t in trades] == [
+        ("buy", 70000.0, 0.01, "t1"), ("sell", 70010.0, 0.02, "t2"),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_sim_fetch_trades_direction_bias_rising():
-    """Over N rounds of rising ticker, cumulative buy volume > sell volume (bias 55%+).
-
-    Manually advances _prev_ticker each round because _prime_sim_ticker bypasses
-    _process_tick (which is where prev-save happens in production). Without this,
-    _prev_ticker stays None forever → price_change_pct = 0 → buy_prob = 0.5 → flat.
-    """
-    random.seed(42)
-    ex = _make_sim()
-    _prime_sim_ticker(ex, last=50000.0)  # seed initial _latest_ticker
-    total_buy = 0.0
-    total_sell = 0.0
-    price = 50000.0
-    for _ in range(100):
-        ex._prev_ticker = ex._latest_ticker  # manually advance (mimics _process_tick behavior)
-        price *= 1.005  # +0.5% each round
-        _prime_sim_ticker(ex, last=price)
-        trades = await ex.fetch_trades("BTC/USDT:USDT", limit=500)
-        total_buy += sum(t.amount for t in trades if t.side == "buy")
-        total_sell += sum(t.amount for t in trades if t.side == "sell")
-    total = total_buy + total_sell
-    buy_share = total_buy / total
-    assert buy_share >= 0.55, f"Expected buy bias >= 55% under rising ticker, got {buy_share:.2%}"
+async def test_sim_fetch_trades_sorted_ascending():
+    """乱序输入 → 按 timestamp 升序。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_trades = AsyncMock(return_value=[
+        {"timestamp": 3000, "side": "buy", "price": 1.0, "amount": 0.01, "id": "c"},
+        {"timestamp": 1000, "side": "buy", "price": 1.0, "amount": 0.01, "id": "a"},
+        {"timestamp": 2000, "side": "buy", "price": 1.0, "amount": 0.01, "id": "b"},
+    ])
+    trades = await ex.fetch_trades("BTC/USDT:USDT", limit=500)
+    assert [t.timestamp for t in trades] == [1000, 2000, 3000]
 
 
 @pytest.mark.asyncio
-async def test_sim_fetch_trades_direction_bias_falling():
-    """Over N rounds of falling ticker, cumulative sell volume > buy volume (bias 55%+)."""
-    random.seed(42)
-    ex = _make_sim()
-    _prime_sim_ticker(ex, last=50000.0)  # seed initial
-    total_buy = 0.0
-    total_sell = 0.0
-    price = 50000.0
-    for _ in range(100):
-        ex._prev_ticker = ex._latest_ticker  # manually advance
-        price *= 0.995  # -0.5% each round
-        _prime_sim_ticker(ex, last=price)
-        trades = await ex.fetch_trades("BTC/USDT:USDT", limit=500)
-        total_buy += sum(t.amount for t in trades if t.side == "buy")
-        total_sell += sum(t.amount for t in trades if t.side == "sell")
-    total = total_buy + total_sell
-    sell_share = total_sell / total
-    assert sell_share >= 0.55, f"Expected sell bias >= 55% under falling ticker, got {sell_share:.2%}"
+async def test_sim_fetch_trades_skips_none_fields():
+    """ts/side/price/amount 任一为 None 的成交被跳过。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_trades = AsyncMock(return_value=[
+        {"timestamp": 1000, "side": "buy", "price": 1.0, "amount": 0.01, "id": "ok"},
+        {"timestamp": None, "side": "buy", "price": 1.0, "amount": 0.01, "id": "bad_ts"},
+        {"timestamp": 2000, "side": None, "price": 1.0, "amount": 0.01, "id": "bad_side"},
+    ])
+    trades = await ex.fetch_trades("BTC/USDT:USDT", limit=500)
+    assert [t.trade_id for t in trades] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_trades_none_id_ok():
+    """id 为 None → trade_id=None，不跳过。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_trades = AsyncMock(return_value=[
+        {"timestamp": 1000, "side": "buy", "price": 1.0, "amount": 0.01, "id": None},
+    ])
+    trades = await ex.fetch_trades("BTC/USDT:USDT", limit=500)
+    assert len(trades) == 1 and trades[0].trade_id is None
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_trades_limit_forwarded_and_not_started():
+    """limit 透传；无 _ccxt → RuntimeError。"""
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_trades = AsyncMock(return_value=[])
+    await ex.fetch_trades("BTC/USDT:USDT", limit=500)
+    ex._ccxt.fetch_trades.assert_awaited_once_with("BTC/USDT:USDT", limit=500)
+    ex2 = _make_sim()  # 无 _ccxt
+    with pytest.raises(RuntimeError, match="not started"):
+        await ex2.fetch_trades("BTC/USDT:USDT", limit=500)
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_trades_ratelimit():
+    """_ccxt 抛 RateLimitExceeded → 转 RateLimitHit。"""
+    from src.utils.cache import RateLimitHit
+    ex = _sim_with_ccxt()
+    ex._ccxt.fetch_trades = AsyncMock(side_effect=ccxt.RateLimitExceeded("429"))
+    with pytest.raises(RateLimitHit):
+        await ex.fetch_trades("BTC/USDT:USDT", limit=500)
 
 
 @pytest.mark.asyncio
@@ -277,3 +340,43 @@ async def test_okx_fetch_order_book_handles_three_element_bidask_entries(mocker)
     assert len(ob.asks) == 2
     assert ob.asks[0].price == 50001.0
     assert ob.asks[0].amount == 0.8
+
+
+# --- ① mock 保真：用真实 CCXT parse 文档 raw 形态，验证 sim impl 假设的 parsed 形态成立 ---
+# per memory project_iter2_mock_fidelity_lesson —— 不用手写 parsed mock 自证自，
+# 而是喂 OKX 文档 raw 响应给真实 parse，确认 (3 元素 / float / 排序 / 字段名) 与 impl 一致。
+
+def test_ccxt_okx_parse_order_book_contract():
+    """真实 ccxt.okx().parse_order_book(文档 raw) → sim fetch_order_book 假设的 parsed 形态。"""
+    client = ccxt_sync.okx()
+    # OKX raw 盘口形态 ["px","sz","deprecated","numOrders"]（4 元素），乱序喂入
+    raw = {
+        "asks": [["100.60", "1.0", "0", "2"], ["100.50", "2.0", "0", "1"]],
+        "bids": [["100.30", "1.0", "0", "1"], ["100.40", "3.0", "0", "1"]],
+        "ts": "1621438475342",
+    }
+    parsed = client.parse_order_book(raw, "BTC/USDT:USDT", 1621438475342)
+    # impl 假设 1：每个 entry 是 [price, amount, count] 3 元素，price/amount 为 float
+    for entry in parsed["bids"] + parsed["asks"]:
+        assert len(entry) == 3
+        assert isinstance(entry[0], float) and isinstance(entry[1], float)
+    # impl 假设 2：bids 价降序 / asks 价升序（sim 显式 sort 即便如此也自保证，但确认 CCXT 同向）
+    assert [e[0] for e in parsed["bids"]] == [100.40, 100.30]
+    assert [e[0] for e in parsed["asks"]] == [100.50, 100.60]
+    # impl 假设 3：data["timestamp"] 键存在
+    assert parsed["timestamp"] == 1621438475342
+
+
+def test_ccxt_okx_parse_trade_contract():
+    """真实 ccxt.okx().parse_trade(文档 raw) → sim fetch_trades 消费的 unified 字段成立。"""
+    client = ccxt_sync.okx()
+    # OKX public fetchTrades raw 形态
+    raw = {"instId": "BTC-USDT-SWAP", "side": "buy", "sz": "0.5",
+           "px": "70000.1", "tradeId": "123", "ts": "1621446178316"}
+    parsed = client.parse_trade(raw)
+    # impl 消费 r["timestamp"|"side"|"price"|"amount"|"id"]
+    assert parsed["timestamp"] == 1621446178316
+    assert parsed["side"] == "buy"
+    assert float(parsed["price"]) == pytest.approx(70000.1)
+    assert float(parsed["amount"]) == pytest.approx(0.5)
+    assert parsed["id"] == "123"
