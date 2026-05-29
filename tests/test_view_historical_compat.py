@@ -26,19 +26,23 @@ async def test_v_cycle_metrics_select_on_historical(db_engine_with_real_db):
 
 
 @pytest.mark.asyncio
-async def test_v_alert_lifecycle_filters_historical(db_engine_with_real_db):
-    """T19.2: v_alert_lifecycle 在历史 DB 上返回 0 行（NULL alert_id 全过滤）。
+async def test_v_alert_lifecycle_filters_null_alert_id(db_engine_with_real_db):
+    """T19.2: v_alert_lifecycle 不泄漏 NULL alert_id 行（registers CTE IS NOT NULL 过滤）。
 
-    sim #1-#8 历史 trade_actions 的 alert_id 列在本 iter 之前不存在；
-    upgrade 后该列是 NULL，被 WHERE alert_id IS NOT NULL 过滤掉。
+    sim #1-#8 历史 trade_actions 的 alert_id 列在本 iter 之前不存在；upgrade 后该列
+    是 NULL，被 registers CTE 的 `WHERE alert_id IS NOT NULL` 过滤，不进 view。
+
+    断言 view 内每行 alert_id 均非 NULL —— 此为 schema-level 不变量，恒成立。
+    （不用 `COUNT(*)==0`：那依赖"本地 DB 恰无带 alert_id 的 run"这一脆弱快照假设，
+    X 方案后新 sim run 的 alert_id 非 NULL，会合法地让总行数 > 0 而误判失败。）
     """
     async with db_engine_with_real_db.connect() as conn:
         result = await conn.execute(text(
-            "SELECT COUNT(*) AS c FROM v_alert_lifecycle"
+            "SELECT COUNT(*) AS c FROM v_alert_lifecycle WHERE alert_id IS NULL"
         ))
-        count = result.scalar_one()
+        null_leak = result.scalar_one()
 
-    assert count == 0
+    assert null_leak == 0
 
 
 @pytest.mark.asyncio
