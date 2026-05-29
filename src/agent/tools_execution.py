@@ -409,9 +409,10 @@ async def cancel_price_level_alert(
     """Cancel a previously-set price level alert by its ID.
 
     Idempotent: if the alert is no longer active (already triggered or
-    removed via close-fill auto-clear), returns ok with a Note rather
-    than emitting a business error. Format-invalid IDs and unexpected
-    internal exceptions still reject explicitly.
+    removed via close-fill auto-clear), returns ok with an
+    'Alert {id} no longer active (already triggered or removed)' note
+    rather than emitting a business error. Format-invalid IDs and
+    unexpected internal exceptions still reject explicitly.
 
     Args:
         alert_id: 8-char hex id returned by add_price_level_alert.
