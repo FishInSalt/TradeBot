@@ -573,15 +573,21 @@ def create_trader_agent(
         direction: str,
         reasoning: str,
     ) -> str:
-        """Set a one-shot alert at a specific price level.
+        """Set a one-shot price level alert at a specific price level.
 
-        Triggers once when reached, then auto-removes. You will be woken up
-        when the level is hit.
+        The alert is evaluated on every market tick. It fires once the
+        condition holds, then is removed. If the condition already holds
+        at creation time, the alert fires on the next tick (the success
+        return string includes a "fires on next tick" suffix in that case).
+
+        Max 20 active alerts per session; all alerts for a symbol are
+        auto-cleared when the position on that symbol fully closes.
 
         Args:
-            price: alert price level.
-            direction: 'above' (breakout) or 'below' (breakdown).
-            reasoning: brief description of your decision logic.
+            price: trigger price level.
+            direction: 'above' (fires when price >= level) or
+                       'below' (fires when price <= level).
+            reasoning: brief rationale for the alert (audit-only).
         """
         from src.agent.tools_execution import add_price_level_alert as _impl
 

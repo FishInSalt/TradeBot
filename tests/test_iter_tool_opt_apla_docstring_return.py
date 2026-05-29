@@ -22,7 +22,6 @@ Issue 1 (P2) — docstring leanness — verified by docstring-channel grep below
 """
 from __future__ import annotations
 
-import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,17 +106,33 @@ async def test_latest_price_none_returns_normal_format():
     assert "fires on next tick" not in out
 
 
-def test_docstring_fills_args_channel():
-    """Issue 1 — docstring 补 Args 块，使 pydantic-ai/griffe 把 per-param
-    description 注入 `parameters_json_schema` (channel ②). Locks against
-    docstring shrinking back to single-line summary-only.
+def test_docstring_reaches_llm_channel():
+    """Issue 1 (revised) — narrative facts + per-param descriptions must reach the
+    LLM-facing channel, i.e. the trader.py @tool wrapper docstring as griffe
+    reduces it to `tool_def.description` (channel ①) + `parameters_json_schema`
+    (channel ②). NOT `tools_execution.__doc__`, which is dev-facing only and the
+    model never sees.
+
+    Regression guard for the channel-drift bug surfaced 2026-05-29: the apla
+    enrichment originally landed only in tools_execution while the trader.py
+    wrapper kept a short stub, so none of these facts reached the model — yet a
+    test asserting `tools_execution.__doc__` passed (guarded the wrong channel).
     """
-    ds = add_price_level_alert.__doc__ or ""
-    # ① pre-Args narrative covers fires-on-next-tick / 20-cap / auto-clear facts
-    assert "fires on next tick" in ds
-    assert "20 active alerts" in ds
-    assert "auto-cleared" in ds
-    # ② Args block present with per-param description
-    assert re.search(r"Args:\s*\n\s+price:", ds)
-    assert re.search(r"direction:\s*'above'.*'below'", ds, re.DOTALL)
-    assert re.search(r"reasoning:.*audit-only", ds)
+    from pydantic_ai import models
+    models.ALLOW_MODEL_REQUESTS = False
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    tool = agent._function_toolset.tools["add_price_level_alert"]
+    desc = tool.tool_def.description or ""
+    props = (tool.tool_def.parameters_json_schema or {}).get("properties", {})
+
+    # ① narrative facts reach the LLM (channel ①)
+    assert "fires on next tick" in desc, f"missing in LLM desc: {desc!r}"
+    assert "20 active alerts" in desc, f"missing 20-cap in LLM desc: {desc!r}"
+    assert "auto-cleared" in desc, f"missing auto-clear in LLM desc: {desc!r}"
+    # ② per-param descriptions reach the LLM (channel ②)
+    assert "above" in (props.get("direction", {}).get("description") or "")
+    assert props.get("price", {}).get("description")
+    assert props.get("reasoning", {}).get("description")
