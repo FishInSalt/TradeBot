@@ -23,9 +23,11 @@ from src.integrations.exchange.base import (
     OrderBook,
     OrderBookLevel,
     Position,
+    TakerFlowBar,
     Ticker,
     Trade,
     _OKX_OI_PERIOD,
+    _TAKER_VOLUME_PERIOD,
 )
 from src.utils.cache import RateLimitHit
 
@@ -1061,6 +1063,32 @@ class SimulatedExchange(BaseExchange):
         ]
         points.reverse()
         return points
+
+    async def fetch_taker_flow(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "4h", "1d", "1w"] = "5m",
+        limit: int = 6,
+    ) -> list[TakerFlowBar]:
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            raw = await self._ccxt.public_get_rubik_stat_taker_volume_contract({
+                "instId": self._ccxt.market(symbol)["id"],
+                "period": _TAKER_VOLUME_PERIOD[period],
+                "unit": "2",  # USD notional — unit-clear, cross-symbol comparable
+                "limit": str(limit),
+            })
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim taker flow: {e}") from e
+        rows = raw.get("data") or []
+        bars = [
+            TakerFlowBar(ts=int(r[0]), sell_usd=float(r[1]), buy_usd=float(r[2]))
+            for r in rows
+        ]
+        bars.reverse()  # OKX newest-first -> oldest-first (in-progress bar last)
+        return bars
 
     async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
         self._validate_symbol(symbol)

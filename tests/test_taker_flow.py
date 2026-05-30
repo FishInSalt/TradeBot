@@ -25,3 +25,64 @@ def test_taker_volume_period_map_is_complete():
     assert _TAKER_VOLUME_PERIOD is not _OKX_OI_PERIOD
     for p in ("5m", "1h", "4h", "1d", "1w"):
         assert p in _TAKER_VOLUME_PERIOD
+
+
+def _sim_with_rubik(data_rows):
+    """SimulatedExchange with mocked _ccxt rubik response. `.market` is SYNC
+    (ccxt market() is synchronous) -> MagicMock; the rubik endpoint is async."""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    ex = SimulatedExchange.__new__(SimulatedExchange)
+    ex._ccxt = MagicMock()
+    ex._ccxt.market.return_value = {"id": "BTC-USDT-SWAP"}
+    ex._ccxt.public_get_rubik_stat_taker_volume_contract = AsyncMock(
+        return_value={"code": "0", "data": data_rows, "msg": ""}
+    )
+    ex._validate_symbol = lambda s: None  # bypass symbol guard for unit isolation
+    return ex
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_taker_flow_parses_and_ascends():
+    # Raw OKX rubik is newest-first: [ts, sellVol, buyVol] (col1=sell, col2=buy).
+    # Newest row (in-progress current bucket) must survive AND end up LAST after
+    # the ascending sort (no drop/shift at fetch layer).
+    rows = [
+        ["1778644800000", "5800000", "4200000"],  # newest = in-progress
+        ["1778644500000", "9000000", "8000000"],
+        ["1778644200000", "1000000", "9000000"],  # oldest
+    ]
+    ex = _sim_with_rubik(rows)
+    bars = await ex.fetch_taker_flow("BTC/USDT:USDT", "5m", 3)
+    assert len(bars) == 3
+    assert bars[0].ts == 1778644200000          # oldest first
+    assert bars[-1].ts == 1778644800000         # in-progress newest kept, last
+    # Column order [ts, sell, buy] (regression guard against direction flip):
+    assert bars[-1].sell_usd == pytest.approx(5800000.0)
+    assert bars[-1].buy_usd == pytest.approx(4200000.0)
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_taker_flow_passes_unit_period_instid_limit():
+    ex = _sim_with_rubik([["1778644800000", "1", "2"]])
+    await ex.fetch_taker_flow("BTC/USDT:USDT", "4h", 21)
+    ex._ccxt.public_get_rubik_stat_taker_volume_contract.assert_awaited_once_with(
+        {"instId": "BTC-USDT-SWAP", "period": "4H", "unit": "2", "limit": "21"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_taker_flow_empty():
+    ex = _sim_with_rubik([])
+    assert await ex.fetch_taker_flow("BTC/USDT:USDT", "5m", 6) == []
+
+
+@pytest.mark.asyncio
+async def test_sim_fetch_taker_flow_rate_limit_raises():
+    import ccxt.async_support as ccxt
+    from src.utils.cache import RateLimitHit
+    ex = _sim_with_rubik([])
+    ex._ccxt.public_get_rubik_stat_taker_volume_contract = AsyncMock(
+        side_effect=ccxt.RateLimitExceeded("429")
+    )
+    with pytest.raises(RateLimitHit):
+        await ex.fetch_taker_flow("BTC/USDT:USDT", "5m", 6)
