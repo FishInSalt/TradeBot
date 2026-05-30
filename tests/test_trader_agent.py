@@ -422,9 +422,9 @@ def test_get_multi_timeframe_snapshot_description_carries_example():
 
 
 def test_get_order_book_description_carries_degradation():
-    """get_order_book degradation文案 (insufficient / unavailable) must
-    reach LLM via path A inline narrative. Preserves existing main_desc
-    'Reports best bid/ask...' fact content."""
+    """get_order_book 新契约（USD notional / pts / 单行 Error 降级）经 tool_def.description
+    （summary + Returns 块）到达 LLM。退役旧 'Reports…/temporarily unavailable' literal
+    （该旧文案从未与 impl 输出匹配）。"""
     from src.agent.trader import create_trader_agent
     from src.config import PersonaConfig
 
@@ -432,11 +432,16 @@ def test_get_order_book_description_carries_degradation():
     tool = agent._function_toolset.tools["get_order_book"]
     desc = tool.tool_def.description
 
-    # Existing main_desc preserved (path A doesn't delete fact content)
-    assert "Reports best bid/ask" in desc, f"existing main_desc literal lost (regression): {desc!r}"
-    # New inline degradation
-    assert "insufficient data" in desc, f"insufficient-data degradation literal missing: {desc!r}"
-    assert "temporarily unavailable" in desc, f"unavailable degradation literal missing: {desc!r}"
+    # 新格式事实内容到达 LLM（summary + Returns 块）
+    assert "best bid/ask" in desc, f"summary fact content lost: {desc!r}"
+    assert "USD notional" in desc, f"notional contract missing: {desc!r}"
+    assert "pts" in desc, f"distance-unit (pts) contract missing: {desc!r}"
+    # 降级契约收敛为单行 Error
+    assert "Insufficient data" in desc, f"degradation contract missing: {desc!r}"
+    assert "Error:" in desc, f"error-line contract missing: {desc!r}"
+    # 旧 drift 契约已退役
+    assert "temporarily unavailable" not in desc, f"retired old literal still present: {desc!r}"
+    assert "Reports best bid/ask" not in desc, f"retired old summary still present: {desc!r}"
 
 
 def test_get_performance_description_carries_degradation():
