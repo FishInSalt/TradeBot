@@ -54,7 +54,7 @@ get_taker_flow(period: str = "5m", limit: int = 6) -> str
 ### 3.2 `get_taker_flow` 输出格式
 
 ```
-=== Taker Flow (BTC-USDT-SWAP · 5m bars · @04:34 UTC) ===
+=== Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:34 UTC) ===
 
 Now (current 5m, 4.0/5min formed):  41% taker buy · net −5.8$M · vol 0.3× (vs 20-bar avg)
 Window (6 bars = 30min):  CVD +109.8$M · 2/6 bars net-sell
@@ -83,7 +83,7 @@ Per-bar (bar open UTC, newest first; row 1 = current in-progress):
     - **period=1d 例外（probe 实证）**：rubik 1D 用 16:00 UTC（HKT 日界）vs ccxt OHLCV "1d" 用 00:00 UTC → **0/10 对齐**；故 1d 的 `Close` **整列省略 + 显式标注**（`Close: n/a — 1d rubik/OHLCV 日界不一致`），**不逐格静默 —**；CVD/flow 列对 1d 仍有效（rubik-only）。5m/4h 实测对齐（20/20、10/10）；1h impl 前确认。impl 前再 probe 是否有 HKT 对齐的 OHLCV `bar` 变体可救 1d。
     - **通用安全网**：若某 period 的 `Close` **整列皆 —**，工具层显式降级标注（避免系统性失败伪装成零星缺失）。
 - **context 锚点行**：fact-only 给上一档**当前 in-progress** bar 的 `buy% · net` + **成型度标注**（防"只看短期 flow 下结论"，对治 52% 过度解读），不贴背离/反转标签（详 §3.3）。
-- **header**：`@<取数 wall time> UTC`，**不标 data lag**（数据实时）；in-progress 状态由 Now 行 + per-bar `*` 脚注表达。
+- **header**：`@ <取数 wall time> UTC`，**不标 data lag**（数据实时）；in-progress 状态由 Now 行 + per-bar `*` 脚注表达。
 - **单位**：net/vol USD 名义，自适应 `$K/$M`（列头货币单位按品种量级 **per-invocation** 选取，同次调用内一致）；buy% 百分比；RVol 比值。
 
 ### 3.3 `get_taker_flow` context 锚点规则
@@ -108,7 +108,7 @@ Per-bar (bar open UTC, newest first; row 1 = current in-progress):
 旧实现按 `5×60s` 时间桶渲染（4/5 桶恒空）；重构为**按笔数分桶**，诚实呈现"最近 500 笔"的秒级微观。服务 A 类（入场时点：此刻买卖压 + 短窗演化）。
 
 ```
-=== Recent Trades (BTC-USDT-SWAP · last 500 · 40.9s · @04:34 UTC) ===
+=== Recent Trades (BTC-USDT-SWAP · last 500 · 40.9s · @ 04:34 UTC) ===
 
 Taker buy:  40% by count · 49% by volume      Net: −$34.8K · 12.2 tr/s
 Largest single:  $168K SELL  (= 12.7% of window vol)
@@ -124,7 +124,7 @@ Per 100-trade slice (newest first):
 ```
 
 **设计要点**：
-- **header**：`last <n> · <span>s · @<wall time>`——把"500 笔覆盖多少秒"作 fact 标注（秒级、随活跃度 5–60s 浮动）。
+- **header**：`last <n> · <span>s · @ <wall time>`——把"500 笔覆盖多少秒"作 fact 标注（秒级、随活跃度 5–60s 浮动）。
 - **聚合行**：全窗口 `buy%(count) · buy%(volume)` + `net($)` + `rate(tr/s)`。**count 与 volume 买占比都给**——实测背离 9–18pp（SOL 按笔 45%/按量 63%），是"散户笔数方向 vs 大单规模方向"的核心信号。
 - **Largest single 行**：最大单笔 `$` + 方向 + 占窗口量%（实测 BTC 单笔达 12.7%，巨鲸信号免费可得）。
 - **Size 行**：med/mean/p95 USD（极端 skew = 散户尘埃 + 巨鲸纹理）。

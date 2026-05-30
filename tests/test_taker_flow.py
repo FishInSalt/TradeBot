@@ -162,7 +162,7 @@ def test_render_taker_flow_now_line_and_in_progress():
     # make the newest bar buy-heavy so buy% is checkable
     bars[-1].buy_usd, bars[-1].sell_usd = 700_000.0, 300_000.0
     out = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="BTC-USDT-SWAP", fetch_ts="04:34")
-    assert "=== Taker Flow (BTC-USDT-SWAP · 5m bars · @04:34 UTC) ===" in out
+    assert "=== Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:34 UTC) ===" in out
     assert "current 5m, 2.0/5min formed" in out
     assert "70% taker buy" in out                 # newest bar buy%
     assert "row 1 = current in-progress" in out

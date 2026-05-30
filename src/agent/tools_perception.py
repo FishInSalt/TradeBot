@@ -1178,7 +1178,7 @@ def _render_taker_flow(
 
     scale_label, divisor = _pick_usd_scale([_net(b) for b in display] + list(cvd_by_ts.values()))
 
-    lines = [f"=== Taker Flow ({symbol} · {period} bars · @{fetch_ts} UTC) ===", ""]
+    lines = [f"=== Taker Flow ({symbol} · {period} bars · @ {fetch_ts} UTC) ===", ""]
 
     now_rvol = (_total(newest) / baseline_avg) if baseline_avg else None
     rvol_now = f"{now_rvol:.1f}× (vs {_TAKER_FLOW_RVOL_BARS}-bar avg)" if now_rvol is not None else "—"
@@ -1262,7 +1262,7 @@ async def get_taker_flow(deps: TradingDeps, period: str = "5m", limit: int = 6) 
     if not (1 <= limit <= 36):
         return f"Invalid limit {limit}. limit must be in [1, 36]"
 
-    header = f"=== Taker Flow ({symbol} · {period} bars · @{fetch_ts} UTC) ==="
+    header = f"=== Taker Flow ({symbol} · {period} bars · @ {fetch_ts} UTC) ==="
     n = max(limit + 1, 21)  # fetch enough for fixed-20 RVol baseline + in-progress
 
     # Main rubik series — hard dependency.
@@ -2041,9 +2041,9 @@ async def get_recent_trades(deps: TradingDeps) -> str:
         trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
     except Exception as e:
         logger.exception("get_recent_trades failed for %s", symbol)
-        return f"=== Recent Trades ({symbol} · @{fetch_ts} UTC) ===\nRecent trades temporarily unavailable ({e.__class__.__name__})."
+        return f"=== Recent Trades ({symbol} · @ {fetch_ts} UTC) ===\nRecent trades temporarily unavailable ({e.__class__.__name__})."
     if not trades:
-        return f"=== Recent Trades ({symbol} · @{fetch_ts} UTC) ===\nNo recent trades."
+        return f"=== Recent Trades ({symbol} · @ {fetch_ts} UTC) ===\nNo recent trades."
 
     trades = sorted(trades, key=lambda t: t.timestamp)  # ascending (defensive)
     n = len(trades)
@@ -2054,7 +2054,7 @@ async def get_recent_trades(deps: TradingDeps) -> str:
     buy_cnt = sum(1 for t in trades if t.side == "buy")
     net_usd = buy_usd - (total_usd - buy_usd)
 
-    lines = [f"=== Recent Trades ({symbol} · last {n} · {span_s:.1f}s · @{fetch_ts} UTC) ===", ""]
+    lines = [f"=== Recent Trades ({symbol} · last {n} · {span_s:.1f}s · @ {fetch_ts} UTC) ===", ""]
     lines.append(
         f"Taker buy:  {buy_cnt / n * 100:.0f}% by count · {buy_usd / total_usd * 100:.0f}% by volume"
         f"      Net: {_fmt_money(net_usd)} · {n / span_s:.1f} tr/s"

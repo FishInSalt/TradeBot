@@ -1496,10 +1496,10 @@ def test_render_tool_body_fallback_no_header():
 
 
 def test_dg_2_dispatch_sets_partition_all_registered_tools():
-    """T-DG-2: 二层集合互斥 + 完整覆盖 33 registered tools.
+    """T-DG-2: 二层集合互斥 + 完整覆盖 34 registered tools.
 
-    Post iter-w3r1-vol-alert-agent-owned: _PERCEPTION_TOOL_NAMES (19) ∪ _EXECUTION_TOOL_NAMES (14)
-    必须等于 REGISTERED_TOOL_NAMES (33)，且互不重叠。
+    Post iter-order-flow-tools: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (14)
+    必须等于 REGISTERED_TOOL_NAMES (34)，且互不重叠。
     _SECTIONED_PERCEPTION_TOOL_NAMES = _PERCEPTION_TOOL_NAMES (no exclusion).
     """
     from src.cli.display import (
@@ -1519,7 +1519,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     # Two-layer disjointness.
     assert perception.isdisjoint(execution)
 
-    # Complete coverage of 32 registered tools.
+    # Complete coverage of 34 registered tools.
     union = perception | execution
     declared = set(REGISTERED_TOOL_NAMES)
     assert union == declared, (
@@ -3219,7 +3219,7 @@ async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
 # 14 perception tools must carry inline "@ HH:MM:SS UTC" in their first section
 # header (UTC-only). Aligns with get_market_data / get_higher_timeframe_view
 # existing pattern and set_next_wake_at PR #48 UTC anchor.
-_AS_OF_HEADER_RE = _re_dg.compile(r"^=== [^=]*@ ?\d{2}:\d{2}:\d{2} UTC[^=]*===")
+_AS_OF_HEADER_RE = _re_dg.compile(r"^=== [^=]*@ \d{2}:\d{2}:\d{2} UTC[^=]*===")
 
 # Tools whose first-section render lives behind Path A (service=None / empty
 # state — early return). These do NOT need market_data/exchange happy mocks.
@@ -3278,7 +3278,7 @@ async def test_dg_1e_path_b_first_section_has_as_of_timestamp(tool_name):
 # this guard a future edit can silently drop the window from an error-path
 # header and agent loses context about which window query failed.
 _WINDOW_BEARING_FIRST_HEADER_PATTERNS = {
-    "get_recent_trades": r"=== Recent Trades \([^)]*@\d{2}:\d{2}:\d{2} UTC\) ===",
+    "get_recent_trades": r"=== Recent Trades \([^)]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
     "get_macro_calendar": r"=== Upcoming Macro Events \([^@]*next \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
     "get_exchange_announcements": r"=== Exchange Announcements \([^@]*past \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
 }
