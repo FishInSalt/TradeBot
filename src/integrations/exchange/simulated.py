@@ -1187,11 +1187,14 @@ class SimulatedExchange(BaseExchange):
             data = await self._ccxt.fetch_order_book(symbol, limit=depth)
         except ccxt.RateLimitExceeded as e:
             raise RateLimitHit(f"Sim order book: {e}") from e
+        # OKX swap size 是合约张数；× contractSize 归一化为 base 币（解耦执行层 get_contract_size）。
+        # ccxt fetch_order_book 首行已 load_markets（okx.py），market() 必可用。
+        cs = float(self._ccxt.market(symbol).get("contractSize") or 1.0)
         # CCXT-parsed entries are [price, amount, count?]; *_ swallows count.
         # None-safe: skip malformed levels rather than crash on float(None).
-        bids = [OrderBookLevel(price=float(p), amount=float(a))
+        bids = [OrderBookLevel(price=float(p), amount=float(a) * cs)
                 for p, a, *_ in data.get("bids", []) if p is not None and a is not None]
-        asks = [OrderBookLevel(price=float(p), amount=float(a))
+        asks = [OrderBookLevel(price=float(p), amount=float(a) * cs)
                 for p, a, *_ in data.get("asks", []) if p is not None and a is not None]
         # Explicit sort — self-enforce best-first instead of depending on CCXT's
         # internal parse_order_book sort_by (untested-in-prod assumption otherwise).
