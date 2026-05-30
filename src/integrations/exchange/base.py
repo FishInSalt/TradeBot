@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 # lowercase across abstractions (matches fetch_ohlcv(timeframe='1h')). The mapping
 # below is the only translation layer.
 _OKX_OI_PERIOD = {"5m": "5m", "1h": "1H", "1d": "1D"}
+# taker-volume rubik endpoint period map. DELIBERATELY distinct from
+# _OKX_OI_PERIOD: the legal period set differs (taker flow exposes 4h + 1w; OI
+# does not), so reusing _OKX_OI_PERIOD would KeyError on 4h/1w. 1w is included
+# only as the 1d-period anchor up-tier (§3.3), not as a standalone tool period.
+_TAKER_VOLUME_PERIOD = {"5m": "5m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
 
 
 @dataclass
@@ -390,6 +395,21 @@ class OpenInterestHistoryPoint:
     timestamp: int
     open_interest: float  # base-currency amount
     open_interest_value: float  # USD value
+
+
+@dataclass
+class TakerFlowBar:
+    """One taker-volume bucket from OKX rubik taker-volume-contract (unit=2, USD).
+
+    `ts` is the bucket OPEN time (ms); intervals equal the requested period. The
+    newest bar returned by the endpoint is the in-progress CURRENT bucket — the
+    fetch layer returns it raw (no detection, no formed% — this dataclass carries
+    no formed field); the tool layer detects in-progress via
+    `ts + period_ms > now_ms` and labels formed% (§3.2/§4.1).
+    """
+    ts: int
+    sell_usd: float
+    buy_usd: float
 
 
 @dataclass
