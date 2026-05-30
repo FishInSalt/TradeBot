@@ -3040,6 +3040,11 @@ async def _invoke_path_b(tool_name: str) -> str:
         market_data.get_order_book.side_effect = Exception("upstream")  # L2 unavailable
         return await fn(_MockDeps(market_data=market_data))
 
+    if tool_name == "get_taker_flow":
+        market_data = _AsyncMock_dg()
+        market_data.get_taker_flow.side_effect = Exception("upstream")  # L2 unavailable
+        return await fn(_MockDeps(market_data=market_data))
+
     if tool_name == "get_derivatives_data":
         # Force all-3-failure → L2 inline `Error:` form (Option D)
         market_data = _AsyncMock_dg()
@@ -3216,7 +3221,7 @@ async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
 
 
 # === T-DG-1e: as-of header timestamp (iter-tool-opt-as-of-header) ===
-# 14 perception tools must carry inline "@ HH:MM:SS UTC" in their first section
+# 15 perception tools must carry inline "@ HH:MM:SS UTC" in their first section
 # header (UTC-only). Aligns with get_market_data / get_higher_timeframe_view
 # existing pattern and set_next_wake_at PR #48 UTC anchor.
 _AS_OF_HEADER_RE = _re_dg.compile(r"^=== [^=]*@ \d{2}:\d{2}:\d{2} UTC[^=]*===")
@@ -3239,6 +3244,7 @@ _AS_OF_PATH_A_TOOLS = [
 _AS_OF_PATH_B_TOOLS = [
     "get_open_orders",
     "get_recent_trades",
+    "get_taker_flow",
     "get_order_book",
     "get_price_pivots",
     "get_account_balance",

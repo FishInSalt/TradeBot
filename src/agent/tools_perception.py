@@ -1126,11 +1126,6 @@ def _fmt_scaled(v: float, divisor: float) -> str:
     return f"{v / divisor:+.1f}"
 
 
-def _fmt_hhmm(ts_ms: int) -> str:
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%H:%M")
-
-
 def _render_taker_flow(
     bars: list["TakerFlowBar"],
     period: str,
@@ -1150,6 +1145,8 @@ def _render_taker_flow(
     Close column and emit this note instead (1d day-boundary, or OHLCV failure).
     anchor: (uptier_label, uptier_in_progress_bar) or None.
     """
+    from src.utils.ohlcv_utils import _fmt_candle_time, _to_pd_timestamp_utc
+
     period_ms = _TAKER_FLOW_PERIOD_MS[period]
     period_min = period_ms / 60_000
     newest = bars[-1]
@@ -1161,6 +1158,8 @@ def _render_taker_flow(
     def _buy_pct(b):
         t = _total(b)
         return (b.buy_usd / t * 100) if t > 0 else 0.0
+    def _bar_time(b):                                    # tf-aware (mirrors get_market_data candles)
+        return _fmt_candle_time(_to_pd_timestamp_utc(b.ts), period)
 
     display = bars[-limit:]                              # oldest..newest displayed
     closed = bars[:-1] if is_in_progress else bars
@@ -1205,7 +1204,9 @@ def _render_taker_flow(
             show_close = False
             close_note = "Close: n/a — no OHLCV bar matched (timestamp join empty)"
 
-    hdr = f"  Time     Buy%   Net({scale_label})   RVol(×20-bar)   CVD({scale_label})"
+    time_w = max([len(_bar_time(b)) for b in display] + [len("Time")])
+    hdr = (f"  {'Time'.ljust(time_w + 1)} Buy%   Net({scale_label})   "
+           f"RVol(×20-bar)   CVD({scale_label})")
     if show_close:
         hdr += "   Close"
     lines.append("Per-bar (bar open UTC, newest first; row 1 = current in-progress):")
@@ -1214,7 +1215,8 @@ def _render_taker_flow(
         star = "*" if (is_in_progress and b is newest) else " "
         rvol = (_total(b) / baseline_avg) if baseline_avg else None
         rvol_s = f"{rvol:.1f}×" if rvol is not None else "—"
-        row = (f"  {_fmt_hhmm(b.ts)}{star}  {_buy_pct(b):>3.0f}%  "
+        tfield = f"{_bar_time(b)}{star}".ljust(time_w + 1)
+        row = (f"  {tfield} {_buy_pct(b):>3.0f}%  "
                f"{_fmt_scaled(_net(b), divisor):>7}  {rvol_s:>5}  "
                f"{_fmt_scaled(cvd_by_ts[b.ts], divisor):>8}")
         if show_close:
@@ -2047,17 +2049,18 @@ async def get_recent_trades(deps: TradingDeps) -> str:
 
     trades = sorted(trades, key=lambda t: t.timestamp)  # ascending (defensive)
     n = len(trades)
-    span_s = (trades[-1].timestamp - trades[0].timestamp) / 1000 or 1e-9
+    span_s = (trades[-1].timestamp - trades[0].timestamp) / 1000
     usd = [t.amount * t.price for t in trades]
     total_usd = sum(usd) or 1e-9
     buy_usd = sum(u for u, t in zip(usd, trades) if t.side == "buy")
     buy_cnt = sum(1 for t in trades if t.side == "buy")
     net_usd = buy_usd - (total_usd - buy_usd)
 
+    rate_str = f"{n / span_s:.1f} tr/s" if span_s > 0 else "n/a tr/s (single-timestamp window)"
     lines = [f"=== Recent Trades ({symbol} · last {n} · {span_s:.1f}s · @ {fetch_ts} UTC) ===", ""]
     lines.append(
         f"Taker buy:  {buy_cnt / n * 100:.0f}% by count · {buy_usd / total_usd * 100:.0f}% by volume"
-        f"      Net: {_fmt_money(net_usd)} · {n / span_s:.1f} tr/s"
+        f"      Net: {_fmt_money(net_usd)} · {rate_str}"
     )
     li = max(range(n), key=lambda i: usd[i])
     lines.append(

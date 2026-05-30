@@ -413,8 +413,8 @@ def create_trader_agent(
         instant. For the minute-to-hours flow trend, use get_taker_flow instead.
 
         Returns:
-            A trades micro-report. Example for get_recent_trades():
-            === Recent Trades (BTC-USDT-SWAP · last 500 · 40.9s · @ 04:34 UTC) ===
+            A trades micro-report (fact-only text). Example output follows.
+            === Recent Trades (BTC-USDT-SWAP · last 500 · 40.9s · @ 04:34:07 UTC) ===
             Taker buy:  40% by count · 49% by volume      Net: -$34.8K · 12.2 tr/s
             Largest single:  $168K SELL  (= 12.7% of window vol)
             Size (USD notional):  med $59 · mean $2.6K · p95 $9.7K
@@ -445,8 +445,8 @@ def create_trader_agent(
             limit: number of bars to show, 1..36 (default 6).
 
         Returns:
-            A taker-flow report. Example for get_taker_flow("5m", 6):
-            === Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:34 UTC) ===
+            A taker-flow report (fact-only text) for the given period and limit. Example output follows.
+            === Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:34:07 UTC) ===
             Now (current 5m, 4.0/5min formed):  41% taker buy · net -5.8$M · vol 0.3× (vs 20-bar avg)
             Window (6 bars = 30min):  CVD +109.8$M · 2/6 bars net-sell
             Per-bar (bar open UTC, newest first; row 1 = current in-progress):

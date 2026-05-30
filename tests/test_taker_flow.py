@@ -362,3 +362,34 @@ async def test_get_taker_flow_happy_path_includes_close_and_anchor():
     out = await get_taker_flow(deps, "5m", 6)
     assert "Close" in out
     assert "1h-scale anchor" in out
+
+
+def test_render_taker_flow_per_bar_time_tf_aware_distinct_for_1d():
+    """Imp 2 (PR #65 review): per-bar Time uses tf-aware _fmt_candle_time, so 1d bars
+    render distinct YYYY-MM-DD dates instead of collapsing to one clock value (§3.2
+    alignment with get_market_data candles). Regression: bare %H:%M made all 6 daily
+    rows identical, so the agent could not tell the bars apart by time."""
+    import re
+    from src.agent.tools_perception import _render_taker_flow
+    period_ms = 86_400_000
+    now = 1_000_000_000_000
+    bars = _bars(21, period_ms, base_open=now - 3_600_000 - 20 * period_ms)
+    out = _render_taker_flow(bars, "1d", 6, now_ms=now, symbol="X", fetch_ts="00:00",
+                             close_note="Close: n/a — day-boundary")
+    dates = re.findall(r"\d{4}-\d{2}-\d{2}", out)  # only the 6 per-bar Time cells carry dates
+    assert len(set(dates)) >= 6, f"1d Time column collapsed (not distinct dates):\n{out}"
+
+
+def test_get_taker_flow_returns_example_not_mangled_into_pseudo_type():
+    """Imp 1 (PR #65 review): the Returns first line must be colon-free prose so griffe
+    does NOT split the call→output example into a pseudo-<type> (memory
+    project_griffe_example_section_stripped; mirrors PR #64 get_order_book). Regression:
+    '<type>A taker-flow report. Example for get_taker_flow("5m", 6</type>'."""
+    import re
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    desc = agent._function_toolset.tools["get_taker_flow"].tool_def.description or ""
+    assert "=== Taker Flow (BTC-USDT-SWAP · 5m bars · @" in desc  # example reaches LLM
+    assert not re.search(r"<type>[^<]*Example", desc), \
+        f"Returns example leaked into pseudo-<type> (griffe colon-split):\n{desc!r}"

@@ -126,3 +126,30 @@ async def test_recent_trades_empty_and_failure():
     deps.market_data.get_recent_trades = AsyncMock(side_effect=Exception("timeout"))
     out_fail = await get_recent_trades(deps)
     assert "Recent trades temporarily unavailable" in out_fail
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_tr_per_s_na_on_zero_span():
+    """Imp 3 (PR #65 review): all trades share one timestamp → window span 0 → tr/s
+    renders 'n/a', not a 1e11 sentinel (fact-provider honesty; was `span_s or 1e-9`)."""
+    from src.agent.tools_perception import get_recent_trades
+    specs = [(1_000_000, "buy" if i % 2 == 0 else "sell", 70000.0, 0.01) for i in range(120)]
+    out = await get_recent_trades(_deps(_mk_trades(specs)))
+    assert "n/a tr/s" in out
+    assert "100000000000" not in out   # no sentinel explosion
+    assert "0.0s" in out               # span legitimately renders 0.0s
+
+
+def test_get_recent_trades_returns_example_not_mangled_into_pseudo_type():
+    """Imp 1 (PR #65 review): colon-free Returns first line keeps the call→output
+    example out of a griffe pseudo-<type> (memory project_griffe_example_section_stripped;
+    mirrors PR #64 get_order_book). Regression:
+    '<type>A trades micro-report. Example for get_recent_trades(</type>'."""
+    import re
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    desc = agent._function_toolset.tools["get_recent_trades"].tool_def.description or ""
+    assert "=== Recent Trades (BTC-USDT-SWAP · last 500" in desc  # example reaches LLM
+    assert not re.search(r"<type>[^<]*Example", desc), \
+        f"Returns example leaked into pseudo-<type> (griffe colon-split):\n{desc!r}"
