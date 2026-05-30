@@ -1688,7 +1688,9 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
 
 def _fmt_ob_notional(usd: float) -> str:
     """Order book 规模量 USD notional 自适应 $K/$M（逐值）。"""
-    if abs(usd) >= 1e6:
+    # >= 999_950 rounds to $1.00M at M-precision (.2f); below it the K branch's .1f
+    # would surface a $1000.0K seam. Keeps the K/M boundary continuous.
+    if abs(usd) >= 999_950:
         return f"${usd/1e6:.2f}M"
     if abs(usd) >= 1e3:
         return f"${usd/1e3:.1f}K"
@@ -1776,7 +1778,9 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         ),
     ]
 
-    # Concentrated levels (per-side median on 张数维度), excluding best[0]
+    # Concentrated levels: threshold = 3× per-side median of top-N (张数维度; the
+    # median spans the full top-N incl best). The scan below excludes best[0] —
+    # it is already shown in the Best line, not because the median drops it.
     import statistics
     bid_median = statistics.median([l.amount for l in ob.bids[:depth]])
     ask_median = statistics.median([l.amount for l in ob.asks[:depth]])

@@ -383,16 +383,16 @@ def create_trader_agent(
 
         Returns:
             Multi-line fact-only text. Sizes are USD notional; distances are price
-            points (pts) + bp. Insufficient data or service failure returns a single
-            "Error: ..." line. Example output follows.
+            points (pts) + bp. Insufficient data or service failure returns the header
+            plus a single "Error: ..." line. Example output follows.
 
             === Order Book (BTC/USDT:USDT @ 05:28:25 UTC) ===
-            Best bid: 73509.90 × $1.49M  |  Best ask: 73510.00 × $241K
+            Best bid: 73509.90 × $1.49M  |  Best ask: 73510.00 × $241.0K
             Spread: 0.10 pts (0.01 bp)
 
             === Depth (top 15 each side) ===
-              Bids: $1.54M over 73509.90 - 73506.70  (span 3.2 pts / 0.4 bp)
-              Asks: $0.29M over 73510.00 - 73512.00  (span 2.0 pts / 0.3 bp)
+              Bids: $1.54M over 73509.90 - 73506.70  (span 3.20 pts / 0.4 bp)
+              Asks: $290.0K over 73510.00 - 73512.00  (span 2.00 pts / 0.3 bp)
               Bid share: 84.1% (bid : ask = 5.30 : 1)
 
             === Concentrated Levels (beyond best bid/ask, size > 3× median of top 15) ===
