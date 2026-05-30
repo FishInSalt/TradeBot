@@ -1243,6 +1243,11 @@ class SimulatedExchange(BaseExchange):
             data = await self._ccxt.fetch_trades(symbol, limit=limit)
         except ccxt.RateLimitExceeded as e:
             raise RateLimitHit(f"Sim recent trades: {e}") from e
+        # 张->base normalization (Option B, §4.2): raw ccxt amount is OKX
+        # contracts; multiply by the REAL market contractSize so Trade.amount is
+        # base-currency (as its model annotation claims). NOT get_contract_size
+        # (sim returns 1.0 there — execution-layer, load-bearing, untouched).
+        cs = float((self._ccxt.market(symbol) or {}).get("contractSize") or 1.0)
         trades: list[Trade] = []
         for r in data:
             ts, side, px, amt = r.get("timestamp"), r.get("side"), r.get("price"), r.get("amount")
@@ -1250,7 +1255,7 @@ class SimulatedExchange(BaseExchange):
                 continue  # None-safe: CCXT safe_* may return None on malformed rows
             tid = r.get("id")
             trades.append(Trade(timestamp=int(ts), side=str(side), price=float(px),
-                                amount=float(amt), trade_id=str(tid) if tid is not None else None))
+                                amount=float(amt) * cs, trade_id=str(tid) if tid is not None else None))
         trades.sort(key=lambda t: t.timestamp)
         return trades
 

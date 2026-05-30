@@ -921,6 +921,9 @@ class OKXExchange(BaseExchange):
 
     @_retry(max_retries=2, base_delay=0.5)
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
+        if not self._client.markets:
+            await self._client.load_markets()
+        cs = float((self._client.markets.get(symbol) or {}).get("contractSize") or 1.0)
         data = await self._client.fetch_trades(symbol, limit=limit)
         trades: list[Trade] = []
         for raw in data:
@@ -929,10 +932,9 @@ class OKXExchange(BaseExchange):
                 timestamp=int(raw["timestamp"]),
                 side=str(raw["side"]),
                 price=float(raw["price"]),
-                amount=float(raw["amount"]),
+                amount=float(raw["amount"]) * cs,  # 张->base (Option B, §4.2)
                 trade_id=str(raw_id) if raw_id is not None else None,
             ))
-        # Explicit sort — don't rely on CCXT default (unified spec is ascending but not guaranteed)
         trades.sort(key=lambda t: t.timestamp)
         return trades
 
