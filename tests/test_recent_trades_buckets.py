@@ -52,3 +52,77 @@ async def test_okx_fetch_trades_normalizes_contracts_to_base():
          "info": {"sz": "4"}}])  # 4 张 * 0.1 = 0.4 base
     trades = await ex.fetch_trades("ETH/USDT:USDT", limit=500)
     assert trades[0].amount == pytest.approx(0.4)
+
+
+def _mk_trades(specs):
+    """specs: list of (ts_ms, side, price, base_amount)."""
+    from src.integrations.exchange.base import Trade
+    return [Trade(timestamp=ts, side=s, price=p, amount=a, trade_id=str(i))
+            for i, (ts, s, p, a) in enumerate(specs)]
+
+
+def _deps(trades):
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    deps.market_data.get_recent_trades = AsyncMock(return_value=trades)
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_count_buckets_5x100():
+    from src.agent.tools_perception import get_recent_trades
+    specs = [(1_000_000 + i * 1000, "buy" if i % 2 == 0 else "sell", 70000.0, 0.01)
+             for i in range(500)]
+    out = await get_recent_trades(_deps(_mk_trades(specs)))
+    assert "last 500 ·" in out
+    assert "Per 100-trade slice (newest first):" in out
+    assert "1 (new)" in out and "5 (old)" in out
+    assert "by count" in out and "by volume" in out
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_usd_is_amount_times_price():
+    from src.agent.tools_perception import get_recent_trades
+    specs = [(1_000_000 + i * 1000, "buy", 70000.0, 0.001) for i in range(99)]
+    specs.append((1_000_000 + 99_000, "sell", 70000.0, 1.0))  # 1.0 base * 70000 = $70K
+    out = await get_recent_trades(_deps(_mk_trades(specs)))
+    assert "$70.0K SELL" in out
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_count_vs_volume_buy_pct_divergence():
+    from src.agent.tools_perception import get_recent_trades
+    specs = [(1_000_000 + i * 1000, "buy", 70000.0, 0.0001) for i in range(90)]
+    specs += [(1_000_000 + (90 + i) * 1000, "sell", 70000.0, 1.0) for i in range(10)]
+    out = await get_recent_trades(_deps(_mk_trades(specs)))
+    assert "90% by count" in out
+    assert "by volume" in out
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_under_100_single_aggregate_no_table():
+    from src.agent.tools_perception import get_recent_trades
+    specs = [(1_000_000 + i * 1000, "buy", 70000.0, 0.01) for i in range(40)]
+    out = await get_recent_trades(_deps(_mk_trades(specs)))
+    assert "last 40 ·" in out
+    assert "Per 100-trade slice" not in out
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_partial_fewer_slices_with_real_counts():
+    from src.agent.tools_perception import get_recent_trades
+    specs = [(1_000_000 + i * 1000, "buy", 70000.0, 0.01) for i in range(250)]
+    out = await get_recent_trades(_deps(_mk_trades(specs)))
+    assert "last 250 ·" in out
+    assert "[50 tr]" in out
+
+
+@pytest.mark.asyncio
+async def test_recent_trades_empty_and_failure():
+    from src.agent.tools_perception import get_recent_trades
+    out_empty = await get_recent_trades(_deps([]))
+    assert "No recent trades." in out_empty
+    deps = MagicMock(); deps.symbol = "BTC/USDT:USDT"
+    deps.market_data.get_recent_trades = AsyncMock(side_effect=Exception("timeout"))
+    out_fail = await get_recent_trades(deps)
+    assert "Recent trades temporarily unavailable" in out_fail

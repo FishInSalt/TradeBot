@@ -151,153 +151,26 @@ async def test_order_book_concentrated_truncation_to_10():
 
 
 @pytest.mark.asyncio
-async def test_recent_trades_typical():
-    """Typical: 5 buckets, total + count + avg size."""
+async def test_recent_trades_typical_new_format():
+    from unittest.mock import AsyncMock, MagicMock
+    from src.integrations.exchange.base import Trade
     from src.agent.tools_perception import get_recent_trades
-    import time
-    now_ms = int(time.time() * 1000)
-    trades = []
-    # Distribute trades into known buckets — 100 trades evenly across 5 minutes
-    for i in range(100):
-        age = i * 3000  # 0 to 297s
-        trades.append(Trade(timestamp=now_ms - age, side="buy" if i % 3 == 0 else "sell",
-                            price=64000.0, amount=0.01, trade_id=None))
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.return_value = trades
-    result = await get_recent_trades(deps, window_seconds=300)
-    assert "Recent Trades" in result
-    assert "last 300s" in result
-    assert "5 × 60s buckets" in result
-    assert "Total:" in result
-    assert "Trade count: 100" in result
-    assert "Avg size:" in result
+    deps = MagicMock(); deps.symbol = "BTC/USDT:USDT"
+    trades = [Trade(timestamp=1_000_000 + i * 1000, side="buy" if i % 2 else "sell",
+                    price=64000.0, amount=0.01, trade_id=str(i)) for i in range(120)]
+    deps.market_data.get_recent_trades = AsyncMock(return_value=trades)
+    out = await get_recent_trades(deps)
+    assert "Per 100-trade slice (newest first):" in out
+    assert "by count" in out
 
 
 @pytest.mark.asyncio
-async def test_recent_trades_empty_cold_market():
-    """No trades in window → no trades message (L3 empty-state, single section)."""
+async def test_recent_trades_empty_new_format():
+    from unittest.mock import AsyncMock, MagicMock
     from src.agent.tools_perception import get_recent_trades
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.return_value = []
-    result = await get_recent_trades(deps, window_seconds=300)
-    # R2-8c §4.2.9: single-section empty-state (NOT Error: prefix).
-    assert re.search(rf"=== Recent Trades \(BTC/USDT:USDT, last 300s {_AS_OF_TS}\) ===", result), result[:200]
-    assert "No trades in last 300s." in result
-    assert "Error:" not in result
-
-
-@pytest.mark.asyncio
-async def test_recent_trades_service_failure():
-    """Service failure → inline Error: prefix under tool section (R2-8c §4.2.9 Option D)."""
-    from src.agent.tools_perception import get_recent_trades
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.side_effect = Exception("timeout")
-    result = await get_recent_trades(deps)
-    # iter-tool-opt-error-metadata: exception class name appended in parentheses
-    # review-followup I2: error-path header now carries `last Xs` window field
-    assert re.search(rf"=== Recent Trades \(BTC/USDT:USDT, last \d+s {_AS_OF_TS}\) ===", result), result[:200]
-    assert "Error: Temporarily unavailable (Exception)." in result
-
-
-@pytest.mark.asyncio
-async def test_recent_trades_partial_coverage_double_condition():
-    """When n>=95% of max AND oldest age < 95% window → partial coverage flagged."""
-    from src.agent.tools_perception import get_recent_trades, RECENT_TRADES_MAX_FETCH
-    import time
-    now_ms = int(time.time() * 1000)
-    # Fill up to limit, oldest 200s ago → 200/300 = 67% of window
-    trades = [Trade(timestamp=now_ms - int((i / RECENT_TRADES_MAX_FETCH) * 200_000),
-                    side="buy", price=64000.0, amount=0.01, trade_id=None)
-              for i in range(RECENT_TRADES_MAX_FETCH)]
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.return_value = trades
-    result = await get_recent_trades(deps, window_seconds=300)
-    assert "partial coverage" in result
-
-
-@pytest.mark.asyncio
-async def test_recent_trades_all_taker_sell():
-    """All trades are taker-sell → 0% taker buy / 100% taker sell / negative net."""
-    from src.agent.tools_perception import get_recent_trades
-    import time
-    now_ms = int(time.time() * 1000)
-    trades = [Trade(timestamp=now_ms - i * 3000, side="sell", price=64000.0, amount=0.01, trade_id=None)
-              for i in range(50)]
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.return_value = trades
-    result = await get_recent_trades(deps, window_seconds=300)
-    assert "0% taker buy" in result
-    assert "net -" in result  # negative net (all sells)
-
-
-@pytest.mark.asyncio
-async def test_recent_trades_all_taker_buy():
-    """All trades are taker-buy → 100% taker buy / positive net (symmetric to all-sell)."""
-    from src.agent.tools_perception import get_recent_trades
-    import time
-    now_ms = int(time.time() * 1000)
-    trades = [Trade(timestamp=now_ms - i * 3000, side="buy", price=64000.0, amount=0.01, trade_id=None)
-              for i in range(50)]
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.return_value = trades
-    result = await get_recent_trades(deps, window_seconds=300)
-    assert "100% taker buy" in result
-    assert "net +" in result  # positive net (all buys)
-
-
-@pytest.mark.asyncio
-async def test_recent_trades_future_timestamp_clock_skew_skipped():
-    """Trades with timestamp in the future (server clock ahead of local) are skipped.
-
-    Regression for IndexError: Python floor division on negative age yields
-    `-5000 // 60_000 == -1`, which would compute bucket_idx = 5 — out of bounds
-    on a 5-element list. NTP-level millisecond drift between OKX server and
-    local clock is common in practice; this test pins the skip-on-negative
-    behavior so a refactor cannot re-introduce the crash silently.
-    """
-    from src.agent.tools_perception import get_recent_trades
-    import time
-    now_ms = int(time.time() * 1000)
-    trades = [
-        # 5 seconds in the future (server clock ahead) — would crash without guard
-        Trade(timestamp=now_ms + 5_000, side="buy", price=64000.0, amount=0.01, trade_id="future"),
-        # Normal in-window trade — should still be counted
-        Trade(timestamp=now_ms - 30_000, side="sell", price=64000.0, amount=0.02, trade_id="ok"),
-    ]
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.return_value = trades
-    # Must NOT raise IndexError
-    result = await get_recent_trades(deps, window_seconds=300)
-    # Future-timestamped trade was filtered; only the in-window trade counted
-    assert "Trade count: 1" in result
-
-
-@pytest.mark.asyncio
-async def test_recent_trades_non_standard_window_label():
-    """window_seconds != 300 → fallback label format `bucket {i+1}/N ({start}-{end}s ago)`.
-
-    Spec §5.2 test-coverage clause. Default 300s path uses `t-Xmin` labels; any
-    other window must render positional bucket labels with second ranges.
-    """
-    from src.agent.tools_perception import get_recent_trades
-    import time
-    now_ms = int(time.time() * 1000)
-    # 120s window → 5 buckets × 24s each
-    trades = [Trade(timestamp=now_ms - i * 2000, side="buy", price=64000.0, amount=0.01, trade_id=None)
-              for i in range(50)]  # ages 0..98000ms, all within 120s window
-    deps = MockDeps()
-    deps.market_data.get_recent_trades.return_value = trades
-    result = await get_recent_trades(deps, window_seconds=120)
-    # Non-standard window → fallback label format; no t-Xmin
-    assert "t-1min" not in result
-    assert "t-2min" not in result
-    # Positional label present (exact format: `bucket {i}/5 ({start}-{end}s ago)`)
-    assert "bucket 1/5" in result
-    assert "bucket 5/5" in result
-    # Second-range markers
-    assert "s ago)" in result
-    # Header reflects 24s bucket duration
-    assert "5 × 24s buckets" in result
+    deps = MagicMock(); deps.symbol = "BTC/USDT:USDT"
+    deps.market_data.get_recent_trades = AsyncMock(return_value=[])
+    assert "No recent trades." in await get_recent_trades(deps)
 
 
 import pandas as pd

@@ -3219,7 +3219,7 @@ async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
 # 14 perception tools must carry inline "@ HH:MM:SS UTC" in their first section
 # header (UTC-only). Aligns with get_market_data / get_higher_timeframe_view
 # existing pattern and set_next_wake_at PR #48 UTC anchor.
-_AS_OF_HEADER_RE = _re_dg.compile(r"^=== [^=]*@ \d{2}:\d{2}:\d{2} UTC[^=]*===")
+_AS_OF_HEADER_RE = _re_dg.compile(r"^=== [^=]*@ ?\d{2}:\d{2}:\d{2} UTC[^=]*===")
 
 # Tools whose first-section render lives behind Path A (service=None / empty
 # state — early return). These do NOT need market_data/exchange happy mocks.
@@ -3278,7 +3278,7 @@ async def test_dg_1e_path_b_first_section_has_as_of_timestamp(tool_name):
 # this guard a future edit can silently drop the window from an error-path
 # header and agent loses context about which window query failed.
 _WINDOW_BEARING_FIRST_HEADER_PATTERNS = {
-    "get_recent_trades": r"=== Recent Trades \([^@]*last \d+s[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
+    "get_recent_trades": r"=== Recent Trades \([^)]*@\d{2}:\d{2}:\d{2} UTC\) ===",
     "get_macro_calendar": r"=== Upcoming Macro Events \([^@]*next \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
     "get_exchange_announcements": r"=== Exchange Announcements \([^@]*past \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
 }

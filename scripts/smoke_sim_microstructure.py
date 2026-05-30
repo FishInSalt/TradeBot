@@ -45,7 +45,7 @@ async def main():
         print("\n========== get_order_book ==========")
         print(await get_order_book(_deps(md), depth=15))
         print("\n========== get_recent_trades ==========")
-        print(await get_recent_trades(_deps(md), window_seconds=300))
+        print(await get_recent_trades(_deps(md)))
     finally:
         await ex._ccxt.close()
 
