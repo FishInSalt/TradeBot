@@ -169,6 +169,27 @@ def test_render_taker_flow_now_line_and_in_progress():
     assert "still forming (2.0/5min)" in out      # per-bar footnote
 
 
+def test_render_taker_flow_closed_newest_header_not_in_progress():
+    """Problem ①: rubik publish-lag can leave the newest returned bar already
+    CLOSED (newest.ts + period_ms <= now_ms — common on 5m, and on 1h/4h/1d in the
+    short window just after a bar boundary). The per-bar header must then NOT claim
+    'row 1 = current in-progress' (a false fact); it says 'latest closed bar', the
+    Now line says 'closed', and there is no in-progress star/footnote. Mock unit
+    tests defaulted the newest bar to in-progress, so this branch was never exercised
+    until the live grounding run (memory project_iter2_mock_fidelity_lesson)."""
+    from src.agent.tools_perception import _render_taker_flow
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    # newest bar opened 7min before now -> closed 2min ago (publish-lag window)
+    bars = _bars(21, period_ms, base_open=now - 120_000 - 21 * period_ms)
+    out = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "current 5m, closed" in out                  # Now line honest
+    assert "row 1 = latest closed bar" in out           # header conditionalized
+    assert "row 1 = current in-progress" not in out     # no false claim
+    assert "still forming" not in out                   # no in-progress footnote
+    assert "*" not in out.split("Per-bar")[1]           # no star on row 1
+
+
 def test_render_taker_flow_window_cvd_and_net_sell_count():
     from src.agent.tools_perception import _render_taker_flow
     from src.integrations.exchange.base import TakerFlowBar
@@ -418,3 +439,21 @@ def test_order_flow_wrappers_fact_only_no_imperative_cross_routing():
     assert "get_taker_flow" not in rt, "get_recent_trades cross-routes to get_taker_flow by name"
     assert "get_recent_trades" not in tf, "get_taker_flow cross-routes to get_recent_trades by name"
     assert "companion to" not in tf
+
+
+def test_get_taker_flow_docstring_row1_state_is_fact_only():
+    """Problem ① docstring channel: the LLM-visible wrapper docstring must NOT make the
+    absolute claim 'Row 1 is the current in-progress bar' — false whenever rubik
+    publish-lag leaves the newest bar closed. It states both observable states
+    fact-only, mirroring the conditionalized output header (tool-design principle 1
+    fact-only; memory project_tool_docstring_llm_channel — assert tool_def.description,
+    not the impl __doc__)."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    desc = agent._function_toolset.tools["get_taker_flow"].tool_def.description or ""
+    norm = " ".join(desc.split())  # collapse docstring line-wraps (LLM reads newlines as spaces)
+    assert "Row 1 is the newest bar" in norm      # fact-only framing reaches LLM
+    assert "latest closed bar" in norm            # the second observable state surfaced
+    # the old absolute claim must be gone (it was false whenever the newest bar was closed)
+    assert "Row 1 is the current in-progress bar" not in norm

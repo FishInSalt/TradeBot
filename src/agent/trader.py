@@ -432,8 +432,9 @@ def create_trader_agent(
         """Minute-level taker buy/sell flow: who is hitting the book over recent bars.
 
         Server-aggregated taker volume (USD) per bar — a minute-to-hours flow
-        trend. Row 1 is the current in-progress bar (labeled with how far it has
-        formed); CVD is
+        trend. Row 1 is the newest bar — the current in-progress bar (labeled
+        with how far it has formed) when still open, otherwise the latest closed
+        bar; CVD is
         cumulative net taker volume across the shown window only, so do NOT compare
         CVD across separate calls (the window's oldest bar — its zero point — rolls
         forward each call). RVol is the bar's taker total vs a fixed 20-closed-bar

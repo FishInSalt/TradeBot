@@ -1209,7 +1209,13 @@ def _render_taker_flow(
            f"RVol(×20-bar)   CVD({scale_label})")
     if show_close:
         hdr += "   Close"
-    lines.append("Per-bar (bar open UTC, newest first; row 1 = current in-progress):")
+    # Row 1 is the newest bar rubik returned; it is only in-progress when the
+    # latest bar is still forming. Upstream publish-lag can leave the newest
+    # returned bar already closed (common on 5m; on 1h/4h/1d in the short window
+    # after a bar boundary) — so the header must follow is_in_progress, not
+    # assert in-progress unconditionally.
+    row1_state = "current in-progress" if is_in_progress else "latest closed bar"
+    lines.append(f"Per-bar (bar open UTC, newest first; row 1 = {row1_state}):")
     lines.append(hdr)
     for b in reversed(display):                          # newest-first
         star = "*" if (is_in_progress and b is newest) else " "
