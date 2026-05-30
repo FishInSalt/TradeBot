@@ -86,3 +86,36 @@ async def test_sim_fetch_taker_flow_rate_limit_raises():
     )
     with pytest.raises(RateLimitHit):
         await ex.fetch_taker_flow("BTC/USDT:USDT", "5m", 6)
+
+
+def _okx_with_rubik(data_rows):
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange.__new__(OKXExchange)
+    ex._client = MagicMock()
+    ex._client.market.return_value = {"id": "BTC-USDT-SWAP"}
+    ex._client.public_get_rubik_stat_taker_volume_contract = AsyncMock(
+        return_value={"code": "0", "data": data_rows, "msg": ""}
+    )
+    return ex
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_taker_flow_parses_and_ascends():
+    rows = [
+        ["1778644800000", "5800000", "4200000"],  # newest = in-progress
+        ["1778644500000", "9000000", "8000000"],  # oldest
+    ]
+    ex = _okx_with_rubik(rows)
+    bars = await ex.fetch_taker_flow("BTC/USDT:USDT", "1h", 2)
+    assert [b.ts for b in bars] == [1778644500000, 1778644800000]
+    assert bars[-1].sell_usd == pytest.approx(5800000.0)
+    assert bars[-1].buy_usd == pytest.approx(4200000.0)
+    ex._client.public_get_rubik_stat_taker_volume_contract.assert_awaited_once_with(
+        {"instId": "BTC-USDT-SWAP", "period": "1H", "unit": "2", "limit": "2"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_taker_flow_empty():
+    ex = _okx_with_rubik([])
+    assert await ex.fetch_taker_flow("BTC/USDT:USDT", "5m", 6) == []

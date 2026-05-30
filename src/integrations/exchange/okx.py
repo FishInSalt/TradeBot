@@ -22,9 +22,11 @@ from src.integrations.exchange.base import (
     OrderBook,
     OrderBookLevel,
     Position,
+    TakerFlowBar,
     Ticker,
     Trade,
     _OKX_OI_PERIOD,
+    _TAKER_VOLUME_PERIOD,
 )
 from src.utils.cache import RateLimitHit
 
@@ -846,6 +848,31 @@ class OKXExchange(BaseExchange):
         ]
         points.reverse()  # OKX returns newest-first; flip to oldest-first
         return points
+
+    @_retry()
+    async def fetch_taker_flow(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "4h", "1d", "1w"] = "5m",
+        limit: int = 6,
+    ) -> list[TakerFlowBar]:
+        inst_id = self._client.market(symbol)["id"]  # BTC/USDT:USDT -> BTC-USDT-SWAP
+        try:
+            raw = await self._client.public_get_rubik_stat_taker_volume_contract({
+                "instId": inst_id,
+                "period": _TAKER_VOLUME_PERIOD[period],
+                "unit": "2",
+                "limit": str(limit),
+            })
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX taker flow: {e}") from e
+        rows = raw.get("data") or []
+        bars = [
+            TakerFlowBar(ts=int(r[0]), sell_usd=float(r[1]), buy_usd=float(r[2]))
+            for r in rows
+        ]
+        bars.reverse()  # OKX newest-first -> oldest-first (in-progress bar last)
+        return bars
 
     @_retry()
     async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
