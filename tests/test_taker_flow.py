@@ -119,3 +119,12 @@ async def test_okx_fetch_taker_flow_parses_and_ascends():
 async def test_okx_fetch_taker_flow_empty():
     ex = _okx_with_rubik([])
     assert await ex.fetch_taker_flow("BTC/USDT:USDT", "5m", 6) == []
+
+
+def test_base_exchange_has_fetch_taker_flow_abstractmethod():
+    import inspect
+    from src.integrations.exchange.base import BaseExchange
+    assert "fetch_taker_flow" in BaseExchange.__abstractmethods__
+    sig = inspect.signature(BaseExchange.fetch_taker_flow)
+    assert sig.parameters["period"].default == "5m"
+    assert sig.parameters["limit"].default == 6

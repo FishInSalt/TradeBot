@@ -168,6 +168,19 @@ class BaseExchange(ABC):
         limit: int = 26,
     ) -> list["OpenInterestHistoryPoint"]: ...
     @abstractmethod
+    async def fetch_taker_flow(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "4h", "1d", "1w"] = "5m",
+        limit: int = 6,
+    ) -> list["TakerFlowBar"]:
+        """Taker buy/sell volume bars (USD notional) from rubik taker-volume.
+
+        Returns oldest-first; the LAST bar is the in-progress current bucket
+        (returned raw, no detection/labeling — that is the tool layer's job).
+        """
+        ...
+    @abstractmethod
     async def fetch_long_short_ratio(self, symbol: str) -> 'LongShortRatio': ...
     @abstractmethod
     async def fetch_order_book(self, symbol: str, depth: int = 20) -> OrderBook: ...
