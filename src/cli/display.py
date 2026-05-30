@@ -619,6 +619,7 @@ _PERCEPTION_TOOL_NAMES: frozenset[str] = frozenset({
     "get_multi_timeframe_snapshot",
     "get_price_pivots",
     "get_recent_trades",
+    "get_taker_flow",
     "get_derivatives_data",
     # Mid (B2 50-70%)
     "get_market_news",

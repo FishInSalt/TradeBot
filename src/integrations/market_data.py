@@ -1,7 +1,7 @@
 from __future__ import annotations
 import pandas as pd
 from typing import Literal
-from src.integrations.exchange.base import BaseExchange, FundingRate, LongShortRatio, OpenInterestHistoryPoint, OrderBook, Ticker, Trade
+from src.integrations.exchange.base import BaseExchange, FundingRate, LongShortRatio, OpenInterestHistoryPoint, OrderBook, TakerFlowBar, Ticker, Trade
 from src.utils.cache import TTLCache
 
 _DERIVATIVES_TTL = 180.0  # 3 minutes
@@ -32,6 +32,12 @@ class MarketDataService:
 
     async def get_recent_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
         return await self._exchange.fetch_trades(symbol, limit=limit)
+
+    async def get_taker_flow(self, symbol: str, period: str = "5m", limit: int = 6) -> list[TakerFlowBar]:
+        # NOT cached (contrast get_open_interest_history's 180s TTL): taker_flow's
+        # value is the live in-progress bucket; caching would stale formed% AND
+        # desync from the uncached OHLCV join used for the Close column (§3.2/§4.1).
+        return await self._exchange.fetch_taker_flow(symbol, period, limit)
 
     async def get_funding_rate(self, symbol: str) -> FundingRate:
         return await self._derivatives_cache.get_or_fetch(

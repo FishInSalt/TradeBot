@@ -60,16 +60,17 @@ async def test_get_order_book_degrades_on_failure():
 
 
 @pytest.mark.asyncio
-async def test_get_recent_trades_partial_coverage():
-    """500 笔成交全落窗口末 <120s（fetch_ratio=1.0 且 oldest_age_ratio<0.95）→ partial coverage 注记。"""
+async def test_get_recent_trades_count_buckets_real_shape():
+    """500 笔真实形态 → 等笔数桶渲染（last 500 + 5×100 slice 表）。"""
     now_ms = int(time.time() * 1000)
     trades = [Trade(timestamp=now_ms - (i % 120) * 1000,
                     side="buy" if i % 2 else "sell",
                     price=70000.0, amount=0.01, trade_id=str(i))
-              for i in range(500)]  # RECENT_TRADES_MAX_FETCH = 500 → fetch_ratio=1.0
+              for i in range(500)]
     deps = _deps_with_trades(trades)
-    out = await get_recent_trades(deps, window_seconds=300)
-    assert "partial coverage" in out
+    out = await get_recent_trades(deps)
+    assert "last 500 ·" in out
+    assert "Per 100-trade slice (newest first):" in out
 
 
 @pytest.mark.asyncio
@@ -79,8 +80,8 @@ async def test_get_recent_trades_degrades_on_failure():
     deps.symbol = "BTC/USDT:USDT"
     deps.market_data = MagicMock()
     deps.market_data.get_recent_trades = AsyncMock(side_effect=Exception("boom"))
-    out = await get_recent_trades(deps, window_seconds=300)
-    assert "Temporarily unavailable" in out
+    out = await get_recent_trades(deps)
+    assert "Recent trades temporarily unavailable" in out
 
 
 @pytest.mark.asyncio

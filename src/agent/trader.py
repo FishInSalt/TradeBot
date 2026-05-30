@@ -404,18 +404,61 @@ def create_trader_agent(
         return await _impl(ctx.deps, depth=depth)
 
     @tool
-    async def get_recent_trades(ctx: RunContext[TradingDeps], window_seconds: int = 300) -> str:
-        """Read taker-flow bias and rhythm over recent minutes.
+    async def get_recent_trades(ctx: RunContext[TradingDeps]) -> str:
+        """Seconds-level tick micro-view: who is taking liquidity right now.
 
-        Default 300s window across 5 × 60s buckets. Total + trade count + avg
-        size shown below buckets.
+        The last ~500 trades grouped into 5 count-buckets of 100 (newest first),
+        with the window's true time span in the header (typically tens of seconds).
+        Each slice reports taker buy% by count and by volume, net USD, and the
+        largest single trade.
 
-        Args:
-            window_seconds: total scan window (default 300s).
+        Returns:
+            A trades micro-report (fact-only text). Example output follows.
+            === Recent Trades (BTC-USDT-SWAP · last 500 · 40.9s · @ 04:34:07 UTC) ===
+            Taker buy:  40% by count · 49% by volume      Net: -$34.8K · 12.2 tr/s
+            Largest single:  $168K SELL  (= 12.7% of window vol)
+            Size (USD notional):  med $59 · mean $2.6K · p95 $9.7K
+            Per 100-trade slice (newest first):
+              Slice    Span   Buy%(cnt)  Buy%(vol)    Net($)    MaxTrade
+              1 (new)  8.1s     44%        58%       +$12.1K    $168K S
+              ... (older slices) ...
         """
         from src.agent.tools_perception import get_recent_trades as _impl
 
-        return await _impl(ctx.deps, window_seconds=window_seconds)
+        return await _impl(ctx.deps)
+
+    @tool
+    async def get_taker_flow(ctx: RunContext[TradingDeps], period: str = "5m", limit: int = 6) -> str:
+        """Minute-level taker buy/sell flow: who is hitting the book over recent bars.
+
+        Server-aggregated taker volume (USD) per bar — a minute-to-hours flow
+        trend. Row 1 is the current in-progress bar (labeled with how far it has
+        formed); CVD is
+        cumulative net taker volume across the shown window only, so do NOT compare
+        CVD across separate calls (the window's oldest bar — its zero point — rolls
+        forward each call). RVol is the bar's taker total vs a fixed 20-closed-bar
+        average. A same-period 1h/4h/1d context-anchor line shows the larger bar's
+        current direction. period one of 5m/1h/4h/1d; limit 1..36 bars.
+
+        Args:
+            period: bar size, one of "5m", "1h", "4h", "1d" (default "5m").
+            limit: number of bars to show, 1..36 (default 6).
+
+        Returns:
+            A taker-flow report (fact-only text) for the given period and limit. Example output follows.
+            === Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:34:07 UTC) ===
+            Now (current 5m, 4.0/5min formed):  41% taker buy · net -5.8$M · vol 0.3× (vs 20-bar avg)
+            Window (6 bars = 30min):  CVD +109.8$M · 2/6 bars net-sell
+            Per-bar (bar open UTC, newest first; row 1 = current in-progress):
+              Time     Buy%   Net($M)   RVol(×20-bar)   CVD($M)   Close
+              04:30*    41%     -5.8    0.3×   +109.8    73531
+              ... (older bars) ...
+              [* row 1 = current bar still forming (4.0/5min)]
+            1h-scale anchor (current 1h, 34min formed):  53% buy · net +62$M
+        """
+        from src.agent.tools_perception import get_taker_flow as _impl
+
+        return await _impl(ctx.deps, period=period, limit=limit)
 
     # LLM-visible description: src.agent.tools_descriptions.GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION
     @tool(description=GET_MULTI_TIMEFRAME_SNAPSHOT_DESCRIPTION)
@@ -733,7 +776,7 @@ def create_trader_agent(
 # 漂移防护：tests/test_trader_agent.py::test_registered_tool_names_matches_agent_tools
 # 用 agent._function_toolset.tools 对照本常量。加新 tool 必须同时更新此列表。
 REGISTERED_TOOL_NAMES: list[str] = [
-    # --- 感知 (19) ---
+    # --- 感知 (20) ---
     "get_market_data",
     "get_position",
     "get_account_balance",
@@ -751,6 +794,7 @@ REGISTERED_TOOL_NAMES: list[str] = [
     "get_stablecoin_supply",
     "get_order_book",
     "get_recent_trades",
+    "get_taker_flow",
     "get_multi_timeframe_snapshot",
     "get_price_pivots",
     # --- 执行 (14) ---

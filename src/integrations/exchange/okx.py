@@ -22,9 +22,11 @@ from src.integrations.exchange.base import (
     OrderBook,
     OrderBookLevel,
     Position,
+    TakerFlowBar,
     Ticker,
     Trade,
     _OKX_OI_PERIOD,
+    _TAKER_VOLUME_PERIOD,
 )
 from src.utils.cache import RateLimitHit
 
@@ -848,6 +850,31 @@ class OKXExchange(BaseExchange):
         return points
 
     @_retry()
+    async def fetch_taker_flow(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "4h", "1d", "1w"] = "5m",
+        limit: int = 6,
+    ) -> list[TakerFlowBar]:
+        inst_id = self._client.market(symbol)["id"]  # BTC/USDT:USDT -> BTC-USDT-SWAP
+        try:
+            raw = await self._client.public_get_rubik_stat_taker_volume_contract({
+                "instId": inst_id,
+                "period": _TAKER_VOLUME_PERIOD[period],
+                "unit": "2",
+                "limit": str(limit),
+            })
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"OKX taker flow: {e}") from e
+        rows = raw.get("data") or []
+        bars = [
+            TakerFlowBar(ts=int(r[0]), sell_usd=float(r[1]), buy_usd=float(r[2]))
+            for r in rows
+        ]
+        bars.reverse()  # OKX newest-first -> oldest-first (in-progress bar last)
+        return bars
+
+    @_retry()
     async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
         try:
             history = await self._client.fetch_long_short_ratio_history(symbol, "5m", limit=1)
@@ -894,6 +921,9 @@ class OKXExchange(BaseExchange):
 
     @_retry(max_retries=2, base_delay=0.5)
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]:
+        if not self._client.markets:
+            await self._client.load_markets()
+        cs = float((self._client.markets.get(symbol) or {}).get("contractSize") or 1.0)
         data = await self._client.fetch_trades(symbol, limit=limit)
         trades: list[Trade] = []
         for raw in data:
@@ -902,10 +932,9 @@ class OKXExchange(BaseExchange):
                 timestamp=int(raw["timestamp"]),
                 side=str(raw["side"]),
                 price=float(raw["price"]),
-                amount=float(raw["amount"]),
+                amount=float(raw["amount"]) * cs,  # 张->base (Option B, §4.2)
                 trade_id=str(raw_id) if raw_id is not None else None,
             ))
-        # Explicit sort — don't rely on CCXT default (unified spec is ascending but not guaranteed)
         trades.sort(key=lambda t: t.timestamp)
         return trades
 

@@ -24,8 +24,8 @@ def test_a_memory_tools_unregistered():
     assert "get_memories" not in tool_names, "get_memories must be unregistered"
     assert "save_memory" not in REGISTERED_TOOL_NAMES
     assert "get_memories" not in REGISTERED_TOOL_NAMES
-    assert len(REGISTERED_TOOL_NAMES) == 33, (
-        f"Expected 33 tools (19 perception + 14 execution), got {len(REGISTERED_TOOL_NAMES)}"
+    assert len(REGISTERED_TOOL_NAMES) == 34, (
+        f"Expected 34 tools (20 perception + 14 execution), got {len(REGISTERED_TOOL_NAMES)}"
     )
 
 

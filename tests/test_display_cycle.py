@@ -1496,10 +1496,10 @@ def test_render_tool_body_fallback_no_header():
 
 
 def test_dg_2_dispatch_sets_partition_all_registered_tools():
-    """T-DG-2: 二层集合互斥 + 完整覆盖 33 registered tools.
+    """T-DG-2: 二层集合互斥 + 完整覆盖 34 registered tools.
 
-    Post iter-w3r1-vol-alert-agent-owned: _PERCEPTION_TOOL_NAMES (19) ∪ _EXECUTION_TOOL_NAMES (14)
-    必须等于 REGISTERED_TOOL_NAMES (33)，且互不重叠。
+    Post iter-order-flow-tools: _PERCEPTION_TOOL_NAMES (20) ∪ _EXECUTION_TOOL_NAMES (14)
+    必须等于 REGISTERED_TOOL_NAMES (34)，且互不重叠。
     _SECTIONED_PERCEPTION_TOOL_NAMES = _PERCEPTION_TOOL_NAMES (no exclusion).
     """
     from src.cli.display import (
@@ -1519,7 +1519,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     # Two-layer disjointness.
     assert perception.isdisjoint(execution)
 
-    # Complete coverage of 32 registered tools.
+    # Complete coverage of 34 registered tools.
     union = perception | execution
     declared = set(REGISTERED_TOOL_NAMES)
     assert union == declared, (
@@ -1529,7 +1529,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     )
 
     # Counts.
-    assert len(perception) == 19
+    assert len(perception) == 20
     assert len(execution) == 14
 
 
@@ -3040,6 +3040,11 @@ async def _invoke_path_b(tool_name: str) -> str:
         market_data.get_order_book.side_effect = Exception("upstream")  # L2 unavailable
         return await fn(_MockDeps(market_data=market_data))
 
+    if tool_name == "get_taker_flow":
+        market_data = _AsyncMock_dg()
+        market_data.get_taker_flow.side_effect = Exception("upstream")  # L2 unavailable
+        return await fn(_MockDeps(market_data=market_data))
+
     if tool_name == "get_derivatives_data":
         # Force all-3-failure → L2 inline `Error:` form (Option D)
         market_data = _AsyncMock_dg()
@@ -3216,7 +3221,7 @@ async def test_dg_1d_param_order_convention(tool_name, expected_pattern):
 
 
 # === T-DG-1e: as-of header timestamp (iter-tool-opt-as-of-header) ===
-# 14 perception tools must carry inline "@ HH:MM:SS UTC" in their first section
+# 15 perception tools must carry inline "@ HH:MM:SS UTC" in their first section
 # header (UTC-only). Aligns with get_market_data / get_higher_timeframe_view
 # existing pattern and set_next_wake_at PR #48 UTC anchor.
 _AS_OF_HEADER_RE = _re_dg.compile(r"^=== [^=]*@ \d{2}:\d{2}:\d{2} UTC[^=]*===")
@@ -3239,6 +3244,7 @@ _AS_OF_PATH_A_TOOLS = [
 _AS_OF_PATH_B_TOOLS = [
     "get_open_orders",
     "get_recent_trades",
+    "get_taker_flow",
     "get_order_book",
     "get_price_pivots",
     "get_account_balance",
@@ -3278,7 +3284,7 @@ async def test_dg_1e_path_b_first_section_has_as_of_timestamp(tool_name):
 # this guard a future edit can silently drop the window from an error-path
 # header and agent loses context about which window query failed.
 _WINDOW_BEARING_FIRST_HEADER_PATTERNS = {
-    "get_recent_trades": r"=== Recent Trades \([^@]*last \d+s[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
+    "get_recent_trades": r"=== Recent Trades \([^)]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
     "get_macro_calendar": r"=== Upcoming Macro Events \([^@]*next \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
     "get_exchange_announcements": r"=== Exchange Announcements \([^@]*past \d+h[^@]*@ \d{2}:\d{2}:\d{2} UTC\) ===",
 }

@@ -28,7 +28,9 @@ def _sim_with_ccxt(symbol: str = "BTC/USDT:USDT") -> SimulatedExchange:
     """_make_sim + 挂一个 MagicMock _ccxt（换源后两方法依赖 self._ccxt）。"""
     ex = _make_sim(symbol)
     ex._ccxt = MagicMock()
-    ex._ccxt.market = MagicMock(return_value={"contractSize": 1.0})  # 归一化默认无变化
+    # fetch_order_book + fetch_trades both read market contractSize for 张->base
+    # normalization; cs=1.0 keeps these mapping/sort tests' raw-amount assertions valid.
+    ex._ccxt.market.return_value = {"id": symbol, "contractSize": 1.0}
     return ex
 
 
@@ -262,8 +264,11 @@ async def test_okx_fetch_order_book_retry_params(mocker):
 @pytest.mark.asyncio
 async def test_okx_fetch_trades_parses_and_sorts(mocker):
     """OKX fetch_trades parses CCXT response and explicitly sorts ascending by timestamp."""
+    from unittest.mock import AsyncMock
     from src.integrations.exchange.okx import OKXExchange
     ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    # Pre-populate markets so the load-guard is skipped; cs=1.0 keeps amount assertions valid.
+    ex._client.markets = {"BTC/USDT:USDT": {"contractSize": 1.0}}
     # Deliberately unordered to test explicit sort
     mocker.patch.object(ex._client, "fetch_trades", return_value=[
         {"timestamp": 1700000030000, "side": "buy", "price": 50001.0, "amount": 0.01, "id": "t3"},

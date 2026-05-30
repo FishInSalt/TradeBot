@@ -2,7 +2,7 @@
 in error/degradation messages.
 
 Coverage:
-  RT-1  get_recent_trades            — except → "Error: Temporarily unavailable (TimeoutError)."
+  RT-1  get_recent_trades            — except → "Recent trades temporarily unavailable (TimeoutError)."
   OB-5  get_order_book               — except → "Error: Temporarily unavailable (ConnectionError)."
   POS-2 get_position                 — except → "(unavailable: <ExceptionClassName>)" in Risk + Exit sections
   EA-5  get_exchange_announcements   — except → "Error: ... temporarily unavailable (<ExceptionClassName>)."
@@ -57,7 +57,7 @@ async def test_get_recent_trades_error_message_includes_exception_class():
     result = await get_recent_trades(deps)
 
     assert "=== Recent Trades (BTC/USDT:USDT" in result  # iter-8 may suffix `@ HH:MM:SS UTC`
-    assert "Error: Temporarily unavailable" in result
+    assert "Recent trades temporarily unavailable" in result
     assert "(TimeoutError)" in result, f"class name missing in: {result!r}"
 
 

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
-    from src.integrations.exchange.base import OpenInterestHistoryPoint, Trade
+    from src.integrations.exchange.base import OpenInterestHistoryPoint, TakerFlowBar, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +18,9 @@ ORDER_BOOK_MAX_CONCENTRATED_LEVELS = 10
 ORDER_BOOK_DEPTH_DEFAULT = 15
 
 # get_recent_trades
-RECENT_TRADES_WINDOW_DEFAULT = 300
-RECENT_TRADES_BUCKET_COUNT = 5
-RECENT_TRADES_MAX_FETCH = 500  # OKX /market/trades single-call limit
+RECENT_TRADES_SLICE_SIZE = 100         # trades per count-bucket
+RECENT_TRADES_N_SLICES = 5             # max slices -> 5×100 = 500 (OKX /market/trades cap)
+RECENT_TRADES_MAX_FETCH = RECENT_TRADES_SLICE_SIZE * RECENT_TRADES_N_SLICES  # 500
 
 # get_multi_timeframe_snapshot
 MULTI_TF_PRIMARY_MA = {"5m": 20, "1h": 50, "4h": 50, "1d": 50, "1w": 50, "1M": 50}
@@ -1045,6 +1045,17 @@ def _format_oi_usd(v: float) -> str:
     return f"${v:,.0f}"
 
 
+def _fmt_money(v: float) -> str:
+    """Signed USD with auto $K/$M scale (ASCII sign, for test stability)."""
+    a = abs(v)
+    sign = "-" if v < 0 else "+"
+    if a >= 1e6:
+        return f"{sign}${a / 1e6:.1f}M"
+    if a >= 1e3:
+        return f"{sign}${a / 1e3:.1f}K"
+    return f"{sign}${a:.0f}"
+
+
 def _derive_oi_anchors(
     points: list[OpenInterestHistoryPoint],
     *,
@@ -1092,6 +1103,209 @@ def _derive_oi_anchors(
             f"{label} {_format_oi_usd(anchor.open_interest_value)}, {delta_pct:+.1f}%"
         )
     return current_closed, "; ".join(fragments), is_in_progress
+
+
+# --- taker_flow (get_taker_flow) constants + helpers (spec §3.1-3.3) ---
+_TAKER_FLOW_PERIOD_MS = {
+    "5m": 5 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000,
+    "1d": 24 * 60 * 60_000, "1w": 7 * 24 * 60 * 60_000,
+}
+# context-anchor up-tier on the 5m->1h->4h->1d->1w ladder (§3.3). Keys are also
+# the exact set of valid *tool* periods ({5m,1h,4h,1d}); 1w is anchor-only.
+_TAKER_FLOW_ANCHOR = {"5m": "1h", "1h": "4h", "4h": "1d", "1d": "1w"}
+_TAKER_FLOW_RVOL_BARS = 20  # fixed baseline window (closed bars), decoupled from limit
+
+
+def _pick_usd_scale(values: list[float]) -> tuple[str, float]:
+    """One $K/$M scale for a column, chosen from peak abs magnitude (§3.2)."""
+    peak = max((abs(v) for v in values), default=0.0)
+    return ("$M", 1e6) if peak >= 1e6 else ("$K", 1e3)
+
+
+def _fmt_scaled(v: float, divisor: float) -> str:
+    return f"{v / divisor:+.1f}"
+
+
+def _render_taker_flow(
+    bars: list["TakerFlowBar"],
+    period: str,
+    limit: int,
+    *,
+    now_ms: int,
+    symbol: str,
+    fetch_ts: str,
+    closes: dict[int, float] | None = None,
+    close_note: str | None = None,
+    anchor: tuple[str, "TakerFlowBar"] | None = None,
+) -> str:
+    """Render the taker-flow report. Pure + deterministic given now_ms.
+
+    bars: ascending; bars[-1] is the in-progress current bucket (kept + labeled).
+    closes: bar-open-ts -> close px (OHLCV join). close_note: when set, omit the
+    Close column and emit this note instead (1d day-boundary, or OHLCV failure).
+    anchor: (uptier_label, uptier_in_progress_bar) or None.
+    """
+    from src.utils.ohlcv_utils import _fmt_candle_time, _to_pd_timestamp_utc
+
+    period_ms = _TAKER_FLOW_PERIOD_MS[period]
+    period_min = period_ms / 60_000
+    newest = bars[-1]
+    is_in_progress = newest.ts + period_ms > now_ms
+    elapsed_min = max(0.0, (now_ms - newest.ts) / 60_000)
+
+    def _total(b): return b.sell_usd + b.buy_usd
+    def _net(b): return b.buy_usd - b.sell_usd
+    def _buy_pct(b):
+        t = _total(b)
+        return (b.buy_usd / t * 100) if t > 0 else 0.0
+    def _bar_time(b):                                    # tf-aware (mirrors get_market_data candles)
+        return _fmt_candle_time(_to_pd_timestamp_utc(b.ts), period)
+
+    display = bars[-limit:]                              # oldest..newest displayed
+    closed = bars[:-1] if is_in_progress else bars
+    baseline = closed[-_TAKER_FLOW_RVOL_BARS:]
+    baseline_avg = (
+        sum(_total(b) for b in baseline) / len(baseline)
+        if len(baseline) >= _TAKER_FLOW_RVOL_BARS else None
+    )
+
+    # CVD cumulative over displayed window, from oldest displayed bar upward
+    cvd_running, cvd_by_ts = 0.0, {}
+    for b in display:                                    # ascending
+        cvd_running += _net(b)
+        cvd_by_ts[b.ts] = cvd_running
+
+    scale_label, divisor = _pick_usd_scale([_net(b) for b in display] + list(cvd_by_ts.values()))
+
+    lines = [f"=== Taker Flow ({symbol} · {period} bars · @ {fetch_ts} UTC) ===", ""]
+
+    now_rvol = (_total(newest) / baseline_avg) if baseline_avg else None
+    rvol_now = f"{now_rvol:.1f}× (vs {_TAKER_FLOW_RVOL_BARS}-bar avg)" if now_rvol is not None else "—"
+    formed = (f"current {period}, {elapsed_min:.1f}/{period_min:g}min formed"
+              if is_in_progress else f"current {period}, closed")
+    lines.append(
+        f"Now ({formed}):  {_buy_pct(newest):.0f}% taker buy · "
+        f"net {_fmt_scaled(_net(newest), divisor)}{scale_label} · vol {rvol_now}"
+    )
+    net_sell_n = sum(1 for b in display if _net(b) < 0)
+    lines.append(
+        f"Window ({len(display)} bars = {len(display) * period_min:g}min):  "
+        f"CVD {_fmt_scaled(cvd_by_ts[display[-1].ts], divisor)}{scale_label} · "
+        f"{net_sell_n}/{len(display)} bars net-sell"
+    )
+    lines.append("")
+
+    # Close column: omitted if close_note set; else joined by ts; collapse w/ safety net
+    show_close = close_note is None and closes is not None
+    rendered_closes = {}
+    if show_close:
+        rendered_closes = {b.ts: closes.get(b.ts) for b in display}
+        if all(v is None for v in rendered_closes.values()):
+            show_close = False
+            close_note = "Close: n/a — no OHLCV bar matched (timestamp join empty)"
+
+    time_w = max([len(_bar_time(b)) for b in display] + [len("Time")])
+    hdr = (f"  {'Time'.ljust(time_w + 1)} Buy%   Net({scale_label})   "
+           f"RVol(×20-bar)   CVD({scale_label})")
+    if show_close:
+        hdr += "   Close"
+    lines.append("Per-bar (bar open UTC, newest first; row 1 = current in-progress):")
+    lines.append(hdr)
+    for b in reversed(display):                          # newest-first
+        star = "*" if (is_in_progress and b is newest) else " "
+        rvol = (_total(b) / baseline_avg) if baseline_avg else None
+        rvol_s = f"{rvol:.1f}×" if rvol is not None else "—"
+        tfield = f"{_bar_time(b)}{star}".ljust(time_w + 1)
+        row = (f"  {tfield} {_buy_pct(b):>3.0f}%  "
+               f"{_fmt_scaled(_net(b), divisor):>7}  {rvol_s:>5}  "
+               f"{_fmt_scaled(cvd_by_ts[b.ts], divisor):>8}")
+        if show_close:
+            c = rendered_closes.get(b.ts)
+            row += f"  {c:.0f}" if c is not None else "  —"
+        lines.append(row)
+    if is_in_progress:
+        lines.append(f"  [* row 1 = current bar still forming ({elapsed_min:.1f}/{period_min:g}min)]")
+    if close_note is not None:
+        lines.append(close_note)
+
+    if anchor is not None:
+        up_label, up_bar = anchor
+        up_ms = _TAKER_FLOW_PERIOD_MS[up_label]
+        up_in_prog = up_bar.ts + up_ms > now_ms
+        up_elapsed = max(0.0, (now_ms - up_bar.ts) / 60_000)
+        up_formed = (f"current {up_label}, {up_elapsed:.0f}min formed"
+                     if up_in_prog else f"current {up_label}, closed")
+        up_total = up_bar.sell_usd + up_bar.buy_usd
+        up_buy = (up_bar.buy_usd / up_total * 100) if up_total > 0 else 0.0
+        up_net = up_bar.buy_usd - up_bar.sell_usd
+        up_scale, up_div = _pick_usd_scale([up_net])
+        lines.append("")
+        lines.append(
+            f"{up_label}-scale anchor ({up_formed}):  "
+            f"{up_buy:.0f}% buy · net {_fmt_scaled(up_net, up_div)}{up_scale}"
+        )
+    return "\n".join(lines)
+
+
+async def get_taker_flow(deps: TradingDeps, period: str = "5m", limit: int = 6) -> str:
+    """Minute-level taker buy/sell flow over `limit` `period`-bars (impl).
+
+    LLM-visible docstring lives on the trader.py @tool wrapper.
+    """
+    import time
+    from datetime import datetime, timezone
+
+    symbol = deps.symbol
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+    # Fact-only explicit reject (no clamp, no Literal narrowing — soft-constraint §1/§2)
+    if period not in _TAKER_FLOW_ANCHOR:  # valid tool periods == {5m,1h,4h,1d}
+        return f"Invalid period '{period}'. period must be one of: 5m, 1h, 4h, 1d"
+    if not (1 <= limit <= 36):
+        return f"Invalid limit {limit}. limit must be in [1, 36]"
+
+    header = f"=== Taker Flow ({symbol} · {period} bars · @ {fetch_ts} UTC) ==="
+    n = max(limit + 1, 21)  # fetch enough for fixed-20 RVol baseline + in-progress
+
+    # Main rubik series — hard dependency.
+    try:
+        bars = await deps.market_data.get_taker_flow(symbol, period, n)
+    except Exception as e:
+        logger.exception("get_taker_flow main fetch failed for %s", symbol)
+        return f"{header}\nTaker flow temporarily unavailable ({e.__class__.__name__})."
+    if not bars:
+        return f"{header}\nNo taker-volume data available."
+
+    now_ms = int(time.time() * 1000)
+
+    # OHLCV Close join — soft. 1d: day-boundary mismatch (probe E 0/10) -> omit column.
+    closes: dict[int, float] | None = None
+    close_note: str | None = None
+    if period == "1d":
+        close_note = ("Close: n/a — 1d rubik/OHLCV day-boundary mismatch "
+                      "(16:00 vs 00:00 UTC)")
+    else:
+        try:
+            df = await deps.market_data.get_ohlcv_dataframe(symbol, period, limit=n)
+            closes = {int(r.timestamp): float(r.close) for r in df.itertuples()}
+        except Exception:
+            logger.exception("get_taker_flow OHLCV join failed for %s", symbol)
+            close_note = "Close: n/a — OHLCV temporarily unavailable"
+
+    # Context anchor (up-tier in-progress bar) — soft; drop the line on failure/empty.
+    anchor = None
+    up_label = _TAKER_FLOW_ANCHOR[period]
+    try:
+        up_bars = await deps.market_data.get_taker_flow(symbol, up_label, 1)
+        if up_bars:
+            anchor = (up_label, up_bars[-1])
+    except Exception:
+        logger.exception("get_taker_flow anchor fetch failed for %s", symbol)
+
+    return _render_taker_flow(
+        bars, period, limit, now_ms=now_ms, symbol=symbol, fetch_ts=fetch_ts,
+        closes=closes, close_note=close_note, anchor=anchor,
+    )
 
 
 async def get_derivatives_data(
@@ -1813,97 +2027,85 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     return "\n\n".join(sections)
 
 
-async def get_recent_trades(deps: TradingDeps, window_seconds: int = RECENT_TRADES_WINDOW_DEFAULT) -> str:
-    """Return taker-flow bias and rhythm over a recent time window via 5 time-buckets.
+async def get_recent_trades(deps: TradingDeps) -> str:
+    """Seconds-level tick micro-view over the last ~500 trades (impl).
 
-    Args:
-        window_seconds: Observation window in seconds. Default 300 (5 min).
-
-    Returns:
-        str: 5-bucket breakdown + Total + trade count + avg size. See spec §2.2.
-
-    Degradation: "no trades in last {window_seconds}s" if cold market; "temporarily unavailable" on service failure.
+    Count-buckets (5×100), newest-first. USD notional = amount(base) × price
+    (amount is base-currency after the fetch_trades adapter normalization, §4.2).
+    LLM-visible docstring lives on the trader.py @tool wrapper.
     """
-    import time
+    import statistics
     from datetime import datetime, timezone
-    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
     symbol = deps.symbol
-    base_currency = symbol.split("/")[0]
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     try:
         trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
     except Exception as e:
         logger.exception("get_recent_trades failed for %s", symbol)
-        return (
-            f"=== Recent Trades ({symbol}, last {window_seconds}s @ {fetch_ts} UTC) ===\n"
-            f"Error: Temporarily unavailable ({e.__class__.__name__})."
-        )
-
+        return f"=== Recent Trades ({symbol} · @ {fetch_ts} UTC) ===\nRecent trades temporarily unavailable ({e.__class__.__name__})."
     if not trades:
-        return (
-            f"=== Recent Trades ({symbol}, last {window_seconds}s @ {fetch_ts} UTC) ===\n"
-            f"No trades in last {window_seconds}s."
-        )
+        return f"=== Recent Trades ({symbol} · @ {fetch_ts} UTC) ===\nNo recent trades."
 
-    now_ms = int(time.time() * 1000)
-    window_ms = window_seconds * 1000
-    bucket_duration_ms = window_ms // RECENT_TRADES_BUCKET_COUNT
+    trades = sorted(trades, key=lambda t: t.timestamp)  # ascending (defensive)
+    n = len(trades)
+    span_s = (trades[-1].timestamp - trades[0].timestamp) / 1000
+    usd = [t.amount * t.price for t in trades]
+    total_usd = sum(usd) or 1e-9
+    buy_usd = sum(u for u, t in zip(usd, trades) if t.side == "buy")
+    buy_cnt = sum(1 for t in trades if t.side == "buy")
+    net_usd = buy_usd - (total_usd - buy_usd)
 
-    # Allocate trades to buckets (0 = oldest, 4 = newest); drop over-window
-    buckets: list[list[Trade]] = [[] for _ in range(RECENT_TRADES_BUCKET_COUNT)]
-    in_window: list[Trade] = []
-    for t in trades:
-        age_ms = now_ms - t.timestamp
-        # Skip out-of-window trades:
-        # - age_ms >= window_ms: too old (strict >= prevents bucket_idx = -1 on boundary)
-        # - age_ms < 0: future-timestamped (server clock ahead of local clock).
-        #   Python floor division gives `-5000 // 60_000 == -1`, which would compute
-        #   bucket_idx = 5 — out of bounds on a 5-element list (IndexError). NTP-level
-        #   clock skew of a few hundred ms is common in practice; skip rather than
-        #   silently clamp so genuine clock-sync failures stay visible.
-        if age_ms >= window_ms or age_ms < 0:
-            continue
-        bucket_idx = RECENT_TRADES_BUCKET_COUNT - 1 - (age_ms // bucket_duration_ms)
-        buckets[bucket_idx].append(t)
-        in_window.append(t)
+    rate_str = f"{n / span_s:.1f} tr/s" if span_s > 0 else "n/a tr/s (single-timestamp window)"
+    lines = [f"=== Recent Trades ({symbol} · last {n} · {span_s:.1f}s · @ {fetch_ts} UTC) ===", ""]
+    lines.append(
+        f"Taker buy:  {buy_cnt / n * 100:.0f}% by count · {buy_usd / total_usd * 100:.0f}% by volume"
+        f"      Net: {_fmt_money(net_usd)} · {rate_str}"
+    )
+    li = max(range(n), key=lambda i: usd[i])
+    lines.append(
+        f"Largest single:  {_fmt_money(usd[li]).lstrip('+')} {trades[li].side.upper()}"
+        f"  (= {usd[li] / total_usd * 100:.1f}% of window vol)"
+    )
+    srt = sorted(usd)
+    med = statistics.median(srt)
+    p95 = srt[min(int(0.95 * n), n - 1)]
+    lines.append(
+        f"Size (USD notional):  med {_fmt_money(med).lstrip('+')} · "
+        f"mean {_fmt_money(total_usd / n).lstrip('+')} · p95 {_fmt_money(p95).lstrip('+')}"
+    )
 
-    if not in_window:
-        return (
-            f"=== Recent Trades ({symbol}, last {window_seconds}s @ {fetch_ts} UTC) ===\n"
-            f"No trades in last {window_seconds}s."
-        )
-
-    lines = [f"=== Recent Trades ({symbol}, last {window_seconds}s, {RECENT_TRADES_BUCKET_COUNT} × {bucket_duration_ms // 1000}s buckets @ {fetch_ts} UTC) ==="]
-    total_buy = 0.0
-    total_sell = 0.0
-    for i, bucket in enumerate(buckets):
-        buy_vol = sum(t.amount for t in bucket if t.side == "buy")
-        sell_vol = sum(t.amount for t in bucket if t.side == "sell")
-        net = buy_vol - sell_vol
-        total_buy += buy_vol
-        total_sell += sell_vol
-        # Label: for standard 300s/5-bucket → t-5min to t-1min; otherwise bucket {i+1}/N ({start_s}-{end_s}s ago)
-        if window_seconds == 300:
-            label = f"t-{RECENT_TRADES_BUCKET_COUNT - i}min"
-        else:
-            start_s = (RECENT_TRADES_BUCKET_COUNT - i - 1) * (bucket_duration_ms // 1000)
-            end_s = (RECENT_TRADES_BUCKET_COUNT - i) * (bucket_duration_ms // 1000)
-            label = f"bucket {i+1}/{RECENT_TRADES_BUCKET_COUNT} ({start_s}-{end_s}s ago)"
-        lines.append(f"  {label}  buy {buy_vol:.4f} / sell {sell_vol:.4f}  (net {net:+.4f})")
-
-    total_vol = total_buy + total_sell
-    buy_pct = total_buy / total_vol * 100 if total_vol > 0 else 0.0
-    net_total = total_buy - total_sell
-    total_label = f"Total: buy {total_buy:.4f} / sell {total_sell:.4f} (net {net_total:+.4f}, {buy_pct:.0f}% taker buy)"
-
-    # Partial coverage double-condition
-    fetch_ratio = len(trades) / RECENT_TRADES_MAX_FETCH
-    oldest_age_ms = max(now_ms - t.timestamp for t in in_window)
-    oldest_age_ratio = oldest_age_ms / window_ms
-    if fetch_ratio >= 0.95 and oldest_age_ratio < 0.95:
-        total_label = f"Total: buy {total_buy:.4f} / sell {total_sell:.4f} (net {net_total:+.4f}*, {buy_pct:.0f}% taker buy) [* partial coverage: {len(trades)} trades at limit, oldest age {oldest_age_ms//1000}s ({oldest_age_ratio:.0%} of window), window not fully covered]"
-
-    lines.append(total_label)
-    lines.append(f"Trade count: {len(in_window)} | Avg size: {total_vol / len(in_window):.4f} {base_currency}")
+    # Count-buckets, newest-first. Fewer than one full slice (<100) -> no table.
+    if n >= RECENT_TRADES_SLICE_SIZE:
+        slices = []
+        hi = n
+        while hi > 0 and len(slices) < RECENT_TRADES_N_SLICES:
+            lo = max(0, hi - RECENT_TRADES_SLICE_SIZE)
+            slices.append(trades[lo:hi])  # ascending chunk; slices[0]=newest
+            hi = lo
+        lines.append("")
+        lines.append("Per 100-trade slice (newest first):")
+        lines.append("  Slice    Span   Buy%(cnt)  Buy%(vol)    Net($)    MaxTrade")
+        for si, chunk in enumerate(slices):
+            cu = [t.amount * t.price for t in chunk]
+            ctot = sum(cu) or 1e-9
+            cbuy_usd = sum(u for u, t in zip(cu, chunk) if t.side == "buy")
+            cbuy_cnt = sum(1 for t in chunk if t.side == "buy")
+            cspan = (chunk[-1].timestamp - chunk[0].timestamp) / 1000
+            cnet = cbuy_usd - (ctot - cbuy_usd)
+            mi = max(range(len(chunk)), key=lambda k: cu[k])
+            mside = "B" if chunk[mi].side == "buy" else "S"
+            label = f"{si + 1}"
+            if si == 0:
+                label += " (new)"
+            elif si == len(slices) - 1:
+                label += " (old)"
+            cnt_note = "" if len(chunk) == RECENT_TRADES_SLICE_SIZE else f" [{len(chunk)} tr]"
+            lines.append(
+                f"  {label:<8} {cspan:>4.1f}s   {cbuy_cnt / len(chunk) * 100:>4.0f}%      "
+                f"{cbuy_usd / ctot * 100:>4.0f}%   {_fmt_money(cnet):>8}   "
+                f"{_fmt_money(cu[mi]).lstrip('+')} {mside}{cnt_note}"
+            )
     return "\n".join(lines)
 
 

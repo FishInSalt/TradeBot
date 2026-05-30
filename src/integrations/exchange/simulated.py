@@ -23,9 +23,11 @@ from src.integrations.exchange.base import (
     OrderBook,
     OrderBookLevel,
     Position,
+    TakerFlowBar,
     Ticker,
     Trade,
     _OKX_OI_PERIOD,
+    _TAKER_VOLUME_PERIOD,
 )
 from src.utils.cache import RateLimitHit
 
@@ -1062,6 +1064,32 @@ class SimulatedExchange(BaseExchange):
         points.reverse()
         return points
 
+    async def fetch_taker_flow(
+        self,
+        symbol: str,
+        period: Literal["5m", "1h", "4h", "1d", "1w"] = "5m",
+        limit: int = 6,
+    ) -> list[TakerFlowBar]:
+        self._validate_symbol(symbol)
+        if not hasattr(self, "_ccxt"):
+            raise RuntimeError("Exchange not started — call start() first")
+        try:
+            raw = await self._ccxt.public_get_rubik_stat_taker_volume_contract({
+                "instId": self._ccxt.market(symbol)["id"],
+                "period": _TAKER_VOLUME_PERIOD[period],
+                "unit": "2",  # USD notional — unit-clear, cross-symbol comparable
+                "limit": str(limit),
+            })
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitHit(f"Sim taker flow: {e}") from e
+        rows = raw.get("data") or []
+        bars = [
+            TakerFlowBar(ts=int(r[0]), sell_usd=float(r[1]), buy_usd=float(r[2]))
+            for r in rows
+        ]
+        bars.reverse()  # OKX newest-first -> oldest-first (in-progress bar last)
+        return bars
+
     async def fetch_long_short_ratio(self, symbol: str) -> LongShortRatio:
         self._validate_symbol(symbol)
         if not hasattr(self, "_ccxt"):
@@ -1215,6 +1243,11 @@ class SimulatedExchange(BaseExchange):
             data = await self._ccxt.fetch_trades(symbol, limit=limit)
         except ccxt.RateLimitExceeded as e:
             raise RateLimitHit(f"Sim recent trades: {e}") from e
+        # 张->base normalization (Option B, §4.2): raw ccxt amount is OKX
+        # contracts; multiply by the REAL market contractSize so Trade.amount is
+        # base-currency (as its model annotation claims). NOT get_contract_size
+        # (sim returns 1.0 there — execution-layer, load-bearing, untouched).
+        cs = float((self._ccxt.market(symbol) or {}).get("contractSize") or 1.0)
         trades: list[Trade] = []
         for r in data:
             ts, side, px, amt = r.get("timestamp"), r.get("side"), r.get("price"), r.get("amount")
@@ -1222,7 +1255,7 @@ class SimulatedExchange(BaseExchange):
                 continue  # None-safe: CCXT safe_* may return None on malformed rows
             tid = r.get("id")
             trades.append(Trade(timestamp=int(ts), side=str(side), price=float(px),
-                                amount=float(amt), trade_id=str(tid) if tid is not None else None))
+                                amount=float(amt) * cs, trade_id=str(tid) if tid is not None else None))
         trades.sort(key=lambda t: t.timestamp)
         return trades
 
