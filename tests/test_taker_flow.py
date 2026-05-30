@@ -128,3 +128,18 @@ def test_base_exchange_has_fetch_taker_flow_abstractmethod():
     sig = inspect.signature(BaseExchange.fetch_taker_flow)
     assert sig.parameters["period"].default == "5m"
     assert sig.parameters["limit"].default == 6
+
+
+@pytest.mark.asyncio
+async def test_market_data_get_taker_flow_passthrough_uncached():
+    from src.integrations.market_data import MarketDataService
+    from src.integrations.exchange.base import TakerFlowBar
+    exchange = AsyncMock()
+    exchange.fetch_taker_flow.return_value = [TakerFlowBar(ts=1, sell_usd=2.0, buy_usd=3.0)]
+    svc = MarketDataService(exchange)
+    out1 = await svc.get_taker_flow("BTC/USDT:USDT", "5m", 21)
+    out2 = await svc.get_taker_flow("BTC/USDT:USDT", "5m", 21)
+    assert out1[0].buy_usd == pytest.approx(3.0)
+    # NOT cached: two calls -> two underlying fetches (unlike get_open_interest_history)
+    assert exchange.fetch_taker_flow.await_count == 2
+    exchange.fetch_taker_flow.assert_awaited_with("BTC/USDT:USDT", "5m", 21)
