@@ -1529,7 +1529,7 @@ def test_dg_2_dispatch_sets_partition_all_registered_tools():
     )
 
     # Counts.
-    assert len(perception) == 19
+    assert len(perception) == 20
     assert len(execution) == 14
 
 
