@@ -256,3 +256,109 @@ def test_render_taker_flow_anchor_line_when_provided_and_absent_when_none():
     assert "53% buy" in out  # 5.3M / (5.3M+4.7M) = 53.0% exactly (off the .5 round-half-even boundary)
     out2 = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
     assert "anchor" not in out2.lower()
+
+
+import time as _time
+from unittest.mock import AsyncMock, MagicMock
+import pandas as pd
+
+
+def _deps_with_taker(bars_by_period, *, ohlcv=None, ohlcv_exc=None, main_exc=None):
+    """TradingDeps double: market_data.get_taker_flow keyed by period;
+    get_ohlcv_dataframe returns `ohlcv` df (or raises ohlcv_exc)."""
+    deps = MagicMock()
+    deps.symbol = "BTC/USDT:USDT"
+    async def _gtf(symbol, period, limit):
+        if main_exc is not None and period in bars_by_period and limit > 1:
+            raise main_exc
+        return bars_by_period.get(period, [])
+    deps.market_data.get_taker_flow = AsyncMock(side_effect=_gtf)
+    if ohlcv_exc is not None:
+        deps.market_data.get_ohlcv_dataframe = AsyncMock(side_effect=ohlcv_exc)
+    else:
+        deps.market_data.get_ohlcv_dataframe = AsyncMock(
+            return_value=ohlcv if ohlcv is not None else pd.DataFrame(
+                columns=["timestamp", "open", "high", "low", "close", "volume"]))
+    return deps
+
+
+def _live_bars(n, period_ms):
+    from src.integrations.exchange.base import TakerFlowBar
+    now = int(_time.time() * 1000)
+    base = now - 60_000 - (n - 1) * period_ms  # last bar in-progress
+    return [TakerFlowBar(ts=base + i * period_ms, sell_usd=1e6, buy_usd=1e6) for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_rejects_bad_period():
+    from src.agent.tools_perception import get_taker_flow
+    out = await get_taker_flow(_deps_with_taker({}), period="15m")
+    assert "period must be one of: 5m, 1h, 4h, 1d" in out
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_rejects_out_of_range_limit():
+    from src.agent.tools_perception import get_taker_flow
+    deps = _deps_with_taker({})
+    assert "limit must be in [1, 36]" in await get_taker_flow(deps, "5m", 0)
+    assert "limit must be in [1, 36]" in await get_taker_flow(deps, "5m", 37)
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_main_failure_unavailable():
+    from src.agent.tools_perception import get_taker_flow
+    deps = _deps_with_taker({"5m": _live_bars(21, 300_000)}, main_exc=RuntimeError("boom"))
+    out = await get_taker_flow(deps, "5m", 6)
+    assert "Taker flow temporarily unavailable" in out
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_empty():
+    from src.agent.tools_perception import get_taker_flow
+    out = await get_taker_flow(_deps_with_taker({"5m": []}), "5m", 6)
+    assert "No taker-volume data available." in out
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_ohlcv_failure_degrades_close_but_renders_flow():
+    from src.agent.tools_perception import get_taker_flow
+    deps = _deps_with_taker({"5m": _live_bars(21, 300_000), "1h": _live_bars(2, 3_600_000)},
+                            ohlcv_exc=RuntimeError("ohlcv down"))
+    out = await get_taker_flow(deps, "5m", 6)
+    assert "Close: n/a — OHLCV temporarily unavailable" in out
+    assert "Per-bar" in out  # flow rows still render
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_1d_omits_close_column():
+    from src.agent.tools_perception import get_taker_flow
+    deps = _deps_with_taker({"1d": _live_bars(21, 86_400_000), "1w": _live_bars(2, 604_800_000)})
+    out = await get_taker_flow(deps, "1d", 6)
+    assert "day-boundary mismatch" in out
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_anchor_failure_drops_anchor_line():
+    from src.agent.tools_perception import get_taker_flow
+    async def _gtf(symbol, period, limit):
+        if period == "1h":
+            raise RuntimeError("anchor down")
+        return _live_bars(21, 300_000)
+    deps = _deps_with_taker({"5m": _live_bars(21, 300_000)})
+    deps.market_data.get_taker_flow = AsyncMock(side_effect=_gtf)
+    out = await get_taker_flow(deps, "5m", 6)
+    assert "Per-bar" in out          # main series renders
+    assert "anchor" not in out.lower()  # anchor line dropped silently
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_happy_path_includes_close_and_anchor():
+    from src.agent.tools_perception import get_taker_flow
+    main = _live_bars(21, 300_000)
+    anchor = _live_bars(2, 3_600_000)
+    ohlcv = pd.DataFrame([{"timestamp": b.ts, "open": 1, "high": 1, "low": 1,
+                           "close": 73000 + i, "volume": 1} for i, b in enumerate(main)])
+    deps = _deps_with_taker({"5m": main, "1h": anchor}, ohlcv=ohlcv)
+    out = await get_taker_flow(deps, "5m", 6)
+    assert "Close" in out
+    assert "1h-scale anchor" in out

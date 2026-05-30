@@ -1234,6 +1234,67 @@ def _render_taker_flow(
     return "\n".join(lines)
 
 
+async def get_taker_flow(deps: TradingDeps, period: str = "5m", limit: int = 6) -> str:
+    """Minute-level taker buy/sell flow over `limit` `period`-bars (impl).
+
+    LLM-visible docstring lives on the trader.py @tool wrapper.
+    """
+    import time
+    from datetime import datetime, timezone
+
+    symbol = deps.symbol
+    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+
+    # Fact-only explicit reject (no clamp, no Literal narrowing — soft-constraint §1/§2)
+    if period not in _TAKER_FLOW_ANCHOR:  # valid tool periods == {5m,1h,4h,1d}
+        return f"Invalid period '{period}'. period must be one of: 5m, 1h, 4h, 1d"
+    if not (1 <= limit <= 36):
+        return f"Invalid limit {limit}. limit must be in [1, 36]"
+
+    header = f"=== Taker Flow ({symbol} · {period} bars · @{fetch_ts} UTC) ==="
+    n = max(limit + 1, 21)  # fetch enough for fixed-20 RVol baseline + in-progress
+
+    # Main rubik series — hard dependency.
+    try:
+        bars = await deps.market_data.get_taker_flow(symbol, period, n)
+    except Exception as e:
+        logger.exception("get_taker_flow main fetch failed for %s", symbol)
+        return f"{header}\nTaker flow temporarily unavailable ({e.__class__.__name__})."
+    if not bars:
+        return f"{header}\nNo taker-volume data available."
+
+    now_ms = int(time.time() * 1000)
+
+    # OHLCV Close join — soft. 1d: day-boundary mismatch (probe E 0/10) -> omit column.
+    closes: dict[int, float] | None = None
+    close_note: str | None = None
+    if period == "1d":
+        close_note = ("Close: n/a — 1d rubik/OHLCV day-boundary mismatch "
+                      "(16:00 vs 00:00 UTC)")
+    else:
+        try:
+            df = await deps.market_data.get_ohlcv_dataframe(symbol, period, limit=n)
+            closes = {int(r.timestamp): float(r.close) for r in df.itertuples()}
+        except Exception:
+            logger.exception("get_taker_flow OHLCV join failed for %s", symbol)
+            close_note = "Close: n/a — OHLCV temporarily unavailable"
+
+    # Context anchor (up-tier in-progress bar) — soft; drop the line on failure/empty.
+    anchor = None
+    up_label = _TAKER_FLOW_ANCHOR[period]
+    try:
+        up_bars = await deps.market_data.get_taker_flow(symbol, up_label, 1)
+        if up_bars:
+            anchor = (up_label, up_bars[-1])
+    except Exception:
+        logger.exception("get_taker_flow anchor fetch failed for %s", symbol)
+
+    return _render_taker_flow(
+        bars, period, limit, now_ms=now_ms, symbol=symbol, fetch_ts=fetch_ts,
+        closes=closes, close_note=close_note, anchor=anchor,
+    )
+
+
 async def get_derivatives_data(
     deps: TradingDeps,
     symbol: str | None = None,
