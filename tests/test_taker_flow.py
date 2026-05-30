@@ -393,3 +393,28 @@ def test_get_taker_flow_returns_example_not_mangled_into_pseudo_type():
     assert "=== Taker Flow (BTC-USDT-SWAP · 5m bars · @" in desc  # example reaches LLM
     assert not re.search(r"<type>[^<]*Example", desc), \
         f"Returns example leaked into pseudo-<type> (griffe colon-split):\n{desc!r}"
+
+
+def test_order_flow_wrappers_fact_only_no_imperative_cross_routing():
+    """PR #65 review Imp 1: the two order-flow wrappers stay fact-only — no imperative
+    'Use it for...' guidance and no docstring cross-routing to the sibling tool
+    (tool-design-principles 1/2/8). The seconds-vs-minutes 承重墙 lives in the output
+    window labels (spec §3.4: 'last 500 · 40.9s' vs '5m bars'), not in a docstring
+    directive; differentiation is left to each tool's own description + output labels
+    so the agent routes autonomously. A neutral `Related:` pointer would be added only
+    if a sim run shows misrouting (observation-gated, per principle 8)."""
+    import re
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    rt = agent._function_toolset.tools["get_recent_trades"].tool_def.description or ""
+    tf = agent._function_toolset.tools["get_taker_flow"].tool_def.description or ""
+    for name, desc in (("get_recent_trades", rt), ("get_taker_flow", tf)):
+        assert not re.search(r"\bUse (it|this) for\b", desc, re.IGNORECASE), \
+            f"{name} docstring has imperative 'Use it/this for' guidance:\n{desc!r}"
+        assert not re.search(r"\buse \w+ instead\b", desc, re.IGNORECASE), \
+            f"{name} docstring has 'use X instead' cross-routing:\n{desc!r}"
+    # no docstring cross-routing to the sibling tool by name
+    assert "get_taker_flow" not in rt, "get_recent_trades cross-routes to get_taker_flow by name"
+    assert "get_recent_trades" not in tf, "get_taker_flow cross-routes to get_recent_trades by name"
+    assert "companion to" not in tf

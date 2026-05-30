@@ -409,8 +409,8 @@ def create_trader_agent(
 
         The last ~500 trades grouped into 5 count-buckets of 100 (newest first),
         with the window's true time span in the header (typically tens of seconds).
-        Use it for entry timing — is buy or sell pressure hitting the book this
-        instant. For the minute-to-hours flow trend, use get_taker_flow instead.
+        Each slice reports taker buy% by count and by volume, net USD, and the
+        largest single trade.
 
         Returns:
             A trades micro-report (fact-only text). Example output follows.
@@ -431,9 +431,9 @@ def create_trader_agent(
     async def get_taker_flow(ctx: RunContext[TradingDeps], period: str = "5m", limit: int = 6) -> str:
         """Minute-level taker buy/sell flow: who is hitting the book over recent bars.
 
-        Server-aggregated taker volume (USD) per bar — the minute-to-hours trend
-        companion to get_recent_trades (which is a ~40s tick micro-view). Row 1 is
-        the current in-progress bar (labeled with how far it has formed); CVD is
+        Server-aggregated taker volume (USD) per bar — a minute-to-hours flow
+        trend. Row 1 is the current in-progress bar (labeled with how far it has
+        formed); CVD is
         cumulative net taker volume across the shown window only, so do NOT compare
         CVD across separate calls (the window's oldest bar — its zero point — rolls
         forward each call). RVol is the bar's taker total vs a fixed 20-closed-bar
