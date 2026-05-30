@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
-    from src.integrations.exchange.base import OpenInterestHistoryPoint, Trade
+    from src.integrations.exchange.base import OpenInterestHistoryPoint, TakerFlowBar, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -1092,6 +1092,146 @@ def _derive_oi_anchors(
             f"{label} {_format_oi_usd(anchor.open_interest_value)}, {delta_pct:+.1f}%"
         )
     return current_closed, "; ".join(fragments), is_in_progress
+
+
+# --- taker_flow (get_taker_flow) constants + helpers (spec §3.1-3.3) ---
+_TAKER_FLOW_PERIOD_MS = {
+    "5m": 5 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000,
+    "1d": 24 * 60 * 60_000, "1w": 7 * 24 * 60 * 60_000,
+}
+# context-anchor up-tier on the 5m->1h->4h->1d->1w ladder (§3.3). Keys are also
+# the exact set of valid *tool* periods ({5m,1h,4h,1d}); 1w is anchor-only.
+_TAKER_FLOW_ANCHOR = {"5m": "1h", "1h": "4h", "4h": "1d", "1d": "1w"}
+_TAKER_FLOW_RVOL_BARS = 20  # fixed baseline window (closed bars), decoupled from limit
+
+
+def _pick_usd_scale(values: list[float]) -> tuple[str, float]:
+    """One $K/$M scale for a column, chosen from peak abs magnitude (§3.2)."""
+    peak = max((abs(v) for v in values), default=0.0)
+    return ("$M", 1e6) if peak >= 1e6 else ("$K", 1e3)
+
+
+def _fmt_scaled(v: float, divisor: float) -> str:
+    return f"{v / divisor:+.1f}"
+
+
+def _fmt_hhmm(ts_ms: int) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%H:%M")
+
+
+def _render_taker_flow(
+    bars: list["TakerFlowBar"],
+    period: str,
+    limit: int,
+    *,
+    now_ms: int,
+    symbol: str,
+    fetch_ts: str,
+    closes: dict[int, float] | None = None,
+    close_note: str | None = None,
+    anchor: tuple[str, "TakerFlowBar"] | None = None,
+) -> str:
+    """Render the taker-flow report. Pure + deterministic given now_ms.
+
+    bars: ascending; bars[-1] is the in-progress current bucket (kept + labeled).
+    closes: bar-open-ts -> close px (OHLCV join). close_note: when set, omit the
+    Close column and emit this note instead (1d day-boundary, or OHLCV failure).
+    anchor: (uptier_label, uptier_in_progress_bar) or None.
+    """
+    period_ms = _TAKER_FLOW_PERIOD_MS[period]
+    period_min = period_ms / 60_000
+    newest = bars[-1]
+    is_in_progress = newest.ts + period_ms > now_ms
+    elapsed_min = max(0.0, (now_ms - newest.ts) / 60_000)
+
+    def _total(b): return b.sell_usd + b.buy_usd
+    def _net(b): return b.buy_usd - b.sell_usd
+    def _buy_pct(b):
+        t = _total(b)
+        return (b.buy_usd / t * 100) if t > 0 else 0.0
+
+    display = bars[-limit:]                              # oldest..newest displayed
+    closed = bars[:-1] if is_in_progress else bars
+    baseline = closed[-_TAKER_FLOW_RVOL_BARS:]
+    baseline_avg = (
+        sum(_total(b) for b in baseline) / len(baseline)
+        if len(baseline) >= _TAKER_FLOW_RVOL_BARS else None
+    )
+
+    # CVD cumulative over displayed window, from oldest displayed bar upward
+    cvd_running, cvd_by_ts = 0.0, {}
+    for b in display:                                    # ascending
+        cvd_running += _net(b)
+        cvd_by_ts[b.ts] = cvd_running
+
+    scale_label, divisor = _pick_usd_scale([_net(b) for b in display] + list(cvd_by_ts.values()))
+
+    lines = [f"=== Taker Flow ({symbol} · {period} bars · @{fetch_ts} UTC) ===", ""]
+
+    now_rvol = (_total(newest) / baseline_avg) if baseline_avg else None
+    rvol_now = f"{now_rvol:.1f}× (vs {_TAKER_FLOW_RVOL_BARS}-bar avg)" if now_rvol is not None else "—"
+    formed = (f"current {period}, {elapsed_min:.1f}/{period_min:g}min formed"
+              if is_in_progress else f"current {period}, closed")
+    lines.append(
+        f"Now ({formed}):  {_buy_pct(newest):.0f}% taker buy · "
+        f"net {_fmt_scaled(_net(newest), divisor)}{scale_label} · vol {rvol_now}"
+    )
+    net_sell_n = sum(1 for b in display if _net(b) < 0)
+    lines.append(
+        f"Window ({len(display)} bars = {len(display) * period_min:g}min):  "
+        f"CVD {_fmt_scaled(cvd_by_ts[display[-1].ts], divisor)}{scale_label} · "
+        f"{net_sell_n}/{len(display)} bars net-sell"
+    )
+    lines.append("")
+
+    # Close column: omitted if close_note set; else joined by ts; collapse w/ safety net
+    show_close = close_note is None and closes is not None
+    rendered_closes = {}
+    if show_close:
+        rendered_closes = {b.ts: closes.get(b.ts) for b in display}
+        if all(v is None for v in rendered_closes.values()):
+            show_close = False
+            close_note = "Close: n/a — no OHLCV bar matched (timestamp join empty)"
+
+    hdr = f"  Time     Buy%   Net({scale_label})   RVol(×20-bar)   CVD({scale_label})"
+    if show_close:
+        hdr += "   Close"
+    lines.append("Per-bar (bar open UTC, newest first; row 1 = current in-progress):")
+    lines.append(hdr)
+    for b in reversed(display):                          # newest-first
+        star = "*" if (is_in_progress and b is newest) else " "
+        rvol = (_total(b) / baseline_avg) if baseline_avg else None
+        rvol_s = f"{rvol:.1f}×" if rvol is not None else "—"
+        row = (f"  {_fmt_hhmm(b.ts)}{star}  {_buy_pct(b):>3.0f}%  "
+               f"{_fmt_scaled(_net(b), divisor):>7}  {rvol_s:>5}  "
+               f"{_fmt_scaled(cvd_by_ts[b.ts], divisor):>8}")
+        if show_close:
+            c = rendered_closes.get(b.ts)
+            row += f"  {c:.0f}" if c is not None else "  —"
+        lines.append(row)
+    if is_in_progress:
+        lines.append(f"  [* row 1 = current bar still forming ({elapsed_min:.1f}/{period_min:g}min)]")
+    if close_note is not None:
+        lines.append(close_note)
+
+    if anchor is not None:
+        up_label, up_bar = anchor
+        up_ms = _TAKER_FLOW_PERIOD_MS[up_label]
+        up_in_prog = up_bar.ts + up_ms > now_ms
+        up_elapsed = max(0.0, (now_ms - up_bar.ts) / 60_000)
+        up_formed = (f"current {up_label}, {up_elapsed:.0f}min formed"
+                     if up_in_prog else f"current {up_label}, closed")
+        up_total = up_bar.sell_usd + up_bar.buy_usd
+        up_buy = (up_bar.buy_usd / up_total * 100) if up_total > 0 else 0.0
+        up_net = up_bar.buy_usd - up_bar.sell_usd
+        up_scale, up_div = _pick_usd_scale([up_net])
+        lines.append("")
+        lines.append(
+            f"{up_label}-scale anchor ({up_formed}):  "
+            f"{up_buy:.0f}% buy · net {_fmt_scaled(up_net, up_div)}{up_scale}"
+        )
+    return "\n".join(lines)
 
 
 async def get_derivatives_data(
