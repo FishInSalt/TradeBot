@@ -25,7 +25,7 @@ class MockDeps:
 
 @pytest.mark.asyncio
 async def test_order_book_typical_output_format():
-    """Typical order book renders best bid/ask, cumulative depth, bid share, concentrated levels."""
+    """Typical order book renders best bid/ask, USD-notional depth, bid share, concentrated levels."""
     from src.agent.tools_perception import get_order_book
     deps = MockDeps()
     deps.market_data.get_order_book.return_value = OrderBook(

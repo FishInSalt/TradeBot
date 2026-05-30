@@ -2268,25 +2268,25 @@ def test_snapshot_get_market_news_dense_general_news_full_expansion():
 def test_snapshot_get_order_book_happy_path():
     """Snapshot — order book 2 sub-sections (Order Book + Depth) without concentrated."""
     content = (
-        "=== Order Book (BTC/USDT:USDT) ===\n"
-        "Best bid: 75200.00 × 0.5000 BTC  |  Best ask: 75205.00 × 0.4500 BTC\n"
-        "Spread: 5.00 (0.007%)\n"
+        "=== Order Book (BTC/USDT:USDT @ 05:28:25 UTC) ===\n"
+        "Best bid: 75200.00 × $37.6K  |  Best ask: 75205.00 × $33.8K\n"
+        "Spread: 5.00 pts (0.66 bp)\n"
         "\n"
         "=== Depth (top 15 each side) ===\n"
-        "  Bids cumulative: 5.4500 BTC over 75200.00 - 75150.00 (0.07% deep)\n"
-        "  Asks cumulative: 6.2000 BTC over 75205.00 - 75260.00 (0.07% deep)\n"
-        "  Bid share: ~50% (balanced)"
+        "  Bids: $410.0K over 75200.00 - 75150.00  (span 50.00 pts / 6.6 bp)\n"
+        "  Asks: $466.5K over 75205.00 - 75260.00  (span 55.00 pts / 7.3 bp)\n"
+        "  Bid share: 46.8% (bid : ask = 0.88 : 1)"
     )
     expected = (
         "  ⚙ get_order_book()\n"
-        "    === Order Book (BTC/USDT:USDT) ===\n"
-        "    Best bid: 75200.00 × 0.5000 BTC  |  Best ask: 75205.00 × 0.4500 BTC\n"
-        "    Spread: 5.00 (0.007%)\n"
+        "    === Order Book (BTC/USDT:USDT @ 05:28:25 UTC) ===\n"
+        "    Best bid: 75200.00 × $37.6K  |  Best ask: 75205.00 × $33.8K\n"
+        "    Spread: 5.00 pts (0.66 bp)\n"
         "\n"
         "    === Depth (top 15 each side) ===\n"
-        "      Bids cumulative: 5.4500 BTC over 75200.00 - 75150.00 (0.07% deep)\n"
-        "      Asks cumulative: 6.2000 BTC over 75205.00 - 75260.00 (0.07% deep)\n"
-        "      Bid share: ~50% (balanced)"
+        "      Bids: $410.0K over 75200.00 - 75150.00  (span 50.00 pts / 6.6 bp)\n"
+        "      Asks: $466.5K over 75205.00 - 75260.00  (span 55.00 pts / 7.3 bp)\n"
+        "      Bid share: 46.8% (bid : ask = 0.88 : 1)"
     )
     _assert_perception_render("get_order_book", content, expected)
 

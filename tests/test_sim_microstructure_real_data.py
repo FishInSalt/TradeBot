@@ -34,6 +34,7 @@ async def test_get_order_book_renders_concentrated_levels():
     out = await get_order_book(deps, depth=15)
     assert "Concentrated Levels" in out
     assert "95.00" in out  # 该 bid wall 的价格出现
+    assert "below mid" not in out  # 新格式去距离列
 
 
 @pytest.mark.asyncio
@@ -80,3 +81,54 @@ async def test_get_recent_trades_degrades_on_failure():
     deps.market_data.get_recent_trades = AsyncMock(side_effect=Exception("boom"))
     out = await get_recent_trades(deps, window_seconds=300)
     assert "Temporarily unavailable" in out
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_renders_usd_notional():
+    """规模量 = amount × price → USD notional（best 行不再标 base 币）。"""
+    bids = [OrderBookLevel(100.0 - i * 0.1, 50.0) for i in range(15)]
+    asks = [OrderBookLevel(101.0 + i * 0.1, 50.0) for i in range(15)]
+    deps = _deps_with_order_book(OrderBook("BTC/USDT:USDT", bids, asks, 0))
+    out = await get_order_book(deps, depth=15)
+    assert "$5.0K" in out          # best bid notional 50 × 100 = 5000
+    assert "BTC  |" not in out     # 旧 "× N BTC  |  Best ask" 格式消失（notional 取代 base 币标签）
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_distance_in_pts_and_bp():
+    """spread / depth span 用 pts + bp，不用 %。"""
+    bids = [OrderBookLevel(100.0 - i * 0.1, 10.0) for i in range(15)]
+    asks = [OrderBookLevel(101.0 + i * 0.1, 10.0) for i in range(15)]
+    deps = _deps_with_order_book(OrderBook("BTC/USDT:USDT", bids, asks, 0))
+    out = await get_order_book(deps, depth=15)
+    assert "pts" in out
+    assert "bp" in out
+    assert "% deep" not in out
+    assert "0.00%" not in out
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_bid_share_factonly_near_50():
+    """接近 50% 时显实际值 + 比值，无 'balanced' 评价词。"""
+    bids = [OrderBookLevel(100.0 - i * 0.1, 10.0) for i in range(15)]   # total 150
+    asks = [OrderBookLevel(101.0 + i * 0.1, 10.5) for i in range(15)]   # total 157.5
+    deps = _deps_with_order_book(OrderBook("BTC/USDT:USDT", bids, asks, 0))
+    out = await get_order_book(deps, depth=15)
+    assert "balanced" not in out
+    assert "~50%" not in out
+    assert "bid : ask =" in out
+
+
+@pytest.mark.asyncio
+async def test_get_order_book_concentrated_excludes_best_no_distance():
+    """Concentrated 段排除 best 档（已在 Best 行）+ 无距离列。"""
+    bids = [OrderBookLevel(100.0 - i, 1.0) for i in range(15)]
+    bids[0] = OrderBookLevel(100.0, 100.0)   # best 是最大单
+    bids[5] = OrderBookLevel(95.0, 10.0)     # 纵深 wall（>3× median 1.0）
+    asks = [OrderBookLevel(101.0 + i, 1.0) for i in range(15)]
+    deps = _deps_with_order_book(OrderBook("BTC/USDT:USDT", bids, asks, 0))
+    out = await get_order_book(deps, depth=15)
+    conc = out.split("Concentrated Levels")[1]
+    assert "95.00" in conc          # 纵深 wall 在
+    assert "100.00" not in conc     # best 被排除（best 行另算）
+    assert "below mid" not in conc  # 无距离列
