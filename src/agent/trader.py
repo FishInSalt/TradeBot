@@ -376,12 +376,28 @@ def create_trader_agent(
 
     @tool
     async def get_order_book(ctx: RunContext[TradingDeps], depth: int = 15) -> str:
-        """Return top-N order book depth with concentrated-level breakdown.
-
-        Reports best bid/ask, cumulative depth, bid/ask share, and concentrated levels (size > 3× same-side median). If the book is empty or shorter than requested depth, the response is `Order book ({symbol}): insufficient data (requested depth X, got Y)`. On service failure, the response is `Order book ({symbol}): temporarily unavailable`.
+        """Order book snapshot: best bid/ask, depth, bid/ask share, concentrated levels.
 
         Args:
-            depth: levels per side to fetch (default 15).
+            depth: levels per side (default 15).
+
+        Returns:
+            Multi-line fact-only text. Sizes are USD notional; distances are price
+            points (pts) + bp. Insufficient data or service failure returns the header
+            plus a single "Error: ..." line. Example output follows.
+
+            === Order Book (BTC/USDT:USDT @ 05:28:25 UTC) ===
+            Best bid: 73509.90 × $1.49M  |  Best ask: 73510.00 × $241.0K
+            Spread: 0.10 pts (0.01 bp)
+
+            === Depth (top 15 each side) ===
+              Bids: $1.54M over 73509.90 - 73506.70  (span 3.20 pts / 0.4 bp)
+              Asks: $290.0K over 73510.00 - 73512.00  (span 2.00 pts / 0.3 bp)
+              Bid share: 84.1% (bid : ask = 5.30 : 1, by size)
+
+            === Concentrated Levels (beyond best bid/ask, size > 3× median of top 15) ===
+              Bid  73509.80  $20.8K
+              Ask  73511.60  $36.7K
         """
         from src.agent.tools_perception import get_order_book as _impl
 
