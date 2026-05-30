@@ -211,6 +211,7 @@ async def test_okx_fetch_order_book_parses_ccxt_response(mocker):
             "timestamp": 1700000000000,
         }
     )
+    mocker.patch.object(ex._client, "market", return_value={"contractSize": 1.0})
     ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=2)
     assert ob.symbol == "BTC/USDT:USDT"
     assert ob.timestamp == 1700000000000
@@ -229,6 +230,7 @@ async def test_okx_fetch_order_book_timestamp_none_fallback(mocker):
     mocker.patch.object(ex._client, "fetch_order_book", return_value={
         "bids": [[50000.0, 1.0]], "asks": [[50001.0, 1.0]], "timestamp": None,
     })
+    mocker.patch.object(ex._client, "market", return_value={"contractSize": 1.0})
     ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=1)
     import time
     now_ms = int(time.time() * 1000)
@@ -334,6 +336,7 @@ async def test_okx_fetch_order_book_handles_three_element_bidask_entries(mocker)
         "asks": [[50001.0, 0.8, 3], [50001.5, 1.2, 7]],
         "timestamp": 1700000000000,
     })
+    mocker.patch.object(ex._client, "market", return_value={"contractSize": 1.0})
     ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=2)
     assert len(ob.bids) == 2
     assert ob.bids[0].price == 50000.0
@@ -407,3 +410,17 @@ async def test_sim_fetch_order_book_missing_contract_size_defaults_1():
     })
     ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
     assert ob.bids[0].amount == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_okx_fetch_order_book_normalizes_contracts_to_base(mocker):
+    """okx fetch_order_book 同款张→base 归一化（与 sim 对称，base 抽象契约一致）。"""
+    from src.integrations.exchange.okx import OKXExchange
+    ex = OKXExchange(api_key="k", secret="s", password="p", symbol="BTC/USDT:USDT")
+    mocker.patch.object(ex._client, "fetch_order_book", return_value={
+        "bids": [[73509.9, 2000.0]], "asks": [[73510.0, 300.0]], "timestamp": 0,
+    })
+    mocker.patch.object(ex._client, "market", return_value={"contractSize": 0.01})
+    ob = await ex.fetch_order_book("BTC/USDT:USDT", depth=20)
+    assert ob.bids[0].amount == pytest.approx(20.0)   # 2000 张 × 0.01
+    assert ob.asks[0].amount == pytest.approx(3.0)    # 300 张 × 0.01
