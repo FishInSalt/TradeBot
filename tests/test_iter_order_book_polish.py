@@ -49,3 +49,9 @@ def test_fmt_ob_notional_no_1000K_seam():
     # 下边界仍走 K，且不出现 $1000.0K
     assert _fmt_ob_notional(999_949) == "$999.9K"
     assert "1000.0K" not in _fmt_ob_notional(999_949)
+
+
+def test_get_order_book_docstring_bid_share_labeled_by_size():
+    """P2: docstring 示例 bid share 标注 'by size'，与 impl 输出一致（消 vs notional 歧义）。"""
+    assert "by size" in _order_book_desc()
+

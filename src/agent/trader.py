@@ -393,7 +393,7 @@ def create_trader_agent(
             === Depth (top 15 each side) ===
               Bids: $1.54M over 73509.90 - 73506.70  (span 3.20 pts / 0.4 bp)
               Asks: $290.0K over 73510.00 - 73512.00  (span 2.00 pts / 0.3 bp)
-              Bid share: 84.1% (bid : ask = 5.30 : 1)
+              Bid share: 84.1% (bid : ask = 5.30 : 1, by size)
 
             === Concentrated Levels (beyond best bid/ask, size > 3× median of top 15) ===
               Bid  73509.80  $20.8K

@@ -2275,7 +2275,7 @@ def test_snapshot_get_order_book_happy_path():
         "=== Depth (top 15 each side) ===\n"
         "  Bids: $410.0K over 75200.00 - 75150.00  (span 50.00 pts / 6.6 bp)\n"
         "  Asks: $466.5K over 75205.00 - 75260.00  (span 55.00 pts / 7.3 bp)\n"
-        "  Bid share: 46.8% (bid : ask = 0.88 : 1)"
+        "  Bid share: 46.8% (bid : ask = 0.88 : 1, by size)"
     )
     expected = (
         "  ⚙ get_order_book()\n"
@@ -2286,7 +2286,7 @@ def test_snapshot_get_order_book_happy_path():
         "    === Depth (top 15 each side) ===\n"
         "      Bids: $410.0K over 75200.00 - 75150.00  (span 50.00 pts / 6.6 bp)\n"
         "      Asks: $466.5K over 75205.00 - 75260.00  (span 55.00 pts / 7.3 bp)\n"
-        "      Bid share: 46.8% (bid : ask = 0.88 : 1)"
+        "      Bid share: 46.8% (bid : ask = 0.88 : 1, by size)"
     )
     _assert_perception_render("get_order_book", content, expected)
 

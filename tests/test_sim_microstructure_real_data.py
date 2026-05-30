@@ -117,6 +117,7 @@ async def test_get_order_book_bid_share_factonly_near_50():
     assert "balanced" not in out
     assert "~50%" not in out
     assert "bid : ask =" in out
+    assert "by size" in out  # P2: share 口径标注（区别于 depth 段 $ notional 失衡）
 
 
 @pytest.mark.asyncio

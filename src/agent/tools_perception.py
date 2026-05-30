@@ -1759,7 +1759,7 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
     else:
         bid_share = total_bid / total_sum * 100
         bid_ratio = total_bid / total_ask
-        share_line = f"Bid share: {bid_share:.1f}% (bid : ask = {bid_ratio:.2f} : 1)"
+        share_line = f"Bid share: {bid_share:.1f}% (bid : ask = {bid_ratio:.2f} : 1, by size)"
 
     sections = [
         (
