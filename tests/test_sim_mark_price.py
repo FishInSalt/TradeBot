@@ -1,4 +1,6 @@
+import asyncio
 import pytest
+from unittest.mock import AsyncMock
 from tests._fixtures import make_sim_exchange, make_ticker, _advance
 
 pytestmark = pytest.mark.asyncio
@@ -92,3 +94,63 @@ async def test_liquidation_fill_price_is_bid_not_mark():
     await _advance(ex, make_ticker(last=liq + 5, bid=liq - 20, ask=liq + 5), mark=liq - 1)
     liq_fill = [f for f in fills if f.trigger_reason == "liquidation"][0]
     assert liq_fill.fill_price == liq - 20   # 盘口 bid, NOT mark (liq-1)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: mark data source — _seed_mark_price, _mark_loop, close()
+# ---------------------------------------------------------------------------
+
+async def test_seed_mark_price_extracts_value():
+    ex = make_sim_exchange()
+    ex._ccxt.fetch_mark_price = AsyncMock(return_value={"markPrice": 67000.0})
+    assert await ex._seed_mark_price() == 67000.0
+
+
+async def test_seed_mark_price_parses_real_string_markpx():
+    # mock fidelity (spec §5 / project_iter2_mock_fidelity_lesson): real OKX
+    # fetch_mark_price → parse_ticker → markPrice = safe_string(info,'markPx'),
+    # i.e. a string not a float. float() must parse it. 'markPrice' key confirmed
+    # in ccxt 4.5.47 okx.parse_ticker.
+    ex = make_sim_exchange()
+    ex._ccxt.fetch_mark_price = AsyncMock(return_value={"markPrice": "66500.5"})
+    assert await ex._seed_mark_price() == 66500.5
+
+
+async def test_seed_mark_price_fail_fast_after_retries(monkeypatch):
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())  # skip real 1s+2s backoff
+    ex = make_sim_exchange()
+    ex._ccxt.fetch_mark_price = AsyncMock(side_effect=RuntimeError("net"))
+    with pytest.raises(RuntimeError):
+        await ex._seed_mark_price()
+
+
+async def test_mark_loop_updates_then_keeps_stale_on_error():
+    ex = make_sim_exchange()
+    ex._latest_mark_price = 50000.0
+    # first push 51000, then raise (stale keeps 51000), then cancel to exit
+    ex._ccxt.watch_mark_price = AsyncMock(
+        side_effect=[{"markPrice": 51000.0}, RuntimeError("ws"), asyncio.CancelledError()]
+    )
+    await ex._mark_loop()
+    assert ex._latest_mark_price == 51000.0   # updated, then kept stale through error
+    assert ex._mark_error_count == 1          # exactly one error before cancel
+
+
+async def test_mark_error_count_independent_of_ticker():
+    ex = make_sim_exchange()
+    ex._error_count = 7
+    ex._ccxt.watch_mark_price = AsyncMock(side_effect=[{"markPrice": 52000.0}, asyncio.CancelledError()])
+    await ex._mark_loop()
+    assert ex._error_count == 7   # mark loop must NOT touch _error_count
+
+
+async def test_mark_error_count_resets_after_recovery():
+    ex = make_sim_exchange()
+    ex._mark_error_count = 2
+    # error bumps the count, then a successful watch resets it to 0, then cancel exits
+    ex._ccxt.watch_mark_price = AsyncMock(
+        side_effect=[RuntimeError("ws"), {"markPrice": 53000.0}, asyncio.CancelledError()]
+    )
+    await ex._mark_loop()
+    assert ex._latest_mark_price == 53000.0   # recovered to the successful value
+    assert ex._mark_error_count == 0          # reset on success (else branch)

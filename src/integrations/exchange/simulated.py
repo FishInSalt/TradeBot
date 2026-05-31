@@ -1176,9 +1176,11 @@ class SimulatedExchange(BaseExchange):
             timestamp=seed_ticker["timestamp"],
         )
         self._latest_price = self._latest_ticker.last
+        self._latest_mark_price = await self._seed_mark_price()   # MUST precede _matching_task (liq check has no None guard)
 
         self._running = True
         self._matching_task = asyncio.create_task(self._matching_loop())
+        self._mark_task = asyncio.create_task(self._mark_loop())
         logger.info(f"SimulatedExchange started: {self._symbol}, seed ticker @ {self._latest_ticker.last}")
 
     async def _matching_loop(self) -> None:
@@ -1202,14 +1204,52 @@ class SimulatedExchange(BaseExchange):
             else:
                 self._error_count = 0
 
+    async def _seed_mark_price(self) -> float:
+        """Seed mark via fetch_mark_price; 3-attempt backoff; fail-fast on all.
+
+        MUST be called after _init_contract_size() (load_markets) so ccxt can
+        resolve instId. Mirrors seed_ticker retry semantics.
+        """
+        for attempt in range(3):
+            try:
+                raw = await self._ccxt.fetch_mark_price(self._symbol)
+                return float(raw["markPrice"])
+            except Exception as e:
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    logger.warning(f"fetch_mark_price attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
+                    await asyncio.sleep(delay)
+                else:
+                    raise RuntimeError(f"Failed to seed mark price after 3 attempts: {e}") from e
+
+    async def _mark_loop(self) -> None:
+        """Parallel WS loop maintaining _latest_mark_price. Independent
+        _mark_error_count (NOT shared with _matching_loop._error_count).
+        """
+        while self._running:
+            try:
+                raw = await self._ccxt.watch_mark_price(self._symbol)
+                self._latest_mark_price = float(raw["markPrice"])
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                self._mark_error_count += 1
+                logger.error("Mark loop error (count=%d)", self._mark_error_count, exc_info=True)
+                if self._mark_error_count >= 3:
+                    await asyncio.sleep(min(5 * self._mark_error_count, 60))
+            else:
+                self._mark_error_count = 0
+
     async def close(self) -> None:
         self._running = False
-        if hasattr(self, "_matching_task"):
-            self._matching_task.cancel()
-            try:
-                await self._matching_task
-            except asyncio.CancelledError:
-                pass
+        for attr in ("_matching_task", "_mark_task"):
+            task = getattr(self, attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if hasattr(self, "_ccxt"):
             await self._ccxt.close()
         logger.info("SimulatedExchange closed")
