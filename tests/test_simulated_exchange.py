@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from src.integrations.exchange.base import Ticker
 from src.integrations.exchange.base import FillEvent
+from tests._fixtures import _advance
 
 
 def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT"):
@@ -22,6 +23,7 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
         symbol=symbol, last=95000.0, bid=94990.0, ask=95010.0,
         high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
     )
+    exchange._latest_mark_price = exchange._latest_ticker.last   # default mark = last seed
     exchange._running = True
     from tests._fixtures import inject_mock_ccxt
     inject_mock_ccxt(exchange)
@@ -51,8 +53,8 @@ async def test_fetch_balance_with_unrealized_pnl():
         side="long", contracts=0.001, entry_price=94000.0, leverage=3,
     )
     balance = await ex.fetch_balance()
-    assert balance.total_usdt == pytest.approx(100.99)
-    assert balance.free_usdt == pytest.approx(70.99)
+    assert balance.total_usdt == pytest.approx(101.0)   # mark 95000 vs entry 94000: uPnL=1.0
+    assert balance.free_usdt == pytest.approx(71.0)     # free 70 + uPnL 1.0
     assert balance.used_usdt == 30.0
 
 
@@ -323,7 +325,7 @@ async def test_liquidation_triggers_before_stop():
         symbol="BTC/USDT:USDT", last=80000.0, bid=79990.0, ask=80010.0,
         high=96000.0, low=79000.0, base_volume=1000.0, timestamp=1712535000000,
     )
-    await ex._process_tick(tick)
+    await _advance(ex, tick, mark=79990.0)  # mark = bid (crash side for long liq)
     assert len(fill_events) == 1
     assert fill_events[0].trigger_reason == "liquidation"
     balance = await ex.fetch_balance()
@@ -418,6 +420,7 @@ async def test_persist_and_restore():
         symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
         high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
     )
+    ex1._latest_mark_price = 95010.0  # seed mark (direct construction bypasses start()'s seed)
     ex1._leverage["BTC/USDT:USDT"] = 3
     await ex1.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
     await ex1._process_tick(Ticker(
@@ -460,6 +463,7 @@ async def test_fetch_closed_orders_from_db():
         symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
         high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
     )
+    ex._latest_mark_price = 95010.0  # seed mark (direct construction bypasses start()'s seed)
     ex._leverage["BTC/USDT:USDT"] = 3
 
     order = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
@@ -523,7 +527,7 @@ async def test_liquidation_short():
         symbol="BTC/USDT:USDT", last=120000.0, bid=119990.0, ask=120010.0,
         high=121000.0, low=94000.0, base_volume=1000.0, timestamp=1712535000000,
     )
-    await ex._process_tick(tick2)
+    await _advance(ex, tick2, mark=120010.0)  # mark = ask (crash side for short liq)
 
     assert len(fill_events) == 2
     assert fill_events[1].trigger_reason == "liquidation"
@@ -624,7 +628,7 @@ async def test_force_liquidate_fill_event_has_pnl():
     # Tick 2: price crashes below liquidation
     liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 80000.0, 80010.0,
                         96000.0, 79000.0, 1000.0, 1712534500000)
-    await ex._process_tick(liq_ticker)
+    await _advance(ex, liq_ticker, mark=80000.0)  # mark = bid (crash side for long liq)
 
     liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
     assert len(liq_fills) == 1
@@ -1007,9 +1011,11 @@ async def test_frozen_extreme_clamp():
     assert ex._free_usdt < 1.0  # confirm tight margin
 
     # Tick with MUCH HIGHER ask → actual cost > frozen → clamp
+    # Mark would otherwise lag at the _make_exchange seed (95000) while the tick
+    # moves to 97000 — sync it so uPnL reflects the current price, not a stale mark.
     tick = Ticker(symbol="BTC/USDT:USDT", last=97000.0, bid=96990.0, ask=97000.0,
                   high=97000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
-    await ex._process_tick(tick)
+    await _advance(ex, tick, mark=97000.0)
 
     assert ex._frozen_usdt == 0.0
     assert ex._free_usdt == 0.0  # clamped to zero
@@ -1187,12 +1193,12 @@ async def test_e2e_open_then_immediate_liquidation():
     await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
 
     # Tick where ask is high (buy fills at ask) but bid is already below liquidation
-    # Entry will be at ask; liquidation check uses bid.
+    # Entry will be at ask; liquidation check uses mark.
     # With 10x leverage, liq price ≈ entry * (1 - 1/10) / (1 - fee) ≈ entry * 0.9
-    # We need bid < liq_price. If ask=95010, liq ≈ 85509. Set bid=80000.
+    # We need mark < liq_price. If ask=95010, liq ≈ 85509. Set mark=80000.
     tick = Ticker(symbol="BTC/USDT:USDT", last=80000.0, bid=80000.0, ask=95010.0,
                   high=96000.0, low=79000.0, base_volume=1000.0, timestamp=1712534401000)
-    await ex._process_tick(tick)
+    await _advance(ex, tick, mark=80000.0)  # mark = bid = crash price (below liq after open)
 
     # Should have 2 fills: market open + liquidation
     assert len(fills) == 2
@@ -1601,7 +1607,7 @@ async def test_force_liquidate_includes_entry_price():
     # Tick 2: price crashes below liquidation price
     liq_ticker = Ticker("BTC/USDT:USDT", 80000.0, 79990.0, 80010.0,
                         96000.0, 79000.0, 1000.0, 1712534500000)
-    await ex._process_tick(liq_ticker)
+    await _advance(ex, liq_ticker, mark=79990.0)  # mark = bid (crash side for long liq)
 
     liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
     assert len(liq_fills) == 1
@@ -1635,7 +1641,7 @@ async def test_fill_event_entry_price_captured_before_pnl_cap():
         "BTC/USDT:USDT", 50000.0, 49990.0, 50010.0,
         96000.0, 49000.0, 1000.0, 1712535000000,
     )
-    await ex._process_tick(deep_crash_ticker)
+    await _advance(ex, deep_crash_ticker, mark=49990.0)  # mark = bid (crash side for long liq)
 
     liq_fills = [f for f in fills if f.trigger_reason == "liquidation"]
     assert len(liq_fills) == 1

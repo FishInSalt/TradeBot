@@ -85,6 +85,8 @@ class SimulatedExchange(BaseExchange):
         self._running = False
         self._lock = asyncio.Lock()
         self._error_count = 0
+        self._latest_mark_price: float | None = None   # real OKX mark (watch_mark_price); None until seeded
+        self._mark_error_count = 0                      # independent from _error_count (do NOT share)
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
 
     def _validate_symbol(self, symbol: str) -> None:
@@ -112,12 +114,13 @@ class SimulatedExchange(BaseExchange):
         return amount * self._contract_size
 
     def _calc_unrealized_pnl(self, pos: _Position) -> float:
-        if self._latest_ticker is None:
+        mark = self._latest_mark_price
+        if mark is None:                 # mark unseeded (pre-start / direct construction) → no uPnL, don't crash
             return 0.0
         if pos.side == "long":
-            return (self._latest_ticker.bid - pos.entry_price) * self._base_qty(pos.contracts)
+            return (mark - pos.entry_price) * self._base_qty(pos.contracts)
         else:
-            return (pos.entry_price - self._latest_ticker.ask) * self._base_qty(pos.contracts)
+            return (pos.entry_price - mark) * self._base_qty(pos.contracts)
 
     def _calc_liquidation_price(self, pos: _Position) -> float:
         if pos.side == "long":
@@ -134,18 +137,15 @@ class SimulatedExchange(BaseExchange):
         return self._latest_ticker
 
     async def get_mark_price(self, symbol: str) -> float:
-        """Sim has a single price source — mark = last. Note: under the new
-        get_position flow this is called inside a 6-tuple gather that already
-        fetches ticker; fetch_ticker is observation-only (reads cached
-        _latest_ticker) so back-to-back invocation is safe. If a future
-        SimulatedExchange mutates state in fetch_ticker (e.g., synthetic tick
-        advancement for replay scenarios), revisit and read self._latest_ticker
-        directly.
+        """Return the real OKX mark price (parallel watch_mark_price stream /
+        fetch_mark_price seed). Distinct from ticker.last — under live OKX mark
+        and last differ by a small basis (<0.05% normal). Used as the basis for
+        liquidation trigger and unrealized PnL calculations.
         """
         self._validate_symbol(symbol)
-        if self._latest_ticker is None:
-            raise RuntimeError("No ticker data available yet")
-        return self._latest_ticker.last
+        if self._latest_mark_price is None:
+            raise RuntimeError("No mark price available yet")
+        return self._latest_mark_price
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]:
         self._validate_symbol(symbol)
@@ -657,10 +657,12 @@ class SimulatedExchange(BaseExchange):
                 triggered.append(fill)
 
             # 1. Liquidation check (must be before conditional orders)
+            #    Trigger basis = mark (real OKX); fill price = order-book bid/ask (市价吃盘口)
+            mark = self._latest_mark_price
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
-                if pos.side == "long" and ticker.bid <= liq:
-                    fill = self._force_liquidate(pos, symbol, ticker.bid)
+                if pos.side == "long" and mark <= liq:
+                    fill = self._force_liquidate(pos, symbol, ticker.bid)   # trigger=mark, fill=book bid
                     triggered.append(fill)
                     new_orders.append((Order(
                         id=fill.order_id, symbol=symbol,
@@ -668,8 +670,8 @@ class SimulatedExchange(BaseExchange):
                         amount=fill.amount, price=fill.fill_price,
                         status="closed", fee=fill.fee,
                     ), fill.position_side))
-                elif pos.side == "short" and ticker.ask >= liq:
-                    fill = self._force_liquidate(pos, symbol, ticker.ask)
+                elif pos.side == "short" and mark >= liq:
+                    fill = self._force_liquidate(pos, symbol, ticker.ask)   # trigger=mark, fill=book ask
                     triggered.append(fill)
                     new_orders.append((Order(
                         id=fill.order_id, symbol=symbol,
@@ -1174,9 +1176,11 @@ class SimulatedExchange(BaseExchange):
             timestamp=seed_ticker["timestamp"],
         )
         self._latest_price = self._latest_ticker.last
+        self._latest_mark_price = await self._seed_mark_price()   # MUST precede _matching_task (liq check has no None guard)
 
         self._running = True
         self._matching_task = asyncio.create_task(self._matching_loop())
+        self._mark_task = asyncio.create_task(self._mark_loop())
         logger.info(f"SimulatedExchange started: {self._symbol}, seed ticker @ {self._latest_ticker.last}")
 
     async def _matching_loop(self) -> None:
@@ -1200,14 +1204,52 @@ class SimulatedExchange(BaseExchange):
             else:
                 self._error_count = 0
 
+    async def _seed_mark_price(self) -> float:
+        """Seed mark via fetch_mark_price; 3-attempt backoff; fail-fast on all.
+
+        MUST be called after _init_contract_size() (load_markets) so ccxt can
+        resolve instId. Mirrors seed_ticker retry semantics.
+        """
+        for attempt in range(3):
+            try:
+                raw = await self._ccxt.fetch_mark_price(self._symbol)
+                return float(raw["markPrice"])
+            except Exception as e:
+                if attempt < 2:
+                    delay = 2 ** attempt
+                    logger.warning(f"fetch_mark_price attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
+                    await asyncio.sleep(delay)
+                else:
+                    raise RuntimeError(f"Failed to seed mark price after 3 attempts: {e}") from e
+
+    async def _mark_loop(self) -> None:
+        """Parallel WS loop maintaining _latest_mark_price. Independent
+        _mark_error_count (NOT shared with _matching_loop._error_count).
+        """
+        while self._running:
+            try:
+                raw = await self._ccxt.watch_mark_price(self._symbol)
+                self._latest_mark_price = float(raw["markPrice"])
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                self._mark_error_count += 1
+                logger.error("Mark loop error (count=%d)", self._mark_error_count, exc_info=True)
+                if self._mark_error_count >= 3:
+                    await asyncio.sleep(min(5 * self._mark_error_count, 60))
+            else:
+                self._mark_error_count = 0
+
     async def close(self) -> None:
         self._running = False
-        if hasattr(self, "_matching_task"):
-            self._matching_task.cancel()
-            try:
-                await self._matching_task
-            except asyncio.CancelledError:
-                pass
+        for attr in ("_matching_task", "_mark_task"):
+            task = getattr(self, attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if hasattr(self, "_ccxt"):
             await self._ccxt.close()
         logger.info("SimulatedExchange closed")

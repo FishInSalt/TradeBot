@@ -1,5 +1,6 @@
 import pytest
 from tests.test_simulated_exchange import _make_exchange, _tick
+from tests._fixtures import _advance
 from src.integrations.exchange.simulated import _Position
 
 
@@ -21,9 +22,9 @@ async def test_unrealized_pnl_scales_with_cs():
 
     await ex.create_order("BTC/USDT:USDT", "buy", "market", amount=10)
     # Fill at 100000
-    await ex._process_tick(_tick(last=100_000.0, bid=100_000.0, ask=100_000.0))
+    await _advance(ex, _tick(last=100_000.0, bid=100_000.0, ask=100_000.0), mark=100_000.0)
     # Move price to 101000
-    await ex._process_tick(_tick(last=101_000.0, bid=101_000.0, ask=101_000.0))
+    await _advance(ex, _tick(last=101_000.0, bid=101_000.0, ask=101_000.0), mark=101_000.0)
 
     pos = (await ex.fetch_positions("BTC/USDT:USDT"))[0]
     assert pos.contracts == 10                           # stored in contracts (張數)
@@ -159,8 +160,8 @@ async def test_liquidation_via_process_tick_cs_not_one():
     ex._used_usdt = 1_000.0
     ex._free_usdt = initial_balance - 1_000.0  # = 9000.0
 
-    # Tick with bid=89000 — well below liq_price ≈ 90045
-    await ex._process_tick(_tick(last=89_000.0, bid=89_000.0, ask=89_000.0))
+    # Tick with bid=89000 — well below liq_price ≈ 90045; mark also set to 89000
+    await _advance(ex, _tick(last=89_000.0, bid=89_000.0, ask=89_000.0), mark=89_000.0)
 
     # Position must be gone (liquidated)
     positions = await ex.fetch_positions("BTC/USDT:USDT")

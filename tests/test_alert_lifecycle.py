@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tests._fixtures import (
+    _advance,
     make_fill_event,
     make_okx_exchange,
     make_sim_exchange,
@@ -510,8 +511,8 @@ async def test_sim_liquidation_triggers_alert_clear():
     )
     assert len(sim.get_price_level_alerts()) == 1
 
-    # Crash price to trigger liquidation (100x leverage → ~1% drop kills it)
-    await sim._process_tick(make_ticker(last=40000.0, timestamp=1700000001000))
+    # Crash price to trigger liquidation (100x leverage → ~1% drop kills it); mark = last
+    await _advance(sim, make_ticker(last=40000.0, timestamp=1700000001000), mark=40000.0)
 
     assert "BTC/USDT:USDT" not in sim._positions
     assert len(sim.get_price_level_alerts()) == 0

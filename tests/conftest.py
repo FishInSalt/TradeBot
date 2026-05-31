@@ -145,6 +145,7 @@ def deps_factory(db_engine):
         exchange._pending_orders = []
         exchange._leverage = {}
         exchange._latest_ticker = make_ticker(symbol=symbol)
+        exchange._latest_mark_price = exchange._latest_ticker.last   # third path: default mark = last seed
         exchange._latest_price = exchange._latest_ticker.last
         exchange._running = True
         inject_mock_ccxt(exchange)
