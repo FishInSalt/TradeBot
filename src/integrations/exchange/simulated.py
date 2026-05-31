@@ -136,18 +136,15 @@ class SimulatedExchange(BaseExchange):
         return self._latest_ticker
 
     async def get_mark_price(self, symbol: str) -> float:
-        """Sim has a single price source — mark = last. Note: under the new
-        get_position flow this is called inside a 6-tuple gather that already
-        fetches ticker; fetch_ticker is observation-only (reads cached
-        _latest_ticker) so back-to-back invocation is safe. If a future
-        SimulatedExchange mutates state in fetch_ticker (e.g., synthetic tick
-        advancement for replay scenarios), revisit and read self._latest_ticker
-        directly.
+        """Return the real OKX mark price (parallel watch_mark_price stream /
+        fetch_mark_price seed). Distinct from ticker.last — under live OKX mark
+        and last differ by a small basis (<0.05% normal). Used as the basis for
+        liquidation trigger and unrealized PnL calculations.
         """
         self._validate_symbol(symbol)
-        if self._latest_ticker is None:
-            raise RuntimeError("No ticker data available yet")
-        return self._latest_ticker.last
+        if self._latest_mark_price is None:
+            raise RuntimeError("No mark price available yet")
+        return self._latest_mark_price
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]:
         self._validate_symbol(symbol)

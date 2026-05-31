@@ -29,3 +29,16 @@ async def test_inject_mock_ccxt_mark_sources_are_awaitable():
     watched = await ex._ccxt.watch_mark_price("BTC/USDT:USDT")
     assert "markPrice" in fetched and isinstance(fetched["markPrice"], (int, float))
     assert "markPrice" in watched and isinstance(watched["markPrice"], (int, float))
+
+
+async def test_get_mark_price_returns_real_mark_not_last():
+    ex = make_sim_exchange()
+    await _advance(ex, make_ticker(last=60000.0), mark=59000.0)
+    assert await ex.get_mark_price("BTC/USDT:USDT") == 59000.0  # mark, not last 60000
+
+
+async def test_get_mark_price_raises_before_seed():
+    ex = make_sim_exchange()
+    ex._latest_mark_price = None
+    with pytest.raises(RuntimeError, match="No mark price"):
+        await ex.get_mark_price("BTC/USDT:USDT")
