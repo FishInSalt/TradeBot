@@ -63,3 +63,32 @@ async def test_unrealized_pnl_short_uses_mark():
     await _advance(ex, make_ticker(last=48000.0, bid=47990.0, ask=48010.0), mark=49000.0)
     pos = (await ex.fetch_positions("BTC/USDT:USDT"))[0]
     assert pos.unrealized_pnl == pytest.approx((50000 - 49000) * 0.01)  # 10.0 mark-based, not ask-based 19.9
+
+
+async def test_liquidation_triggers_on_mark_not_bid():
+    ex = make_sim_exchange(initial_balance=1000.0)
+    ex._leverage["BTC/USDT:USDT"] = 100
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.01)
+    await _advance(ex, make_ticker(last=50000.0, bid=50000.0, ask=50000.0), mark=50000.0)  # fill @ 50000
+    liq = (await ex.fetch_positions("BTC/USDT:USDT"))[0].liquidation_price
+    # bid dips below liq but mark stays above → survive (mark-driven, not bid)
+    await _advance(ex, make_ticker(last=liq - 10, bid=liq - 10, ask=liq - 10), mark=liq + 50)
+    assert "BTC/USDT:USDT" in ex._positions
+    # mark dips below liq → liquidated
+    await _advance(ex, make_ticker(last=liq + 5, bid=liq - 20, ask=liq + 5), mark=liq - 1)
+    assert "BTC/USDT:USDT" not in ex._positions
+
+
+async def test_liquidation_fill_price_is_bid_not_mark():
+    fills = []
+    async def collect(f):
+        fills.append(f)
+    ex = make_sim_exchange(initial_balance=1000.0)
+    ex._fill_callback = collect
+    ex._leverage["BTC/USDT:USDT"] = 100
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.01)
+    await _advance(ex, make_ticker(last=50000.0, bid=50000.0, ask=50000.0), mark=50000.0)
+    liq = (await ex.fetch_positions("BTC/USDT:USDT"))[0].liquidation_price
+    await _advance(ex, make_ticker(last=liq + 5, bid=liq - 20, ask=liq + 5), mark=liq - 1)
+    liq_fill = [f for f in fills if f.trigger_reason == "liquidation"][0]
+    assert liq_fill.fill_price == liq - 20   # 盘口 bid, NOT mark (liq-1)

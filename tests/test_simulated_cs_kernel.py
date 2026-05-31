@@ -160,8 +160,8 @@ async def test_liquidation_via_process_tick_cs_not_one():
     ex._used_usdt = 1_000.0
     ex._free_usdt = initial_balance - 1_000.0  # = 9000.0
 
-    # Tick with bid=89000 — well below liq_price ≈ 90045
-    await ex._process_tick(_tick(last=89_000.0, bid=89_000.0, ask=89_000.0))
+    # Tick with bid=89000 — well below liq_price ≈ 90045; mark also set to 89000
+    await _advance(ex, _tick(last=89_000.0, bid=89_000.0, ask=89_000.0), mark=89_000.0)
 
     # Position must be gone (liquidated)
     positions = await ex.fetch_positions("BTC/USDT:USDT")

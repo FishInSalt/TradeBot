@@ -657,10 +657,12 @@ class SimulatedExchange(BaseExchange):
                 triggered.append(fill)
 
             # 1. Liquidation check (must be before conditional orders)
+            #    Trigger basis = mark (real OKX); fill price = order-book bid/ask (市价吃盘口)
+            mark = self._latest_mark_price
             for symbol, pos in list(self._positions.items()):
                 liq = self._calc_liquidation_price(pos)
-                if pos.side == "long" and ticker.bid <= liq:
-                    fill = self._force_liquidate(pos, symbol, ticker.bid)
+                if pos.side == "long" and mark <= liq:
+                    fill = self._force_liquidate(pos, symbol, ticker.bid)   # trigger=mark, fill=book bid
                     triggered.append(fill)
                     new_orders.append((Order(
                         id=fill.order_id, symbol=symbol,
@@ -668,8 +670,8 @@ class SimulatedExchange(BaseExchange):
                         amount=fill.amount, price=fill.fill_price,
                         status="closed", fee=fill.fee,
                     ), fill.position_side))
-                elif pos.side == "short" and ticker.ask >= liq:
-                    fill = self._force_liquidate(pos, symbol, ticker.ask)
+                elif pos.side == "short" and mark >= liq:
+                    fill = self._force_liquidate(pos, symbol, ticker.ask)   # trigger=mark, fill=book ask
                     triggered.append(fill)
                     new_orders.append((Order(
                         id=fill.order_id, symbol=symbol,
