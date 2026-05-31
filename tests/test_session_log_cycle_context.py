@@ -35,3 +35,35 @@ def test_cycle_render_context_user_prompt_snapshot_defaults_none():
         forensic_reason=None, user_prompt_snapshot="hello",
     )
     assert ctx2.user_prompt_snapshot == "hello"
+
+
+def test_split_wake_prompt_with_marker():
+    """有注入块 → 前半=唤醒 scaffold+事件行，后半=注入 summary 块（标记行被丢弃）。"""
+    from src.cli.display import _split_wake_prompt
+    snapshot = (
+        "You have been woken up by a alert trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934c above 73384.00 — x)\n\n"
+        "Your prior cycle summaries (most recent N=3, from this session):\n\n"
+        "[cycle 00f7abcd · alert · 2026-05-31 07:27 UTC (8 min ago) · 96 words]\n"
+        "body here"
+    )
+    wake, summaries = _split_wake_prompt(snapshot)
+    assert "PRICE LEVEL" in wake
+    assert "Your prior cycle summaries" not in wake
+    assert "Your prior cycle summaries" not in summaries  # 标记行本身已丢弃
+    assert "[cycle 00f7abcd" in summaries
+
+
+def test_split_wake_prompt_no_marker():
+    """无注入块（首 cycle 无 prior）→ 后半为空字符串。"""
+    from src.cli.display import _split_wake_prompt
+    snapshot = (
+        "You have been woken up by a scheduled trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    wake, summaries = _split_wake_prompt(snapshot)
+    assert wake == snapshot
+    assert summaries == ""

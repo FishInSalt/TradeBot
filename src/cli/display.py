@@ -920,6 +920,52 @@ def _render_reasoning(thinking_text: str, max_chars: int = 15000) -> str:
     return f"\n▾ Reasoning ({total} chars total)\n{indented}{suffix}"
 
 
+# === Context section (carried into cycle) — spec 2026-05-31 ===
+#
+# 整段从已存的 user_prompt_snapshot 派生（零新 DB 字段 / 渲染层零查询 / 零 replay）。
+# format_cycle_output 在 header 后、forensic 短路前调用 _render_context（fail-isolated）。
+
+# 与 app._render_recent_summaries 的 header_top 逐字一致（格式耦合，由 Task 9 round-trip drift-guard 兜底）
+_SUMMARIES_MARKER = "Your prior cycle summaries (most recent N=3, from this session):"
+
+# conditional/alert 唤醒切片里的变量事件文本前缀（app.py:489/524/528 三种）
+_EVENT_PREFIXES = ("IMPORTANT EVENT", "PRICE ALERT", "PRICE LEVEL")
+
+# 字段 marker 的 4 种 cosmetic 写法（均行首）：**(N) Field / (N) **Field / (N) Field / ### (N) Field
+_FIELD_MARKER_RE = re.compile(r"(?m)^(?:#{1,6}\s*)?\**\s*\(([1-5])\)\s*")
+
+# 字段名 header（persona.py:116/126 模板 `(N) Name — content` —— marker 后紧跟字段名）。
+# _FIELD_MARKER_RE 只吃到 `(N) `，字段名仍留在 value 里（fields[1]="Stance — ..."）；
+# render 须先剥它再 prepend 归一标签，否则双标签 `Stance — Stance — ...`。
+# 字符类排除 — / – / :（不含 hyphen，避免吃掉内容里的 73,000-73,100）；≤40 字符内无分隔符 → 不剥离。
+_FIELD_LABEL_RE = re.compile(r"^[^—–:\n]{1,40}[—–:]\s*")
+
+# 注入块头两变体：valid `[cycle <id8> · <trig> · <utc> (<ago>) · <N> words]`
+# / NULL-forensic `[cycle <id8> · <trig> · <utc> (<ago>)]`（无 `· N words`）。
+# 捕获组 1 = id（8 hex），组 2 = ago 文本（去括号）。
+_BLOCK_HEADER_RE = re.compile(
+    r"\[cycle\s+([0-9a-fA-F]+)\s+·\s+[^·]+·\s+[^(]+\(([^)]+)\)"
+    r"(?:\s+·\s+\d+\s+words)?\]"
+)
+
+# 长度安全网（spec §3.6）—— 实测均不触发，仅防病态长文 / 未来新写法落兜底
+_CONTEXT_THESIS_CAP = 1500     # 最近一条 Thesis（实测 ④ max 1185）
+_CONTEXT_EVENT_CAP = 500       # Woke-by 事件行（实测最长事件行 ~150c）
+_CONTEXT_FALLBACK_CAP = 500    # 兜底 whole-block（尤其 earlier-slot，防整条长文跨 cycle 重复）
+
+
+def _split_wake_prompt(snapshot: str) -> tuple[str, str]:
+    """Split user_prompt_snapshot at the injected-summaries marker.
+
+    Returns (wake_half, summaries_half). 标记缺失（首 cycle 无 prior）→
+    summaries_half 为 ""。标记行本身被丢弃（不进任一半）。
+    """
+    idx = snapshot.find(_SUMMARIES_MARKER)
+    if idx == -1:
+        return snapshot, ""
+    return snapshot[:idx], snapshot[idx + len(_SUMMARIES_MARKER):]
+
+
 def _render_action(
     tool_calls: list,
     returns_lookup: dict,
