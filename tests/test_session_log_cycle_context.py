@@ -298,3 +298,123 @@ def test_render_carried_block_newest_fallback_when_self_terse():
     text = "\n".join(lines)
     assert "Holding. No change." in text
     assert "Stance —" not in text and "more)" not in text
+
+
+def _ctx(trigger_type, user_prompt_snapshot, messages=None, final_text="Hold."):
+    """构造一个带 user_prompt_snapshot 的 success-path ctx（messages 给最小非 None 值触发正常渲染路径）。"""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.display import CycleRenderContext
+    from src.cli.session_state import SessionStats
+    started = datetime(2026, 5, 31, 7, 35, 0, tzinfo=timezone.utc)
+    return CycleRenderContext(
+        cycle_id="06e9abcd", trigger_type=trigger_type,
+        trigger_context={"type": "scheduled_tick"}, state_snapshot=None,
+        messages=messages, final_text=final_text, cycle_tokens=1000,
+        stats=SessionStats(), cache_hit_rate=90.0,
+        cycle_started_at=started, cycle_ended_at=started + timedelta(seconds=3),
+        forensic_reason=None, user_prompt_snapshot=user_prompt_snapshot,
+    )
+
+
+_ALERT_SNAPSHOT = (
+    "You have been woken up by a alert trigger.\n"
+    "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+    "Assess the situation and decide what to do.\n\n"
+    "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — MA20 reclaim)\n\n"
+    "Your prior cycle summaries (most recent N=3, from this session):\n\n"
+    "[cycle 824e2233 · conditional · 2026-05-31 07:00 UTC (35 min ago) · 91 words]\n"
+    "**(1) Stance** — flat; cascade compressing.\n"
+    "**(2) Active commitments** — none.\n"
+    "**(3) This cycle delta** — closed short.\n"
+    "**(4) Thesis & invalidation** — bearish; invalidation > 74,200.\n"
+    "**(5) Watch list** — 73,000 support.\n\n"
+    "[cycle 00f7abcd · alert · 2026-05-31 07:27 UTC (8 min ago) · 96 words]\n"
+    "**(1) Stance** — flat; MA20 reclaim confirmed.\n"
+    "**(2) Active commitments** — alert above 73,384.\n"
+    "**(3) This cycle delta** — updated alert.\n"
+    "**(4) Thesis & invalidation** — bearish macro intact; invalidation > 74,200.\n"
+    "**(5) Watch list** — 74,200 resistance."
+)
+
+
+def test_render_context_section_present_between_header_and_reasoning():
+    """Context 段在 Header 之后、第一段 Reasoning 之前。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["Assess."], tool_call_segments=[[]], final_text="Hold.",
+    )
+    out = format_cycle_output(_ctx("alert", _ALERT_SNAPSHOT, messages=msgs))
+    ctx_idx = out.find("▾ Context (carried into this cycle)")
+    header_idx = out.find("Cycle 06e9")
+    reasoning_idx = out.find("▾ Reasoning")
+    assert header_idx >= 0 and ctx_idx > header_idx, "Context 须在 Header 之后"
+    assert reasoning_idx > ctx_idx, "Context 须在第一段 Reasoning 之前"
+    # Woke by（alert 事件行）
+    assert "Woke by — PRICE LEVEL:" in out
+    assert "alert id=934cfd" in out
+    # Carried thesis newest-first：00f7 在 824e 之前
+    assert out.find("00f7 · 8 min ago") < out.find("824e · 35 min ago")
+    # 最近一条有 Thesis，较早只有 Stance
+    assert "Thesis — bearish macro intact" in out      # 00f7（newest）
+    assert "(+3 more)" in out                            # newest 5−2
+    assert "(+4 more)" in out                            # earlier 5−1
+
+
+def test_render_context_scheduled_omits_woke_by():
+    """scheduled → 无 Woke by，直接从 Carried thesis 起。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    snap = _ALERT_SNAPSHOT.replace(
+        "You have been woken up by a alert trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — MA20 reclaim)\n\n",
+        "You have been woken up by a scheduled trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n",
+    )
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs))
+    assert "▾ Context (carried into this cycle)" in out
+    assert "Woke by" not in out
+    assert "Carried thesis" in out
+
+
+def test_render_context_none_snapshot_omits_section():
+    """user_prompt_snapshot=None → 整段省略（spec §5）。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("scheduled", None, messages=msgs))
+    assert "▾ Context" not in out
+
+
+def test_render_context_scheduled_first_cycle_omits_section():
+    """scheduled 首 cycle（无 Woke by 无 prior）→ 整段省略。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    snap = (
+        "You have been woken up by a scheduled trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs))
+    assert "▾ Context" not in out
+
+
+def test_render_context_alert_first_cycle_woke_by_only():
+    """conditional/alert 首 cycle（有 Woke by、无 prior）→ 只渲 Woke by。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    snap = (
+        "You have been woken up by a alert trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — x)"
+    )
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("alert", snap, messages=msgs))
+    assert "Woke by — PRICE LEVEL:" in out
+    assert "Carried thesis" not in out

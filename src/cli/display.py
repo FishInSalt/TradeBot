@@ -1078,6 +1078,39 @@ def _render_carried_block(id4: str, ago: str, body: str, is_newest: bool) -> lis
     return out
 
 
+def _render_context(user_prompt_snapshot: str | None, trigger_type: str) -> str:
+    """Render the '▾ Context (carried into this cycle)' section (spec §3).
+
+    数据源 = user_prompt_snapshot（agent 本轮实读那份）。无可展示内容
+    （None / scheduled 首 cycle 无 prior）→ ""（caller 跳过）。fail-isolated：
+    任何解析异常降级为空 / 仅 Woke by，绝不阻断整 cycle 渲染（spec §5）。
+    """
+    if not user_prompt_snapshot:
+        return ""
+    try:
+        wake_half, summaries_half = _split_wake_prompt(user_prompt_snapshot)
+        event_line = _extract_event_line(wake_half, trigger_type)
+        blocks = _parse_injected_summaries(summaries_half)
+
+        lines: list[str] = []
+        if event_line:
+            lines.append(f"  Woke by — {escape(event_line)}")
+        if blocks:
+            n = len(blocks)
+            lines.append(
+                f"  Carried thesis — last {n} cycle{'s' if n > 1 else ''} (newest first):"
+            )
+            for slot, (id4, ago, body) in enumerate(blocks):
+                lines.extend(_render_carried_block(id4, ago, body, is_newest=(slot == 0)))
+
+        if not lines:
+            return ""
+        return "\n▾ Context (carried into this cycle)\n" + "\n".join(lines)
+    except Exception:
+        logger.warning("Context section render failed; omitting", exc_info=True)
+        return ""
+
+
 def _render_action(
     tool_calls: list,
     returns_lookup: dict,
@@ -1240,6 +1273,12 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
         trigger_context=ctx.trigger_context, state_snapshot=ctx.state_snapshot,
         cycle_started_at=ctx.cycle_started_at, stats=ctx.stats,
     )]
+
+    # spec 2026-05-31: Context 段插在 Header 后、Reasoning/forensic 短路前
+    # （success + forensic 两路径共用此处，因 user_prompt_snapshot 在两路径均已落库）
+    context_section = _render_context(ctx.user_prompt_snapshot, ctx.trigger_type)
+    if context_section:
+        lines.append(context_section)
 
     # === Forensic / retry-exhausted 短路 ===
     if ctx.messages is None:
