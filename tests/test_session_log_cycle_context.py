@@ -228,3 +228,73 @@ def test_parse_injected_summaries_empty_no_blocks():
     from src.cli.display import _parse_injected_summaries
     assert _parse_injected_summaries("") == []
     assert _parse_injected_summaries("no block header here") == []
+
+
+_FULL5 = (
+    "**(1) Stance** — flat; MA20 reclaim confirmed.\n"
+    "**(2) Active commitments** — alert above 73,384.\n"
+    "**(3) This cycle delta** — updated alert.\n"
+    "**(4) Thesis & invalidation** — bearish macro intact; invalidation > 74,200.\n"
+    "**(5) Watch list** — 74,200 resistance."
+)
+_NO_WATCH4 = (
+    "**(1) Stance** — flat; MA20 reclaim confirmed.\n"
+    "**(2) Active commitments** — alert above 73,384.\n"
+    "**(3) This cycle delta** — updated alert.\n"
+    "**(4) Thesis & invalidation** — bearish macro intact; invalidation > 74,200."
+)
+
+
+def test_render_carried_block_newest_stance_and_thesis():
+    """最近一条 → Stance + Thesis；(+N more) = 5 − 2 = 3。
+
+    断言用精确整行（`in lines`），catch 审查发现的双标签：buggy 实现产出
+    '      Stance — Stance — flat...' / '      Thesis — Thesis & invalidation — ...'
+    与下面精确行不等 → 红。
+    """
+    from src.cli.display import _render_carried_block
+    lines = _render_carried_block("00f7", "8 min ago", _FULL5, is_newest=True)
+    assert "    00f7 · 8 min ago" in lines
+    # 单标签、字段名已剥 —— 精确整行（双标签会变成另一行字符串 → 不在 lines 里）
+    assert "      Stance — flat; MA20 reclaim confirmed." in lines
+    assert "      Thesis — bearish macro intact; invalidation > 74,200." in lines
+    # (+N more) 独占行
+    assert "      (+3 more)" in lines
+
+
+def test_render_carried_block_earlier_stance_only():
+    """较早一条 → 仅 Stance，无 Thesis；(+N more) = 5 − 1 = 4。"""
+    from src.cli.display import _render_carried_block
+    lines = _render_carried_block("47d5", "34 min ago", _FULL5, is_newest=False)
+    assert "      Stance — flat; MA20 reclaim confirmed." in lines
+    assert not any(line.lstrip().startswith("Thesis —") for line in lines)
+    assert "      (+4 more)" in lines
+
+
+def test_render_carried_block_n_more_dynamic_no_watch():
+    """缺 ⑤Watch（4 字段）→ N 动态减 1：newest 4−2=2，earlier 4−1=3。"""
+    from src.cli.display import _render_carried_block
+    newest = _render_carried_block("00f7", "8 min ago", _NO_WATCH4, is_newest=True)
+    earlier = _render_carried_block("47d5", "34 min ago", _NO_WATCH4, is_newest=False)
+    assert "      (+2 more)" in newest
+    assert "      (+3 more)" in earlier
+
+
+def test_render_carried_block_fallback_terse_no_labels():
+    """terse / 无 ①④ → 整条兜底：无 Stance/Thesis 标签、无 (+N more)。"""
+    from src.cli.display import _render_carried_block
+    lines = _render_carried_block("824e", "35 min ago", "Done. Next wake in 30 min.", is_newest=True)
+    text = "\n".join(lines)
+    assert "Done. Next wake in 30 min." in text
+    assert "Stance —" not in text
+    assert "Thesis —" not in text
+    assert "more)" not in text
+
+
+def test_render_carried_block_newest_fallback_when_self_terse():
+    """最近一条自身落兜底（无 ①④）→ 同样整条兜底（优先级 兜底 > 字段）。"""
+    from src.cli.display import _render_carried_block
+    lines = _render_carried_block("00f7", "8 min ago", "Holding. No change.", is_newest=True)
+    text = "\n".join(lines)
+    assert "Holding. No change." in text
+    assert "Stance —" not in text and "more)" not in text

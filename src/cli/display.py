@@ -1045,6 +1045,39 @@ def _parse_injected_summaries(summaries_half: str) -> list[tuple[str, str, str]]
     return blocks
 
 
+def _render_carried_block(id4: str, ago: str, body: str, is_newest: bool) -> list[str]:
+    """Render one carried-cycle block → indented lines（spec §3.4）。
+
+    结构化路径（①④ 均可定位）—— 字段名经 _strip_field_label 剥离后 prepend 归一标签：
+        <id4> · <ago>
+          Stance — <① 去名内容>
+          Thesis — <④ 去名内容>        # 仅 is_newest（④ Thesis & invalidation 归一为 Thesis）
+          (+N more)                    # 独占行，N = len(fields) − rendered
+    兜底路径（无 ①④ — terse / forensic body，含 is_newest）—— 不剥标签（无字段名可剥）：
+        <id4> · <ago>
+          <cleaned whole body, capped>
+    """
+    out = [f"    {id4} · {ago}"]
+    fields = _extract_summary_fields(body)
+    if 1 in fields and 4 in fields:
+        rendered = 1
+        stance = _strip_field_label(_clean_field(fields[1]))
+        out.append(f"      Stance — {escape(stance)}")
+        if is_newest:
+            thesis = _truncate_with_marker(
+                _strip_field_label(_clean_field(fields[4])), _CONTEXT_THESIS_CAP,
+            )
+            out.append(f"      Thesis — {escape(thesis)}")
+            rendered = 2
+        n_more = len(fields) - rendered
+        if n_more > 0:
+            out.append(f"      (+{n_more} more)")
+    else:
+        whole = _truncate_with_marker(_clean_field(body), _CONTEXT_FALLBACK_CAP)
+        out.append(f"      {escape(whole)}")
+    return out
+
+
 def _render_action(
     tool_calls: list,
     returns_lookup: dict,
