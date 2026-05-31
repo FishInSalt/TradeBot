@@ -188,7 +188,8 @@ class BaseExchange(ABC):
     async def fetch_trades(self, symbol: str, limit: int = 500) -> list[Trade]: ...
     @abstractmethod
     async def get_contract_size(self, symbol: str) -> float:
-        """Contract multiplier. OKX BTC swap = 0.01 BTC/contract; Sim = 1.0."""
+        """Contract multiplier (base currency per contract). OKX BTC/USDT:USDT swap = 0.01 BTC/contract.
+        Both Sim and OKX cache the real market contractSize at start()."""
         ...
 
     async def start(self) -> None:
