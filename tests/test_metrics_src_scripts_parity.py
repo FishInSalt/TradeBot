@@ -202,3 +202,27 @@ async def test_src_scripts_fifo_parity_cs_nonunit(engine):
     assert abs(src_rts[0].pnl_gross - 100.0) < 1e-6, (
         f"Expected gross=100.0 (×cs=0.01), got {src_rts[0].pnl_gross}"
     )
+
+
+@pytest.mark.asyncio
+async def test_src_scripts_fifo_parity_cs_nonunit_liquidation(engine):
+    """cs=0.01 + liquidation: src ↔ scripts per-unit 口径一致（都不乘 cs）。
+
+    Both sides read the stored arbitrary pnl=-200.0 and derive liq_pnl_per_unit
+    = pnl / amount (per-张, money-denominated — no ×cs).  Parity confirms both
+    FIFO implementations treat the stored value identically under cs≠1.
+    """
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    from scripts._sim_metrics import collect_roundtrips
+
+    sid = "parity-cs-liq"
+    await _setup_synthetic_sim_session(engine, sid, 0.0005, contract_size=0.01, fills=[
+        ("open", "long", 100_000.0, 10.0),
+        ("liq", "long", 95_000.0, 10.0),
+    ])
+    src_rts, _ = await _collect_roundtrips_from_trade_actions(engine, sid, 0.01)
+    script_rts, caveats = await collect_roundtrips(engine, sid)
+
+    assert len(src_rts) == len(script_rts) == 1
+    assert caveats["liquidation_count"] == 1
+    _assert_roundtrip_parity(src_rts[0], script_rts[0])

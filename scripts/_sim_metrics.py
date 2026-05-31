@@ -89,7 +89,7 @@ def _compute_pnl(
     entry_px: float, exit_px: float, amount: float, side: str,
     contract_size: float = 1.0,
 ) -> float:
-    """Lot-level PnL (non-weighted). Mirrors simulated.py:427-430 (×contractSize)."""
+    """Lot-level PnL (non-weighted). Mirrors simulated.py _close_position_core PnL (×contractSize)."""
     if side == "long":
         return (exit_px - entry_px) * amount * contract_size
     return (entry_px - exit_px) * amount * contract_size
