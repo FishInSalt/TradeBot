@@ -85,6 +85,8 @@ class SimulatedExchange(BaseExchange):
         self._running = False
         self._lock = asyncio.Lock()
         self._error_count = 0
+        self._latest_mark_price: float | None = None   # real OKX mark (watch_mark_price); None until seeded
+        self._mark_error_count = 0                      # independent from _error_count (do NOT share)
         self._alert_callback: Callable[[Any], Awaitable[None]] | None = None
 
     def _validate_symbol(self, symbol: str) -> None:

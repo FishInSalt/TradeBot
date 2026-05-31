@@ -22,6 +22,7 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
         symbol=symbol, last=95000.0, bid=94990.0, ask=95010.0,
         high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
     )
+    exchange._latest_mark_price = exchange._latest_ticker.last   # default mark = last seed
     exchange._running = True
     from tests._fixtures import inject_mock_ccxt
     inject_mock_ccxt(exchange)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from src.integrations.exchange.base import FillEvent, Ticker
 
@@ -25,6 +25,9 @@ def inject_mock_ccxt(exchange, contract_size: float = 1.0):
     exchange._ccxt = MagicMock()
     exchange._ccxt.amount_to_precision = MagicMock(side_effect=_trunc3)
     exchange._ccxt.market = MagicMock(return_value={"contractSize": contract_size})
+    # mark sources are async (ccxtpro) — MagicMock children aren't awaitable; use AsyncMock
+    exchange._ccxt.fetch_mark_price = AsyncMock(return_value={"markPrice": 50000.0})
+    exchange._ccxt.watch_mark_price = AsyncMock(return_value={"markPrice": 50000.0})
     exchange._contract_size = contract_size
     return exchange
 
@@ -113,9 +116,22 @@ def make_sim_exchange(
     ex._pending_orders = []
     ex._leverage = {}
     ex._latest_ticker = make_ticker(symbol=symbol)
+    ex._latest_mark_price = ex._latest_ticker.last   # default mark = last seed (None would TypeError in liq check)
     ex._running = True
     inject_mock_ccxt(ex)
     return ex
+
+
+async def _advance(ex, ticker, mark=None):
+    """Advance sim price for tests: optionally sync mark, then process the tick.
+
+    mark 真实化后 mark 不走 _process_tick（只更新 _latest_ticker）。凡"推进价格 →
+    查 uPnL / 触发清算"的测试须经此 helper 同步 mark。mark=None 时保留现有
+    _latest_mark_price。接受任意 Ticker，_tick / make_ticker 两套体系通用。
+    """
+    if mark is not None:
+        ex._latest_mark_price = mark
+    await ex._process_tick(ticker)
 
 
 def make_okx_exchange():
