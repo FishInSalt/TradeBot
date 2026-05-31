@@ -82,6 +82,7 @@ class SimulatedExchange(BaseExchange):
         self._pending_orders: list[_PendingOrder] = []
         self._leverage: dict[str, int] = {}
         self._latest_ticker: Ticker | None = None
+        self._contract_size: float = 1.0   # _init_contract_size() overwrites with real market contractSize
         self._running = False
         self._lock = asyncio.Lock()
         self._error_count = 0
@@ -1145,6 +1146,7 @@ class SimulatedExchange(BaseExchange):
             await self._persist_state()
 
         self._ccxt = ccxtpro.okx()
+        await self._init_contract_size()
         seed_ticker = None
         for attempt in range(3):
             try:
@@ -1259,5 +1261,38 @@ class SimulatedExchange(BaseExchange):
         trades.sort(key=lambda t: t.timestamp)
         return trades
 
+    async def _load_markets_with_retry(self) -> None:
+        """load_markets with exponential backoff, 3 attempts; fail-fast on all failures (no silent fallback)."""
+        for attempt in range(3):
+            try:
+                await self._ccxt.load_markets()
+                return
+            except Exception as e:
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    raise RuntimeError(f"Failed to load_markets after 3 attempts: {e}") from e
+
+    async def _init_contract_size(self) -> None:
+        """load_markets(retry) → cache real contractSize from market() → persist to DB (if db_engine set)."""
+        await self._load_markets_with_retry()
+        self._contract_size = float(self._ccxt.market(self._symbol).get("contractSize") or 1.0)
+        if self._db_engine:
+            await self._persist_contract_size()
+
+    async def _persist_contract_size(self) -> None:
+        """Persist cached contract_size to sessions.contract_size column (Task 1)."""
+        from sqlalchemy import update
+        from src.storage.database import get_session
+        from src.storage.models import Session as SessionModel
+        async with get_session(self._db_engine) as session:
+            await session.execute(
+                update(SessionModel)
+                .where(SessionModel.id == self._session_id)
+                .values(contract_size=self._contract_size)
+            )
+            await session.commit()
+
     async def get_contract_size(self, symbol: str) -> float:
-        return 1.0
+        self._validate_symbol(symbol)
+        return self._contract_size

@@ -193,11 +193,12 @@ async def test_sim_fetch_trades_ratelimit():
 
 
 @pytest.mark.asyncio
-async def test_sim_get_contract_size_always_one():
-    """Sim always returns 1.0 (no contract multiplier model)."""
+async def test_sim_get_contract_size_default_and_symbol_validation():
+    """Sim returns 1.0 default before start() populates _contract_size; rejects wrong symbol."""
     ex = _make_sim()
     assert await ex.get_contract_size("BTC/USDT:USDT") == 1.0
-    assert await ex.get_contract_size("ETH/USDT:USDT") == 1.0
+    with pytest.raises(ValueError, match="Symbol mismatch"):
+        await ex.get_contract_size("ETH/USDT:USDT")
 
 
 @pytest.mark.asyncio
