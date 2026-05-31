@@ -25,25 +25,32 @@ import pytest
 from sqlalchemy import text
 
 
-async def _setup_synthetic_sim_session(engine, sid: str, fee_rate: float, fills: list[tuple]):
+async def _setup_synthetic_sim_session(
+    engine,
+    sid: str,
+    fee_rate: float,
+    fills: list[tuple],
+    contract_size: float = 1.0,
+):
     """Double-write sim_orders + trade_actions from single fill specs.
 
     Each fill spec: (event_type, side, price, amount, [trigger_reason])
       event_type ∈ {"open", "close", "liq"}
       side ∈ {"long", "short"}
 
-    Fee = price × amount × fee_rate exactly (no stale_close_amount path).
+    Fee = price × amount × contract_size × fee_rate exactly (no stale_close_amount path).
+    contract_size defaults to 1.0 so existing callers (cs=1) see identical math.
     """
     async with engine.begin() as conn:
         await conn.execute(text(
             "INSERT INTO sessions "
             "(id, name, symbol, initial_balance, status, created_at, updated_at, "
             " exchange_type, timeframe, scheduler_interval_min, approval_enabled, "
-            " token_budget, fee_rate) "
+            " token_budget, fee_rate, contract_size) "
             "VALUES (:sid, :sid, 'BTC/USDT:USDT', 10000.0, 'active', "
             "        '2026-01-01 00:00:00', '2026-01-01 00:00:00', "
-            "        'simulated', '15m', 15, 1, 500000, :fr)"
-        ), {"sid": sid, "fr": fee_rate})
+            "        'simulated', '15m', 15, 1, 500000, :fr, :cs)"
+        ), {"sid": sid, "fr": fee_rate, "cs": contract_size})
 
         for idx, spec in enumerate(fills):
             etype, side, price, amount = spec[:4]
@@ -52,7 +59,7 @@ async def _setup_synthetic_sim_session(engine, sid: str, fee_rate: float, fills:
             ord_id = f"o-{idx}"
             order_side = "sell" if (side == "long" and is_close) or (side == "short" and not is_close) else "buy"
             order_type = "liquidation" if etype == "liq" else "market"
-            fee = price * amount * fee_rate
+            fee = price * amount * contract_size * fee_rate
             ts = f"2026-01-01 00:00:{idx:02d}"
 
             # sim_orders row (consumed by scripts FIFO) — enumerate all NOT NULL cols
@@ -78,7 +85,7 @@ async def _setup_synthetic_sim_session(engine, sid: str, fee_rate: float, fills:
                     open_idx = next(i for i, s in enumerate(fills[:idx])
                                     if s[0] == "open" and s[1] == side)
                     entry_price = fills[open_idx][2]
-                    pnl = (price - entry_price) * amount * sign
+                    pnl = (price - entry_price) * amount * sign * contract_size
 
             await conn.execute(text(
                 "INSERT INTO trade_actions "
@@ -160,3 +167,38 @@ def _assert_roundtrip_parity(src_rt, script_rt) -> None:
     )
     assert math.isclose(src_rt.exit_px, script_rt.exit_px, abs_tol=1e-9)
     assert math.isclose(src_rt.amount, script_rt.amount, abs_tol=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_src_scripts_fifo_parity_cs_nonunit(engine):
+    """cs=0.01: src (explicit cs) ↔ scripts (reads DB cs) 仍 byte-equal。
+
+    10 张 long open@100000 close@101000, cs=0.01:
+      gross = (101000-100000) × 10 × 0.01 = 100.0 USDT
+      fee_open  = 100000 × 10 × 0.01 × 0.0005 = 5.0
+      fee_close = 101000 × 10 × 0.01 × 0.0005 = 5.05
+      pnl_net   = 100.0 - 10.05 = 89.95
+    """
+    from src.services.metrics import _collect_roundtrips_from_trade_actions
+    from scripts._sim_metrics import collect_roundtrips
+
+    sid = "parity-cs"
+    await _setup_synthetic_sim_session(
+        engine, sid, fee_rate=0.0005, contract_size=0.01,
+        fills=[
+            ("open", "long", 100_000.0, 10.0),
+            ("close", "long", 101_000.0, 10.0),
+        ],
+    )
+
+    src_rts, _ = await _collect_roundtrips_from_trade_actions(engine, sid, 0.01)
+    script_rts, caveats = await collect_roundtrips(engine, sid)
+
+    assert caveats["stale_close_amount_count"] == 0
+    assert len(src_rts) == len(script_rts) == 1
+    _assert_roundtrip_parity(src_rts[0], script_rts[0])
+
+    # Verify cs is truly multiplied in (not just coincident): gross ≠ cs=1 result
+    assert abs(src_rts[0].pnl_gross - 100.0) < 1e-6, (
+        f"Expected gross=100.0 (×cs=0.01), got {src_rts[0].pnl_gross}"
+    )
