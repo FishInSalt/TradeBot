@@ -1,10 +1,32 @@
 """Shared test fixtures for Iter 6+ tests."""
 from __future__ import annotations
 
+import math
 from typing import Any
 from unittest.mock import MagicMock
 
 from src.integrations.exchange.base import FillEvent, Ticker
+
+
+def inject_mock_ccxt(exchange, contract_size: float = 1.0):
+    """Inject a mock _ccxt into a sim exchange that bypassed async start().
+
+    amount_to_precision reads self._ccxt (set only in start()); fixtures that
+    pre-populate state without calling start() must call this helper so the
+    attribute exists.  Truncates to 3 decimal places (TRUNCATE semantics, mock
+    fidelity).  Note: real OKX BTC/USDT:USDT uses TICK_SIZE mode with
+    precision.amount=0.01 (step 0.01), so any quantity in 0.001-0.009 range
+    passes this mock but would be rejected by live exchange — flagged as
+    grounding follow-up for next sim run.
+    """
+    def _trunc3(_symbol, amt):
+        return f"{math.floor(float(amt) * 1000) / 1000:.3f}"
+
+    exchange._ccxt = MagicMock()
+    exchange._ccxt.amount_to_precision = MagicMock(side_effect=_trunc3)
+    exchange._ccxt.market = MagicMock(return_value={"contractSize": contract_size})
+    exchange._contract_size = contract_size
+    return exchange
 
 
 def make_fill_event(
@@ -93,6 +115,7 @@ def make_sim_exchange(
     ex._leverage = {}
     ex._latest_ticker = make_ticker(symbol=symbol)
     ex._running = True
+    inject_mock_ccxt(ex)
     return ex
 
 

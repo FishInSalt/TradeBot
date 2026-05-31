@@ -24,13 +24,8 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
         high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
     )
     exchange._running = True
-    import math
-    def _trunc3(_symbol, amt):          # ccxt amount_to_precision truncates to 3 decimal places (mock fidelity)
-        return f"{math.floor(float(amt) * 1000) / 1000:.3f}"
-    exchange._ccxt = MagicMock()
-    exchange._ccxt.amount_to_precision = MagicMock(side_effect=_trunc3)
-    exchange._ccxt.market = MagicMock(return_value={"contractSize": 1.0})
-    exchange._contract_size = 1.0
+    from tests._fixtures import inject_mock_ccxt
+    inject_mock_ccxt(exchange)
     return exchange
 
 

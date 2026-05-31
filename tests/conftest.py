@@ -137,7 +137,7 @@ def deps_factory(db_engine):
         # Pre-populate state mirroring tests/_fixtures.py:make_sim_exchange — avoids
         # async start() while making _latest_price / _latest_ticker available so tools
         # (e.g. add_price_level_alert) reading these attrs don't AttributeError.
-        from tests._fixtures import make_ticker
+        from tests._fixtures import inject_mock_ccxt, make_ticker
         exchange._free_usdt = initial_balance
         exchange._used_usdt = 0.0
         exchange._frozen_usdt = 0.0
@@ -147,6 +147,7 @@ def deps_factory(db_engine):
         exchange._latest_ticker = make_ticker(symbol=symbol)
         exchange._latest_price = exchange._latest_ticker.last
         exchange._running = True
+        inject_mock_ccxt(exchange)
         deps = TradingDeps(
             session_id=session_id, symbol=symbol,
             timeframe="15m", exchange=exchange,

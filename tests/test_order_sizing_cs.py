@@ -111,3 +111,23 @@ async def test_place_limit_order_cs1_unchanged():
     )
     amount = deps.exchange.create_order.call_args.kwargs["amount"]
     assert abs(amount - 0.1) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_open_position_too_small_returns_graceful_message():
+    """sub-precision quantity → amount_to_precision returns 0.0 → graceful 'Position too small' message.
+
+    Spec A1 e2e: amount_to_precision returns 0.0 → open_position must return the
+    'Position too small' string without raising, not proceed to create_order.
+
+    Non-vacuous check: temporarily restoring amount_to_precision to identity (return amt)
+    causes the assertion to fail (create_order called, no early-return message).
+    """
+    deps = _deps(1.0)
+    # Override amount_to_precision to always return 0.0 (sub-precision scenario)
+    deps.exchange.amount_to_precision = MagicMock(return_value=0.0)
+
+    result = await open_position(deps, side="long", position_pct=10.0, leverage=10, reasoning="r")
+
+    assert "Position too small" in result, f"Expected 'Position too small' message, got: {result!r}"
+    deps.exchange.create_order.assert_not_called()
