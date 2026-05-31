@@ -108,13 +108,17 @@ class SimulatedExchange(BaseExchange):
             (o.position_side == "short" and o.side == "buy")
         )
 
+    def _base_qty(self, amount: float) -> float:
+        """张数 → base 币当量（amount × contractSize）。计价统一入口。"""
+        return amount * self._contract_size
+
     def _calc_unrealized_pnl(self, pos: _Position) -> float:
         if self._latest_ticker is None:
             return 0.0
         if pos.side == "long":
-            return (self._latest_ticker.bid - pos.entry_price) * pos.contracts
+            return (self._latest_ticker.bid - pos.entry_price) * self._base_qty(pos.contracts)
         else:
-            return (pos.entry_price - self._latest_ticker.ask) * pos.contracts
+            return (pos.entry_price - self._latest_ticker.ask) * self._base_qty(pos.contracts)
 
     def _calc_liquidation_price(self, pos: _Position) -> float:
         if pos.side == "long":
@@ -232,14 +236,14 @@ class SimulatedExchange(BaseExchange):
                     pos = self._positions[symbol]
                     position_side = pos.side
                     estimated_price = ticker.bid if pos.side == "long" else ticker.ask
-                    estimated_fee = estimated_price * amount * self._fee_rate
+                    estimated_fee = estimated_price * self._base_qty(amount) * self._fee_rate
                     frozen = min(estimated_fee, self._free_usdt)
                 else:
                     position_side = "long" if side == "buy" else "short"
                     estimated_price = ticker.ask if side == "buy" else ticker.bid
                     leverage = self._leverage.get(symbol, 1)
-                    estimated_margin = (estimated_price * amount) / leverage
-                    estimated_fee = estimated_price * amount * self._fee_rate
+                    estimated_margin = (estimated_price * self._base_qty(amount)) / leverage
+                    estimated_fee = estimated_price * self._base_qty(amount) * self._fee_rate
                     frozen = (estimated_margin + estimated_fee) * 1.002
                     if self._free_usdt < frozen:
                         raise ValueError(
@@ -277,8 +281,8 @@ class SimulatedExchange(BaseExchange):
                     leverage = pos.leverage
                 else:
                     leverage = self._leverage.get(symbol, 1)
-                margin = (price * amount) / leverage
-                fee = price * amount * self._fee_rate
+                margin = (price * self._base_qty(amount)) / leverage
+                fee = price * self._base_qty(amount) * self._fee_rate
                 frozen = margin + fee
                 if self._free_usdt < frozen:
                     raise ValueError(
@@ -329,8 +333,8 @@ class SimulatedExchange(BaseExchange):
 
         fill_price = ticker.ask if order.side == "buy" else ticker.bid
         leverage = order.leverage
-        actual_margin = (fill_price * order.amount) / leverage
-        actual_fee = fill_price * order.amount * self._fee_rate
+        actual_margin = (fill_price * self._base_qty(order.amount)) / leverage
+        actual_fee = fill_price * self._base_qty(order.amount) * self._fee_rate
         actual_cost = actual_margin + actual_fee
 
         # Unfreeze → occupy
@@ -422,13 +426,13 @@ class SimulatedExchange(BaseExchange):
         """Core close logic shared by market close, conditional fill, and liquidation.
         Returns (pnl, fee, released_margin). Does NOT cancel orders."""
         pos = self._positions[symbol]
-        released_margin = (pos.entry_price * amount) / pos.leverage
-        fee = fill_price * amount * self._fee_rate
+        released_margin = (pos.entry_price * self._base_qty(amount)) / pos.leverage
+        fee = fill_price * self._base_qty(amount) * self._fee_rate
 
         if position_side == "long":
-            pnl = (fill_price - pos.entry_price) * amount
+            pnl = (fill_price - pos.entry_price) * self._base_qty(amount)
         else:
-            pnl = (pos.entry_price - fill_price) * amount
+            pnl = (pos.entry_price - fill_price) * self._base_qty(amount)
 
         if pnl_cap:
             pnl = max(pnl, -(released_margin - fee))
@@ -573,8 +577,8 @@ class SimulatedExchange(BaseExchange):
 
         fill_price = order.trigger_price  # limit fills at specified price
         leverage = order.leverage
-        actual_margin = (fill_price * order.amount) / leverage
-        actual_fee = fill_price * order.amount * self._fee_rate
+        actual_margin = (fill_price * self._base_qty(order.amount)) / leverage
+        actual_fee = fill_price * self._base_qty(order.amount) * self._fee_rate
         actual_cost = actual_margin + actual_fee
 
         # Unfreeze → occupy
