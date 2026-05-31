@@ -18,7 +18,6 @@ def _make_sim(symbol: str = "BTC/USDT:USDT") -> SimulatedExchange:
     """
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3, "ETH/USDT:USDT": 2}
     return SimulatedExchange(
         config=config, db_engine=None, session_id="test-order-book", symbol=symbol,
     )
@@ -193,11 +192,12 @@ async def test_sim_fetch_trades_ratelimit():
 
 
 @pytest.mark.asyncio
-async def test_sim_get_contract_size_always_one():
-    """Sim always returns 1.0 (no contract multiplier model)."""
+async def test_sim_get_contract_size_default_and_symbol_validation():
+    """Sim returns 1.0 default before start() populates _contract_size; rejects wrong symbol."""
     ex = _make_sim()
     assert await ex.get_contract_size("BTC/USDT:USDT") == 1.0
-    assert await ex.get_contract_size("ETH/USDT:USDT") == 1.0
+    with pytest.raises(ValueError, match="Symbol mismatch"):
+        await ex.get_contract_size("ETH/USDT:USDT")
 
 
 @pytest.mark.asyncio

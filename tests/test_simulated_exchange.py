@@ -10,7 +10,6 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
 
     config = MagicMock()
     config.fee_rate = fee_rate
-    config.precision = {"BTC/USDT:USDT": 3, "ETH/USDT:USDT": 2}
 
     exchange = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol=symbol)
     exchange._free_usdt = initial_balance
@@ -24,6 +23,8 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
         high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
     )
     exchange._running = True
+    from tests._fixtures import inject_mock_ccxt
+    inject_mock_ccxt(exchange)
     return exchange
 
 
@@ -214,16 +215,10 @@ async def test_set_leverage_rejects_with_position():
         await ex.set_leverage("BTC/USDT:USDT", 5)
 
 
-def test_amount_to_precision():
+def test_amount_to_precision_truncates_via_ccxt():
     ex = _make_exchange()
     assert ex.amount_to_precision("BTC/USDT:USDT", 0.001567) == 0.001
-    assert ex.amount_to_precision("BTC/USDT:USDT", 0.0019999) == 0.001
-
-
-def test_amount_to_precision_unknown_symbol():
-    ex = _make_exchange()
-    with pytest.raises(KeyError):
-        ex.amount_to_precision("UNKNOWN/USDT:USDT", 1.0)
+    assert ex.amount_to_precision("BTC/USDT:USDT", 0.0019999) == 0.001   # truncate not round
 
 
 async def test_stop_order_creation():
@@ -416,7 +411,6 @@ async def test_persist_and_restore():
 
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
 
     ex1 = SimulatedExchange(config, engine, "test-s", "BTC/USDT:USDT")
     await ex1._init_state(initial_balance=100.0)
@@ -459,7 +453,6 @@ async def test_fetch_closed_orders_from_db():
 
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
 
     ex = SimulatedExchange(config, engine, "test-s2", "BTC/USDT:USDT")
     await ex._init_state(initial_balance=100.0)
@@ -648,7 +641,6 @@ async def test_simulated_exchange_alert_service_integration():
 
     config = ExchangeConfig(
         name="simulated", fee_rate=0.0005,
-        precision={"BTC/USDT:USDT": 3},
     )
     exchange = SimulatedExchange(
         config=config, db_engine=None, session_id="test",
@@ -695,7 +687,6 @@ async def test_simulated_exchange_no_alert_when_service_returns_none():
 
     config = ExchangeConfig(
         name="simulated", fee_rate=0.0005,
-        precision={"BTC/USDT:USDT": 3},
     )
     exchange = SimulatedExchange(
         config=config, db_engine=None, session_id="test",
@@ -733,7 +724,6 @@ async def test_simulated_exchange_alert_callback_outside_lock():
 
     config = ExchangeConfig(
         name="simulated", fee_rate=0.0005,
-        precision={"BTC/USDT:USDT": 3},
     )
     exchange = SimulatedExchange(
         config=config, db_engine=None, session_id="test",

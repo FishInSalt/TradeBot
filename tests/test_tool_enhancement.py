@@ -290,7 +290,7 @@ async def test_simulated_fetch_positions_has_created_at(tmp_path):
     from src.storage.database import init_db
 
     engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/t2.db")
-    config = ExchangeConfig(name="simulated", fee_rate=0.0005, precision={"BTC/USDT:USDT": 3})
+    config = ExchangeConfig(name="simulated", fee_rate=0.0005)
     ex = SimulatedExchange(config=config, db_engine=engine, session_id="t2", symbol="BTC/USDT:USDT")
     # Manually set up state for test (bypass start())
     ex._free_usdt = 10000.0

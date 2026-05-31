@@ -116,8 +116,9 @@ async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
         positions = await deps.exchange.fetch_positions(deps.symbol)
         if positions:
             p = positions[0]
+            cs = await deps.exchange.get_contract_size(deps.symbol)
             notional = (
-                p.entry_price * p.contracts
+                p.entry_price * p.contracts * cs
                 if p.entry_price > 0 and p.contracts > 0
                 else 0.0
             )

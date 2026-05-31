@@ -49,6 +49,7 @@ class Session(Base):
     scheduler_interval_min: Mapped[int] = mapped_column(Integer, default=15)
     approval_enabled: Mapped[bool] = mapped_column(default=True)
     fee_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    contract_size: Mapped[float | None] = mapped_column(Float, nullable=True)  # per-session market contractSize; NULL=legacy (analysis fallback 1.0)
     token_budget: Mapped[int] = mapped_column(Integer, default=500000)
     # P4 (obs roadmap Phase 3): rendered system_prompt at session creation; session-fixed
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -30,7 +30,6 @@ def test_add_price_level_alert_stores_created_at(monkeypatch):
 
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
 
     ex = SimulatedExchange(
         config=config, db_engine=None, session_id="test-session", symbol="BTC/USDT:USDT"
@@ -64,7 +63,6 @@ def test_update_price_level_alert_is_in_place(monkeypatch):
     monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700000000.0)
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
     ex = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol="BTC/USDT:USDT")
     alert_id = ex.add_price_level_alert(
         price=82_100.0, direction="above",
@@ -86,7 +84,6 @@ def test_update_price_level_alert_overwrites_price_and_reasoning(monkeypatch):
     monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700000000.0)
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
     ex = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol="BTC/USDT:USDT")
     alert_id = ex.add_price_level_alert(
         price=82_100.0, direction="above",
@@ -107,7 +104,6 @@ def test_update_price_level_alert_keeps_direction_and_symbol(monkeypatch):
     monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700000000.0)
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
     ex = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol="BTC/USDT:USDT")
     alert_id = ex.add_price_level_alert(
         price=82_100.0, direction="above",
@@ -131,7 +127,6 @@ def test_update_price_level_alert_resets_created_at(monkeypatch):
     monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700000000.0)
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
     ex = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol="BTC/USDT:USDT")
     alert_id = ex.add_price_level_alert(
         price=82_100.0, direction="above",
@@ -153,7 +148,6 @@ def test_update_price_level_alert_not_found_returns_false(monkeypatch):
     monkeypatch.setattr("src.integrations.exchange.base.time.time", lambda: 1700000000.0)
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
     ex = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol="BTC/USDT:USDT")
     ex.add_price_level_alert(
         price=82_100.0, direction="above",

@@ -85,24 +85,29 @@ def _is_close_fill(position_side: str, side: str) -> bool:
     )
 
 
-def _compute_pnl(entry_px: float, exit_px: float, amount: float, side: str) -> float:
-    """Lot-level PnL (non-weighted). Mirrors simulated.py:403-406."""
+def _compute_pnl(
+    entry_px: float, exit_px: float, amount: float, side: str,
+    contract_size: float = 1.0,
+) -> float:
+    """Lot-level PnL (non-weighted). Mirrors simulated.py _close_position_core PnL (×contractSize)."""
     if side == "long":
-        return (exit_px - entry_px) * amount
-    return (entry_px - exit_px) * amount
+        return (exit_px - entry_px) * amount * contract_size
+    return (entry_px - exit_px) * amount * contract_size
 
 
-def _derive_close_amount(fill, fee_rate: float | None) -> tuple[float, bool]:
-    """Derive close fill actual_amount from fee (handles stale SL/TP amount).
+def _derive_close_amount(
+    fill, fee_rate: float | None, contract_size: float = 1.0,
+) -> tuple[float, bool]:
+    """Derive close fill actual_amount (张数) from fee (handles stale SL/TP amount).
 
-    fee = filled_price × actual_amount × fee_rate
-    → actual_amount = fee / (filled_price × fee_rate)
+    Internal fee formula: fee = filled_price × amount_张 × contract_size × fee_rate
+    → amount_张 = fee / (filled_price × contract_size × fee_rate)
 
     Fallback when fee/fee_rate/filled_price missing OR derived > order_amount × 1.01:
     return (order_amount, False).
     """
     if fill.fee and fill.filled_price and fee_rate and fee_rate > 0:
-        derived = fill.fee / (fill.filled_price * fee_rate)
+        derived = fill.fee / (fill.filled_price * contract_size * fee_rate)
         if derived <= fill.amount * 1.01:  # 1% float tolerance
             return derived, True
     return fill.amount, False
@@ -164,6 +169,15 @@ async def _fetch_fee_rate(engine, session_id: str) -> float | None:
     return row.fee_rate if row else None
 
 
+async def _fetch_contract_size(engine, session_id: str) -> float:
+    async with engine.connect() as conn:
+        row = (await conn.execute(
+            text("SELECT contract_size FROM sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).first()
+    return row.contract_size if row and row.contract_size is not None else 1.0
+
+
 async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], dict]:
     """FIFO lot pairing. See spec §4.2 for full algorithm.
 
@@ -174,6 +188,7 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
                     stale_close_amount_count: int
     """
     fee_rate = await _fetch_fee_rate(engine, session_id)
+    contract_size = await _fetch_contract_size(engine, session_id)
     async with engine.connect() as conn:
         result = await conn.execute(_FILLS_SQL, {"sid": session_id})
         fills = result.all()
@@ -202,7 +217,7 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
             continue
 
         # CLOSE — FIFO consume
-        actual_amount, derived_ok = _derive_close_amount(fill, fee_rate)
+        actual_amount, derived_ok = _derive_close_amount(fill, fee_rate, contract_size)
         if not derived_ok:
             caveats["stale_close_amount_count"] += 1
         close_remaining = actual_amount
@@ -238,9 +253,13 @@ async def collect_roundtrips(engine, session_id: str) -> tuple[list[Roundtrip], 
             consumed = min(lot.remaining_amount, close_remaining)
 
             if fill.order_type == "liquidation":
+                # liq_pnl_per_unit = trade_action_pnl / actual_amount (money/张, per-unit)
+                # already money-denominated: no ×cs here
                 pnl_gross = liq_pnl_per_unit * consumed
             else:
-                pnl_gross = _compute_pnl(lot.entry_px, fill.filled_price, consumed, lot.side)
+                pnl_gross = _compute_pnl(
+                    lot.entry_px, fill.filled_price, consumed, lot.side, contract_size
+                )
 
             fee_open_share = lot.open_fee * (consumed / lot.original_amount)
             fee_close_share = close_fee_total * (consumed / actual_amount)

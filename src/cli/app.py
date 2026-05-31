@@ -774,12 +774,6 @@ async def run_agent_cycle(
 
 # --- Phase 5: Service construction ---
 
-_DEFAULT_PRECISION = {
-    "BTC/USDT:USDT": 3,
-    "ETH/USDT:USDT": 2,
-}
-
-
 def _compute_max_wake(scheduler_interval_min: int) -> int:
     """Compute wake_max_minutes ceiling from scheduler interval.
 
@@ -841,9 +835,8 @@ def build_services(
     # Exchange
     if result.exchange_type == "simulated":
         from src.integrations.exchange.simulated import SimulatedExchange
-        precision = {result.symbol: _DEFAULT_PRECISION.get(result.symbol, 3)}
         config = ExchangeConfig(
-            name="simulated", fee_rate=result.fee_rate, precision=precision,
+            name="simulated", fee_rate=result.fee_rate,
         )
         exchange = SimulatedExchange(
             config=config, db_engine=engine,

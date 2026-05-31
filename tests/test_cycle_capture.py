@@ -45,6 +45,7 @@ def deps_with_position():
             is_algo=False, trigger_price=None,
         )
     ])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
 
     deps.market_data = MagicMock()
@@ -206,6 +207,7 @@ async def test_state_snapshot_pnl_pct_zero_position():
             liquidation_price=None,
         )
     ])
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
         total_usdt=1.0, free_usdt=1.0, used_usdt=0.0,
     ))

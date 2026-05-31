@@ -119,13 +119,18 @@ async def test_upgrade_preserves_pre_iter_legacy_rows(pre_iter_head_db):
 
 
 async def test_downgrade_drops_new_columns_and_restores_view(head_db):
-    """alembic downgrade -1: 2 columns removed; view recreated with pre-iter JSON path.
+    """alembic downgrade to pre-iter rev: 2 columns removed; view recreated with
+    pre-iter JSON path.
 
-    NOTE: Expected to false-pass before migration impl. Verify by `git status` shows
-    new migration file before treating this test as meaningful.
+    Downgrades to PRE_ITER_REV (af87432ee6dd's down_revision) rather than relative
+    `-1`: later migrations may stack on top of net_pnl_metrics (e.g. the
+    sim-exec-cs contract_size column), so `-1` would only undo the topmost
+    migration and leave entry_price/amount intact. Targeting the explicit
+    pre-iter rev keeps this test pinned to the net_pnl_metrics downgrade regardless
+    of head.
     """
     db, env = head_db
-    subprocess.run(["alembic", "downgrade", "-1"], check=True, env=env, capture_output=True)
+    subprocess.run(["alembic", "downgrade", PRE_ITER_REV], check=True, env=env, capture_output=True)
 
     conn = sqlite3.connect(db)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(trade_actions)")}

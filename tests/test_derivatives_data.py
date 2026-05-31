@@ -131,7 +131,6 @@ def _make_sim_exchange(symbol="BTC/USDT:USDT"):
 
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
     exchange = SimulatedExchange(config=config, db_engine=None, session_id="test", symbol=symbol)
     exchange._ccxt = AsyncMock()
     return exchange
@@ -167,7 +166,6 @@ async def test_sim_fetch_funding_rate_no_ccxt():
 
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {}
     ex = SimulatedExchange(config=config, db_engine=None, session_id="test", symbol="BTC/USDT:USDT")
     # Don't set _ccxt — simulates not calling start()
     with pytest.raises(RuntimeError, match="not started"):
