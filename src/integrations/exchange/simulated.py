@@ -201,9 +201,10 @@ class SimulatedExchange(BaseExchange):
         self._leverage[symbol] = leverage
 
     def amount_to_precision(self, symbol: str, amount: float) -> float:
-        decimals = self._precision[symbol]  # KeyError if missing = fail fast
-        factor = 10 ** decimals
-        return math.floor(amount * factor) / factor
+        try:
+            return float(self._ccxt.amount_to_precision(symbol, amount))
+        except ccxt.InvalidOrder:
+            return 0.0   # sub-precision → restores open_position/place_limit_order "Position too small" guard
 
     async def create_order(  # noqa: ARG002
         self,

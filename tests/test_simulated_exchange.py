@@ -24,6 +24,13 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
         high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
     )
     exchange._running = True
+    import math
+    def _trunc3(_symbol, amt):          # ccxt amount_to_precision truncates to 3 decimal places (mock fidelity)
+        return f"{math.floor(float(amt) * 1000) / 1000:.3f}"
+    exchange._ccxt = MagicMock()
+    exchange._ccxt.amount_to_precision = MagicMock(side_effect=_trunc3)
+    exchange._ccxt.market = MagicMock(return_value={"contractSize": 1.0})
+    exchange._contract_size = 1.0
     return exchange
 
 
@@ -214,16 +221,10 @@ async def test_set_leverage_rejects_with_position():
         await ex.set_leverage("BTC/USDT:USDT", 5)
 
 
-def test_amount_to_precision():
+def test_amount_to_precision_truncates_via_ccxt():
     ex = _make_exchange()
     assert ex.amount_to_precision("BTC/USDT:USDT", 0.001567) == 0.001
-    assert ex.amount_to_precision("BTC/USDT:USDT", 0.0019999) == 0.001
-
-
-def test_amount_to_precision_unknown_symbol():
-    ex = _make_exchange()
-    with pytest.raises(KeyError):
-        ex.amount_to_precision("UNKNOWN/USDT:USDT", 1.0)
+    assert ex.amount_to_precision("BTC/USDT:USDT", 0.0019999) == 0.001   # truncate not round
 
 
 async def test_stop_order_creation():
