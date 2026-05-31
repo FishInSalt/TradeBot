@@ -649,7 +649,7 @@ git commit -m "$(printf 'iter-sim-exec-mark-price: update mark==last comment (no
 - [ ] **Step 1: 全量 pytest**
 
 Run: `pytest -q`
-Expected: PASS — 基线 2036 passed + 5 skip（PR #66）+ 本 iter 净增（`test_sim_mark_price.py` 15 新测试）。无 fail。
+Expected: PASS — 本 iter 净增 `test_sim_mark_price.py` 16 新测试（含 Task 5 计数器 recovery-reset 覆盖）；rebase onto PR #67 后基线推进，实测 2087 passed + 5 skip。无 fail。
 
 - [ ] **Step 2: 若有 fail，逐个核因**
 
