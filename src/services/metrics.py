@@ -98,6 +98,7 @@ _EPS = 1e-9
 async def _collect_roundtrips_from_trade_actions(
     engine: AsyncEngine,
     session_id: str,
+    contract_size: float = 1.0,
 ) -> tuple[list[_Roundtrip], dict[str, int]]:
     """FIFO lot pairing from trade_actions (spec §5.2).
 
@@ -192,7 +193,7 @@ async def _collect_roundtrips_from_trade_actions(
             if is_liquidation:
                 pnl_gross = (liq_pnl_per_unit or 0.0) * consumed
             else:
-                pnl_gross = (fill.price - lot.entry_px) * consumed * sign
+                pnl_gross = (fill.price - lot.entry_px) * consumed * sign * contract_size
             pnl_net = pnl_gross - fee_open_share - fee_close_share
             roundtrips.append(_Roundtrip(
                 side=lot.side, entry_px=lot.entry_px, exit_px=fill.price,
@@ -227,12 +228,16 @@ class MetricsService:
     ) -> PerformanceMetrics:
         from src.storage.models import Session as SessionModel
 
-        # Fetch fee_rate from sessions (informational; FIFO uses lot.open_fee + fill.fee directly)
+        # Fetch fee_rate + contract_size from sessions.
+        # fee_rate: informational; FIFO uses lot.open_fee + fill.fee directly.
+        # contract_size: scaling factor for normal-close pnl_gross (B2); NULL=legacy → 1.0.
         async with get_session(self._engine) as session:
             row = (await session.execute(
-                select(SessionModel.fee_rate).where(SessionModel.id == self._session_id)
+                select(SessionModel.fee_rate, SessionModel.contract_size)
+                .where(SessionModel.id == self._session_id)
             )).first()
         fee_rate = row.fee_rate if row else None
+        contract_size = (row.contract_size if row and row.contract_size is not None else 1.0)
         if fee_rate is None:
             logger.warning(
                 "metrics: sessions.fee_rate IS NULL for session %s (informational; "
@@ -251,7 +256,9 @@ class MetricsService:
         total_fees = sum(f.fee for f in all_fills if f.fee is not None)
 
         # FIFO lot pairing
-        rts, caveats = await _collect_roundtrips_from_trade_actions(self._engine, self._session_id)
+        rts, caveats = await _collect_roundtrips_from_trade_actions(
+            self._engine, self._session_id, contract_size
+        )
 
         # All stats unavailable when no roundtrips (spec §6.2 c)
         if not rts:
