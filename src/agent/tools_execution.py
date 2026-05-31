@@ -73,8 +73,9 @@ async def open_position(
     """Open a new position. side='long' or 'short'. position_pct=% of free balance."""
     balance = await deps.exchange.fetch_balance()
     ticker = await deps.market_data.get_ticker(deps.symbol)
+    contract_size = await deps.exchange.get_contract_size(deps.symbol)
     usdt_amount = balance.free_usdt * (position_pct / 100.0)
-    raw_quantity = (usdt_amount * leverage) / ticker.last
+    raw_quantity = (usdt_amount * leverage) / (ticker.last * contract_size)
     quantity = deps.exchange.amount_to_precision(deps.symbol, raw_quantity)
     if quantity <= 0:
         return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
@@ -100,7 +101,6 @@ async def open_position(
         side=side, reasoning=reasoning,
     )
 
-    contract_size = await deps.exchange.get_contract_size(deps.symbol)
     notional = ticker.last * quantity * contract_size
     est_entry_fee = notional * deps.fee_rate
     return (
@@ -619,8 +619,9 @@ async def place_limit_order(
         actual_leverage = leverage
 
     balance = await deps.exchange.fetch_balance()
+    contract_size = await deps.exchange.get_contract_size(deps.symbol)
     usdt_amount = balance.free_usdt * (position_pct / 100.0)
-    raw_quantity = (usdt_amount * actual_leverage) / price
+    raw_quantity = (usdt_amount * actual_leverage) / (price * contract_size)
     quantity = deps.exchange.amount_to_precision(deps.symbol, raw_quantity)
     if quantity <= 0:
         return f"Position too small: {raw_quantity:.8f} rounds to 0 after precision adjustment."
@@ -651,7 +652,6 @@ async def place_limit_order(
     leverage_suffix = ""
     if positions and leverage != actual_leverage:
         leverage_suffix = f" (matched existing position; requested {leverage}x ignored)"
-    contract_size = await deps.exchange.get_contract_size(deps.symbol)
     notional = price * quantity * contract_size
     est_entry_fee = notional * deps.fee_rate
     return (
