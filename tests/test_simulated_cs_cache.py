@@ -1,6 +1,9 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock
+from sqlalchemy import select
 from src.integrations.exchange.simulated import SimulatedExchange
+from src.storage.database import init_db, get_session
+from src.storage.models import Session as SessionModel
 
 
 def _bare(symbol="BTC/USDT:USDT"):
@@ -51,3 +54,40 @@ async def test_init_contract_size_caches_real_cs():
     await ex._init_contract_size()
     assert ex._contract_size == 0.01
     ex._ccxt.market.assert_called_once_with("BTC/USDT:USDT")
+
+
+@pytest.mark.asyncio
+async def test_persist_contract_size_writes_to_db(tmp_path):
+    # Verify _persist_contract_size() actually writes the correct value to the
+    # sessions row — ensures the WHERE clause and column name are correct.
+    engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/cs_persist.db")
+
+    # Insert a session row with contract_size initially NULL.
+    async with get_session(engine) as s:
+        s.add(SessionModel(
+            id="sess-cs", name="test", symbol="BTC/USDT:USDT",
+            initial_balance=1000.0,
+        ))
+        await s.commit()
+
+    # Build exchange pointing at the real engine.
+    cfg = MagicMock()
+    cfg.fee_rate = 0.0005
+    cfg.precision = {}
+    ex = SimulatedExchange(config=cfg, db_engine=engine, session_id="sess-cs",
+                           symbol="BTC/USDT:USDT")
+
+    # Mock _ccxt so _init_contract_size() succeeds without real network calls.
+    ex._ccxt = MagicMock()
+    ex._ccxt.load_markets = AsyncMock()
+    ex._ccxt.market = MagicMock(return_value={"contractSize": 0.01})
+
+    # db_engine is set → should call _persist_contract_size() after caching.
+    await ex._init_contract_size()
+
+    # Re-query the DB and confirm the value was persisted.
+    async with get_session(engine) as s:
+        stored = (await s.execute(
+            select(SessionModel.contract_size).where(SessionModel.id == "sess-cs")
+        )).scalar_one()
+    assert stored == 0.01
