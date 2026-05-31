@@ -710,6 +710,7 @@ class CycleRenderContext:
     cycle_started_at: datetime
     cycle_ended_at: datetime
     forensic_reason: str | None
+    user_prompt_snapshot: str | None = None  # spec 2026-05-31: Context 段唯一数据源；None → 整段省略
 
 
 # === R2-8a: Cycle log narrative render helpers (spec §4) ===

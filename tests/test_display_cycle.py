@@ -896,6 +896,7 @@ def _make_ctx(
     cycle_started_at=None,
     cycle_ended_at=None,
     forensic_reason=None,
+    user_prompt_snapshot=None,
 ):
     from src.cli.display import CycleRenderContext
     from src.cli.session_state import SessionStats
@@ -916,6 +917,7 @@ def _make_ctx(
         stats=stats, cache_hit_rate=cache_hit_rate,
         cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
         forensic_reason=forensic_reason,
+        user_prompt_snapshot=user_prompt_snapshot,
     )
 
 
