@@ -118,3 +118,71 @@ def test_extract_event_line_no_known_prefix_returns_none():
     from src.cli.display import _extract_event_line
     wake = "You have been woken up by a alert trigger.\nTrading pair: X | Timeframe: 5m\n..."
     assert _extract_event_line(wake, "alert") is None
+
+
+def test_clean_field_strips_bold_and_collapses_whitespace():
+    from src.cli.display import _clean_field
+    raw = "Flat. MA20 reclaim **confirmed**\n  by 07:30 close;   bearish bias tempered."
+    cleaned = _clean_field(raw)
+    assert "**" not in cleaned
+    assert "\n" not in cleaned
+    assert "  " not in cleaned  # 多空格已 collapse
+    assert cleaned == "Flat. MA20 reclaim confirmed by 07:30 close; bearish bias tempered."
+
+
+@pytest.mark.parametrize("marker", [
+    "**(1) Stance** —",      # **(N) Field
+    "(1) **Stance** —",      # (N) **Field
+    "(1) Stance —",          # (N) Field
+    "### (1) Stance —",      # ### (N) Field (markdown heading)
+])
+def test_extract_summary_fields_four_marker_styles(marker):
+    """4 种 cosmetic 写法均能定位 ①④。"""
+    from src.cli.display import _extract_summary_fields
+    body = (
+        f"{marker} Flat near MA20.\n"
+        "**(2) Active commitments** — alert above 73,384.\n"
+        "**(3) This cycle delta** — updated alert.\n"
+        "**(4) Thesis & invalidation** — bearish macro; invalidation > 74,200.\n"
+        "**(5) Watch list** — 74,200 resistance."
+    )
+    fields = _extract_summary_fields(body)
+    assert 1 in fields and 4 in fields
+    assert "Flat near MA20" in fields[1]
+    assert "bearish macro" in fields[4]
+    assert len(fields) == 5
+
+
+def test_extract_summary_fields_terse_returns_empty():
+    """terse 一句话（无 (N) marker）→ {}（caller 走整条兜底）。"""
+    from src.cli.display import _extract_summary_fields
+    assert _extract_summary_fields("Done. Next wake in 30 min.") == {}
+
+
+def test_extract_summary_fields_degraded_only_1_and_4():
+    """退化：仅 ①④ 在（缺 ②③⑤）→ ④ 以 block 末兜底定界。"""
+    from src.cli.display import _extract_summary_fields
+    body = "(1) Stance — flat.\n(4) Thesis — bearish; invalidation > 74,200."
+    fields = _extract_summary_fields(body)
+    assert set(fields) == {1, 4}
+    assert "bearish; invalidation > 74,200" in fields[4]
+
+
+def test_strip_field_label_removes_name_header():
+    """剥 '<FieldName> — ' header（_extract_summary_fields 保留了字段名，render 前须剥）。
+
+    覆盖审查发现的双标签根因：fields[1]='Stance — ...'，若不剥则 render 出 'Stance — Stance — ...'。
+    """
+    from src.cli.display import _strip_field_label
+    # ① em-dash 分隔
+    assert _strip_field_label("Stance — flat near MA20.") == "flat near MA20."
+    # ④ 长字段名 + 内容含 colon（colon 在 em-dash 之后，不被误剥）
+    assert (_strip_field_label("Thesis & invalidation — bearish; conviction: low")
+            == "bearish; conviction: low")
+    # colon 分隔写法
+    assert _strip_field_label("Stance: flat") == "flat"
+    # 内容含 hyphen 不被吃（hyphen 不在分隔符类）
+    assert _strip_field_label("Stance — range 73,000-73,100") == "range 73,000-73,100"
+    # 无 name—sep 前缀（≤40 内无分隔符）→ 原样返回（降级，不吃内容）
+    raw = "flat near MA20 with no leading label or separator anywhere in here"
+    assert _strip_field_label(raw) == raw

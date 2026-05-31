@@ -990,6 +990,40 @@ def _extract_event_line(wake_half: str, trigger_type: str) -> str | None:
     return _truncate_with_marker(event, _CONTEXT_EVENT_CAP)
 
 
+def _clean_field(text: str) -> str:
+    """Strip markdown bold + collapse internal whitespace（log 渲 plain text）。"""
+    return re.sub(r"\s+", " ", text.replace("**", "")).strip()
+
+
+def _strip_field_label(text: str) -> str:
+    """Remove a leading '<FieldName> — ' header（persona `(N) Name — content`）。
+
+    _extract_summary_fields 切片只去 `(N) ` marker，字段名（Stance / Thesis &
+    invalidation …）仍留在 value 开头。render 须先剥它再 prepend 归一标签
+    `Stance —` / `Thesis —`（④ 缩写归一同时落地），否则双标签
+    `Stance — Stance — ...`。≤40 字符内无 — / – / : 分隔符 → 原样返回（降级，不吃内容）。
+    """
+    return _FIELD_LABEL_RE.sub("", text, count=1)
+
+
+def _extract_summary_fields(body: str) -> dict[int, str]:
+    """Position-slice a summary body into {field_num: raw_content}（spec §3.4）。
+
+    容忍 4 种 cosmetic marker 写法（_FIELD_MARKER_RE）。按相邻 marker 位置切片，
+    每段以"下一个 marker 或 block 末"定界（故仅 ①④ 在的退化情形 ④ 自动以末尾兜底）。
+    切片保留字段名（`Stance — ...`）—— render 经 _strip_field_label 去名后再 prepend
+    归一标签。无任何 (N) marker（terse / forensic system body）→ {}（caller 走整条兜底）。
+    """
+    marks = [(m.start(), int(m.group(1)), m.end()) for m in _FIELD_MARKER_RE.finditer(body)]
+    if not marks:
+        return {}
+    out: dict[int, str] = {}
+    for i, (_, num, end) in enumerate(marks):
+        nxt = marks[i + 1][0] if i + 1 < len(marks) else len(body)
+        out[num] = body[end:nxt].strip()
+    return out
+
+
 def _render_action(
     tool_calls: list,
     returns_lookup: dict,
