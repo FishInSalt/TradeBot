@@ -418,3 +418,93 @@ def test_render_context_alert_first_cycle_woke_by_only():
     out = format_cycle_output(_ctx("alert", snap, messages=msgs))
     assert "Woke by — PRICE LEVEL:" in out
     assert "Carried thesis" not in out
+
+
+# === Task 9: round-trip drift-guard + length caps + backward-compat ===
+
+
+def test_roundtrip_render_recent_summaries_parses_correctly():
+    """drift-guard：app._render_recent_summaries 真实产出（valid + forensic body）
+    → _split_wake_prompt + _parse_injected_summaries + _extract_summary_fields 全链正确。
+    格式漂移 → 本测试先红（spec §6 首条风险缓解）。
+    """
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _render_recent_summaries, CycleSummary
+    from src.cli.display import (
+        _SUMMARIES_MARKER, _parse_injected_summaries, _extract_summary_fields,
+    )
+
+    now = datetime(2026, 5, 31, 8, 0, 0, tzinfo=timezone.utc)
+    summaries = [
+        # 最旧：valid 5-field（ASC 源序 → 列表首）
+        CycleSummary(
+            id=1, cycle_id="824e2233aa", triggered_by="conditional",
+            decision=(
+                "**(1) Stance** — flat; cascade compressing.\n"
+                "**(2) Active commitments** — none.\n"
+                "**(3) This cycle delta** — closed short.\n"
+                "**(4) Thesis & invalidation** — bearish; invalidation > 74,200.\n"
+                "**(5) Watch list** — 73,000 support."
+            ),
+            execution_status="ok", created_at=now - timedelta(minutes=35),
+        ),
+        # 中間：forensic（decision=None → _render_empty_decision_body，NULL 块头变体）
+        CycleSummary(
+            id=2, cycle_id="47d5ef0199", triggered_by="scheduled",
+            decision=None, execution_status="usage_limit_exceeded",
+            created_at=now - timedelta(minutes=34),
+        ),
+        # 最新：valid 5-field（ASC 源序 → 列表尾）
+        CycleSummary(
+            id=3, cycle_id="00f7abcd55", triggered_by="alert",
+            decision=(
+                "**(1) Stance** — flat; MA20 reclaim confirmed.\n"
+                "**(2) Active commitments** — alert above 73,384.\n"
+                "**(3) This cycle delta** — updated alert.\n"
+                "**(4) Thesis & invalidation** — bearish macro intact; invalidation > 74,200.\n"
+                "**(5) Watch list** — 74,200 resistance."
+            ),
+            execution_status="ok", created_at=now - timedelta(minutes=8),
+        ),
+    ]
+    block = _render_recent_summaries(summaries, now=now)
+    assert block.startswith(_SUMMARIES_MARKER)  # 标记逐字一致 — 否则 _split_wake_prompt 失配
+
+    # 模拟完整 snapshot 的后半（标记之后部分）
+    summaries_half = block[len(_SUMMARIES_MARKER):]
+    blocks = _parse_injected_summaries(summaries_half)
+
+    # 切块 + 反转：3 条，newest-first
+    assert [b[0] for b in blocks] == ["00f7", "47d5", "824e"]
+    assert blocks[0][1] == "8 min ago"
+    assert blocks[1][1] == "34 min ago"     # NULL 块头变体仍取到 ago
+    # 字段提取
+    f_new = _extract_summary_fields(blocks[0][2])   # 00f7 valid
+    assert 1 in f_new and 4 in f_new and len(f_new) == 5
+    f_forensic = _extract_summary_fields(blocks[1][2])  # 47d5 forensic body → 兜底
+    assert f_forensic == {}
+
+
+def test_thesis_cap_truncates_pathological_long():
+    """最近一条 Thesis 超 _CONTEXT_THESIS_CAP → ASCII ' ... [+N chars]' 截断。"""
+    from src.cli.display import _render_carried_block, _CONTEXT_THESIS_CAP
+    long_thesis = "x" * (_CONTEXT_THESIS_CAP + 500)
+    body = f"**(1) Stance** — flat.\n**(4) Thesis & invalidation** — {long_thesis}"
+    text = "\n".join(_render_carried_block("00f7", "8 min ago", body, is_newest=True))
+    assert "... [+" in text and "chars]" in text
+
+
+def test_fallback_whole_block_cap():
+    """兜底 whole-block 超 _CONTEXT_FALLBACK_CAP → 截断。"""
+    from src.cli.display import _render_carried_block, _CONTEXT_FALLBACK_CAP
+    body = "y" * (_CONTEXT_FALLBACK_CAP + 300)  # 无 (N) marker → 兜底
+    text = "\n".join(_render_carried_block("824e", "35 min ago", body, is_newest=False))
+    assert "... [+" in text
+
+
+def test_markdown_stars_stripped_in_render():
+    """log 不解释 markdown：字面 ** 被剥离。"""
+    from src.cli.display import _render_carried_block
+    body = "**(1) Stance** — **flat** near MA20.\n**(4) Thesis & invalidation** — bearish."
+    text = "\n".join(_render_carried_block("00f7", "8 min ago", body, is_newest=True))
+    assert "**" not in text
