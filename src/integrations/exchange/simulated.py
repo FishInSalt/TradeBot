@@ -72,7 +72,6 @@ class SimulatedExchange(BaseExchange):
                 "(wizard-enforced; legacy NULL session detected)"
             )
         self._fee_rate: float = config.fee_rate
-        self._precision: dict[str, int] = config.precision if config.precision is not None else {}
 
         # Internal state (initialized in start() or directly for tests)
         self._free_usdt: float = 0.0

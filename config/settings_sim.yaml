@@ -6,9 +6,6 @@
 exchange:
   name: simulated               # Use local simulated exchange (no real API calls for trading)
   fee_rate: 0.0005              # Taker fee rate (0.05%)
-  precision:                    # Symbol → decimal places for amount truncation
-    BTC/USDT:USDT: 3
-    ETH/USDT:USDT: 2
 
 # === Trading Parameters ===
 trading:

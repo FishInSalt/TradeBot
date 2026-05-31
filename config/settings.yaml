@@ -4,9 +4,6 @@ exchange:
   # API credentials are loaded from .env file, not here
   # Required env vars: OKX_API_KEY, OKX_SECRET, OKX_PASSWORD
   # fee_rate: 0.0005            # simulated mode: taker fee rate (0.05%)
-  # precision:                  # simulated mode: symbol → decimal places
-  #   BTC/USDT:USDT: 3
-  #   ETH/USDT:USDT: 2
 
 # === Trading Parameters ===
 trading:

@@ -7,7 +7,7 @@ from src.storage.models import Session as SessionModel
 
 
 def _bare(symbol="BTC/USDT:USDT"):
-    cfg = MagicMock(); cfg.fee_rate = 0.0005; cfg.precision = {}
+    cfg = MagicMock(); cfg.fee_rate = 0.0005
     return SimulatedExchange(config=cfg, db_engine=None, session_id="s", symbol=symbol)
 
 
@@ -73,7 +73,6 @@ async def test_persist_contract_size_writes_to_db(tmp_path):
     # Build exchange pointing at the real engine.
     cfg = MagicMock()
     cfg.fee_rate = 0.0005
-    cfg.precision = {}
     ex = SimulatedExchange(config=cfg, db_engine=engine, session_id="sess-cs",
                            symbol="BTC/USDT:USDT")
 

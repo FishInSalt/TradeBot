@@ -88,16 +88,20 @@ def test_settings_missing_env_keys_uses_empty(tmp_path: Path):
 
 def test_exchange_config_simulated_fields():
     from src.config import ExchangeConfig
-    config = ExchangeConfig(name="simulated", fee_rate=0.0005, precision={"BTC/USDT:USDT": 3})
+    config = ExchangeConfig(name="simulated", fee_rate=0.0005)
     assert config.fee_rate == 0.0005
-    assert config.precision["BTC/USDT:USDT"] == 3
+
+
+def test_exchange_config_no_precision_field():
+    from src.config import ExchangeConfig
+    cfg = ExchangeConfig(name="simulated", fee_rate=0.0005)
+    assert not hasattr(cfg, "precision")
 
 
 def test_exchange_config_okx_ignores_sim_fields():
     from src.config import ExchangeConfig
     config = ExchangeConfig(name="okx")
     assert config.fee_rate is None
-    assert config.precision is None
 
 
 def test_settings_models_optional(tmp_path: Path):

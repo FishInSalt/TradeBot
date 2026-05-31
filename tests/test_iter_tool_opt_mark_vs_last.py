@@ -44,7 +44,7 @@ async def test_sim_get_mark_price_returns_ticker_last():
     from src.integrations.exchange.simulated import SimulatedExchange
     from src.integrations.exchange.base import Ticker
 
-    cfg = MagicMock(fee_rate=0.0005, precision={})
+    cfg = MagicMock(fee_rate=0.0005)
     ex = SimulatedExchange(config=cfg, db_engine=None, session_id="sid", symbol="BTC/USDT:USDT")
     ex._latest_ticker = Ticker(
         symbol="BTC/USDT:USDT", last=80_000.0, bid=79_995.0, ask=80_005.0,
@@ -538,7 +538,7 @@ async def test_algo_trigger_reference_class_attribute_pathway(monkeypatch):
     class _MarkSimExchange(SimulatedExchange):
         algo_trigger_reference = "mark"
 
-    cfg = MagicMock(fee_rate=0.0005, precision={})
+    cfg = MagicMock(fee_rate=0.0005)
     ex = _MarkSimExchange(config=cfg, db_engine=None, session_id="sid",
                           symbol="BTC/USDT:USDT")
     ex._latest_ticker = Ticker(

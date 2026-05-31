@@ -18,7 +18,6 @@ def _make_sim(symbol: str = "BTC/USDT:USDT") -> SimulatedExchange:
     """
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3, "ETH/USDT:USDT": 2}
     return SimulatedExchange(
         config=config, db_engine=None, session_id="test-order-book", symbol=symbol,
     )

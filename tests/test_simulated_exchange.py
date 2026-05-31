@@ -10,7 +10,6 @@ def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT
 
     config = MagicMock()
     config.fee_rate = fee_rate
-    config.precision = {"BTC/USDT:USDT": 3, "ETH/USDT:USDT": 2}
 
     exchange = SimulatedExchange(config=config, db_engine=None, session_id="test-session", symbol=symbol)
     exchange._free_usdt = initial_balance
@@ -412,7 +411,6 @@ async def test_persist_and_restore():
 
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
 
     ex1 = SimulatedExchange(config, engine, "test-s", "BTC/USDT:USDT")
     await ex1._init_state(initial_balance=100.0)
@@ -455,7 +453,6 @@ async def test_fetch_closed_orders_from_db():
 
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {"BTC/USDT:USDT": 3}
 
     ex = SimulatedExchange(config, engine, "test-s2", "BTC/USDT:USDT")
     await ex._init_state(initial_balance=100.0)
@@ -644,7 +641,6 @@ async def test_simulated_exchange_alert_service_integration():
 
     config = ExchangeConfig(
         name="simulated", fee_rate=0.0005,
-        precision={"BTC/USDT:USDT": 3},
     )
     exchange = SimulatedExchange(
         config=config, db_engine=None, session_id="test",
@@ -691,7 +687,6 @@ async def test_simulated_exchange_no_alert_when_service_returns_none():
 
     config = ExchangeConfig(
         name="simulated", fee_rate=0.0005,
-        precision={"BTC/USDT:USDT": 3},
     )
     exchange = SimulatedExchange(
         config=config, db_engine=None, session_id="test",
@@ -729,7 +724,6 @@ async def test_simulated_exchange_alert_callback_outside_lock():
 
     config = ExchangeConfig(
         name="simulated", fee_rate=0.0005,
-        precision={"BTC/USDT:USDT": 3},
     )
     exchange = SimulatedExchange(
         config=config, db_engine=None, session_id="test",

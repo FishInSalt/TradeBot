@@ -17,7 +17,6 @@ SYMBOL = "BTC/USDT:USDT"
 def _make_sim() -> SimulatedExchange:
     config = MagicMock()
     config.fee_rate = 0.0005
-    config.precision = {SYMBOL: 3}
     return SimulatedExchange(config=config, db_engine=None, session_id="smoke", symbol=SYMBOL)
 
 

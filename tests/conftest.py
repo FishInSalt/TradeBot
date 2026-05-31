@@ -129,7 +129,7 @@ def deps_factory(db_engine):
         if session_id is None:
             import uuid
             session_id = str(uuid.uuid4())
-        config = ExchangeConfig(name="simulated", fee_rate=0.0005, precision={symbol: 3})
+        config = ExchangeConfig(name="simulated", fee_rate=0.0005)
         exchange = SimulatedExchange(
             config=config, db_engine=db_engine,
             session_id=session_id, symbol=symbol,

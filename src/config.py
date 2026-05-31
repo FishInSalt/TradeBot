@@ -15,7 +15,6 @@ class ExchangeConfig(BaseModel):
     secret: str = ""
     password: str = ""
     fee_rate: float | None = None
-    precision: dict[str, int] | None = None
     sandbox: bool = False
 
 
