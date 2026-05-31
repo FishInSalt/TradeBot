@@ -194,3 +194,75 @@ async def test_cycle_captures_user_prompt_snapshot_retry_exhausted(monkeypatch):
         "forensic capture must match prompt from attempt 1 "
         "(retry-loop prompt invariant — see AC-10)"
     )
+
+
+async def test_cycle_console_renders_context_section_happy():
+    """app.py success 构造点透传 user_prompt_snapshot → console 渲出 ▾ Context + Woke by。
+
+    drift-guard：若 app.py 漏传 user_prompt_snapshot，字段默认 None → 无 Context 段 → 红。
+    """
+    import io
+    from rich.console import Console
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from src.integrations.exchange.base import PriceLevelAlertInfo
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-ctx-happy")
+
+    async def mock_run(prompt, **kwargs):
+        result = MagicMock()
+        result.usage = lambda: _mock_usage_legacy(1000)   # 全 token 属性为 int，避 commit 崩
+        result.new_messages = lambda: []
+        result.output = "**(1) Stance** — flat.\n**(4) Thesis & invalidation** — bearish."
+        return result
+
+    agent = MagicMock()
+    agent.run = mock_run
+    agent.model = "test-model"
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=120, no_color=True)
+    alert = PriceLevelAlertInfo(
+        symbol="BTC/USDT:USDT", target_price=73384.0, direction="above",
+        current_price=73384.0, reasoning="MA20 reclaim", timestamp=1746098096000,
+        alert_id="934cfd12",
+    )
+    await run_agent_cycle(
+        agent, deps, "alert", TokenBudget(daily_max=1_000_000), engine,
+        context=alert, console=console, model="test-model",
+    )
+    out = buf.getvalue()
+    assert "▾ Context (carried into this cycle)" in out
+    assert "Woke by — PRICE LEVEL:" in out
+    assert "alert id=934cfd12" in out
+
+
+async def test_cycle_console_renders_context_on_forensic():
+    """usage_limit forensic 短路路径透传 user_prompt_snapshot → console 渲出 Woke by。"""
+    import io
+    from rich.console import Console
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from src.integrations.exchange.base import PriceLevelAlertInfo
+
+    deps, engine = await _make_deps_engine_with_capture_mocks(session_id="sess-ctx-forensic")
+
+    async def mock_run(prompt, **kwargs):
+        raise UsageLimitExceeded("simulated token cap")
+
+    agent = MagicMock()
+    agent.run = mock_run
+    agent.model = "test-model"
+
+    buf = io.StringIO()
+    console = Console(file=buf, width=120, no_color=True)
+    alert = PriceLevelAlertInfo(
+        symbol="BTC/USDT:USDT", target_price=73384.0, direction="above",
+        current_price=73384.0, reasoning="MA20 reclaim", timestamp=1746098096000,
+        alert_id="934cfd12",
+    )
+    await run_agent_cycle(
+        agent, deps, "alert", TokenBudget(daily_max=1_000_000), engine,
+        context=alert, console=console, model="test-model",
+    )
+    out = buf.getvalue()
+    assert "▾ Context (carried into this cycle)" in out
+    assert "Woke by — PRICE LEVEL:" in out

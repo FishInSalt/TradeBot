@@ -710,6 +710,7 @@ class CycleRenderContext:
     cycle_started_at: datetime
     cycle_ended_at: datetime
     forensic_reason: str | None
+    user_prompt_snapshot: str | None = None  # spec 2026-05-31: Context 段唯一数据源；None → 整段省略
 
 
 # === R2-8a: Cycle log narrative render helpers (spec §4) ===
@@ -919,6 +920,206 @@ def _render_reasoning(thinking_text: str, max_chars: int = 15000) -> str:
     return f"\n▾ Reasoning ({total} chars total)\n{indented}{suffix}"
 
 
+# === Context section (carried into cycle) — spec 2026-05-31 ===
+#
+# 整段从已存的 user_prompt_snapshot 派生（零新 DB 字段 / 渲染层零查询 / 零 replay）。
+# format_cycle_output 在 header 后、forensic 短路前调用 _render_context（fail-isolated）。
+
+# 与 app._render_recent_summaries 的 header_top 逐字一致（格式耦合，由 Task 9 round-trip drift-guard 兜底）
+_SUMMARIES_MARKER = "Your prior cycle summaries (most recent N=3, from this session):"
+
+# conditional/alert 唤醒切片里的变量事件文本前缀（app.py:489/524/528 三种）
+_EVENT_PREFIXES = ("IMPORTANT EVENT", "PRICE ALERT", "PRICE LEVEL")
+
+# 字段 marker 的 4 种 cosmetic 写法（均行首）：**(N) Field / (N) **Field / (N) Field / ### (N) Field
+_FIELD_MARKER_RE = re.compile(r"(?m)^(?:#{1,6}\s*)?\**\s*\(([1-5])\)\s*")
+
+# 字段名 header（persona.py:116/126 模板 `(N) Name — content` —— marker 后紧跟字段名）。
+# _FIELD_MARKER_RE 只吃到 `(N) `，字段名仍留在 value 里（fields[1]="Stance — ..."）；
+# render 须先剥它再 prepend 归一标签，否则双标签 `Stance — Stance — ...`。
+# 锚定到 5 个已知字段名才剥（不用泛化 `^.{0,40}[sep]`）：泛化形态会把无字段名、
+# 但内容早期含 — / : 的退化写法（如 `(N) flat — watching` / `(N) conviction: low`）
+# 误当 label 静默吃掉前半句——对 forensic log 是最坏失败模式。锚定后任何输入都不会吃内容，
+# 未知字段名 fall-through 不剥（→ 可见双标签而非静默丢失，顺带成 persona 字段名 drift-guard）。
+_FIELD_LABEL_RE = re.compile(
+    r"^(?:Stance|Active commitments|This cycle delta"
+    r"|Thesis(?:\s*&\s*invalidation)?|Watch(?:\s*list)?)\s*[—–:]\s*",
+    re.IGNORECASE,
+)
+
+# 注入块头两变体：valid `[cycle <id8> · <trig> · <utc> (<ago>) · <N> words]`
+# / NULL-forensic `[cycle <id8> · <trig> · <utc> (<ago>)]`（无 `· N words`）。
+# 捕获组 1 = id（8 hex），组 2 = ago 文本（去括号）。
+_BLOCK_HEADER_RE = re.compile(
+    r"\[cycle\s+([0-9a-fA-F]+)\s+·\s+[^·]+·\s+[^(]+\(([^)]+)\)"
+    r"(?:\s+·\s+\d+\s+words)?\]"
+)
+
+# 长度安全网（spec §3.6）—— 实测均不触发，仅防病态长文 / 未来新写法落兜底
+_CONTEXT_THESIS_CAP = 1500     # 最近一条 Thesis（实测 ④ max 1185）
+_CONTEXT_EVENT_CAP = 500       # Woke-by 事件行（实测最长事件行 ~150c）
+_CONTEXT_FALLBACK_CAP = 500    # 兜底 whole-block（尤其 earlier-slot，防整条长文跨 cycle 重复）
+
+
+def _split_wake_prompt(snapshot: str) -> tuple[str, str]:
+    """Split user_prompt_snapshot at the injected-summaries marker.
+
+    Returns (wake_half, summaries_half). 标记缺失（首 cycle 无 prior）→
+    summaries_half 为 ""。标记行本身被丢弃（不进任一半）。
+    """
+    idx = snapshot.find(_SUMMARIES_MARKER)
+    if idx == -1:
+        return snapshot, ""
+    return snapshot[:idx], snapshot[idx + len(_SUMMARIES_MARKER):]
+
+
+def _truncate_with_marker(text: str, max_chars: int) -> str:
+    """Hard-truncate to max_chars + ASCII ' ... [+N chars]'（与 _render_reasoning 一致）。"""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f" ... [+{len(text) - max_chars} chars]"
+
+
+def _extract_event_line(wake_half: str, trigger_type: str) -> str | None:
+    """Extract the verbatim variable event text from the wake prompt (spec §3.3).
+
+    scheduled → None（纯样板、与 Header Trigger 重叠，整体省略）。
+    conditional/alert → 以已知前缀（IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL）
+    锚定到 wake_half 末尾，原样保留（alert id / reasoning / fee / PnL / round-trip），
+    collapse 空白 + 上限截断。识别不到前缀 → None。
+    """
+    if trigger_type == "scheduled":
+        return None
+    positions = [p for p in (wake_half.find(pre) for pre in _EVENT_PREFIXES) if p != -1]
+    if not positions:
+        return None
+    event = re.sub(r"\s+", " ", wake_half[min(positions):]).strip()
+    return _truncate_with_marker(event, _CONTEXT_EVENT_CAP)
+
+
+def _clean_field(text: str) -> str:
+    """Strip markdown bold + collapse internal whitespace（log 渲 plain text）。"""
+    return re.sub(r"\s+", " ", text.replace("**", "")).strip()
+
+
+def _strip_field_label(text: str) -> str:
+    """Remove a leading '<FieldName> — ' header（persona `(N) Name — content`）。
+
+    _extract_summary_fields 切片只去 `(N) ` marker，字段名（Stance / Thesis &
+    invalidation …）仍留在 value 开头。render 须先剥它再 prepend 归一标签
+    `Stance —` / `Thesis —`（④ 缩写归一同时落地），否则双标签
+    `Stance — Stance — ...`。仅当 value 以 5 个已知字段名之一开头时才剥；其余
+    （未知字段名 / 无字段名的退化写法）原样返回——保证绝不吃内容（含早期 colon / em-dash
+    的交易笔记，如 `conviction: low` / `flat — watching`）。
+    """
+    return _FIELD_LABEL_RE.sub("", text, count=1)
+
+
+def _extract_summary_fields(body: str) -> dict[int, str]:
+    """Position-slice a summary body into {field_num: raw_content}（spec §3.4）。
+
+    容忍 4 种 cosmetic marker 写法（_FIELD_MARKER_RE）。按相邻 marker 位置切片，
+    每段以"下一个 marker 或 block 末"定界（故仅 ①④ 在的退化情形 ④ 自动以末尾兜底）。
+    切片保留字段名（`Stance — ...`）—— render 经 _strip_field_label 去名后再 prepend
+    归一标签。无任何 (N) marker（terse / forensic system body）→ {}（caller 走整条兜底）。
+    """
+    marks = [(m.start(), int(m.group(1)), m.end()) for m in _FIELD_MARKER_RE.finditer(body)]
+    if not marks:
+        return {}
+    out: dict[int, str] = {}
+    for i, (_, num, end) in enumerate(marks):
+        nxt = marks[i + 1][0] if i + 1 < len(marks) else len(body)
+        out[num] = body[end:nxt].strip()
+    return out
+
+
+def _parse_injected_summaries(summaries_half: str) -> list[tuple[str, str, str]]:
+    """Slice the injected block into per-cycle (id4, ago, body), newest-first（spec §3.4）。
+
+    源序 ASC（最旧在前，app._render_recent_summaries）→ 反转为 newest-first 对齐
+    Header 'Cycle' 阅读序。块头两变体（有/无 '· N words'）均容忍。无块头 → []。
+    id 由块头 id8 再切 4 字符；ago 去括号。
+    """
+    marks = [
+        (m.start(), m.group(1)[:4], m.group(2).strip(), m.end())
+        for m in _BLOCK_HEADER_RE.finditer(summaries_half)
+    ]
+    if not marks:
+        return []
+    blocks: list[tuple[str, str, str]] = []
+    for i, (_, id4, ago, end) in enumerate(marks):
+        nxt = marks[i + 1][0] if i + 1 < len(marks) else len(summaries_half)
+        blocks.append((id4, ago, summaries_half[end:nxt].strip()))
+    blocks.reverse()  # ASC → newest-first
+    return blocks
+
+
+def _render_carried_block(id4: str, ago: str, body: str, is_newest: bool) -> list[str]:
+    """Render one carried-cycle block → indented lines（spec §3.4）。
+
+    结构化路径（①④ 均可定位）—— 字段名经 _strip_field_label 剥离后 prepend 归一标签：
+        <id4> · <ago>
+          Stance — <① 去名内容>
+          Thesis — <④ 去名内容>        # 仅 is_newest（④ Thesis & invalidation 归一为 Thesis）
+          (+N more)                    # 独占行，N = len(fields) − rendered
+    兜底路径（无 ①④ — terse / forensic body，含 is_newest）—— 不剥标签（无字段名可剥）：
+        <id4> · <ago>
+          <cleaned whole body, capped>
+    """
+    out = [f"    {id4} · {ago}"]
+    fields = _extract_summary_fields(body)
+    if 1 in fields and 4 in fields:
+        rendered = 1
+        stance = _strip_field_label(_clean_field(fields[1]))
+        out.append(f"      Stance — {escape(stance)}")
+        if is_newest:
+            thesis = _truncate_with_marker(
+                _strip_field_label(_clean_field(fields[4])), _CONTEXT_THESIS_CAP,
+            )
+            out.append(f"      Thesis — {escape(thesis)}")
+            rendered = 2
+        n_more = len(fields) - rendered
+        if n_more > 0:
+            out.append(f"      (+{n_more} more)")
+    else:
+        whole = _truncate_with_marker(_clean_field(body), _CONTEXT_FALLBACK_CAP)
+        out.append(f"      {escape(whole)}")
+    return out
+
+
+def _render_context(user_prompt_snapshot: str | None, trigger_type: str) -> str:
+    """Render the '▾ Context (carried into this cycle)' section (spec §3).
+
+    数据源 = user_prompt_snapshot（agent 本轮实读那份）。无可展示内容
+    （None / scheduled 首 cycle 无 prior）→ ""（caller 跳过）。fail-isolated：
+    任何解析异常降级为空 / 仅 Woke by，绝不阻断整 cycle 渲染（spec §5）。
+    """
+    if not user_prompt_snapshot:
+        return ""
+    try:
+        wake_half, summaries_half = _split_wake_prompt(user_prompt_snapshot)
+        event_line = _extract_event_line(wake_half, trigger_type)
+        blocks = _parse_injected_summaries(summaries_half)
+
+        lines: list[str] = []
+        if event_line:
+            lines.append(f"  Woke by — {escape(event_line)}")
+        if blocks:
+            n = len(blocks)
+            lines.append(
+                f"  Carried thesis — last {n} cycle{'s' if n > 1 else ''} (newest first):"
+            )
+            for slot, (id4, ago, body) in enumerate(blocks):
+                lines.extend(_render_carried_block(id4, ago, body, is_newest=(slot == 0)))
+
+        if not lines:
+            return ""
+        return "\n▾ Context (carried into this cycle)\n" + "\n".join(lines)
+    except Exception:
+        logger.warning("Context section render failed; omitting", exc_info=True)
+        return ""
+
+
 def _render_action(
     tool_calls: list,
     returns_lookup: dict,
@@ -1081,6 +1282,12 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
         trigger_context=ctx.trigger_context, state_snapshot=ctx.state_snapshot,
         cycle_started_at=ctx.cycle_started_at, stats=ctx.stats,
     )]
+
+    # spec 2026-05-31: Context 段插在 Header 后、Reasoning/forensic 短路前
+    # （success + forensic 两路径共用此处，因 user_prompt_snapshot 在两路径均已落库）
+    context_section = _render_context(ctx.user_prompt_snapshot, ctx.trigger_type)
+    if context_section:
+        lines.append(context_section)
 
     # === Forensic / retry-exhausted 短路 ===
     if ctx.messages is None:

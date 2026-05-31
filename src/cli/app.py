@@ -603,6 +603,7 @@ async def run_agent_cycle(
                     cycle_tokens=0, stats=stats, cache_hit_rate=None,
                     cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
                     forensic_reason="usage_limit_exceeded",
+                    user_prompt_snapshot=user_prompt_snapshot_var,
                 )
                 console.print(format_cycle_output(ctx))
             stats.record_cycle(0, cycle_ended_at)
@@ -655,6 +656,7 @@ async def run_agent_cycle(
                         cycle_tokens=0, stats=stats, cache_hit_rate=None,
                         cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
                         forensic_reason=f"aborted: {err_class}: {err_msg}",
+                        user_prompt_snapshot=user_prompt_snapshot_var,
                     )
                     console.print(format_cycle_output(ctx))
                 stats.record_cycle(0, cycle_ended_at)
@@ -765,6 +767,7 @@ async def run_agent_cycle(
             cycle_tokens=tokens, stats=stats, cache_hit_rate=hit_rate,
             cycle_started_at=cycle_started_at, cycle_ended_at=cycle_ended_at,
             forensic_reason=None,
+            user_prompt_snapshot=user_prompt_snapshot_var,
         )
         console.print(format_cycle_output(ctx))
     stats.record_cycle(tokens, cycle_ended_at)
