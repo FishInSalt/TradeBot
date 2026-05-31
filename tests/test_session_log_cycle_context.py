@@ -67,3 +67,54 @@ def test_split_wake_prompt_no_marker():
     wake, summaries = _split_wake_prompt(snapshot)
     assert wake == snapshot
     assert summaries == ""
+
+
+def test_extract_event_line_scheduled_returns_none():
+    """scheduled → 事件行整体省略（spec §3.3）。"""
+    from src.cli.display import _extract_event_line
+    wake = (
+        "You have been woken up by a scheduled trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    assert _extract_event_line(wake, "scheduled") is None
+
+
+def test_extract_event_line_price_level_verbatim():
+    """price-level alert → 保 alert id + reasoning，空白 collapse。"""
+    from src.cli.display import _extract_event_line
+    wake = (
+        "You have been woken up by a alert trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 "
+        "(alert id=934cfd above 73384.00 — MA20 reclaim: bounce)"
+    )
+    line = _extract_event_line(wake, "alert")
+    assert line is not None
+    assert line.startswith("PRICE LEVEL:")
+    assert "alert id=934cfd" in line
+    assert "MA20 reclaim: bounce" in line
+    assert "You have been woken up" not in line  # scaffold 已剥离
+
+
+def test_extract_event_line_conditional_fill():
+    """conditional fill → 保 fee/PnL 段。"""
+    from src.cli.display import _extract_event_line
+    wake = (
+        "You have been woken up by a conditional trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "IMPORTANT EVENT: take_profit triggered — BTC/USDT:USDT 0.265 @ 75350.0, "
+        "Fee: -2.10 USDT, PnL: +12.40 USDT (gross) / +8.20 USDT (this fill, equiv-round-trip)"
+    )
+    line = _extract_event_line(wake, "conditional")
+    assert line.startswith("IMPORTANT EVENT: take_profit triggered")
+    assert "PnL: +12.40 USDT (gross)" in line
+
+
+def test_extract_event_line_no_known_prefix_returns_none():
+    """alert 但无任何已知前缀（识别不到）→ None（不渲 Woke by）。"""
+    from src.cli.display import _extract_event_line
+    wake = "You have been woken up by a alert trigger.\nTrading pair: X | Timeframe: 5m\n..."
+    assert _extract_event_line(wake, "alert") is None

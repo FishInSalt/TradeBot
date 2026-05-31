@@ -966,6 +966,30 @@ def _split_wake_prompt(snapshot: str) -> tuple[str, str]:
     return snapshot[:idx], snapshot[idx + len(_SUMMARIES_MARKER):]
 
 
+def _truncate_with_marker(text: str, max_chars: int) -> str:
+    """Hard-truncate to max_chars + ASCII ' ... [+N chars]'（与 _render_reasoning 一致）。"""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f" ... [+{len(text) - max_chars} chars]"
+
+
+def _extract_event_line(wake_half: str, trigger_type: str) -> str | None:
+    """Extract the verbatim variable event text from the wake prompt (spec §3.3).
+
+    scheduled → None（纯样板、与 Header Trigger 重叠，整体省略）。
+    conditional/alert → 以已知前缀（IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL）
+    锚定到 wake_half 末尾，原样保留（alert id / reasoning / fee / PnL / round-trip），
+    collapse 空白 + 上限截断。识别不到前缀 → None。
+    """
+    if trigger_type == "scheduled":
+        return None
+    positions = [p for p in (wake_half.find(pre) for pre in _EVENT_PREFIXES) if p != -1]
+    if not positions:
+        return None
+    event = re.sub(r"\s+", " ", wake_half[min(positions):]).strip()
+    return _truncate_with_marker(event, _CONTEXT_EVENT_CAP)
+
+
 def _render_action(
     tool_calls: list,
     returns_lookup: dict,
