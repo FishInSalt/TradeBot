@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from src.integrations.exchange.base import Ticker
 from src.integrations.exchange.base import FillEvent
+from tests._fixtures import _advance
 
 
 def _make_exchange(initial_balance=100.0, fee_rate=0.0005, symbol="BTC/USDT:USDT"):
@@ -52,8 +53,8 @@ async def test_fetch_balance_with_unrealized_pnl():
         side="long", contracts=0.001, entry_price=94000.0, leverage=3,
     )
     balance = await ex.fetch_balance()
-    assert balance.total_usdt == pytest.approx(100.99)
-    assert balance.free_usdt == pytest.approx(70.99)
+    assert balance.total_usdt == pytest.approx(101.0)   # mark 95000 vs entry 94000: uPnL=1.0
+    assert balance.free_usdt == pytest.approx(71.0)     # free 70 + uPnL 1.0
     assert balance.used_usdt == 30.0
 
 
@@ -1008,9 +1009,11 @@ async def test_frozen_extreme_clamp():
     assert ex._free_usdt < 1.0  # confirm tight margin
 
     # Tick with MUCH HIGHER ask → actual cost > frozen → clamp
+    # Mark would otherwise lag at the _make_exchange seed (95000) while the tick
+    # moves to 97000 — sync it so uPnL reflects the current price, not a stale mark.
     tick = Ticker(symbol="BTC/USDT:USDT", last=97000.0, bid=96990.0, ask=97000.0,
                   high=97000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000)
-    await ex._process_tick(tick)
+    await _advance(ex, tick, mark=97000.0)
 
     assert ex._frozen_usdt == 0.0
     assert ex._free_usdt == 0.0  # clamped to zero

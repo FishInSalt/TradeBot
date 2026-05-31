@@ -114,12 +114,13 @@ class SimulatedExchange(BaseExchange):
         return amount * self._contract_size
 
     def _calc_unrealized_pnl(self, pos: _Position) -> float:
-        if self._latest_ticker is None:
+        mark = self._latest_mark_price
+        if mark is None:                 # mark unseeded (pre-start / direct construction) → no uPnL, don't crash
             return 0.0
         if pos.side == "long":
-            return (self._latest_ticker.bid - pos.entry_price) * self._base_qty(pos.contracts)
+            return (mark - pos.entry_price) * self._base_qty(pos.contracts)
         else:
-            return (pos.entry_price - self._latest_ticker.ask) * self._base_qty(pos.contracts)
+            return (pos.entry_price - mark) * self._base_qty(pos.contracts)
 
     def _calc_liquidation_price(self, pos: _Position) -> float:
         if pos.side == "long":
