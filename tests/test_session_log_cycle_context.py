@@ -186,3 +186,45 @@ def test_strip_field_label_removes_name_header():
     # 无 name—sep 前缀（≤40 内无分隔符）→ 原样返回（降级，不吃内容）
     raw = "flat near MA20 with no leading label or separator anywhere in here"
     assert _strip_field_label(raw) == raw
+
+
+def _injected_block_asc() -> str:
+    """模拟 app._render_recent_summaries 产出：ASC（最旧在前），3 条，含两块头变体。"""
+    return (
+        "\n\n"
+        "[cycle 824e2233 · conditional · 2026-05-31 07:00 UTC (35 min ago) · 91 words]\n"
+        "**(1) Stance** — flat; cascade compressing.\n"
+        "**(4) Thesis & invalidation** — bearish; invalidation > 74,200.\n\n"
+        "[cycle 47d5ef01 · usage_limit_exceeded · 2026-05-31 07:01 UTC (34 min ago)]\n"  # NULL 变体：无 · N words
+        "⚠️ The previous cycle did not complete normally. Please verify state.\n\n"
+        "[cycle 00f7abcd · alert · 2026-05-31 07:27 UTC (8 min ago) · 96 words]\n"
+        "**(1) Stance** — flat; MA20 reclaim confirmed.\n"
+        "**(4) Thesis & invalidation** — bearish macro intact."
+    )
+
+
+def test_parse_injected_summaries_reversed_newest_first():
+    """源 ASC → 反转为 newest-first（00f7 最新在前，824e 最旧在后）。"""
+    from src.cli.display import _parse_injected_summaries
+    blocks = _parse_injected_summaries(_injected_block_asc())
+    assert len(blocks) == 3
+    ids = [b[0] for b in blocks]
+    assert ids == ["00f7", "47d5", "824e"]  # newest-first，且 id8 → id4
+
+
+def test_parse_injected_summaries_two_header_variants_ago():
+    """两块头变体（有/无 · N words）均能取 id+ago（去括号）。"""
+    from src.cli.display import _parse_injected_summaries
+    blocks = _parse_injected_summaries(_injected_block_asc())
+    by_id = {b[0]: b for b in blocks}
+    assert by_id["00f7"][1] == "8 min ago"      # valid 变体（有 · 96 words）
+    assert by_id["47d5"][1] == "34 min ago"     # NULL 变体（无 · N words）
+    # body 切片正确（含字段标记 / forensic 系统文本）
+    assert "MA20 reclaim confirmed" in by_id["00f7"][2]
+    assert "did not complete normally" in by_id["47d5"][2]
+
+
+def test_parse_injected_summaries_empty_no_blocks():
+    from src.cli.display import _parse_injected_summaries
+    assert _parse_injected_summaries("") == []
+    assert _parse_injected_summaries("no block header here") == []

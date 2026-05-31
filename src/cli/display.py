@@ -1024,6 +1024,27 @@ def _extract_summary_fields(body: str) -> dict[int, str]:
     return out
 
 
+def _parse_injected_summaries(summaries_half: str) -> list[tuple[str, str, str]]:
+    """Slice the injected block into per-cycle (id4, ago, body), newest-first（spec §3.4）。
+
+    源序 ASC（最旧在前，app._render_recent_summaries）→ 反转为 newest-first 对齐
+    Header 'Cycle' 阅读序。块头两变体（有/无 '· N words'）均容忍。无块头 → []。
+    id 由块头 id8 再切 4 字符；ago 去括号。
+    """
+    marks = [
+        (m.start(), m.group(1)[:4], m.group(2).strip(), m.end())
+        for m in _BLOCK_HEADER_RE.finditer(summaries_half)
+    ]
+    if not marks:
+        return []
+    blocks: list[tuple[str, str, str]] = []
+    for i, (_, id4, ago, end) in enumerate(marks):
+        nxt = marks[i + 1][0] if i + 1 < len(marks) else len(summaries_half)
+        blocks.append((id4, ago, summaries_half[end:nxt].strip()))
+    blocks.reverse()  # ASC → newest-first
+    return blocks
+
+
 def _render_action(
     tool_calls: list,
     returns_lookup: dict,
