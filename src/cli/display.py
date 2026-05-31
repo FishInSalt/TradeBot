@@ -937,8 +937,15 @@ _FIELD_MARKER_RE = re.compile(r"(?m)^(?:#{1,6}\s*)?\**\s*\(([1-5])\)\s*")
 # 字段名 header（persona.py:116/126 模板 `(N) Name — content` —— marker 后紧跟字段名）。
 # _FIELD_MARKER_RE 只吃到 `(N) `，字段名仍留在 value 里（fields[1]="Stance — ..."）；
 # render 须先剥它再 prepend 归一标签，否则双标签 `Stance — Stance — ...`。
-# 字符类排除 — / – / :（不含 hyphen，避免吃掉内容里的 73,000-73,100）；≤40 字符内无分隔符 → 不剥离。
-_FIELD_LABEL_RE = re.compile(r"^[^—–:\n]{1,40}[—–:]\s*")
+# 锚定到 5 个已知字段名才剥（不用泛化 `^.{0,40}[sep]`）：泛化形态会把无字段名、
+# 但内容早期含 — / : 的退化写法（如 `(N) flat — watching` / `(N) conviction: low`）
+# 误当 label 静默吃掉前半句——对 forensic log 是最坏失败模式。锚定后任何输入都不会吃内容，
+# 未知字段名 fall-through 不剥（→ 可见双标签而非静默丢失，顺带成 persona 字段名 drift-guard）。
+_FIELD_LABEL_RE = re.compile(
+    r"^(?:Stance|Active commitments|This cycle delta"
+    r"|Thesis(?:\s*&\s*invalidation)?|Watch(?:\s*list)?)\s*[—–:]\s*",
+    re.IGNORECASE,
+)
 
 # 注入块头两变体：valid `[cycle <id8> · <trig> · <utc> (<ago>) · <N> words]`
 # / NULL-forensic `[cycle <id8> · <trig> · <utc> (<ago>)]`（无 `· N words`）。
@@ -1001,7 +1008,9 @@ def _strip_field_label(text: str) -> str:
     _extract_summary_fields 切片只去 `(N) ` marker，字段名（Stance / Thesis &
     invalidation …）仍留在 value 开头。render 须先剥它再 prepend 归一标签
     `Stance —` / `Thesis —`（④ 缩写归一同时落地），否则双标签
-    `Stance — Stance — ...`。≤40 字符内无 — / – / : 分隔符 → 原样返回（降级，不吃内容）。
+    `Stance — Stance — ...`。仅当 value 以 5 个已知字段名之一开头时才剥；其余
+    （未知字段名 / 无字段名的退化写法）原样返回——保证绝不吃内容（含早期 colon / em-dash
+    的交易笔记，如 `conviction: low` / `flat — watching`）。
     """
     return _FIELD_LABEL_RE.sub("", text, count=1)
 

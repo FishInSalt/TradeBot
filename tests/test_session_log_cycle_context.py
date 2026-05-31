@@ -172,6 +172,7 @@ def test_strip_field_label_removes_name_header():
     """剥 '<FieldName> — ' header（_extract_summary_fields 保留了字段名，render 前须剥）。
 
     覆盖审查发现的双标签根因：fields[1]='Stance — ...'，若不剥则 render 出 'Stance — Stance — ...'。
+    仅锚定 5 个已知字段名才剥（PR #67 审查 follow-up）。
     """
     from src.cli.display import _strip_field_label
     # ① em-dash 分隔
@@ -179,11 +180,29 @@ def test_strip_field_label_removes_name_header():
     # ④ 长字段名 + 内容含 colon（colon 在 em-dash 之后，不被误剥）
     assert (_strip_field_label("Thesis & invalidation — bearish; conviction: low")
             == "bearish; conviction: low")
-    # colon 分隔写法
+    # 已知字段名 + colon 分隔写法 → 仍剥
     assert _strip_field_label("Stance: flat") == "flat"
-    # 内容含 hyphen 不被吃（hyphen 不在分隔符类）
+    # 内容含 hyphen 不被吃（hyphen 不是分隔符）
     assert _strip_field_label("Stance — range 73,000-73,100") == "range 73,000-73,100"
-    # 无 name—sep 前缀（≤40 内无分隔符）→ 原样返回（降级，不吃内容）
+    # 大小写漂移容忍
+    assert _strip_field_label("stance — flat") == "flat"
+
+
+def test_strip_field_label_never_eats_content_without_known_name():
+    """锚定已知字段名 → 退化写法（无字段名）绝不吃内容（PR #67 审查 Important follow-up）。
+
+    旧泛化正则 `^.{0,40}[—–:]` 会把内容早期的 colon / em-dash 当 label 静默吃掉前半句；
+    锚定后这些都 fall-through → 原样返回。
+    """
+    from src.cli.display import _strip_field_label
+    # 无字段名 + 内容早期含 colon（交易笔记常见：conviction: / target:）→ 不吞
+    assert _strip_field_label("Flat, conviction: low") == "Flat, conviction: low"
+    assert _strip_field_label("Long bias, target: 77,750") == "Long bias, target: 77,750"
+    # 无字段名 + 内容早期含 em-dash → 不吞
+    assert _strip_field_label("flat — watching for breakout") == "flat — watching for breakout"
+    # 未知字段名 → fall-through（drift-guard：可见双标签而非静默丢失）
+    assert _strip_field_label("Bias: short") == "Bias: short"
+    # 无任何分隔符 → 原样返回
     raw = "flat near MA20 with no leading label or separator anywhere in here"
     assert _strip_field_label(raw) == raw
 

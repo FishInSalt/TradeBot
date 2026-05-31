@@ -8,7 +8,7 @@ so the data-driven design decisions can be re-verified on demand
 
 Measures, over a session's agent_cycles.decision (the cycle closing summaries):
   - 5-field format compliance (binary: all-5 / none / partial)
-  - the 3 cosmetic marker styles
+  - the 4 cosmetic marker styles (incl. the `### (N)` markdown-heading variant)
   - field-1 (Stance) + field-4 (Thesis) extracted lengths
   - the ①Stance-only vs ①+④ rendered footprint
   - the field-extraction parser's success / fallback rate
