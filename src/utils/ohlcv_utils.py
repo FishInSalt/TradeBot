@@ -10,6 +10,7 @@ invariant rests on for signals MTS and HTF both surface at shared
 timeframes (4h, 1d).
 """
 from __future__ import annotations
+import numbers
 from typing import Any
 import pandas as pd
 import pandas_ta as ta  # type: ignore[import-untyped]
@@ -84,11 +85,18 @@ TF_OFFSETS: dict[str, pd.Timedelta | DateOffset] = {
 def _to_pd_timestamp_utc(ts_val: Any) -> pd.Timestamp:
     """Coerce OHLCV timestamp to tz-aware pd.Timestamp UTC.
 
-    Mirrors the isinstance dispatch at tools_perception.py:164-168 — OHLCV
-    timestamp column may be int/float ms-epoch OR datetime depending on the
-    exchange adapter. Both produce equivalent UTC pd.Timestamp here.
+    The OHLCV `timestamp` column may be a ms-epoch number OR a datetime
+    depending on the exchange adapter; both produce equivalent UTC here.
+
+    The numeric branch is gated on `numbers.Number`, NOT `isinstance(int, float)`:
+    a scalar read via column access `df["timestamp"].iloc[-1]` on an int64
+    column is a `numpy.int64`, which under numpy 2.x is NOT a subclass of
+    Python `int` (whereas `numpy.float64` IS a subclass of `float`). The old
+    `(int, float)` check let numpy.int64 fall through to the no-`unit` branch,
+    which parses ms-epoch as nanoseconds → collapses to ~1970. `numbers.Number`
+    matches both Python and numpy real scalars, so any access path is correct.
     """
-    if isinstance(ts_val, (int, float)):
+    if isinstance(ts_val, numbers.Number):
         return pd.Timestamp(ts_val, unit="ms", tz="UTC")
     ts = pd.Timestamp(ts_val)
     return ts.tz_localize("UTC") if ts.tz is None else ts.tz_convert("UTC")

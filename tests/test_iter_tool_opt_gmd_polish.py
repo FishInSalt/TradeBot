@@ -315,18 +315,22 @@ class TestInProgressHint:
 
         Use a custom 5m fixture with predictable last-closed timestamp.
         """
-        import re, pandas as pd
-        from src.utils.ohlcv_utils import _to_pd_timestamp_utc, TF_OFFSETS
+        import pandas as pd
         from src.agent.tools_perception import get_market_data
 
-        # Manually take df_5m_130bars and compute expected times
-        df = df_5m_130bars
         # df has 129 closed + 1 in-progress; _closed_bars drops the last bar,
         # so last closed = df.iloc[-2] (index 128).
-        last_closed_ts_raw = df["timestamp"].iloc[-2]
-        last_closed_dt = _to_pd_timestamp_utc(last_closed_ts_raw)
-        expected_open = last_closed_dt + TF_OFFSETS["5m"]
-        expected_close = expected_open + TF_OFFSETS["5m"]
+        df = df_5m_130bars
+        # Independent expectation: derive directly from the raw ms-epoch with an
+        # explicit unit="ms", NOT through _to_pd_timestamp_utc. Routing the
+        # expectation through the function under test made this assertion
+        # tautological — the numpy.int64-as-nanoseconds bug collapsed both sides
+        # to 1970 identically, so it stayed green while the rendered header was
+        # wrong. See tests/test_ohlcv_ts_numpy_int64.py for the root cause.
+        last_closed_ts_raw = int(df["timestamp"].iloc[-2])
+        last_closed_dt = pd.Timestamp(last_closed_ts_raw, unit="ms", tz="UTC")
+        expected_open = last_closed_dt + pd.Timedelta(minutes=5)
+        expected_close = expected_open + pd.Timedelta(minutes=5)
 
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df})
         out = await get_market_data(deps)
