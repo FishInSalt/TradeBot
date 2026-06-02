@@ -4,6 +4,10 @@ An autonomous cryptocurrency perpetual futures trading agent built on **pydantic
 
 > **Status**: MVP — core features are complete and stable. Currently in an observation period, collecting real-run data to drive future iterations.
 
+> ⚠️ **Disclaimer**: This software is provided for **research and educational purposes only**. It is **not financial advice**. Trading cryptocurrency perpetual futures carries a substantial risk of loss. The authors make no claim of profitability and accept **no liability** for any financial loss or other damages arising from use of this software. Use entirely at your own risk. See [LICENSE](LICENSE) for the full "AS IS" warranty disclaimer.
+>
+> Licensed under the [Apache License 2.0](LICENSE). Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 [中文文档](README_CN.md)
 
 ---
