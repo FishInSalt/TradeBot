@@ -45,39 +45,42 @@ Examples:
 """
 
 
-GET_MARKET_DATA_DESCRIPTION = """Single-timeframe market data: ticker (last + bid/ask + 24h H/L + base volume), technical indicators (RSI / MACD / BB / ATR), market context (ATR percent of price + last-bar volume with SMA(20) ratio), the most recent N closed candles in OHLCV table form with per-bar volume ratio (RVol = vol / SMA(20)) and anomaly markers, and a period summary comparing the last 5 vs prior 5 closed candles (avg volume, net Δclose).
+GET_MARKET_DATA_DESCRIPTION = """Single-timeframe market data: ticker (last + bid/ask + 24h H/L + base volume), technical indicators (RSI / MA(20) / MA(50) / MACD / BB / ATR), the most recent N closed candles in OHLCV table form with per-bar volume ratio (RVol = vol / SMA(20)) and anomaly markers, and the in-progress (not-yet-closed) candle in its own section.
 
-All indicators are computed on the closed-bar series only (excluding the in-progress candle). The OHLCV table also shows closed bars only and is sorted oldest-first by row; the section header reports the in-progress candle's open and expected close timestamps.
+Indicator VALUES are computed on the closed-bar series only (the in-progress candle is excluded), and the Technical Indicators header reports the last closed candle's open time. Moving averages are simple moving averages (SMA). The MA / BB comparison suffixes (`Last <price> → X% vs MA`, `Last <price> → X% ... band`) and the ATR percent (`X% of Last <price>`) use the live ticker Last as the operand / denominator — the live price measured against the closed-bar structure.
 
 OHLCV columns: Time (open UTC) | Open | High | Low | Close | Vol | RVol(×SMA20) | Markers.
 - RVol = bar volume / SMA(20) of bar volumes (`2.95×` means the bar's volume is 2.95× the 20-bar average). Rendered for every closed bar; `—` when SMA(20) has not yet started (degraded display window).
 - Markers (upside-only thresholds): `vol↑` for bar volume > 2× SMA(20) of bar volumes; `range↑` for bar range (high - low) > 2× ATR(14); empty for neither threshold tripped.
 
+In-progress Candle section (after the closed table): the current not-yet-closed candle rendered from live data — Open | High(so far) | Low(so far) | Last | Vol(so far) — plus how far into the bar interval it is. This bar is excluded from all indicators and carries no RVol/markers until it closes; the authoritative live price is the ticker Last.
+
 Example call:
     get_market_data(timeframe="5m", candle_count=30)
 
 Example output:
-    === Ticker (BTC/USDT:USDT @ 14:27:30 UTC) ===
+    === Ticker (BTC/USDT:USDT @ 14:28:00 UTC) ===
     Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
     24h High: 82400.10 | 24h Low: 80120.00 | 24h base vol: 12345.67
 
-    === Technical Indicators (5m) ===
+    === Technical Indicators (5m, values as of last closed 14:20) ===
     RSI(14): 58.20
-    ...
+    MA(20): 81960.00  (Last 81870.50 → -0.1% vs MA)
+    MA(50): 82150.00  (Last 81870.50 → -0.3% vs MA)
+    MACD: 12.50 | Signal: 8.30 | Histogram: 4.20
+    BB(20,2): Upper 82100.00 | Middle 81870.00 | Lower 81640.00  (Last 81870.50 → 50% of band, 0%=Lower / 100%=Upper)
+    ATR(14): 245.30 (0.30% of Last 81870.50)
 
-    === Market Context ===
-    ATR(14): 245.30 (0.30% of price, 5m candles)
-    Last bar vol: 178.6 (1.35× SMA(20) avg)
-
-    === Recent Candles (5m, last 30, oldest-first by row; in-progress 14:25 still open, closes at 14:30) ===
+    === Recent Closed Candles (5m, last 30, oldest-first by row) ===
     Time (open UTC)        Open       High        Low      Close        Vol  RVol(×SMA20)  Markers
     ...
     14:15              81830.00   81870.00   81825.00   81865.00      400.0         3.02×  vol↑
     14:20              81865.00   81910.00   81860.00   81895.00      178.6         1.35×
 
-    === Period summary (last 5 closed candles vs prior 5 closed candles) ===
-    Avg vol:     last 5 178.6 / prior 5 132.4 (1.35×)
-    Net Δclose:  last 5 -25.0 USDT / prior 5 +120.0 USDT
+    === In-progress Candle (5m): 14:25 open, closes 14:30 — ~3 of 5 min elapsed ===
+    Time (open UTC)        Open High(so far)  Low(so far)       Last  Vol(so far)
+    14:25              81895.00     81920.00     81880.00   81870.50         95.0
+    (partial bar — excluded from all indicators; no RVol/markers until close)
 """
 
 

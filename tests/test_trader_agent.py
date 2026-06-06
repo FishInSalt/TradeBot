@@ -368,8 +368,9 @@ def test_set_next_wake_at_description_carries_examples_block():
 
 def test_get_market_data_description_carries_example_output():
     """get_market_data description must carry the multi-section Example
-    output (Ticker / Recent Candles / Period summary) + OHLCV marker
-    semantics via path B override.
+    output (Ticker / Technical Indicators / Recent Closed Candles /
+    In-progress Candle; no Period summary) + OHLCV marker semantics via
+    path B override.
     """
     from src.agent.trader import create_trader_agent
     from src.config import PersonaConfig
@@ -379,8 +380,9 @@ def test_get_market_data_description_carries_example_output():
     desc = tool.tool_def.description
 
     assert "=== Ticker" in desc, f"Ticker section header missing in example: {desc!r}"
-    assert "=== Recent Candles" in desc, f"Candles section header missing: {desc!r}"
-    assert "=== Period summary" in desc, f"Period summary section header missing: {desc!r}"
+    assert "=== Recent Closed Candles" in desc, f"Recent Closed Candles header missing: {desc!r}"
+    assert "=== Period summary" not in desc, f"Period summary should be removed: {desc!r}"
+    assert "=== In-progress Candle" in desc, f"In-progress Candle section missing: {desc!r}"
     assert "vol↑" in desc, f"OHLCV vol marker literal missing: {desc!r}"
     assert "range↑" in desc, f"OHLCV range marker literal missing: {desc!r}"
 

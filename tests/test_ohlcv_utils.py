@@ -61,7 +61,7 @@ def test_atr_series_returns_pandas_series(df_4h_250bars):
 
 
 def test_format_for_llm_bb_label_uses_full_words_and_explicit_periods():
-    """F-O2: `BB(20,2): Upper X | Middle Y | Lower Z (position: P%, 0%=Lower / 100%=Upper)`."""
+    """F-O2: `BB(20,2): Upper X | Middle Y | Lower Z (Last <price> → P% of band, 0%=Lower / 100%=Upper)`."""
     from src.services.technical import TechnicalAnalysisService
     indicators = {
         "rsi_14": 50.0,
@@ -76,6 +76,7 @@ def test_format_for_llm_bb_label_uses_full_words_and_explicit_periods():
     assert "Middle 81727.00" in out
     assert "Lower 81494.00" in out
     assert "0%=Lower" in out and "100%=Upper" in out
-    assert "position:" in out
+    assert "Last 81870.50 →" in out      # inside-band 现渲 `(Last <价> → P% of band, ...)`
+    assert "% of band" in out
     # Old format must be gone:
     assert "BB: 81960" not in out

@@ -56,14 +56,15 @@ async def get_market_data(
     """Single-timeframe market data implementation.
 
     Renders: Ticker (last + bid/ask + 24h H/L + base volume); Technical Indicators
-    (RSI / MACD / BB / ATR via TechnicalAnalysisService); Market Context (ATR % of
-    price + last-bar vol/SMA(20) ratio); Recent Candles OHLCV table with per-bar
-    RVol(×SMA20) column + vol↑/range↑ markers + in-progress candle hint in the
-    section header; Period summary (Avg vol, Net Δclose) across last 5 vs prior 5.
+    (RSI / MA(20) / MA(50) / MACD / BB / ATR via TechnicalAnalysisService), with the
+    section header reporting the last closed candle's open time; Recent Closed Candles
+    OHLCV table with per-bar RVol(×SMA20) column + vol↑/range↑ markers; and the
+    in-progress (not-yet-closed) candle in its own section (Open / High(so far) /
+    Low(so far) / Last / Vol(so far) + elapsed-into-bar).
 
-    All indicators / OHLCV rows / period summary are computed on closed bars
-    (via `_closed_bars(df)`); the in-progress candle is excluded from data but
-    its expected open/close timestamps appear in the section header.
+    Indicator values / OHLCV rows are computed on closed bars (via `_closed_bars(df)`);
+    the in-progress candle (`df.iloc[-1]`) is excluded from all indicators and rendered
+    only in its own section.
 
     NOTE: This impl docstring is dev-facing only. LLM-facing description comes
     from `src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION` via the
@@ -90,7 +91,8 @@ async def get_market_data(
 
     ticker = await deps.market_data.get_ticker(symbol)
     live_price = _live_price(ticker)
-    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    now_dt = datetime.now(timezone.utc)
+    fetch_ts = now_dt.strftime("%H:%M:%S")
 
     fetch_limit = max(candle_count + 50, 100)
     df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=fetch_limit)
@@ -117,32 +119,14 @@ async def get_market_data(
     )
 
     # === Technical Indicators ===
-    sections.append(f"=== Technical Indicators ({timeframe}) ===\n{indicators_text}")
-
-    # === Market Context ===
-    ctx_lines: list[str] = []
-    atr = indicators.get("atr_14")
-    if atr is not None and live_price > 0:
-        pct = atr / live_price * 100
-        ctx_lines.append(f"ATR(14): {atr:.2f} ({pct:.2f}% of price, {timeframe} candles)")
+    if not df_closed.empty:
+        ti_ts = _fmt_candle_time(_to_pd_timestamp_utc(df_closed["timestamp"].iloc[-1]), timeframe)
+        ti_header = f"=== Technical Indicators ({timeframe}, values as of last closed {ti_ts}) ==="
     else:
-        ctx_lines.append("ATR(14): N/A")
+        ti_header = f"=== Technical Indicators ({timeframe}) ==="
+    sections.append(f"{ti_header}\n{indicators_text}")
 
-    # F-O3: Last bar vol with SMA(20) period explicit.
-    # Window: "last 20 closed bars including the latest" — identical to HTF
-    # (spec §5.5), so the same market state renders the same ratio in both
-    # tools. Numerator = df_closed.iloc[-1] (most-recent closed bar).
-    if len(df_closed) >= 20:
-        vol_now = float(df_closed["volume"].iloc[-1])
-        vol_avg = float(df_closed["volume"].iloc[-20:].mean())
-        ratio = vol_now / vol_avg if vol_avg > 0 else 0.0
-        ctx_lines.append(f"Last bar vol: {vol_now:.1f} ({ratio:.2f}× SMA(20) avg)")
-    else:
-        ctx_lines.append("Last bar vol: N/A")
-
-    sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
-
-    # === Recent Candles (OHLCV with markers + RVol column) ===
+    # === Recent Closed Candles (OHLCV with markers + RVol column) ===
     vol_sma = df_closed["volume"].rolling(20).mean()
     atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None
     candle_lines: list[str] = [
@@ -179,41 +163,54 @@ async def get_market_data(
             f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  "
             f"{rvol_str:>12}  {marker_str}".rstrip()
         )
-    # In-progress candle hint: extrapolate next bar's open/close from the
-    # most-recent closed bar + tf offset. Unknown tf → empty suffix (degraded).
-    in_progress_suffix = ""
-    if not display_df.empty:
-        offset = TF_OFFSETS.get(timeframe)
-        if offset is not None:
-            last_closed_dt = _to_pd_timestamp_utc(display_df["timestamp"].iloc[-1])
-            in_progress_open = last_closed_dt + offset
-            in_progress_close = in_progress_open + offset
-            in_progress_suffix = (
-                f"; in-progress {_fmt_candle_time(in_progress_open, timeframe)} "
-                f"still open, closes at {_fmt_candle_time(in_progress_close, timeframe)}"
-            )
-
     sections.append(
-        f"=== Recent Candles ({timeframe}, last {display_count}, "
-        f"oldest-first by row{in_progress_suffix}) ===\n"
+        f"=== Recent Closed Candles ({timeframe}, last {display_count}, "
+        f"oldest-first by row) ===\n"
         + "\n".join(candle_lines)
     )
 
-    # === Period summary ===
-    if len(df_closed) >= 10:
-        last_5 = df_closed.iloc[-5:]
-        prior_5 = df_closed.iloc[-10:-5]
-        avg_vol_last = float(last_5["volume"].mean())
-        avg_vol_prior = float(prior_5["volume"].mean())
-        vol_ratio = avg_vol_last / avg_vol_prior if avg_vol_prior > 0 else 0.0
-        net_delta_last = float(df_closed["close"].iloc[-1] - df_closed["close"].iloc[-5])
-        net_delta_prior = float(df_closed["close"].iloc[-6] - df_closed["close"].iloc[-10])
-        summary = (
-            "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===\n"
-            f"Avg vol:     last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
-            f"Net Δclose:  last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
+    # === In-progress Candle (议题1) === —— 渲 df.iloc[-1]（被 _closed_bars 丢弃的那根）
+    if not df.empty:
+        ip = df.iloc[-1]
+        ip_open = _to_pd_timestamp_utc(ip["timestamp"])
+        offset = TF_OFFSETS.get(timeframe)
+        if offset is not None:
+            ip_close = ip_open + offset
+            # 1M 是 DateOffset 无 .total_seconds()，用 (open+offset)-open 得 Timedelta
+            total = (ip_open + offset) - ip_open
+            elapsed = _to_pd_timestamp_utc(now_dt) - ip_open
+            total_s = total.total_seconds()
+            elapsed_s = min(max(elapsed.total_seconds(), 0.0), total_s)  # clamp [0, total]
+            if total_s <= 90 * 60:
+                e_str, t_str, unit = f"{elapsed_s / 60:.0f}", f"{total_s / 60:.0f}", "min"
+            elif total_s <= 48 * 3600:
+                e_str, t_str, unit = f"{elapsed_s / 3600:.1f}", f"{total_s / 3600:.1f}", "h"
+            else:
+                e_str, t_str, unit = f"{elapsed_s / 86400:.1f}", f"{total_s / 86400:.1f}", "days"
+            ip_header = (
+                f"=== In-progress Candle ({timeframe}): "
+                f"{_fmt_candle_time(ip_open, timeframe)} open, "
+                f"closes {_fmt_candle_time(ip_close, timeframe)} "
+                f"— ~{e_str} of {t_str} {unit} elapsed ==="
+            )
+        else:
+            ip_header = (
+                f"=== In-progress Candle ({timeframe}): "
+                f"{_fmt_candle_time(ip_open, timeframe)} open ==="
+            )
+        ip_col_header = (
+            f"{'Time (open UTC)':<16} {'Open':>10} {'High(so far)':>12} "
+            f"{'Low(so far)':>12} {'Last':>10} {'Vol(so far)':>12}"
         )
-        sections.append(summary)
+        ip_row = (
+            f"{_fmt_candle_time(ip_open, timeframe):<16} {ip['open']:>10.2f} "
+            f"{ip['high']:>12.2f} {ip['low']:>12.2f} {ip['close']:>10.2f} "
+            f"{ip['volume']:>12.1f}"
+        )
+        sections.append(
+            f"{ip_header}\n{ip_col_header}\n{ip_row}\n"
+            "(partial bar — excluded from all indicators; no RVol/markers until close)"
+        )
 
     return "\n\n".join(sections)
 

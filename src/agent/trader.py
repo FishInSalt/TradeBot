@@ -128,7 +128,7 @@ def create_trader_agent(
         timeframe: str | None = None,
         candle_count: int = 30,
     ) -> str:
-        """Single-timeframe market data: ticker + indicators + OHLCV table (with RVol column + in-progress hint) + period summary. LLM-visible description override: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION (carries Example block).
+        """Single-timeframe market data: ticker + indicators (RSI/MA/MACD/BB/ATR) + closed OHLCV table (RVol column) + in-progress candle section. LLM-visible description override: src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION (carries Example block).
 
         Args:
             symbol: Trading symbol. Defaults to session symbol.

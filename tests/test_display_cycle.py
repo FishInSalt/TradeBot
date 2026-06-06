@@ -2998,7 +2998,7 @@ async def _invoke_path_b(tool_name: str) -> str:
         market_data.get_ohlcv_dataframe.return_value = _make_ohlcv_df_local(150)
         technical = _MagicMock_dg()
         technical.compute_indicators.return_value = {"atr_14": 100.0}
-        technical.format_for_llm.return_value = "RSI(14): 50.0\nMACD: bullish"
+        technical.format_for_llm.return_value = "RSI(14): 50.0\nMACD: -1.2 | Signal: -0.8 | Histogram: -0.4\nATR(14): 100.00 (0.13% of Last 75200.00)"
         deps = _MockDeps(market_data=market_data, technical=technical)
         return await fn(deps)
 
@@ -3134,8 +3134,8 @@ async def test_dg_1b_path_b_canonical_section_lines(tool_name):
 # Option D adopted (commit 99ad60e): L2 fallback uses inline 'Error:' prefix
 # instead of '=== Error ===' section, so whitelist uses 'Error:' for L2 paths.
 _CRITICAL_FIELDS_PATH_B: dict[str, list[str]] = {
-    "get_market_data": ["Ticker", "Technical Indicators", "Market Context",
-                        "Recent Candles", "RSI", "MACD", "ATR"],
+    "get_market_data": ["Ticker", "Technical Indicators",
+                        "Recent Closed Candles", "In-progress", "RSI", "MACD", "ATR"],
     # HTF: iter w2r2-next-d Task 3 reshaped to list-form per-tf sections.
     # Header is "Higher Timeframe View ({symbol} @ HH:MM:SS UTC)"; per-tf
     # body has MA50/MA100/MA200 lines, MA stack, 100-period High/Low,

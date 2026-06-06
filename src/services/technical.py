@@ -22,7 +22,7 @@ class TechnicalAnalysisService:
         # G-calc-rigor-audit §G-5.
         bb_df = ta.bbands(close, length=20, ddof=0)  # type: ignore[attr-defined]
         atr = ta.atr(high, low, close, length=14)  # type: ignore[attr-defined]
-        # Volume ratio intentionally not surfaced here — GMD/HTF inline their own
+        # Volume ratio intentionally not surfaced here — HTF inlines its own
         # "Last bar vol (X× SMA(20) avg)" rendering with a different numerator
         # (most-recent closed bar) than the historical baseline (second-to-last
         # closed bar). G-calc-rigor-audit §G-4.
@@ -76,7 +76,7 @@ class TechnicalAnalysisService:
             ma = indicators.get(f"ma_{period}")
             if ma is not None:
                 dist_pct = (current_price - ma) / ma * 100
-                lines.append(f"MA({period}): {ma:.2f} (price vs MA: {dist_pct:+.1f}%)")
+                lines.append(f"MA({period}): {ma:.2f}  (Last {current_price:.2f} → {dist_pct:+.1f}% vs MA)")
             else:
                 lines.append(f"MA({period}): N/A")
 
@@ -106,19 +106,26 @@ class TechnicalAnalysisService:
                 pos = "position: N/A"
             elif current_price < bb_l:
                 pct_below = (bb_l - current_price) / bb_l * 100
-                pos = f"position: {pct_below:.1f}% below Lower"
+                pos = f"Last {current_price:.2f} → {pct_below:.1f}% below Lower"
             elif current_price > bb_u:
                 pct_above = (current_price - bb_u) / bb_u * 100
-                pos = f"position: {pct_above:.1f}% above Upper"
+                pos = f"Last {current_price:.2f} → {pct_above:.1f}% above Upper"
             else:
                 pct = (current_price - bb_l) / (bb_u - bb_l) * 100
-                pos = f"position: {pct:.0f}%, 0%=Lower / 100%=Upper"
+                pos = f"Last {current_price:.2f} → {pct:.0f}% of band, 0%=Lower / 100%=Upper"
             lines.append(
-                f"BB(20,2): Upper {bb_u:.2f} | Middle {bb_m:.2f} | Lower {bb_l:.2f} ({pos})"
+                f"BB(20,2): Upper {bb_u:.2f} | Middle {bb_m:.2f} | Lower {bb_l:.2f}  ({pos})"
             )
         else:
             lines.append(
                 f"BB(20,2): Upper {_fmt(bb_u)} | Middle {_fmt(bb_m)} | Lower {_fmt(bb_l)}"
             )
+
+        # ATR (议题5: 归位进 Technical Indicators；% 以 live Last 为分母，显式标 of Last)
+        atr = indicators.get("atr_14")
+        if atr is not None and current_price > 0:
+            lines.append(f"ATR(14): {atr:.2f} ({atr / current_price * 100:.2f}% of Last {current_price:.2f})")
+        else:
+            lines.append("ATR(14): N/A")
 
         return "\n".join(lines)

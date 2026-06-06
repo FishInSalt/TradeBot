@@ -208,14 +208,20 @@ def test_atr_series_last_value_equals_compute_indicators_atr_14(df_4h_250bars):
 async def test_gmd_htf_last_bar_vol_ratio_match(
     fake_ticker_81870, df_4h_recent_vol_spike,
 ):
-    """GMD and HTF both surface "Last bar vol: X (Y× SMA(20) avg)"; the
-    SMA(20) window formula must be identical across the two tools
+    """GMD (OHLCV table RVol column, last row) and HTF ("Last bar vol (base):
+    X (Y× SMA(20) avg)") both surface the same vol/SMA(20) ratio; the SMA(20)
+    window formula must be identical across the two tools
     (spec §5.5: `df.iloc[:-1]['volume'].rolling(20).mean().iloc[-1]`,
     equivalent to `df_closed['volume'].iloc[-20:].mean()`).
 
+    议题4+5 (Task 2): GMD's dedicated "Last bar vol:" line was deleted along
+    with the Market Context section; the same vol/SMA(20) signal now lives only
+    in the OHLCV table's RVol(×SMA20) column. The last (most-recent closed)
+    row is the spike bar, so its RVol = the canonical ratio.
+
     End-to-end test: feed the same df_4h_recent_vol_spike fixture into
     both GMD (with timeframe="4h") and HTF (with timeframes=["4h"]),
-    regex-extract the Y× SMA(20) avg ratio from each rendered output,
+    extract the Y× SMA(20) avg ratio from each rendered output,
     and assert (1) the two tools render the same ratio at the same
     precision, and (2) that ratio matches the canonical formula.
 
@@ -237,10 +243,14 @@ async def test_gmd_htf_last_bar_vol_ratio_match(
     out_gmd = await get_market_data(deps_gmd, timeframe="4h")
     out_htf = await get_higher_timeframe_view(deps_htf, timeframes=["4h"])
 
-    # GMD: "Last bar vol: X.X (Y.YY× SMA(20) avg)"  (2dp)
-    gmd_match = re.search(r"Last bar vol:[^(]*\((\d+\.\d+)× SMA\(20\) avg\)", out_gmd)
-    assert gmd_match, f"GMD missing Last bar vol line\n{out_gmd}"
-    gmd_ratio = float(gmd_match.group(1))
+    # GMD: vol/SMA20 信号现只在 OHLCV 表 RVol 列。必须先限定到 Recent [Closed]
+    # Candles 表内再取 [-1]——否则 Period summary 的 (2.00×) 会污染 [-1]
+    # （Period 段直到后续 task 才删，本 task 它仍在、且是输出最末段）。
+    # 用 "=== Recent" 前缀（跨后续改名稳健）+ "\n\n=== " 切到下一段头精确隔离表本身。
+    gmd_table = out_gmd.split("=== Recent")[1].split("\n\n=== ")[0]
+    gmd_rvols = re.findall(r"(\d+\.\d{2})×", gmd_table)
+    assert gmd_rvols, f"GMD missing RVol column values\n{out_gmd}"
+    gmd_ratio = float(gmd_rvols[-1])  # 表 oldest-first，末行 = 最近收盘 bar = spike bar = 4.80×
 
     # HTF: "Last bar vol (base): X.X (Y.Y× SMA(20) avg)"  (1dp)
     htf_match = re.search(r"Last bar vol \(base\):[^(]*\((\d+\.\d+)× SMA\(20\) avg\)", out_htf)
