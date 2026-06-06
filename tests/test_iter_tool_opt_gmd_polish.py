@@ -450,22 +450,25 @@ class TestDocstringRewrite:
 
         # Block-style sections still present (CH-DESC bypasses griffe)
         assert "=== Ticker" in desc, "Ticker section header missing from CH-DESC"
-        assert "=== Recent Candles" in desc, "Recent Candles header missing"
-        assert "=== Period summary" in desc, "Period summary header missing"
+        assert "=== Recent Closed Candles" in desc, "Recent Closed Candles header missing"
+        assert "=== Period summary" not in desc, "Period summary should be removed"
+        assert "=== In-progress Candle" in desc, "In-progress Candle section missing"
 
         # New content from this iter:
         assert "RVol(×SMA20)" in desc, \
             f"RVol column header (literal `RVol(×SMA20)`) missing in CH-DESC: {desc!r}"
         assert "in-progress" in desc, \
-            f"in-progress hint documentation missing in CH-DESC: {desc!r}"
+            f"in-progress documentation missing in CH-DESC: {desc!r}"
 
         # Markers semantics preserved:
         assert "vol↑" in desc, "vol↑ marker semantics missing"
         assert "range↑" in desc, "range↑ marker semantics missing"
 
-        # Avg range deletion reflected:
+        # Deletions reflected:
         assert "Avg range" not in desc, \
-            f"Avg range should be removed from Period summary docs: {desc!r}"
+            f"Avg range should be removed: {desc!r}"
+        assert "Market Context" not in desc, \
+            f"Market Context should be removed: {desc!r}"
 
     def test_candle_count_clamp_text_in_params_schema(self):
         """Clamp explicit text reaches LLM via CH-ARGS channel (trader.py:124-140

@@ -56,14 +56,15 @@ async def get_market_data(
     """Single-timeframe market data implementation.
 
     Renders: Ticker (last + bid/ask + 24h H/L + base volume); Technical Indicators
-    (RSI / MACD / BB / ATR via TechnicalAnalysisService); Market Context (ATR % of
-    price + last-bar vol/SMA(20) ratio); Recent Candles OHLCV table with per-bar
-    RVol(×SMA20) column + vol↑/range↑ markers + in-progress candle hint in the
-    section header; Period summary (Avg vol, Net Δclose) across last 5 vs prior 5.
+    (RSI / MA(20) / MA(50) / MACD / BB / ATR via TechnicalAnalysisService), with the
+    section header reporting the last closed candle's open time; Recent Closed Candles
+    OHLCV table with per-bar RVol(×SMA20) column + vol↑/range↑ markers; and the
+    in-progress (not-yet-closed) candle in its own section (Open / High(so far) /
+    Low(so far) / Last / Vol(so far) + elapsed-into-bar).
 
-    All indicators / OHLCV rows / period summary are computed on closed bars
-    (via `_closed_bars(df)`); the in-progress candle is excluded from data but
-    its expected open/close timestamps appear in the section header.
+    Indicator values / OHLCV rows are computed on closed bars (via `_closed_bars(df)`);
+    the in-progress candle (`df.iloc[-1]`) is excluded from all indicators and rendered
+    only in its own section.
 
     NOTE: This impl docstring is dev-facing only. LLM-facing description comes
     from `src.agent.tools_descriptions.GET_MARKET_DATA_DESCRIPTION` via the
