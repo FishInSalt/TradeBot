@@ -74,17 +74,16 @@ class TestInProgressHeaderUsesRealClock:
 
     @pytest.mark.asyncio
     async def test_5m_in_progress_header_not_collapsed_to_1970(self):
-        # 130 rows of 5m bars anchored at a known ms-epoch. _build's last row is
-        # the in-progress bar; get_market_data strips it via _closed_bars, so the
-        # last CLOSED bar is index 128 → open = _KNOWN_MS + 128*300_000.
+        # 130 rows of 5m bars anchored at a known ms-epoch. The new design renders
+        # the in-progress bar (df.iloc[-1] = index 129) in its own section, so its
+        # open-ts comes straight from that row → open = _KNOWN_MS + 129*300_000.
         step_ms = 300_000
         closes = [70000.0 + i for i in range(130)]
         df = _build(start_ms=_KNOWN_MS, tf="5m", closes=closes)
         assert df["timestamp"].dtype == np.int64  # the dtype that triggers the bug
 
-        # Independent expectation (NOT via _to_pd_timestamp_utc).
-        last_closed_open_ms = _KNOWN_MS + 128 * step_ms
-        ip_open = pd.Timestamp(last_closed_open_ms, unit="ms", tz="UTC") + pd.Timedelta(minutes=5)
+        # 新设计: in-progress section 直接渲 df.iloc[-1]（= 被丢弃那根），open = 该行 timestamp
+        ip_open = pd.Timestamp(_KNOWN_MS + 129 * step_ms, unit="ms", tz="UTC")  # df.iloc[-1]，独立换算
         ip_close = ip_open + pd.Timedelta(minutes=5)
         exp_open = ip_open.strftime("%H:%M")
         exp_close = ip_close.strftime("%H:%M")
@@ -97,9 +96,9 @@ class TestInProgressHeaderUsesRealClock:
         from src.agent.tools_perception import get_market_data
         out = await get_market_data(deps, timeframe="5m")
 
-        header = next((l for l in out.splitlines() if "in-progress" in l), "<none>")
-        assert f"in-progress {exp_open} still open, closes at {exp_close}" in out, (
-            f"expected in-progress {exp_open}/{exp_close}; header = {header!r}"
+        assert f"{exp_open} open, closes {exp_close}" in out, (
+            f"expected in-progress {exp_open}/{exp_close} in In-progress Candle header; out={out[:600]}"
         )
-        # Explicit guard against the exact buggy output.
-        assert "00:34 still open, closes at 00:39" not in out, f"1970-collapsed header: {header!r}"
+        # 回归 guard: 绝不塌缩到 1970（旧 bug 渲成 00:xx）。
+        assert ip_open.year == 2023
+        assert "1970" not in out

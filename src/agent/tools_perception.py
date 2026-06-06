@@ -90,7 +90,8 @@ async def get_market_data(
 
     ticker = await deps.market_data.get_ticker(symbol)
     live_price = _live_price(ticker)
-    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    now_dt = datetime.now(timezone.utc)
+    fetch_ts = now_dt.strftime("%H:%M:%S")
 
     fetch_limit = max(candle_count + 50, 100)
     df = await deps.market_data.get_ohlcv_dataframe(symbol, timeframe, limit=fetch_limit)
@@ -161,25 +162,54 @@ async def get_market_data(
             f"{row['low']:>10.2f} {row['close']:>10.2f} {row['volume']:>10.1f}  "
             f"{rvol_str:>12}  {marker_str}".rstrip()
         )
-    # In-progress candle hint: extrapolate next bar's open/close from the
-    # most-recent closed bar + tf offset. Unknown tf → empty suffix (degraded).
-    in_progress_suffix = ""
-    if not display_df.empty:
-        offset = TF_OFFSETS.get(timeframe)
-        if offset is not None:
-            last_closed_dt = _to_pd_timestamp_utc(display_df["timestamp"].iloc[-1])
-            in_progress_open = last_closed_dt + offset
-            in_progress_close = in_progress_open + offset
-            in_progress_suffix = (
-                f"; in-progress {_fmt_candle_time(in_progress_open, timeframe)} "
-                f"still open, closes at {_fmt_candle_time(in_progress_close, timeframe)}"
-            )
-
     sections.append(
-        f"=== Recent Candles ({timeframe}, last {display_count}, "
-        f"oldest-first by row{in_progress_suffix}) ===\n"
+        f"=== Recent Closed Candles ({timeframe}, last {display_count}, "
+        f"oldest-first by row) ===\n"
         + "\n".join(candle_lines)
     )
+
+    # === In-progress Candle (议题1) === —— 渲 df.iloc[-1]（被 _closed_bars 丢弃的那根）
+    if not df.empty:
+        ip = df.iloc[-1]
+        ip_open = _to_pd_timestamp_utc(ip["timestamp"])
+        offset = TF_OFFSETS.get(timeframe)
+        if offset is not None:
+            ip_close = ip_open + offset
+            # 1M 是 DateOffset 无 .total_seconds()，用 (open+offset)-open 得 Timedelta
+            total = (ip_open + offset) - ip_open
+            elapsed = _to_pd_timestamp_utc(now_dt) - ip_open
+            total_s = total.total_seconds()
+            elapsed_s = min(max(elapsed.total_seconds(), 0.0), total_s)  # clamp [0, total]
+            if total_s <= 90 * 60:
+                e_str, t_str, unit = f"{elapsed_s / 60:.0f}", f"{total_s / 60:.0f}", "min"
+            elif total_s <= 48 * 3600:
+                e_str, t_str, unit = f"{elapsed_s / 3600:.1f}", f"{total_s / 3600:.1f}", "h"
+            else:
+                e_str, t_str, unit = f"{elapsed_s / 86400:.1f}", f"{total_s / 86400:.1f}", "days"
+            ip_header = (
+                f"=== In-progress Candle ({timeframe}): "
+                f"{_fmt_candle_time(ip_open, timeframe)} open, "
+                f"closes {_fmt_candle_time(ip_close, timeframe)} "
+                f"— ~{e_str} of {t_str} {unit} elapsed ==="
+            )
+        else:
+            ip_header = (
+                f"=== In-progress Candle ({timeframe}): "
+                f"{_fmt_candle_time(ip_open, timeframe)} open ==="
+            )
+        ip_col_header = (
+            f"{'Time (open UTC)':<16} {'Open':>10} {'High(so far)':>12} "
+            f"{'Low(so far)':>12} {'Last':>10} {'Vol(so far)':>12}"
+        )
+        ip_row = (
+            f"{_fmt_candle_time(ip_open, timeframe):<16} {ip['open']:>10.2f} "
+            f"{ip['high']:>12.2f} {ip['low']:>12.2f} {ip['close']:>10.2f} "
+            f"{ip['volume']:>12.1f}"
+        )
+        sections.append(
+            f"{ip_header}\n{ip_col_header}\n{ip_row}\n"
+            "(partial bar — excluded from all indicators; no RVol/markers until close)"
+        )
 
     # === Period summary ===
     if len(df_closed) >= 10:

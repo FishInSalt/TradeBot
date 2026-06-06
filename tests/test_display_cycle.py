@@ -3135,7 +3135,7 @@ async def test_dg_1b_path_b_canonical_section_lines(tool_name):
 # instead of '=== Error ===' section, so whitelist uses 'Error:' for L2 paths.
 _CRITICAL_FIELDS_PATH_B: dict[str, list[str]] = {
     "get_market_data": ["Ticker", "Technical Indicators",
-                        "Recent Candles", "RSI", "MACD", "ATR"],
+                        "Recent Closed Candles", "In-progress", "RSI", "MACD", "ATR"],
     # HTF: iter w2r2-next-d Task 3 reshaped to list-form per-tf sections.
     # Header is "Higher Timeframe View ({symbol} @ HH:MM:SS UTC)"; per-tf
     # body has MA50/MA100/MA200 lines, MA stack, 100-period High/Low,

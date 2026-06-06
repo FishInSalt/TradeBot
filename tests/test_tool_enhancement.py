@@ -503,7 +503,7 @@ async def test_get_market_data_four_segments():
     assert "=== Ticker" in result
     assert "=== Technical Indicators" in result
     assert "=== Market Context ===" not in result          # 议题4+5 删段
-    assert "=== Recent Candles" in result                  # 本 task 保持旧名仍真（改名在 Task 4）
+    assert "=== Recent Closed Candles" in result           # Task 4 改名（议题1）
     # Ticker data
     assert "74880" in result
     assert "74870" in result  # bid

@@ -127,7 +127,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 from tests.fixtures.multi_tf_ohlcv import (
     df_5m_130bars, df_5m_anomaly,
-    df_4h_250bars, df_1d_250bars,  # used by TestInProgressHint (Task 3)
     fake_ticker_81870,
 )
 
@@ -177,10 +176,10 @@ class TestRVolColumn:
         from src.agent.tools_perception import get_market_data
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
         out = await get_market_data(deps)
-        # Extract OHLCV section: split at next section header `=== Period`
-        # NOT just `===` (the Recent Candles header has its own closing `===`
-        # that would truncate the section to just the header tail).
-        section = out.split("=== Recent Candles")[1].split("=== Period")[0]
+        # Extract OHLCV section: split at next section header. Use `\n\n=== `
+        # so it cuts to the next top-level section (In-progress Candle / Period
+        # summary), isolating the closed-candle table cleanly.
+        section = out.split("=== Recent Closed Candles")[1].split("\n\n=== ")[0]
         # At least one row should have a `N.NN×` value
         assert re.search(r"\d+\.\d{2}×", section), \
             f"No RVol value with × suffix found in OHLCV section: {section[:600]}"
@@ -197,7 +196,7 @@ class TestRVolColumn:
         from src.agent.tools_perception import get_market_data
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
         out = await get_market_data(deps)
-        section = out.split("=== Recent Candles")[1].split("=== Period")[0]
+        section = out.split("=== Recent Closed Candles")[1].split("\n\n=== ")[0]
         # Every visible RVol value (vol / 100 = 1.0) should render as `1.00×`
         # — assert at least one such value appears (full match across all
         # rows is brittle to column-alignment whitespace; presence is enough).
@@ -247,148 +246,116 @@ class TestRVolColumn:
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
         out = await get_market_data(deps)
         # In a constant-volume fixture, no bar should trigger vol↑
-        section = out.split("=== Recent Candles")[1].split("=== Period")[0]
+        section = out.split("=== Recent Closed Candles")[1].split("\n\n=== ")[0]
         assert "vol↑" not in section, \
             f"vol↑ should not fire on constant-volume fixture; section: {section[:600]}"
 
 
-# === Task 3: in-progress candle hint ===
+# === Task 3 (renamed Task 4): in-progress candle independent section ===
 
-class TestInProgressHint:
+class TestInProgressSection:
     @pytest.mark.asyncio
-    async def test_in_progress_indicator_5m(
+    async def test_in_progress_section_header_and_columns_5m(
         self, fake_ticker_81870, df_5m_130bars,
     ):
-        """Issue 2: OHLCV header contains 'in-progress HH:MM still open, closes at HH:MM'
-        for intraday 5m tf."""
+        """议题1: 独立 In-progress Candle section（header + so-far 列头 + caveat）。"""
         from src.agent.tools_perception import get_market_data
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
         out = await get_market_data(deps)
-        # df_5m_130bars uses start_ms=1_700_000_000_000 (= 2023-11-14 22:13:20 UTC)
-        # so the in-progress bar = closed[129] open
-        # We assert presence of marker + closes-at clause, not exact times
-        # (start_ms makes exact-time assertion brittle if fixture changes).
-        assert "in-progress " in out
-        assert "still open, closes at " in out
+        assert "=== In-progress Candle (5m):" in out
+        assert "High(so far)" in out and "Low(so far)" in out and "Vol(so far)" in out
+        assert "(partial bar — excluded from all indicators; no RVol/markers until close)" in out
 
     @pytest.mark.asyncio
-    async def test_in_progress_indicator_4h_format(
-        self, fake_ticker_81870, df_4h_250bars,
-    ):
-        """Issue 2: 4h tf uses MM-DD HH:MM format in in-progress hint."""
-        import re
-        from src.agent.tools_perception import get_market_data
-        deps = _build_gmd_deps(
-            fake_ticker_81870, {"4h": df_4h_250bars}, tf="4h",
-        )
-        out = await get_market_data(deps, timeframe="4h")
-        # Header should contain `in-progress <MM-DD HH:MM> still open, closes at <MM-DD HH:MM>`
-        m = re.search(
-            r"in-progress (\d{2}-\d{2} \d{2}:\d{2}) still open, closes at (\d{2}-\d{2} \d{2}:\d{2})",
-            out,
-        )
-        assert m, f"4h in-progress hint missing or wrong format; out={out[:1200]}"
-
-    @pytest.mark.asyncio
-    async def test_in_progress_indicator_1d_format(
-        self, fake_ticker_81870, df_1d_250bars,
-    ):
-        """Issue 2: 1d tf uses YYYY-MM-DD format."""
-        import re
-        from src.agent.tools_perception import get_market_data
-        deps = _build_gmd_deps(
-            fake_ticker_81870, {"1d": df_1d_250bars}, tf="1d",
-        )
-        out = await get_market_data(deps, timeframe="1d")
-        m = re.search(
-            r"in-progress (\d{4}-\d{2}-\d{2}) still open, closes at (\d{4}-\d{2}-\d{2})",
-            out,
-        )
-        assert m, f"1d in-progress hint missing or wrong format; out={out[:1200]}"
-
-    @pytest.mark.asyncio
-    async def test_in_progress_time_arithmetic_intraday(
+    async def test_in_progress_row_values_from_iloc_minus1(
         self, fake_ticker_81870, df_5m_130bars,
     ):
-        """Issue 2: in-progress_open == last_closed_open + tf_offset.
-        in-progress_close == in-progress_open + tf_offset.
-
-        Use a custom 5m fixture with predictable last-closed timestamp.
-        """
-        import pandas as pd
+        """议题1 护栏2: section 行 O/H/L/Last/Vol 全取 df.iloc[-1]（含被丢弃那根）。"""
         from src.agent.tools_perception import get_market_data
-
-        # df has 129 closed + 1 in-progress; _closed_bars drops the last bar,
-        # so last closed = df.iloc[-2] (index 128).
         df = df_5m_130bars
-        # Independent expectation: derive directly from the raw ms-epoch with an
-        # explicit unit="ms", NOT through _to_pd_timestamp_utc. Routing the
-        # expectation through the function under test made this assertion
-        # tautological — the numpy.int64-as-nanoseconds bug collapsed both sides
-        # to 1970 identically, so it stayed green while the rendered header was
-        # wrong. See tests/test_ohlcv_ts_numpy_int64.py for the root cause.
-        last_closed_ts_raw = int(df["timestamp"].iloc[-2])
-        last_closed_dt = pd.Timestamp(last_closed_ts_raw, unit="ms", tz="UTC")
-        expected_open = last_closed_dt + pd.Timedelta(minutes=5)
-        expected_close = expected_open + pd.Timedelta(minutes=5)
-
+        ip = df.iloc[-1]
         deps = _build_gmd_deps(fake_ticker_81870, {"5m": df})
         out = await get_market_data(deps)
-        assert expected_open.strftime("%H:%M") in out, \
-            f"Expected in-progress open {expected_open.strftime('%H:%M')} in out; out={out[:1200]}"
-        assert expected_close.strftime("%H:%M") in out, \
-            f"Expected in-progress close {expected_close.strftime('%H:%M')} in out; out={out[:1200]}"
+        ip_block = out.split("=== In-progress Candle")[1].split("\n\n=== ")[0]  # 限定到段内
+        assert f"{ip['open']:.2f}" in ip_block
+        assert f"{ip['high']:.2f}" in ip_block
+        assert f"{ip['low']:.2f}" in ip_block
+        assert f"{ip['close']:.2f}" in ip_block   # Last 列 = df.iloc[-1].close
 
     @pytest.mark.asyncio
-    async def test_in_progress_time_arithmetic_monthly(
+    async def test_in_progress_no_rvol_no_markers(
+        self, fake_ticker_81870, df_5m_anomaly,
+    ):
+        """议题1 护栏1: in-progress 行不含 RVol(×) / vol↑ / range↑。"""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_anomaly})
+        out = await get_market_data(deps)
+        # 限定到 in-progress 段内（"\n\n=== " 切到下一段头）——否则仍未删的 Period
+        # summary 的 (2.00×)（df_5m_anomaly: bar127=600 落在 last_5）会污染 not-in 断言。
+        ip_block = out.split("=== In-progress Candle")[1].split("\n\n=== ")[0]
+        assert "×" not in ip_block
+        assert "vol↑" not in ip_block and "range↑" not in ip_block
+
+    @pytest.mark.asyncio
+    async def test_in_progress_open_close_timestamps_5m(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """议题1: header 的 open/close 时点 = df.iloc[-1] timestamp 与 +1 tf offset。"""
+        import pandas as pd
+        from src.agent.tools_perception import get_market_data
+        df = df_5m_130bars
+        ip_open_ms = int(df["timestamp"].iloc[-1])  # 独立换算，不经被测函数
+        ip_open = pd.Timestamp(ip_open_ms, unit="ms", tz="UTC")
+        ip_close = ip_open + pd.Timedelta(minutes=5)
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df})
+        out = await get_market_data(deps)
+        assert f"{ip_open.strftime('%H:%M')} open" in out
+        assert f"closes {ip_close.strftime('%H:%M')}" in out
+
+    @pytest.mark.asyncio
+    async def test_in_progress_monthly_uses_dateoffset(
         self, fake_ticker_81870,
     ):
-        """Issue 2: 1M tf must use pd.DateOffset (calendar-aware), not Timedelta
-        (months are 28-31 days, not fixed)."""
+        """议题1: 1M tf 用 DateOffset（calendar-aware），elapsed 走 days 单位。"""
         import pandas as pd
         from tests.fixtures.multi_tf_ohlcv import _build
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc, TF_OFFSETS
         from src.agent.tools_perception import get_market_data
-
-        # Build a 1M fixture: 80 closed bars + 1 in-progress, starting 2020-01-01
-        # so last closed is around 2026-08-01 → in-progress=2026-09-01, closes=2026-10-01
-        # (or wherever the timeline lands — assert relative arithmetic, not absolutes)
         closes = [50000.0 + i * 100 for i in range(81)]
         df_1M = _build(
             start_ms=int(pd.Timestamp("2020-01-01", tz="UTC").value / 1e6),
             tf="1M", closes=closes,
         )
-
-        from src.utils.ohlcv_utils import _to_pd_timestamp_utc, TF_OFFSETS
-        last_closed_dt = _to_pd_timestamp_utc(df_1M["timestamp"].iloc[-2])
-        expected_open = last_closed_dt + TF_OFFSETS["1M"]
-        expected_close = expected_open + TF_OFFSETS["1M"]
-
+        ip_open = _to_pd_timestamp_utc(df_1M["timestamp"].iloc[-1])
+        ip_close = ip_open + TF_OFFSETS["1M"]
         deps = _build_gmd_deps(fake_ticker_81870, {"1M": df_1M}, tf="1M")
         out = await get_market_data(deps, timeframe="1M")
-
-        # 1M format = %Y-%m
-        assert expected_open.strftime("%Y-%m") in out, \
-            f"Expected monthly in-progress open {expected_open.strftime('%Y-%m')}; out={out[:1200]}"
-        assert expected_close.strftime("%Y-%m") in out, \
-            f"Expected monthly in-progress close {expected_close.strftime('%Y-%m')}; out={out[:1200]}"
+        assert f"{ip_open.strftime('%Y-%m')} open" in out
+        assert f"closes {ip_close.strftime('%Y-%m')}" in out
+        assert "days elapsed ===" in out   # 1M total > 48h → days 单位
 
     @pytest.mark.asyncio
-    async def test_unsupported_tf_degraded_fallback(
+    async def test_in_progress_unknown_tf_degraded_open_only(
         self, fake_ticker_81870, df_5m_130bars,
     ):
-        """Issue 2: unknown tf → degraded fallback (no in-progress hint),
-        no raise. Backward-compat with existing default-fallback at line 175."""
+        """议题1 降级: 未知 tf → header 只显 open（无 closes/elapsed），不 raise。"""
         from src.agent.tools_perception import get_market_data
-        # Synthesize a fixture with non-CCXT tf label "7m"
-        df = df_5m_130bars
-        deps = _build_gmd_deps(fake_ticker_81870, {"7m": df}, tf="7m")
-        # Should NOT raise
+        deps = _build_gmd_deps(fake_ticker_81870, {"7m": df_5m_130bars}, tf="7m")
         out = await get_market_data(deps, timeframe="7m")
-        # In-progress hint should be absent (or replaced by base header)
-        assert "in-progress" not in out, \
-            f"Unknown tf should skip in-progress hint; out={out[:1200]}"
-        # Recent Candles header should still appear (degraded fallback, not crash)
-        assert "=== Recent Candles" in out
+        assert "=== In-progress Candle (7m):" in out
+        assert "open ===" in out          # 降级头以 ` open ===` 收尾
+        assert "elapsed" not in out.split("=== In-progress Candle")[1].split("\n")[0]
+
+    @pytest.mark.asyncio
+    async def test_recent_table_renamed_no_suffix(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """议题1 配套: 表头 Recent Closed Candles，旧 in-progress 后缀消失。"""
+        from src.agent.tools_perception import get_market_data
+        deps = _build_gmd_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert "=== Recent Closed Candles (5m, last" in out
+        assert "still open, closes at" not in out   # 旧后缀已收敛到独立 section
 
 
 # === Task 4: delete N-candle High-Low row ===
