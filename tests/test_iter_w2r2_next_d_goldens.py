@@ -269,6 +269,20 @@ class TestGMDGolden:
         assert f"MA(20): {expected_closed:.2f}" in out, out
         assert f"MA(20): {expected_full:.2f}" not in out, out
 
+    @pytest.mark.asyncio
+    async def test_gmd_technical_indicators_header_has_closed_anchor(
+        self, fake_ticker_81870, df_5m_130bars,
+    ):
+        """议题3: Technical Indicators 表头报最近收盘 bar 时点（5m → HH:MM）。"""
+        import re
+        from src.agent.tools_perception import get_market_data
+        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
+        out = await get_market_data(deps)
+        assert re.search(
+            r"=== Technical Indicators \(5m, values as of last closed \d{2}:\d{2}\) ===",
+            out,
+        ), f"Technical Indicators header missing closed-bar anchor; out={out[:400]}"
+
 
 class TestMTSGolden:
     @pytest.mark.asyncio
