@@ -126,7 +126,7 @@ async def get_market_data(
         ti_header = f"=== Technical Indicators ({timeframe}) ==="
     sections.append(f"{ti_header}\n{indicators_text}")
 
-    # === Recent Candles (OHLCV with markers + RVol column) ===
+    # === Recent Closed Candles (OHLCV with markers + RVol column) ===
     vol_sma = df_closed["volume"].rolling(20).mean()
     atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None
     candle_lines: list[str] = [

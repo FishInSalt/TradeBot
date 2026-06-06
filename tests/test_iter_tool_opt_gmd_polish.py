@@ -438,7 +438,7 @@ class TestDocstringRewrite:
     def test_ch_desc_description_contains_new_content(self):
         """CH-DESC (tools_descriptions.py:GET_MARKET_DATA_DESCRIPTION
         override → tool_def.description) reflects new OHLCV table format
-        (RVol column + in-progress hint). Block-style Example call/output
+        (RVol column + in-progress section). Block-style Example call/output
         preserved (bypasses griffe per @tool(description=...) override;
         verified by test_dual_mode_tool_wrapper)."""
         from src.agent.trader import create_trader_agent
