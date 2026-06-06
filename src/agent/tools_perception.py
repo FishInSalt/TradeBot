@@ -119,29 +119,6 @@ async def get_market_data(
     # === Technical Indicators ===
     sections.append(f"=== Technical Indicators ({timeframe}) ===\n{indicators_text}")
 
-    # === Market Context ===
-    ctx_lines: list[str] = []
-    atr = indicators.get("atr_14")
-    if atr is not None and live_price > 0:
-        pct = atr / live_price * 100
-        ctx_lines.append(f"ATR(14): {atr:.2f} ({pct:.2f}% of price, {timeframe} candles)")
-    else:
-        ctx_lines.append("ATR(14): N/A")
-
-    # F-O3: Last bar vol with SMA(20) period explicit.
-    # Window: "last 20 closed bars including the latest" — identical to HTF
-    # (spec §5.5), so the same market state renders the same ratio in both
-    # tools. Numerator = df_closed.iloc[-1] (most-recent closed bar).
-    if len(df_closed) >= 20:
-        vol_now = float(df_closed["volume"].iloc[-1])
-        vol_avg = float(df_closed["volume"].iloc[-20:].mean())
-        ratio = vol_now / vol_avg if vol_avg > 0 else 0.0
-        ctx_lines.append(f"Last bar vol: {vol_now:.1f} ({ratio:.2f}× SMA(20) avg)")
-    else:
-        ctx_lines.append("Last bar vol: N/A")
-
-    sections.append("=== Market Context ===\n" + "\n".join(ctx_lines))
-
     # === Recent Candles (OHLCV with markers + RVol column) ===
     vol_sma = df_closed["volume"].rolling(20).mean()
     atr_series = _atr_series(df_closed, period=14) if len(df_closed) >= 15 else None

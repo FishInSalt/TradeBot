@@ -411,9 +411,9 @@ class TestDeletedNCandleHL:
         # 24h H/L (from ticker) should still be present
         assert "24h High:" in out and "24h Low:" in out, \
             f"24h H/L should still be in ticker section as surviving anchor"
-        # Market Context section should still exist (ATR / Last bar vol remain)
-        assert "=== Market Context ===" in out
-        assert "ATR(14):" in out
+        # Market Context section deleted (议题4+5); ATR moved into Technical Indicators
+        assert "=== Market Context ===" not in out
+        assert "ATR(14):" in out  # still present, now in Technical Indicators section
 
 
 # === Task 5: delete Avg range from Period summary ===

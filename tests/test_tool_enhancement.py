@@ -492,22 +492,24 @@ async def test_get_market_data_four_segments():
         "bb_upper": 75100.0, "bb_middle": 74750.0, "bb_lower": 74400.0,
         "atr_14": 85.2,
     }
-    deps.technical.format_for_llm.return_value = "RSI(14): 52.88\nMA(20): 74750.00 (price vs MA: +0.2%)"
+    deps.technical.format_for_llm.return_value = (
+        "RSI(14): 52.88\n"
+        "MA(20): 74750.00  (Last 74880.00 → +0.2% vs MA)\n"
+        "ATR(14): 85.20 (0.11% of Last 74880.00)"
+    )
 
     result = await get_market_data(deps)
-    # Four segment headers
+    # Segment headers — Market Context deleted (议题4+5), ATR moved into Technical Indicators.
     assert "=== Ticker" in result
     assert "=== Technical Indicators" in result
-    assert "=== Market Context ===" in result
-    assert "=== Recent Candles" in result
+    assert "=== Market Context ===" not in result          # 议题4+5 删段
+    assert "=== Recent Candles" in result                  # 本 task 保持旧名仍真（改名在 Task 4）
     # Ticker data
     assert "74880" in result
     assert "74870" in result  # bid
-    # Market context — ATR and last-bar volume present (iter w2r2-next-d Task 4
-    # replaced the old "Volume:" label with "Last bar vol: X (Y× SMA(20) avg)").
-    assert "ATR" in result
-    assert "Last bar vol:" in result
-    assert "SMA(20) avg" in result  # volume ratio label
+    assert "ATR" in result                                  # 经刷新后的 format_for_llm mock 流出
+    # vol/SMA20 信号现只在 OHLCV 表内 RVol 列
+    assert "RVol(×SMA20)" in result
 
 
 async def test_get_market_data_default_params():
@@ -557,12 +559,15 @@ async def test_get_market_data_1h_atr_no_qualitative_label():
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
         "atr_14": 850.0,
     }
-    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
+    # 议题5: ATR now rendered by format_for_llm (mock must include it).
+    deps.technical.format_for_llm.return_value = (
+        "RSI(14): 50.00\nATR(14): 850.00 (1.13% of Last 75200.00)"
+    )
 
     result = await get_market_data(deps, timeframe="1h")
-    # ATR line should exist with value and percentage
+    # ATR line should exist with value and percentage (now in Technical Indicators)
     assert "ATR(14): 850.00" in result
-    assert "1h candles" in result
+    assert "of Last" in result
     # Should NOT have qualitative labels
     assert "low volatility" not in result
     assert "moderate" not in result
@@ -594,11 +599,14 @@ async def test_get_market_data_5m_atr_no_qualitative_label():
         "bb_upper": 75000.0, "bb_middle": 74750.0, "bb_lower": 74500.0,
         "atr_14": 85.2,
     }
-    deps.technical.format_for_llm.return_value = "RSI(14): 50.00"
+    # 议题5: ATR now rendered by format_for_llm (mock must include it).
+    deps.technical.format_for_llm.return_value = (
+        "RSI(14): 50.00\nATR(14): 85.20 (0.11% of Last 74880.00)"
+    )
 
     result = await get_market_data(deps, timeframe="5m")
     assert "ATR(14): 85.20" in result
-    assert "5m candles" in result
+    assert "of Last" in result
     # NO qualitative labels
     assert "low volatility" not in result
     assert "moderate" not in result

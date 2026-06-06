@@ -121,4 +121,11 @@ class TechnicalAnalysisService:
                 f"BB(20,2): Upper {_fmt(bb_u)} | Middle {_fmt(bb_m)} | Lower {_fmt(bb_l)}"
             )
 
+        # ATR (议题5: 归位进 Technical Indicators；% 以 live Last 为分母，显式标 of Last)
+        atr = indicators.get("atr_14")
+        if atr is not None and current_price > 0:
+            lines.append(f"ATR(14): {atr:.2f} ({atr / current_price * 100:.2f}% of Last {current_price:.2f})")
+        else:
+            lines.append("ATR(14): N/A")
+
         return "\n".join(lines)

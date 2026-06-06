@@ -202,19 +202,6 @@ class TestGMDGolden:
         assert "24h base vol:" in out  # was Volume:
 
     @pytest.mark.asyncio
-    async def test_gmd_market_context_uses_last_bar_vol_and_smaperiod(
-        self, fake_ticker_81870, df_5m_130bars,
-    ):
-        """F-O3: Last bar vol: X (Y× SMA(20) avg)."""
-        from src.agent.tools_perception import get_market_data
-        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
-        out = await get_market_data(deps)
-        assert "Last bar vol:" in out
-        assert "SMA(20) avg)" in out
-        # Old label is gone:
-        assert "Volume:" not in out.split("=== Market Context ===")[1].split("===")[0]
-
-    @pytest.mark.asyncio
     async def test_gmd_ohlcv_table_has_markers_column(
         self, fake_ticker_81870, df_5m_130bars,
     ):

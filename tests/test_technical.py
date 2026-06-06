@@ -103,8 +103,9 @@ def test_format_for_llm_is_fact_only(sample_ohlcv):
         phrase in text
         for phrase in ("0%=Lower / 100%=Upper", "above Upper", "below Lower")
     )
-    # format_for_llm should NOT include ATR or Volume (those are in Market Context)
-    assert "ATR" not in text
+    # ATR now rendered by format_for_llm (议题5: ATR 归位 Technical Indicators)
+    assert "ATR(14):" in text
+    assert "of Last" in text  # ATR % 以 live Last 为分母，显式标注
     assert "Volume" not in text
 
 
