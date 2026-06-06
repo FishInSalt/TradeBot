@@ -273,15 +273,47 @@ class TestGMDGolden:
     async def test_gmd_technical_indicators_header_has_closed_anchor(
         self, fake_ticker_81870, df_5m_130bars,
     ):
-        """议题3: Technical Indicators 表头报最近收盘 bar 时点（5m → HH:MM）。"""
+        """议题3: Technical Indicators 表头报最近收盘 bar 时点（5m → HH:MM）。
+
+        N1 加固: 既断锚存在，也断锚 = 最近**收盘** bar 时点（独立换算，
+        反 tautology——不经被测函数）且 **≠** in-progress（df.iloc[-1]）那根，
+        防 off-by-one（误取 in-progress 那根）。
+        """
         import re
+        import pandas as pd
         from src.agent.tools_perception import get_market_data
+        from src.utils.ohlcv_utils import _closed_bars
         deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
         out = await get_market_data(deps)
         assert re.search(
             r"=== Technical Indicators \(5m, values as of last closed \d{2}:\d{2}\) ===",
             out,
         ), f"Technical Indicators header missing closed-bar anchor; out={out[:400]}"
+
+        # Independently derive expected HH:MM (do NOT call _fmt_candle_time / the
+        # tool's own formatter — TDD anti-tautology). For df_5m_130bars these are
+        # 08:53 (last closed, index 128) and 08:58 (in-progress, index 129).
+        closed_ms = int(_closed_bars(df_5m_130bars)["timestamp"].iloc[-1])
+        in_progress_ms = int(df_5m_130bars["timestamp"].iloc[-1])
+        expected_closed_hhmm = pd.Timestamp(
+            closed_ms, unit="ms", tz="UTC"
+        ).strftime("%H:%M")
+        expected_in_progress_hhmm = pd.Timestamp(
+            in_progress_ms, unit="ms", tz="UTC"
+        ).strftime("%H:%M")
+        assert expected_closed_hhmm != expected_in_progress_hhmm, (
+            "fixture closed and in-progress bars share a HH:MM; off-by-one "
+            "assertion would be a tautology"
+        )
+
+        ti_line = next(
+            l for l in out.splitlines()
+            if l.startswith("=== Technical Indicators")
+        )
+        # Anchor is the last CLOSED bar's open time ...
+        assert f"last closed {expected_closed_hhmm}" in ti_line, ti_line
+        # ... and NOT the in-progress bar (off-by-one guard).
+        assert expected_in_progress_hhmm not in ti_line, ti_line
 
 
 class TestMTSGolden:
