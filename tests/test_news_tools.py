@@ -124,17 +124,22 @@ async def test_market_news_passes_filter():
     news_svc.get_news.assert_called_once_with("BTC/USDT:USDT", "positive")
 
 
-async def test_market_news_filters_non_currency_tags():
-    """CoinDesk CATEGORY_DATA mixes tickers and thematic tags;
-    the display layer should show only currency tickers."""
+async def test_market_news_tags_show_all_categories_verbatim():
+    """CoinDesk CATEGORY_DATA mixes tickers and thematic tags. The display
+    shows ALL tags verbatim under 'Tags:' (no filtering) — the agent reads the
+    raw tags and judges relevance itself (fact-provider, not guard).
+
+    Regression for the stale `_NON_CURRENCY_CATEGORIES` blacklist that silently
+    leaked ~24% non-currency tokens (BLOCKCHAIN / SPONSORED / COMMODITY …) while
+    mislabeling the field 'Currencies'."""
     from src.agent.tools_perception import get_market_news
 
     news_svc = AsyncMock()
-    # symbols contains both real tickers and thematic tags — formatter
-    # must strip the thematic ones so the "Currencies" line stays clean.
+    # Real CoinDesk tags: tickers + thematic categories that were NOT in the
+    # old blacklist (BLOCKCHAIN, SPONSORED) and so used to leak silently anyway.
     noisy_event = _event(
         "BTC Rally",
-        symbols=["BTC", "ETH", "MARKET", "MACROECONOMICS", "CRYPTOCURRENCY"],
+        symbols=["BTC", "ETH", "BLOCKCHAIN", "SPONSORED", "MARKET"],
         content="CoinDesk",
     )
     news_svc.get_news.return_value = ([noisy_event], [])
@@ -143,30 +148,107 @@ async def test_market_news_filters_non_currency_tags():
     deps = _make_deps(news=news_svc)
     result = await get_market_news(deps)
 
-    # Tickers appear
-    assert "Currencies: BTC, ETH" in result
-    # Thematic tags do NOT leak into Currencies line
-    assert "MARKET" not in result
-    assert "MACROECONOMICS" not in result
-    assert "CRYPTOCURRENCY" not in result
+    # Field renamed to Tags; all tags shown verbatim, original order preserved.
+    assert "Tags: BTC, ETH, BLOCKCHAIN, SPONSORED, MARKET" in result
+    # Old mislabeled field name is gone.
+    assert "Currencies:" not in result
 
 
-async def test_market_news_all_non_currency_tags_shows_dash():
-    """When every tag is a thematic label, render em-dash."""
+async def test_market_news_empty_tags_shows_dash():
+    """When an event carries no category tags at all, render an em-dash."""
     from src.agent.tools_perception import get_market_news
 
     news_svc = AsyncMock()
-    only_themes = _event(
-        "General regulation news",
-        symbols=["MARKET", "REGULATION", "MACROECONOMICS"],
-        content="Reuters",
-    )
-    news_svc.get_news.return_value = ([], [only_themes])
+    untagged = _event("Untagged headline", symbols=[], content="Reuters")
+    news_svc.get_news.return_value = ([], [untagged])
     news_svc.get_fear_greed_index.return_value = None
 
     deps = _make_deps(news=news_svc)
     result = await get_market_news(deps)
-    assert "Currencies: —" in result
+    assert "Tags: —" in result
+
+
+async def test_market_news_timestamp_has_utc_and_relative_age():
+    """Headline timestamps render explicit UTC + relative age so the agent reads
+    freshness directly instead of hand-computing it from the fetch header
+    (observed in session log: 'these headlines were published 15-40 min ago')."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    evt = _event("Fresh headline", symbols=["BTC"], content="CoinDesk")
+    # 27.5 min old — off the minute boundary so the int-floor age is stable.
+    evt.timestamp = datetime.now(timezone.utc) - timedelta(minutes=27, seconds=30)
+    news_svc.get_news.return_value = ([evt], [])
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+    assert "UTC · 27m ago]" in result
+
+
+async def test_market_news_timestamp_age_over_one_hour():
+    """Age >= 60 min renders hours + minutes."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    evt = _event("Older headline", symbols=["BTC"], content="CoinDesk")
+    evt.timestamp = datetime.now(timezone.utc) - timedelta(minutes=95, seconds=30)
+    news_svc.get_news.return_value = ([evt], [])
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+    assert "UTC · 1h 35m ago]" in result
+
+
+async def test_market_news_timestamp_future_omits_age():
+    """A timestamp in the future (clock skew / fallback) renders UTC only — no
+    age claim, since 'X ago' would be a false statement."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    evt = _event("Future-stamped headline", symbols=["BTC"], content="CoinDesk")
+    evt.timestamp = datetime.now(timezone.utc) + timedelta(hours=1)
+    news_svc.get_news.return_value = ([evt], [])
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+    assert "UTC]" in result
+    assert "ago]" not in result
+
+
+async def test_market_news_timestamp_age_over_one_day():
+    """Age >= 24h rolls over to days + hours (minute precision dropped at day
+    scale). Defensive against cold symbols / quiet windows where the upstream
+    could surface an older headline than the empirical ~1h max."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    evt = _event("Stale headline", symbols=["BTC"], content="CoinDesk")
+    evt.timestamp = datetime.now(timezone.utc) - timedelta(hours=26, minutes=5)
+    news_svc.get_news.return_value = ([evt], [])
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+    assert "UTC · 1d 2h ago]" in result
+
+
+async def test_market_news_timestamp_whole_days_omit_hours():
+    """A near-whole-day age renders just days, not '1d 0h ago'."""
+    from src.agent.tools_perception import get_market_news
+
+    news_svc = AsyncMock()
+    evt = _event("Day-old headline", symbols=["BTC"], content="CoinDesk")
+    evt.timestamp = datetime.now(timezone.utc) - timedelta(days=1, minutes=5)
+    news_svc.get_news.return_value = ([evt], [])
+    news_svc.get_fear_greed_index.return_value = None
+
+    deps = _make_deps(news=news_svc)
+    result = await get_market_news(deps)
+    assert "UTC · 1d ago]" in result
+    assert "1d 0h" not in result
 
 
 # ===== get_exchange_announcements (Iter 4 split from get_critical_alerts) =====

@@ -844,19 +844,35 @@ async def get_performance(deps: TradingDeps) -> str:
     return out
 
 
-# Display-layer filter for CoinDesk CATEGORY_DATA — strips thematic tags
-# (MARKET / CRYPTOCURRENCY / ...) from the "Currencies" line rendered to
-# the Agent. Tags stay in InformationEvent.symbols for matching logic;
-# this only affects display.
-_NON_CURRENCY_CATEGORIES = frozenset({
-    "ALTCOIN", "BUSINESS", "CRYPTOCURRENCY", "EXCHANGE", "FIAT",
-    "MACROECONOMICS", "MARKET", "REGULATION", "TECHNOLOGY", "TRADING",
-})
+def _fmt_tags(syms: list[str]) -> str:
+    # CoinDesk CATEGORY_DATA is a mixed tag set — currency tickers (BTC, ETH)
+    # AND thematic labels (BLOCKCHAIN, SPONSORED, MARKET, …). We render them
+    # all verbatim rather than guessing which are "real" currencies: the tag
+    # vocabulary drifts upstream (a maintained blacklist always lags), TYPE
+    # doesn't separate them (BTC and MARKET are both TYPE 122), and the agent
+    # is better placed to judge relevance from the raw tags than the formatter.
+    cleaned = [s for s in syms if s]
+    return ", ".join(cleaned) if cleaned else "—"
 
 
-def _fmt_currencies(syms: list[str]) -> str:
-    filtered = [s for s in syms if s not in _NON_CURRENCY_CATEGORIES]
-    return ", ".join(filtered) if filtered else "—"
+def _fmt_news_ts(ts: datetime, now: datetime) -> str:
+    # Explicit UTC + relative age so the agent reads freshness directly rather
+    # than subtracting the fetch header by hand. A future stamp (clock skew or
+    # the upstream bad-timestamp fallback) renders UTC only — no false age.
+    base = ts.strftime("%Y-%m-%d %H:%M UTC")
+    delta_min = int((now - ts).total_seconds() // 60)
+    if delta_min < 0:
+        return base
+    if delta_min < 60:
+        return f"{base} · {delta_min}m ago"
+    if delta_min < 1440:  # < 24h → hours + minutes
+        h, m = divmod(delta_min, 60)
+        age = f"{h}h {m}m ago" if m else f"{h}h ago"
+    else:  # >= 24h → days + hours (minute precision dropped at day scale)
+        days, rem = divmod(delta_min, 1440)
+        h = rem // 60
+        age = f"{days}d {h}h ago" if h else f"{days}d ago"
+    return f"{base} · {age}"
 
 
 async def get_market_news(
@@ -866,7 +882,8 @@ async def get_market_news(
     """Get crypto news headlines + Fear & Greed Index."""
     import asyncio
     from datetime import datetime, timezone
-    fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    now = datetime.now(timezone.utc)
+    fetch_ts = now.strftime("%H:%M:%S")
 
     if deps.news is None:
         return (
@@ -913,9 +930,9 @@ async def get_market_news(
         if symbol_news:
             lines: list[str] = []
             for e in symbol_news:
-                ts = e.timestamp.strftime("%Y-%m-%d %H:%M")
+                ts = _fmt_news_ts(e.timestamp, now)
                 source_name = e.content if e.content else e.source
-                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {_fmt_currencies(e.symbols)}")
+                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Tags: {_fmt_tags(e.symbols)}")
             sections.append(
                 f"=== Symbol News ({base}, {len(symbol_news)}) ===\n"
                 + "\n\n".join(lines)
@@ -924,9 +941,9 @@ async def get_market_news(
         if general_news:
             lines = []
             for e in general_news:
-                ts = e.timestamp.strftime("%Y-%m-%d %H:%M")
+                ts = _fmt_news_ts(e.timestamp, now)
                 source_name = e.content if e.content else e.source
-                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Currencies: {_fmt_currencies(e.symbols)}")
+                lines.append(f"[{ts}] {e.title}\n  Source: {source_name} | Tags: {_fmt_tags(e.symbols)}")
             sections.append(
                 f"=== General Crypto News ({len(general_news)}) ===\n"
                 + "\n\n".join(lines)
