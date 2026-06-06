@@ -63,7 +63,7 @@ Example output:
     Last: 81870.50 | Bid: 81870.40 | Ask: 81870.60
     24h High: 82400.10 | 24h Low: 80120.00 | 24h base vol: 12345.67
 
-    === Technical Indicators (5m, values as of last closed 14:25) ===
+    === Technical Indicators (5m, values as of last closed 14:20) ===
     RSI(14): 58.20
     MA(20): 81960.00  (Last 81870.50 → -0.1% vs MA)
     MA(50): 82150.00  (Last 81870.50 → -0.3% vs MA)

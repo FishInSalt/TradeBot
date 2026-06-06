@@ -470,6 +470,28 @@ class TestDocstringRewrite:
         assert "Market Context" not in desc, \
             f"Market Context should be removed: {desc!r}"
 
+    def test_ch_desc_example_last_closed_differs_from_in_progress_open(self):
+        """议题3 回归 guard: Example 的 Technical Indicators 'last closed' 时点
+        必须 ≠ in-progress candle 的 open（前者是最近收盘 bar，后者是未收盘那根；
+        若相等说明 Example 把 in-progress open 误标成 last closed，自相矛盾）。"""
+        import re
+
+        from src.agent.trader import create_trader_agent
+        from src.config import PersonaConfig
+
+        agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+        tool = agent._function_toolset.tools["get_market_data"]
+        desc = tool.tool_def.description
+
+        m_closed = re.search(r"values as of last closed (\d{2}:\d{2})", desc)
+        m_ip = re.search(r"=== In-progress Candle \(\w+\): (\d{2}:\d{2}) open", desc)
+        assert m_closed, f"Example 缺 'values as of last closed HH:MM': {desc!r}"
+        assert m_ip, f"Example 缺 In-progress Candle open 时点: {desc!r}"
+        assert m_closed.group(1) != m_ip.group(1), (
+            f"Example 自相矛盾: last closed {m_closed.group(1)} == in-progress open "
+            f"{m_ip.group(1)}（应为最近收盘 bar 时点，不是 in-progress open）"
+        )
+
     def test_candle_count_clamp_text_in_params_schema(self):
         """Clamp explicit text reaches LLM via CH-ARGS channel (trader.py:124-140
         inner ctx-receiver docstring's Args block → parameters_json_schema),

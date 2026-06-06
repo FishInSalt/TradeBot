@@ -22,7 +22,7 @@ class TechnicalAnalysisService:
         # G-calc-rigor-audit §G-5.
         bb_df = ta.bbands(close, length=20, ddof=0)  # type: ignore[attr-defined]
         atr = ta.atr(high, low, close, length=14)  # type: ignore[attr-defined]
-        # Volume ratio intentionally not surfaced here — GMD/HTF inline their own
+        # Volume ratio intentionally not surfaced here — HTF inlines its own
         # "Last bar vol (X× SMA(20) avg)" rendering with a different numerator
         # (most-recent closed bar) than the historical baseline (second-to-last
         # closed bar). G-calc-rigor-audit §G-4.
