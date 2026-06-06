@@ -335,6 +335,39 @@ class TestInProgressSection:
         assert "days elapsed ===" in out   # 1M total > 48h → days 单位
 
     @pytest.mark.asyncio
+    async def test_in_progress_hourly_unit_for_1d(
+        self, fake_ticker_81870,
+    ):
+        """议题1: 1d tf 的 elapsed 走中间 'h' 单位档（90min < 24h <= 48h）。
+
+        钉住三档分支里此前完全无覆盖的 'h' 档（涵盖 2h/4h/1d 等核心交易周期）。
+        """
+        import pandas as pd
+        from tests.fixtures.multi_tf_ohlcv import _build
+        from src.utils.ohlcv_utils import _to_pd_timestamp_utc, TF_OFFSETS, _fmt_candle_time
+        from src.agent.tools_perception import get_market_data
+        closes = [50000.0 + i * 100 for i in range(60)]
+        df_1d = _build(
+            start_ms=int(pd.Timestamp("2023-01-01", tz="UTC").value / 1e6),
+            tf="1d", closes=closes,
+        )
+        # 独立换算期望时点（不经被测函数）
+        ip_open = _to_pd_timestamp_utc(df_1d["timestamp"].iloc[-1])
+        ip_close = ip_open + TF_OFFSETS["1d"]
+        deps = _build_gmd_deps(fake_ticker_81870, {"1d": df_1d}, tf="1d")
+        out = await get_market_data(deps, timeframe="1d")
+        assert "=== In-progress Candle (1d):" in out
+        # 限定到 in-progress header 行，钉 'h' 档且排除误判 min/days 档
+        ip_line = next(
+            l for l in out.splitlines() if l.startswith("=== In-progress Candle")
+        )
+        assert ip_line.endswith("h elapsed ===")          # 1d total = 24h → 'h' 单位
+        assert "min elapsed" not in ip_line and "days elapsed" not in ip_line
+        # open/close 时点独立验证（1d → _fmt_candle_time 用 %Y-%m-%d）
+        assert f"{_fmt_candle_time(ip_open, '1d')} open" in out
+        assert f"closes {_fmt_candle_time(ip_close, '1d')}" in out
+
+    @pytest.mark.asyncio
     async def test_in_progress_unknown_tf_degraded_open_only(
         self, fake_ticker_81870, df_5m_130bars,
     ):
