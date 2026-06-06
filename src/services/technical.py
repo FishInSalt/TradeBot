@@ -76,7 +76,7 @@ class TechnicalAnalysisService:
             ma = indicators.get(f"ma_{period}")
             if ma is not None:
                 dist_pct = (current_price - ma) / ma * 100
-                lines.append(f"MA({period}): {ma:.2f} (price vs MA: {dist_pct:+.1f}%)")
+                lines.append(f"MA({period}): {ma:.2f}  (Last {current_price:.2f} → {dist_pct:+.1f}% vs MA)")
             else:
                 lines.append(f"MA({period}): N/A")
 
@@ -106,15 +106,15 @@ class TechnicalAnalysisService:
                 pos = "position: N/A"
             elif current_price < bb_l:
                 pct_below = (bb_l - current_price) / bb_l * 100
-                pos = f"position: {pct_below:.1f}% below Lower"
+                pos = f"Last {current_price:.2f} → {pct_below:.1f}% below Lower"
             elif current_price > bb_u:
                 pct_above = (current_price - bb_u) / bb_u * 100
-                pos = f"position: {pct_above:.1f}% above Upper"
+                pos = f"Last {current_price:.2f} → {pct_above:.1f}% above Upper"
             else:
                 pct = (current_price - bb_l) / (bb_u - bb_l) * 100
-                pos = f"position: {pct:.0f}%, 0%=Lower / 100%=Upper"
+                pos = f"Last {current_price:.2f} → {pct:.0f}% of band, 0%=Lower / 100%=Upper"
             lines.append(
-                f"BB(20,2): Upper {bb_u:.2f} | Middle {bb_m:.2f} | Lower {bb_l:.2f} ({pos})"
+                f"BB(20,2): Upper {bb_u:.2f} | Middle {bb_m:.2f} | Lower {bb_l:.2f}  ({pos})"
             )
         else:
             lines.append(

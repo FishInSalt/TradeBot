@@ -97,7 +97,8 @@ def test_format_for_llm_is_fact_only(sample_ohlcv):
     # Positive anchors: guard against "deleted label but forgot to add the
     # fact-only replacement" regression — negative-only assertions would pass
     # silently if MA/BB rendered without the new phrasing.
-    assert "price vs MA:" in text
+    assert "→ -" in text or "→ +" in text  # MA dist 现以 `(Last <价> → ±X% vs MA)` 渲染
+    assert "vs MA)" in text
     assert any(
         phrase in text
         for phrase in ("0%=Lower / 100%=Upper", "above Upper", "below Lower")
