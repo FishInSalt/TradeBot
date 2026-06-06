@@ -211,22 +211,6 @@ async def get_market_data(
             "(partial bar — excluded from all indicators; no RVol/markers until close)"
         )
 
-    # === Period summary ===
-    if len(df_closed) >= 10:
-        last_5 = df_closed.iloc[-5:]
-        prior_5 = df_closed.iloc[-10:-5]
-        avg_vol_last = float(last_5["volume"].mean())
-        avg_vol_prior = float(prior_5["volume"].mean())
-        vol_ratio = avg_vol_last / avg_vol_prior if avg_vol_prior > 0 else 0.0
-        net_delta_last = float(df_closed["close"].iloc[-1] - df_closed["close"].iloc[-5])
-        net_delta_prior = float(df_closed["close"].iloc[-6] - df_closed["close"].iloc[-10])
-        summary = (
-            "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===\n"
-            f"Avg vol:     last 5 {avg_vol_last:.1f} / prior 5 {avg_vol_prior:.1f} ({vol_ratio:.2f}×)\n"
-            f"Net Δclose:  last 5 {net_delta_last:+.1f} USDT / prior 5 {net_delta_prior:+.1f} USDT"
-        )
-        sections.append(summary)
-
     return "\n\n".join(sections)
 
 

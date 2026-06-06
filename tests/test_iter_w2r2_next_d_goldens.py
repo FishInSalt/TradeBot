@@ -225,22 +225,6 @@ class TestGMDGolden:
         assert "range↑" in out
 
     @pytest.mark.asyncio
-    async def test_gmd_period_summary_section(
-        self, fake_ticker_81870, df_5m_130bars,
-    ):
-        """B4: Period summary section after OHLCV table; 2 fields (Avg vol +
-        Net Δclose) post iter-tool-opt-gmd-polish issue 4 deletion of
-        Avg range (~3% adoption)."""
-        from src.agent.tools_perception import get_market_data
-        deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
-        out = await get_market_data(deps)
-        assert "=== Period summary (last 5 closed candles vs prior 5 closed candles) ===" in out
-        assert "Avg vol:" in out
-        assert "Net Δclose:" in out
-        # Avg range deleted per iter-tool-opt-gmd-polish issue 4 (~3% adoption)
-        assert "Avg range" not in out
-
-    @pytest.mark.asyncio
     async def test_gmd_closed_only_indicator_inputs(
         self, fake_ticker_81870, df_5m_130bars,
     ):
