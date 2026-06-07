@@ -565,6 +565,26 @@ def _flatten_groups(groups: list[tuple[str, list[str]]]) -> list[str]:
     return out
 
 
+# === iter-taker-flow-render: full-keep sections (session-log 渲染豁免) ===
+# 这些 section 的 body 整段保留、不走 _clip_body 折叠：核心小表格的逐 bar
+# 序列被 list-like 行折叠后会失去意义（reviewer 无法复现 agent 逐 bar 引用所
+# 依据的数据）。匹配 _parse_sections 出的 section.header 文本前缀 —— by-content
+# （契合本文件既有 by-content sectioned/plain dispatch 哲学），不靠 tool_name
+# frozenset。get_taker_flow header = "Taker Flow (BTC/USDT:USDT · 5m bars · @ …)"；
+# GMD K-line header = "Recent Closed Candles (…)" 前缀不匹配 → 不受影响、仍折叠。
+_FULL_KEEP_SECTION_PREFIXES: tuple[str, ...] = ("Taker Flow",)
+
+
+def _is_full_keep_section(header: str | None) -> bool:
+    """Return True iff this section should bypass _clip_body folding entirely.
+
+    header is the _parse_sections-extracted section header text (None for an
+    unnamed fallback section). Matched by prefix so the volatile suffix
+    (symbol · period · @ timestamp) does not affect the decision.
+    """
+    return header is not None and header.startswith(_FULL_KEEP_SECTION_PREFIXES)
+
+
 def _render_tool_body(
     tool_name: str,
     content: str,
@@ -601,7 +621,11 @@ def _render_tool_body(
             lines.append("")
         if section.header is not None:
             lines.append(f"    === {escape(section.header)} ===")
-        clipped = _clip_body(section.body)
+        clipped = (
+            section.body
+            if _is_full_keep_section(section.header)
+            else _clip_body(section.body)
+        )
         for row in clipped:
             if row == "":
                 lines.append("")

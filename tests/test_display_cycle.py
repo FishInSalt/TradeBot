@@ -3653,3 +3653,134 @@ def test_drift_guard_tools_perception_no_rich_markup():
         "violates _clip_body anchor heuristic invariant (per design spec §6.3). "
         "Either remove Rich markup or escape it before _render_tool_body."
     )
+
+
+# === iter-taker-flow-render: _is_full_keep_section 单元 ===
+
+
+def test_is_full_keep_section_matching():
+    """Taker Flow header 前缀命中豁免（易变后缀 symbol·period·@ts 不影响判定）。"""
+    from src.cli.display import _is_full_keep_section
+    assert _is_full_keep_section(
+        "Taker Flow (BTC/USDT:USDT · 5m bars · @ 12:47 UTC)"
+    ) is True
+
+
+def test_is_full_keep_section_non_matching_gmd():
+    """GMD K-line header 'Recent Closed Candles' 前缀不匹配 → 不豁免。"""
+    from src.cli.display import _is_full_keep_section
+    assert _is_full_keep_section("Recent Closed Candles (15m, last 40)") is False
+
+
+def test_is_full_keep_section_none_header():
+    """无 header 的 fallback section（reject 纯文本路径）→ 不豁免。"""
+    from src.cli.display import _is_full_keep_section
+    assert _is_full_keep_section(None) is False
+
+
+# === iter-taker-flow-render: 渲染层 round-trip（真实 _render_taker_flow 输出）===
+
+
+def _taker_bars(n, period_ms, *, base_open, sell=1_000_000.0, buy=1_000_000.0):
+    """n ascending TakerFlowBar; bar i opens at base_open + i*period_ms.
+    本地隔离副本（mirror of tests/test_taker_flow.py::_bars）；caller 设 base_open
+    使最后一根相对 now_ms in-progress。"""
+    from src.integrations.exchange.base import TakerFlowBar
+    return [TakerFlowBar(ts=base_open + i * period_ms, sell_usd=sell, buy_usd=buy)
+            for i in range(n)]
+
+
+def test_taker_flow_section_full_kept_limit_12():
+    """limit=12 真实 taker_flow 输出经 session-log 渲染整段保留、无折叠
+    （旧 list-like Branch 2 会把 18 行 body 折成 5 行，丢掉 Per-bar 标题/表头/中段 bar）。"""
+    from src.agent.tools_perception import _render_taker_flow
+    from src.cli.display import _render_tool_body
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    bars = _taker_bars(21, period_ms, base_open=now - 120_000 - 20 * period_ms)
+    content = _render_taker_flow(bars, "5m", 12, now_ms=now,
+                                 symbol="BTC/USDT:USDT", fetch_ts="12:47")
+    out = _render_tool_body("get_taker_flow", content)
+    assert "omitted" not in out                          # 无折叠标记
+    assert "Per-bar (bar open UTC, newest first" in out  # 中段标题保留（旧会折掉）
+    assert "RVol(×20-bar)" in out                        # 表头保留（旧会折掉）
+    assert "Now (" in out and "Window (12 bars" in out
+    assert len(out.splitlines()) >= 18                   # 全 18 body 行 + head + header
+
+
+def test_taker_flow_section_full_kept_default_limit_6():
+    """附带受益：默认 limit=6（body ≥10 行）当前也被 Branch 2 折叠，新设计下全保留。"""
+    from src.agent.tools_perception import _render_taker_flow
+    from src.cli.display import _render_tool_body
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    bars = _taker_bars(21, period_ms, base_open=now - 120_000 - 20 * period_ms)
+    content = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    out = _render_tool_body("get_taker_flow", content)
+    assert "omitted" not in out
+    assert "Per-bar (bar open UTC, newest first" in out
+    assert "RVol(×20-bar)" in out
+
+
+def test_full_keep_does_not_leak_to_gmd_kline_section():
+    """豁免不外溢：GMD 'Recent Closed Candles' section（前缀不匹配 Taker Flow）
+    仍走 _clip_body 折叠。"""
+    from src.cli.display import _render_tool_body
+    body_lines = "\n".join(f"14:{i:02d}  100 101 99 100  1.5" for i in range(40))
+    content = f"=== Recent Closed Candles (15m, last 40) ===\n{body_lines}"
+    out = _render_tool_body("get_market_data", content)
+    assert "omitted" in out                              # 仍折叠（守护非目标 section）
+
+
+def test_taker_flow_full_kept_in_progress_footnote_and_star():
+    """in-progress：'row 1 = current in-progress' header + still-forming footnote
+    在全保留输出里都可见。"""
+    from src.agent.tools_perception import _render_taker_flow
+    from src.cli.display import _render_tool_body
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    bars = _taker_bars(21, period_ms, base_open=now - 120_000 - 20 * period_ms)
+    content = _render_taker_flow(bars, "5m", 12, now_ms=now, symbol="X", fetch_ts="00:00")
+    out = _render_tool_body("get_taker_flow", content)
+    assert "row 1 = current in-progress" in out
+    assert "still forming" in out    # footnote 文本正确性（content guard；body[-1] 旧折叠也保留，非 regression guard）
+    assert "omitted" not in out
+
+
+def test_taker_flow_full_kept_1d_period():
+    """1d period：日期格式 Time 列整表全保留（不再做 bar 行识别/格式特判）。"""
+    from src.agent.tools_perception import _render_taker_flow
+    from src.cli.display import _render_tool_body
+    period_ms = 86_400_000
+    now = 1_000_000_000_000
+    bars = _taker_bars(21, period_ms, base_open=now - 3_600_000 - 20 * period_ms)
+    content = _render_taker_flow(bars, "1d", 12, now_ms=now, symbol="X", fetch_ts="00:00")
+    out = _render_tool_body("get_taker_flow", content)
+    assert "omitted" not in out
+    assert "Per-bar (bar open UTC, newest first" in out
+    assert "2001-09-" in out   # 1d Time 列渲染为日期（spec §4 锁定日期格式保留）
+
+
+def test_taker_flow_full_kept_close_note_preserved():
+    """close_note 路径：note 行在全保留输出里可见。"""
+    from src.agent.tools_perception import _render_taker_flow
+    from src.cli.display import _render_tool_body
+    period_ms = 86_400_000
+    now = 1_000_000_000_000
+    bars = _taker_bars(21, period_ms, base_open=now - 3_600_000 - 20 * period_ms)
+    note = "Close: n/a — 1d rubik/OHLCV day-boundary mismatch (16:00 vs 00:00 UTC)"
+    content = _render_taker_flow(bars, "1d", 6, now_ms=now, symbol="X",
+                                 fetch_ts="00:00", close_note=note)
+    out = _render_tool_body("get_taker_flow", content)
+    assert note in out
+    assert "omitted" not in out
+
+
+def test_taker_flow_full_kept_degraded_no_data():
+    """降级路径：有 header 被豁免、单行 body 渲染不报错、内容保留
+    （渲染层合成 content；豁免对短 body 安全）。"""
+    from src.cli.display import _render_tool_body
+    content = ("=== Taker Flow (X · 5m bars · @ 00:00 UTC) ===\n"
+               "No taker-volume data available for X 5m (rubik returned 0 bars).")
+    out = _render_tool_body("get_taker_flow", content)
+    assert "No taker-volume data available" in out
