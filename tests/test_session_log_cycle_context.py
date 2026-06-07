@@ -319,8 +319,22 @@ def test_render_carried_block_newest_fallback_when_self_terse():
     assert "Stance —" not in text and "more)" not in text
 
 
-def _ctx(trigger_type, user_prompt_snapshot, messages=None, final_text="Hold."):
-    """构造一个带 user_prompt_snapshot 的 success-path ctx（messages 给最小非 None 值触发正常渲染路径）。"""
+def _stats_not_first():
+    """非首 cycle 的 SessionStats —— record 过一轮 → last_cycle_ended_at 非 None
+    （Header 显示 '+N min from prev'，is_first_cycle=False）。"""
+    from datetime import datetime, timezone
+    from src.cli.session_state import SessionStats
+    s = SessionStats()
+    s.record_cycle(0, datetime(2026, 5, 31, 7, 30, 0, tzinfo=timezone.utc))
+    return s
+
+
+def _ctx(trigger_type, user_prompt_snapshot, messages=None, final_text="Hold.", stats=None):
+    """构造一个带 user_prompt_snapshot 的 success-path ctx（messages 给最小非 None 值触发正常渲染路径）。
+
+    stats=None → 默认 SessionStats()（首 cycle，last_cycle_ended_at=None →
+    is_first_cycle=True）。传 _stats_not_first() 模拟非首 cycle。
+    """
     from datetime import datetime, timezone, timedelta
     from src.cli.display import CycleRenderContext
     from src.cli.session_state import SessionStats
@@ -329,7 +343,7 @@ def _ctx(trigger_type, user_prompt_snapshot, messages=None, final_text="Hold."):
         cycle_id="06e9abcd", trigger_type=trigger_type,
         trigger_context={"type": "scheduled_tick"}, state_snapshot=None,
         messages=messages, final_text=final_text, cycle_tokens=1000,
-        stats=SessionStats(), cache_hit_rate=90.0,
+        stats=stats if stats is not None else SessionStats(), cache_hit_rate=90.0,
         cycle_started_at=started, cycle_ended_at=started + timedelta(seconds=3),
         forensic_reason=None, user_prompt_snapshot=user_prompt_snapshot,
     )
@@ -378,10 +392,15 @@ def test_render_context_section_present_between_header_and_reasoning():
     assert "Thesis — bearish macro intact" in out      # 00f7（newest）
     assert "(+3 more)" in out                            # newest 5−2
     assert "(+4 more)" in out                            # earlier 5−1
+    # blocks 非空 → 渲实块，绝不出占位行（即便 stats 为首 cycle，if blocks 优先于 elif 占位）
+    assert "none (first cycle" not in out
 
 
-def test_render_context_scheduled_omits_woke_by():
-    """scheduled → 无 Woke by，直接从 Carried thesis 起。"""
+def test_render_context_scheduled_renders_woke_by_label():
+    """scheduled → 渲 'Woke by — SCHEDULED'（镜像 Header Trigger SCHEDULED），再接 Carried thesis。
+
+    行为变更（2026-06-07）：原省略 Woke by，现为跨 trigger 类型一致 + 自包含而渲类型标签。
+    """
     from src.cli.display import format_cycle_output
     from tests.fixtures.cycle_fixtures import build_cycle_messages
     snap = _ALERT_SNAPSHOT.replace(
@@ -394,10 +413,12 @@ def test_render_context_scheduled_omits_woke_by():
         "Assess the situation and decide what to do.\n\n",
     )
     msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
-    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs))
+    # 非首 cycle（有 prior summaries）→ Woke by + Carried thesis 实块
+    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs, stats=_stats_not_first()))
     assert "▾ Context (carried into this cycle)" in out
-    assert "Woke by" not in out
-    assert "Carried thesis" in out
+    assert "Woke by — SCHEDULED" in out
+    assert "Carried thesis — last" in out
+    assert "none (first cycle" not in out  # 有 prior → 不渲占位
 
 
 def test_render_context_none_snapshot_omits_section():
@@ -409,8 +430,11 @@ def test_render_context_none_snapshot_omits_section():
     assert "▾ Context" not in out
 
 
-def test_render_context_scheduled_first_cycle_omits_section():
-    """scheduled 首 cycle（无 Woke by 无 prior）→ 整段省略。"""
+def test_render_context_scheduled_first_cycle_renders_woke_by_and_placeholder():
+    """scheduled 首 cycle（无 prior）→ Context 段含 'Woke by — SCHEDULED' + 占位行。
+
+    行为变更（2026-06-07）：原整段省略，现始终渲 Context 段、首 cycle 显式占位。
+    """
     from src.cli.display import format_cycle_output
     from tests.fixtures.cycle_fixtures import build_cycle_messages
     snap = (
@@ -419,12 +443,17 @@ def test_render_context_scheduled_first_cycle_omits_section():
         "Assess the situation and decide what to do."
     )
     msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
-    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs))
-    assert "▾ Context" not in out
+    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs))  # default stats = 首 cycle
+    assert "▾ Context (carried into this cycle)" in out
+    assert "Woke by — SCHEDULED" in out
+    assert "Carried thesis — none (first cycle in this session)" in out
 
 
-def test_render_context_alert_first_cycle_woke_by_only():
-    """conditional/alert 首 cycle（有 Woke by、无 prior）→ 只渲 Woke by。"""
+def test_render_context_alert_first_cycle_woke_by_and_placeholder():
+    """conditional/alert 首 cycle（有 Woke by、无 prior）→ Woke by 事件行 + Carried thesis 占位。
+
+    行为变更（2026-06-07）：原只渲 Woke by，现首 cycle 同样补占位行。
+    """
     from src.cli.display import format_cycle_output
     from tests.fixtures.cycle_fixtures import build_cycle_messages
     snap = (
@@ -434,9 +463,29 @@ def test_render_context_alert_first_cycle_woke_by_only():
         "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — x)"
     )
     msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
-    out = format_cycle_output(_ctx("alert", snap, messages=msgs))
+    out = format_cycle_output(_ctx("alert", snap, messages=msgs))  # default stats = 首 cycle
     assert "Woke by — PRICE LEVEL:" in out
-    assert "Carried thesis" not in out
+    assert "Carried thesis — none (first cycle in this session)" in out
+
+
+def test_render_context_non_first_cycle_empty_blocks_no_false_placeholder():
+    """非首 cycle 但 blocks 空（如后续 cycle 的 summary 构建失败）→ 不谎称 first cycle、不渲占位。
+
+    占位行必须锚定权威信号 is_first_cycle（= stats.last_cycle_ended_at is None），
+    不能用 'blocks 空' 推断首 cycle，否则会把 summary 构建失败的后续 cycle 误标为首 cycle。
+    """
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    snap = (
+        "You have been woken up by a scheduled trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs, stats=_stats_not_first()))
+    assert "Woke by — SCHEDULED" in out       # 仍渲 trigger 标签（scheduled 一致性）
+    assert "first cycle" not in out            # 不谎称首 cycle
+    assert "Carried thesis — none" not in out  # 无占位行
 
 
 # === Task 9: round-trip drift-guard + length caps + backward-compat ===

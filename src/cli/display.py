@@ -983,7 +983,9 @@ def _truncate_with_marker(text: str, max_chars: int) -> str:
 def _extract_event_line(wake_half: str, trigger_type: str) -> str | None:
     """Extract the verbatim variable event text from the wake prompt (spec §3.3).
 
-    scheduled → None（纯样板、与 Header Trigger 重叠，整体省略）。
+    scheduled → None（无变量事件行；纯样板、零增量）。注：render 层
+    `_render_context` 仍为 scheduled 渲一行类型标签 `Woke by — SCHEDULED`
+    （镜像 Header `Trigger SCHEDULED`，使 Context 段跨 trigger 类型一致 / 自包含）。
     conditional/alert → 以已知前缀（IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL）
     锚定到 wake_half 末尾，原样保留（alert id / reasoning / fee / PnL / round-trip），
     collapse 空白 + 上限截断。识别不到前缀 → None。
@@ -1087,12 +1089,21 @@ def _render_carried_block(id4: str, ago: str, body: str, is_newest: bool) -> lis
     return out
 
 
-def _render_context(user_prompt_snapshot: str | None, trigger_type: str) -> str:
+def _render_context(
+    user_prompt_snapshot: str | None,
+    trigger_type: str,
+    is_first_cycle: bool = False,
+) -> str:
     """Render the '▾ Context (carried into this cycle)' section (spec §3).
 
-    数据源 = user_prompt_snapshot（agent 本轮实读那份）。无可展示内容
-    （None / scheduled 首 cycle 无 prior）→ ""（caller 跳过）。fail-isolated：
-    任何解析异常降级为空 / 仅 Woke by，绝不阻断整 cycle 渲染（spec §5）。
+    数据源 = user_prompt_snapshot（agent 本轮实读那份）。`is_first_cycle` 为权威
+    首-cycle 信号（caller 传 `stats.last_cycle_ended_at is None`，与 Header
+    '(first cycle)' 同源），用于在无 prior 时渲准确占位行。snapshot None（legacy
+    NULL 行）→ ""。fail-isolated：任何解析异常降级为空，绝不阻断整 cycle 渲染（spec §5）。
+
+    Woke by 行：conditional/alert 渲变量事件行；scheduled 渲类型标签
+    `Woke by — SCHEDULED`（镜像 Header `Trigger SCHEDULED`，跨 trigger 类型一致）。
+    Carried thesis：有 prior → 实块；无 prior 且 is_first_cycle → 显式占位行。
     """
     if not user_prompt_snapshot:
         return ""
@@ -1104,6 +1115,11 @@ def _render_context(user_prompt_snapshot: str | None, trigger_type: str) -> str:
         lines: list[str] = []
         if event_line:
             lines.append(f"  Woke by — {escape(event_line)}")
+        elif trigger_type == "scheduled":
+            # scheduled 无变量事件行（_extract_event_line → None）；仍渲类型标签，
+            # 使 Context 段跨 trigger 类型一致 / 自包含（镜像 Header `Trigger SCHEDULED`）。
+            lines.append("  Woke by — SCHEDULED")
+
         if blocks:
             n = len(blocks)
             lines.append(
@@ -1111,6 +1127,11 @@ def _render_context(user_prompt_snapshot: str | None, trigger_type: str) -> str:
             )
             for slot, (id4, ago, body) in enumerate(blocks):
                 lines.extend(_render_carried_block(id4, ago, body, is_newest=(slot == 0)))
+        elif is_first_cycle:
+            # 首 cycle 确无 prior 可 carry → 显式占位行（而非整段省略），保证视觉一致。
+            # 仅当权威信号 is_first_cycle 为真才声明；blocks 空亦可能是后续 cycle 的
+            # summary 构建失败，那种情形不谎称首 cycle、不渲此行。
+            lines.append("  Carried thesis — none (first cycle in this session)")
 
         if not lines:
             return ""
@@ -1285,7 +1306,12 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
 
     # spec 2026-05-31: Context 段插在 Header 后、Reasoning/forensic 短路前
     # （success + forensic 两路径共用此处，因 user_prompt_snapshot 在两路径均已落库）
-    context_section = _render_context(ctx.user_prompt_snapshot, ctx.trigger_type)
+    # is_first_cycle 与 Header '(first cycle)' 同源（stats.last_cycle_ended_at is None；
+    # record_cycle 在 format_cycle_output 之后调用，故渲染时仍反映上一 cycle）。
+    context_section = _render_context(
+        ctx.user_prompt_snapshot, ctx.trigger_type,
+        is_first_cycle=ctx.stats.last_cycle_ended_at is None,
+    )
     if context_section:
         lines.append(context_section)
 
