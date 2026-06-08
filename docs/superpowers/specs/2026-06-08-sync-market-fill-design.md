@@ -60,7 +60,7 @@
 |---|---|---|
 | 失败隔离 | 每步原子，要么成要么败，无半成品 | 「已成交未保护」半成品态 |
 | 风控补救 | agent 在场决定（retry/平仓/改价） | 系统**自主**平仓，激进 |
-| 崩溃恢复 | 轻：启动对账「有仓无保护单→叫醒 agent」 | 重：持久化 bracket 意图 + 自动补挂 |
+| 崩溃恢复 | 轻：启动首跑 cycle 必以全感知唤醒 agent（覆盖裸仓） | 重：持久化 bracket 意图 + 自动补挂 |
 | 交易所机制 | 无 OCO-on-fill、无 attach 机器 | 要 |
 | 无保护窗口 | 秒级（同 cycle 内，开仓返回→set_SL 之间 ~1 步） | ≈0（同 tick 挂上） |
 | token 节省 | 省第二个 cycle 的 85K 上下文重载（set 单仅 13ms） | 同 |
@@ -103,6 +103,8 @@ cycle N（一个 warm 上下文）：
 **共享工具层的分派（🟠，必写）**：`open_position`/`close_position`（`tools_execution.py:66-115` 等）是 **exchange 无关共享代码**，现统一拿 `order.id` 渲"You will be notified when filled"。同步后 **sim 返 `FillEvent` / OKX(deferred) 仍返 `Order`**，工具层须显式 `isinstance(result, FillEvent)`（或等价能力标志）分派两种回执：
 - `FillEvent` → **同步回执**（"Filled @ X, fee … — set SL/TP now"），字段取 `result.order_id`/`fill_price`/`fee`/`pnl`；
 - `Order` → 维持现**异步回执**（"submitted, you will be notified"），字段取 `result.id`。
+
+> **下游耦合（will-break，必随回执前缀同改）**：执行类回执的成功前缀被 `display.py` 的 `_EXECUTION_SUCCESS_PREFIXES` 用于「成功 vs 业务拒绝」判定（`is_tool_error`），并被 `_summarize_open_position` / `_summarize_close_position` 正则解析做 session-log 摘要。新前缀（如 `Filled:` / `Closed`）若不同步登记，**成功的同步开/平仓会被渲成 error + 摘要退化**。现有 display 测试只覆盖旧异步前缀（保留→仍绿），故全量回归抓不到——必须显式改 `display.py` 三处并补同步前缀测试。
 注意 **字段名不同**（`Order.id` vs `FillEvent.order_id`），`_record_action` 的 order_id 取值须按类型分支。这是"不阻断 OKX 未来接入"承诺的真实落地点。
 
 **round-trip 渲染须带 `contract_size` 因子（🟡-4）**：平仓回执从 conditional cycle（`app.py:499-503`）迁到工具层后，entry_fee 的 `contract_size` 乘法须沿用——现 `app.py:499-503` 与 close 估算 `tools_execution.py:131` 都乘了 `contract_size`（USDT 计价 notional 约定）。pattern 已存在，迁移时不可丢。
@@ -214,7 +216,7 @@ agent-loop 层收益比开仓**软**：
 
 ### 7.2 总不变量
 
-`open_position` 同步返回时必须落在三个**已知**状态之一并明示：✅ **Filled+Protected** / ✅ **Flat**（没开成/没成交/被平） / ⚠️ **Working·Unknown→已对账并触发 cycle**。**绝不允许**第四种「仓开着、无保护、无人知」。
+`open_position` 同步返回时必须落在三个**已知**状态之一并明示：✅ **Filled+Protected** / ✅ **Flat**（没开成/没成交/被平） / ⚠️ **Working·Unknown**（提交后成交未确认）。**绝不允许**第四种「仓开着、无保护、无人知」。其中 **Working·Unknown 属 OKX-deferred 异步路径**——sim 同步结算是确定性的（要么 Filled、要么 reject→Flat），**永不落在此态**，故本 iter 无需为它实现对账/恢复机制；启动若遇崩溃残留的裸仓，由 scheduler 保证首跑 cycle（§7.4-1）覆盖。
 
 ### 7.3 拆开（方案 A）后异常处理塌缩（sim）
 
@@ -229,7 +231,7 @@ agent-loop 层收益比开仓**软**：
 
 ### 7.4 仍需保留的安全网
 
-1. 启动**对账**：发现「有仓但无对应保护单」→ 触发 cycle 叫醒 agent。
+1. 启动恢复：**无需专门对账**——`scheduler.start()` 进 while 循环前**无条件先跑一个 `scheduled` cycle**（`scheduler.py:58`），启动必以全感知唤醒 agent、必看到并保护任何裸仓。一个额外的 `context=None` 启动对账 cycle 与这个首跑 cycle **行为同构**（同样不注入裸仓专属 IMPORTANT EVENT），只会多烧一个 ~85K token 的冗余 cycle，故**不做**。（裸仓窗口仅限「同步开仓与同 cycle 设 SL/TP 之间崩溃」，启动首跑即覆盖。）
 2. 可选软网：cycle 结束时若仓位裸奔 → 告警/触发一次。
 3. `_fill_market_open/close` 返回 None 的真实情形（**非无流动性**）= 反向冲突 / 杠杆不匹配（开）或仓位已不在（平）；同步路径下即「未开/平成、Flat」，按 §7.3 改 explicit reject 如实返回，无需 pending 善后。（无 ticker 是 `create_order:230-231` 直接 raise，不走 None。）
 
@@ -274,4 +276,4 @@ drift-guard：§9 已扩到 persona + close_position，并断 persona 不再含"
 
 1. **取价**：用缓存 `_latest_ticker`（§5.3 选 A）。陈旧度 ≤ 一个 watch_ticker 间隔，可忽略。
 2. **市价平仓**：纳入本 iter 对称同步（§6.1）；与「显式撤 OCO」（§6.1 G1）+ flip 记档（§6.3）同 iter 落地。
-3. **裸仓安全网**：本 iter 只做**启动对账**（§7.4-1：发现有仓无保护单 → 触发 cycle 叫醒 agent）；「cycle 结束裸仓软告警」（§7.4-2）降为**后续候选**，不在本 iter scope。
+3. **裸仓安全网**：本 iter **不做专门的启动对账**——`scheduler.start()` 进循环前无条件先跑一个 `scheduled` cycle（`scheduler.py:58`），启动必以全感知唤醒 agent、必看到并保护任何裸仓；额外的 `context=None` 对账 cycle 与之行为同构、只多烧一个冗余 cycle，故**砍掉**（§7.4-1 已据此重写）。「cycle 结束裸仓软告警」（§7.4-2）仍为**后续候选**，不在本 iter scope。
