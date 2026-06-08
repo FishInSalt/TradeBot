@@ -36,11 +36,17 @@ async def _record_action(deps: TradingDeps, action: str, *,
                           order_id: str | None = None,
                           alert_id: str | None = None,
                           side: str | None = None, price: float | None = None,
-                          pnl: float | None = None, reasoning: str | None = None) -> None:
+                          pnl: float | None = None, reasoning: str | None = None,
+                          fee: float | None = None, amount: float | None = None,
+                          entry_price: float | None = None,
+                          trigger_reason: str | None = None) -> None:
     """写入一条 TradeAction 记录。写入失败不影响 tool 返回（容错）。
 
     `*` 之后全 kwarg-only — 防 future positional caller 把例如 side="long"
     误写入 alert_id 列（PR #42 review v4 I-5 修订）。
+
+    fee/amount/entry_price/trigger_reason 供 order_filled 行使用（同步市价路径，
+    per spec §5.1）；非 fill 行留 None。
     """
     if deps.db_engine is None:
         return
@@ -60,10 +66,29 @@ async def _record_action(deps: TradingDeps, action: str, *,
                 price=price,
                 pnl=pnl,
                 reasoning=reasoning,
+                fee=fee,
+                amount=amount,
+                entry_price=entry_price,
+                trigger_reason=trigger_reason,
             ))
             await session.commit()
     except Exception:
         logger.warning("Failed to record TradeAction", exc_info=True)
+
+
+async def _record_order_filled(deps: TradingDeps, fill) -> None:
+    """从同步 FillEvent 记一条 order_filled TradeAction（sim 同步市价路径）。
+
+    字段集与 app._record_action_from_fill 对齐，使 metrics.total_fees /
+    models amount-invariant / trigger_reason 分类在同步路径下仍成立（spec §5.1）。
+    """
+    await _record_action(
+        deps, action="order_filled", order_id=fill.order_id,
+        side=fill.position_side, price=fill.fill_price, pnl=fill.pnl,
+        fee=fill.fee, amount=fill.amount, entry_price=fill.entry_price,
+        trigger_reason=fill.trigger_reason,
+        reasoning=f"(exchange: {fill.trigger_reason} order filled @ {fill.fill_price:.2f})",
+    )
 
 
 async def _check_approval(deps: TradingDeps, action: str, action_desc: str,

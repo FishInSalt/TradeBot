@@ -676,3 +676,39 @@ def test_set_take_profit_wrapper_docstring_no_oco_drift():
     assert "algoid" not in lower
     assert "atomic" not in lower
     assert "Auto-cancels any existing take_profit orders" in doc
+
+
+async def test_record_order_filled_writes_all_fields(db_engine):
+    """_record_order_filled 把 FillEvent 的 fee/amount/entry_price/trigger_reason 全写入。"""
+    from sqlalchemy import select
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from src.integrations.exchange.base import FillEvent
+    from src.agent.tools_execution import _record_order_filled
+    from tests._sim_fixtures import make_session
+    from unittest.mock import MagicMock
+
+    sid = await make_session(db_engine)
+    deps = MagicMock()
+    deps.db_engine = db_engine
+    deps.session_id = sid
+    deps.cycle_id = "cyc1"
+    deps.symbol = "BTC/USDT:USDT"
+    fill = FillEvent(
+        order_id="oid1", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+        trigger_reason="market", fill_price=82000.0, amount=0.1, fee=4.1,
+        pnl=200.0, timestamp=1712534400000, is_full_close=True, entry_price=80000.0,
+    )
+    await _record_order_filled(deps, fill)
+
+    async with get_session(db_engine) as s:
+        row = (await s.execute(
+            select(TradeAction).where(TradeAction.order_id == "oid1")
+                               .where(TradeAction.action == "order_filled")
+        )).scalar_one()
+    assert row.fee == 4.1
+    assert row.amount == 0.1
+    assert row.entry_price == 80000.0
+    assert row.trigger_reason == "market"
+    assert row.pnl == 200.0
+    assert row.cycle_id == "cyc1"
