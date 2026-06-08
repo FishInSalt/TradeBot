@@ -295,6 +295,7 @@ def test_open_position_wrapper_docstring_mentions_fee():
     assert "Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee." in docstring
 
 
+@pytest.mark.asyncio
 async def test_open_position_sync_fill_receipt():
     """create_order 返 FillEvent → open_position 返同步回执（含 fill_price/fee + UNPROTECTED 提示）。"""
     from src.integrations.exchange.base import FillEvent
@@ -311,8 +312,11 @@ async def test_open_position_sync_fill_receipt():
     assert "80050.00" in out
     assert "UNPROTECTED" in out
     assert "op1" in out
+    # contract_size 默认 1.0（_make_open_deps），notional = 80050.0 * 0.1 * 1.0 = 8005.00
+    assert "Entry fee: -4.00 USDT (notional 8,005.00)" in out
 
 
+@pytest.mark.asyncio
 async def test_open_position_async_order_receipt_unchanged():
     """create_order 返 Order（OKX 路径）→ 维持旧异步回执。"""
     deps = _make_open_deps(order_id="op2")   # 既有工厂默认 create_order 返 Order
