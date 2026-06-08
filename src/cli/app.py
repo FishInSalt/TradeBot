@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select, update as sql_update
 
@@ -377,7 +378,7 @@ def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetim
     )
 
 
-def _wake_header_line(events: list[tuple[str, object]], cycle_started_at: datetime) -> str:
+def _wake_header_line(events: list[tuple[str, Any]], cycle_started_at: datetime) -> str:
     """Build the wake-prompt header line (spec 2026-06-08 §2).
 
     N==1: byte-identical to the prior single-trigger header
@@ -570,7 +571,7 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
 async def run_agent_cycle(
     agent,
     deps: TradingDeps,
-    events: list[tuple[str, object]],
+    events: list[tuple[str, Any]],
     budget: TokenBudget,
     engine,
     model=None,
@@ -1118,7 +1119,7 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    async def on_tick(events):
+    async def on_tick(events: list[tuple[str, Any]]):
         if shutdown_event.is_set():
             return
         try:

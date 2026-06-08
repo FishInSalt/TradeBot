@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from src.integrations.exchange.base import PriceLevelAlertInfo
 from src.services.price_alert import AlertInfo
@@ -81,7 +81,7 @@ def _capture_trigger_context(cycle_id: str, trigger_type: str, context) -> dict 
         return None
 
 
-def _capture_trigger_contexts(cycle_id: str, events: list) -> list[dict | None]:
+def _capture_trigger_contexts(cycle_id: str, events: list[tuple[str, Any]]) -> list[dict | None]:
     """Capture trigger metadata for a batch of events (spec 2026-06-08 §3).
 
     Maps `_capture_trigger_context` over the drained `(trigger_type, context)` list.

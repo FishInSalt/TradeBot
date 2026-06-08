@@ -991,7 +991,7 @@ def _extract_event_lines(wake_half: str, trigger_type: str) -> list[str]:
     """
     if trigger_type == "scheduled":
         return []
-    pattern = re.compile("|".join(re.escape(p) for p in _EVENT_PREFIXES))
+    pattern = re.compile("|".join(re.escape("\n\n" + p) for p in _EVENT_PREFIXES))
     positions = [m.start() for m in pattern.finditer(wake_half)]
     if not positions:
         return []

@@ -146,6 +146,22 @@ def test_extract_event_lines_multi_splits_per_prefix():
     assert lines[1].startswith("PRICE ALERT: BTC/USDT:USDT surged")
 
 
+def test_extract_event_lines_prefix_in_freetext_no_oversplit():
+    from src.cli.display import _extract_event_lines
+    # A price-level alert whose reasoning literally contains "PRICE ALERT" must stay ONE bullet.
+    wake = (
+        "You have been woken up by a alert trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 15m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "PRICE LEVEL: BTC/USDT:USDT reached 80050.00 (alert id=a1 above 80000.00 "
+        "— watch for PRICE ALERT confirmation) — fired 2026-06-01 14:34 UTC (4 min ago)"
+    )
+    lines = _extract_event_lines(wake, "alert")
+    assert len(lines) == 1
+    assert lines[0].startswith("PRICE LEVEL: BTC/USDT:USDT reached 80050.00")
+    assert "watch for PRICE ALERT confirmation" in lines[0]
+
+
 def test_clean_field_strips_bold_and_collapses_whitespace():
     from src.cli.display import _clean_field
     raw = "Flat. MA20 reclaim **confirmed**\n  by 07:30 close;   bearish bias tempered."
