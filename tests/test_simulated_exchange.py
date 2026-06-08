@@ -1607,3 +1607,44 @@ def test_sim_close_paths_capture_entry_before_close_position_core():
 
     missing = [name for name, ok in found.items() if not ok]
     assert not missing, f"sim close paths not scanned: {missing}"
+
+
+async def test_sync_market_writes_closed_sim_order(db_engine):
+    """G3：同步市价开/平仓后 sim_orders 各有一行 status='closed'，filled_price/fee/filled_at 齐全。"""
+    from sqlalchemy import select
+    from src.storage.database import get_session
+    from src.storage.models import SimOrder
+    from src.integrations.exchange.base import FillEvent, Ticker
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from tests._sim_fixtures import make_session
+    from unittest.mock import MagicMock
+
+    sid = await make_session(db_engine, initial_balance=100.0, fee_rate=0.0005)
+    config = MagicMock(); config.fee_rate = 0.0005
+    ex = SimulatedExchange(config=config, db_engine=db_engine,
+                           session_id=sid, symbol="BTC/USDT:USDT")
+    ex._free_usdt = 100.0; ex._used_usdt = 0.0; ex._frozen_usdt = 0.0
+    ex._positions = {}; ex._pending_orders = []; ex._leverage = {"BTC/USDT:USDT": 3}
+    ex._latest_ticker = Ticker(symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0,
+                               ask=95010.0, high=96000.0, low=94000.0,
+                               base_volume=1000.0, timestamp=1712534400000)
+    ex._latest_mark_price = 95000.0
+
+    open_fill = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    close_fill = await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.001)
+
+    async with get_session(db_engine) as s:
+        rows = (await s.execute(
+            select(SimOrder).where(SimOrder.session_id == sid)
+                            .where(SimOrder.order_type == "market")
+        )).scalars().all()
+    by_id = {r.order_id: r for r in rows}
+    for fill in (open_fill, close_fill):
+        row = by_id[fill.order_id]
+        assert row.status == "closed"
+        assert row.filled_price == fill.fill_price
+        assert row.fee == fill.fee
+        assert row.filled_at is not None
+
+    closed = await ex.fetch_closed_orders("BTC/USDT:USDT")
+    assert len([o for o in closed if o.order_type == "market"]) == 2
