@@ -569,3 +569,24 @@ def test_no_block_admonition_lost_to_griffe_stripping():
         "src/agent/tools_descriptions.py)."
     )
 
+
+def _tool_desc(name: str) -> str:
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    return agent._function_toolset.tools[name].tool_def.description
+
+
+def test_open_position_docstring_sync_semantics():
+    desc = _tool_desc("open_position").lower()
+    assert "synchronous" in desc or "fills synchronously" in desc
+    assert "same cycle" in desc
+    assert "separate trigger" not in desc
+    assert "not in the same cycle" not in desc
+
+
+def test_close_position_docstring_sync_semantics():
+    desc = _tool_desc("close_position").lower()
+    assert "synchronous" in desc or "realized pnl" in desc
+    assert "separate trigger" not in desc
+

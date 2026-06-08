@@ -274,7 +274,7 @@ async def test_open_position_output_includes_est_entry_fee():
 
 
 def test_open_position_wrapper_docstring_mentions_fee():
-    """Wrapper docstring preserves fill-timing sentence + appends fee mention."""
+    """Wrapper docstring carries sync-fill timing sentence + fee mention."""
     import ast
 
     src = _TRADER_PY.read_text()
@@ -291,8 +291,8 @@ def test_open_position_wrapper_docstring_mentions_fee():
                 break
 
     assert docstring is not None, "open_position wrapper docstring not found in trader.py"
-    assert "Position fills via market order; you will receive a fill notification" in docstring
-    assert "Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee." in docstring
+    assert "The market order fills synchronously" in docstring
+    assert "Entry incurs taker fee = notional × fee_rate; the return reports the actual fee." in docstring
 
 
 @pytest.mark.asyncio
@@ -431,7 +431,7 @@ async def test_close_position_approval_message_includes_gross_and_net():
 
 
 def test_close_position_wrapper_docstring_mentions_fee():
-    """Wrapper docstring appends fee/net-PnL mention."""
+    """Wrapper docstring carries sync realized-PnL timing + fee/net mention."""
     import ast
 
     src = _TRADER_PY.read_text()
@@ -446,9 +446,9 @@ def test_close_position_wrapper_docstring_mentions_fee():
                 break
 
     assert docstring is not None, "close_position wrapper docstring not found in trader.py"
-    assert "Close incurs taker fee on exit." in docstring
-    assert "est. exit fee" in docstring
-    assert "est. round-trip net PnL" in docstring
+    assert "The close fills synchronously" in docstring
+    assert "realized PnL" in docstring
+    assert "Close incurs taker fee on exit (included in the round-trip net)." in docstring
 
 
 # === Task 6: close_position sync FillEvent → realized PnL + round-trip net ===

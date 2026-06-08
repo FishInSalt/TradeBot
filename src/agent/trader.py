@@ -497,12 +497,12 @@ def create_trader_agent(
     ) -> str:
         """Open a new market-order position.
 
-        Position fills via market order; you will receive a fill notification
-        when execution completes (separate trigger, not in the same cycle).
-        Stop loss and take profit place against an existing position, so they
-        require the fill notification.
+        The market order fills synchronously: this call returns the actual fill
+        (price and fee) and the position exists immediately. Set stop loss and
+        take profit in the SAME cycle right after — the position is UNPROTECTED
+        until you do.
 
-        Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee.
+        Entry incurs taker fee = notional × fee_rate; the return reports the actual fee.
 
         Args:
             side: 'long' or 'short'.
@@ -518,10 +518,11 @@ def create_trader_agent(
     async def close_position(ctx: RunContext[TradingDeps], reasoning: str) -> str:
         """Close all open positions via market order.
 
-        Position closure fills via market order; you will receive a fill
-        notification when execution completes (separate trigger).
+        The close fills synchronously: this call returns the realized PnL
+        (gross and round-trip net) in the same cycle. Reflect on the outcome
+        right here — no separate fill notification follows.
 
-        Close incurs taker fee on exit. Submit output includes est. exit fee and est. round-trip net PnL.
+        Close incurs taker fee on exit (included in the round-trip net).
 
         Args:
             reasoning: brief description of your decision logic (e.g., 'TP target hit', 'thesis invalidated').
