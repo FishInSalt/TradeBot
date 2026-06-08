@@ -579,7 +579,7 @@ def _tool_desc(name: str) -> str:
 
 def test_open_position_docstring_sync_semantics():
     desc = _tool_desc("open_position").lower()
-    assert "synchronous" in desc or "fills synchronously" in desc
+    assert "synchronous" in desc
     assert "same cycle" in desc
     assert "separate trigger" not in desc
     assert "not in the same cycle" not in desc
@@ -587,6 +587,8 @@ def test_open_position_docstring_sync_semantics():
 
 def test_close_position_docstring_sync_semantics():
     desc = _tool_desc("close_position").lower()
-    assert "synchronous" in desc or "realized pnl" in desc
+    assert "synchronous" in desc
+    assert "realized pnl" in desc
+    assert "same cycle" in desc
     assert "separate trigger" not in desc
 
