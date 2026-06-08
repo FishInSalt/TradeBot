@@ -3809,6 +3809,7 @@ def test_summarize_sync_open_fill():
     from src.cli.display import _summarize_open_position
     out = _summarize_open_position("Filled: long 0.050000 @ 84200.00, 3x | ID: op1")
     assert "long" in out and "84,200" in out and "3x" in out
+    assert "0.050000" in out
 
 
 def test_summarize_sync_close():
