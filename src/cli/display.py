@@ -776,74 +776,39 @@ _TRIGGER_LINE_PREFIX = "  Trigger    "
 _STATE_LINE_PREFIX = "  State      "
 
 
-def _format_trigger_detail(trigger_type: str, ctx: dict | None) -> str:
-    """Format Header 'Trigger    ...' line per spec §4.1.3.
+def _format_trigger_detail(trigger_type: str, ctx) -> str:
+    """Format Header 'Trigger    ...' line (spec 2026-06-08 §3): type + count only.
 
-    Returns the entire content after the column prefix; e.g.,
-        "ALERT — vol -1.6%/10min fired (BTC 76,225 → 75,448)"
-        "SCHEDULED"
+    Per-event detail (fill PnL / alert summary) lives in the ▾ Context section now,
+    not the Header (the Header can't fit N events; detail is preserved losslessly in
+    Context). Accepts the new batch list `list[dict|None]`, a legacy single dict, or None.
+
+    Returns:
+        N<=1 (incl. legacy single-object / None) → bare type, e.g. "ALERT" / "SCHEDULED".
+        N>1 → "<TYPE> +<N-1> (<breakdown>)", e.g. "CONDITIONAL +2 (1 fill, 2 alerts)".
     """
     type_upper = trigger_type.upper()
-    if not ctx:
+    if ctx is None:
+        events = []
+    elif isinstance(ctx, dict):
+        events = [ctx]                       # legacy single-object row
+    else:
+        events = list(ctx)
+    n = len(events)
+    if n <= 1:
         return type_upper
-
-    ctx_type = ctx.get("type")
-
-    if ctx_type == "scheduled_tick":
-        # spec §4.1.3 verbatim: "Trigger    SCHEDULED" — 无 em-dash 后缀
-        return type_upper
-
-    if ctx_type == "fill":
-        # spec §6.1 T-EH-3 partial degradation: 缺 fill_price / 其他字段 → 保留 trigger_reason
-        # （TP/SL/liquidation/market_close 区分是 conditional cycle 排查关键信息）
-        tr = ctx.get("trigger_reason")
-        if tr is None:
-            return type_upper  # 连 trigger_reason 都缺 → 全 fallback
-        # FillEvent.pnl 开仓时正常即 None — PnL 段独立 try，不让 None 拖垮前段渲染
-        try:
-            symbol_short = (ctx.get("symbol") or "").split("/")[0]
-            front = (
-                f"{type_upper} — {tr} {ctx['position_side']} "
-                f"{symbol_short} {ctx['amount']} @ ${ctx['fill_price']:,.0f}"
-            )
-        except (KeyError, TypeError):
-            return f"{type_upper} — {tr}"  # spec §6.1 T-EH-3: 部分降级保留 trigger_reason
-        pnl = ctx.get("pnl")
-        if pnl is not None:
-            try:
-                return f"{front}, PnL {pnl:+.2f} USDT"
-            except (TypeError, ValueError):
-                pass  # pnl 字段类型异常 → 回落到无 PnL 段
-        return front
-
-    if ctx_type == "price_level_alert":
-        try:
-            symbol_short = (ctx.get("symbol") or "").split("/")[0]
-            return (
-                f"{type_upper} — {symbol_short} reached "
-                f"{ctx['current_price']:,.0f} ({ctx['direction']} "
-                f"${ctx['target_price']:,.0f} alert)"
-            )
-        except (KeyError, TypeError):
-            return type_upper
-
-    if ctx_type == "percentage_alert":
-        try:
-            symbol_short = (ctx.get("symbol") or "").split("/")[0]
-            return (
-                f"{type_upper} — vol {ctx['change_pct']:+.1f}%/{ctx['window_minutes']}min "
-                f"fired ({symbol_short} {ctx['reference_price']:,.0f} → "
-                f"{ctx['current_price']:,.0f})"
-            )
-        except (KeyError, TypeError):
-            return type_upper
-
-    # Unknown type (schema drift) — fallback to bare type
-    logger.warning(
-        "trigger_context.type unknown: %r (keys=%r)",
-        ctx_type, list(ctx.keys()) if ctx else None,
+    n_fill = sum(1 for e in events if isinstance(e, dict) and e.get("type") == "fill")
+    n_alert = sum(
+        1 for e in events
+        if isinstance(e, dict) and e.get("type") in ("price_level_alert", "percentage_alert")
     )
-    return type_upper
+    parts: list[str] = []
+    if n_fill:
+        parts.append(f"{n_fill} fill{'s' if n_fill > 1 else ''}")
+    if n_alert:
+        parts.append(f"{n_alert} alert{'s' if n_alert > 1 else ''}")
+    breakdown = ", ".join(parts) if parts else f"{n} events"
+    return f"{type_upper} +{n - 1} ({breakdown})"
 
 
 def _format_state_line(state_snapshot: dict | None) -> str:
