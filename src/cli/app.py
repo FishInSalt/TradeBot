@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select, update as sql_update
 
@@ -37,7 +38,7 @@ from src.config import ExchangeConfig, PersonaConfig, Settings, load_settings, l
 from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
-from src.services.cycle_capture import _capture_state_snapshot, _capture_trigger_context
+from src.services.cycle_capture import _capture_state_snapshot, _capture_trigger_contexts
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
 from src.storage.models import AgentCycle, Session, TradeAction
@@ -377,6 +378,91 @@ def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetim
     )
 
 
+def _wake_header_line(events: list[tuple[str, Any]], cycle_started_at: datetime) -> str:
+    """Build the wake-prompt header line (spec 2026-06-08 §2).
+
+    N==1: byte-identical to the prior single-trigger header
+    (`You have been woken up by a {type} trigger`), with the scheduled fire-time suffix
+    appended only for scheduled (its fire time ≡ cycle_started_at → "just now").
+    N>1: a multi-event header `You have been woken up by {n} triggers ({breakdown}) since
+    the last cycle`, breakdown lists fills before alerts (matching heap priority
+    conditional<alert).
+    """
+    if len(events) == 1:
+        tt = events[0][0]
+        line = f"You have been woken up by a {tt} trigger"
+        if tt == "scheduled":
+            line += _wake_time_suffix(
+                "fired", int(cycle_started_at.timestamp() * 1000), cycle_started_at,
+            )
+        return line
+    n = len(events)
+    n_fill = sum(1 for tt, _ in events if tt == "conditional")
+    n_alert = sum(1 for tt, _ in events if tt == "alert")
+    parts: list[str] = []
+    if n_fill:
+        parts.append(f"{n_fill} fill{'s' if n_fill > 1 else ''}")
+    if n_alert:
+        parts.append(f"{n_alert} alert{'s' if n_alert > 1 else ''}")
+    breakdown = ", ".join(parts) if parts else f"{n} events"
+    return f"You have been woken up by {n} triggers ({breakdown}) since the last cycle"
+
+
+async def _render_event_block(deps, trigger_type: str, context, cycle_started_at: datetime) -> str:
+    """Render one event's prompt block (spec 2026-06-08 §2), verbatim with the prior
+    inline assembly so N==1 prompts are byte-identical.
+
+    Async + IO: the full-close fill branch awaits `deps.exchange.get_contract_size` and
+    reads `deps.fee_rate` (symbol from `context.symbol`). scheduled / context-None → "".
+    """
+    if trigger_type == "conditional" and context is not None:
+        msg = (
+            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
+            f"— {context.symbol} {context.amount} @ {context.fill_price}"
+        )
+        if context.pnl is None:
+            # Open fill — fee only
+            msg += f", Fee: {-context.fee:+.2f} USDT"
+        elif context.is_full_close and context.entry_price is not None:
+            # Full close fill — fee + gross + equiv-round-trip net.
+            # contract_size factor required for USDT-denominated entry_fee — matches
+            # tools_perception.py / tools_execution.py convention.
+            _contract_size = await deps.exchange.get_contract_size(context.symbol)
+            entry_fee_recompute = (
+                context.entry_price * context.amount * _contract_size * deps.fee_rate
+            )
+            round_trip_net = -entry_fee_recompute + context.pnl - context.fee
+            msg += (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} USDT (gross) / "
+                f"{round_trip_net:+.2f} USDT (this fill, equiv-round-trip)"
+            )
+        else:
+            # Part close, OR full close with no entry_price (OKX cache miss —
+            # e.g., SL/TP placed in a prior process before restart). fact-provider
+            # principle: emit hint so agent knows why round-trip line is absent
+            # on full-close fills, distinguishing from part-close design.
+            base = (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} USDT (gross)"
+            )
+            if context.is_full_close and context.entry_price is None:
+                base += " [round-trip net unavailable: entry_price not cached]"
+            msg += base
+        msg += _wake_time_suffix("filled", context.timestamp, cycle_started_at)
+        return msg
+    if trigger_type == "alert" and context is not None:
+        if isinstance(context, PriceLevelAlertInfo):
+            return _format_price_level_alert_trigger(context, cycle_started_at)
+        direction = "dropped" if context.change_pct < 0 else "surged"
+        return (
+            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+            + _wake_time_suffix("fired", context.timestamp, cycle_started_at)
+        )
+    return ""
+
+
 async def _build_recent_summaries_block(
     engine, session_id: str, n: int = 3,
 ) -> str:
@@ -485,10 +571,9 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
 async def run_agent_cycle(
     agent,
     deps: TradingDeps,
-    trigger_type: str,
+    events: list[tuple[str, Any]],
     budget: TokenBudget,
     engine,
-    context=None,
     model=None,
     console=None,
     stats: SessionStats | None = None,
@@ -507,70 +592,28 @@ async def run_agent_cycle(
     # (一次, success / forensic 两路径复用同一对 *_var)
     # P8: 必须在 `for attempt in range(3):` retry loop 之前, 不能在 loop 内
     # (重复 capture 会让 IO 4× retry + state_snapshot 时刻漂移 + 违反 §6.7 不变量)
-    trigger_context_var = _capture_trigger_context(cycle_id, trigger_type, context)
+    trigger_context_var = _capture_trigger_contexts(cycle_id, events)
+    # triggered_by = dominant (highest-priority) type — events arrive in heap priority
+    # order (conditional > alert > scheduled; see scheduler.py drain), so the lead element
+    # is the dominant type. Precondition: events is always non-empty — the scheduler passes
+    # at least the degenerate [("scheduled", None)] tick — so events[0] never IndexErrors.
+    triggered_by = events[0][0]
     state_snapshot_var = await _capture_state_snapshot(cycle_id, deps)
     # PR #35 I3: 与 capture-once P8 同模式 — hoist model_id 到 retry loop 之前
     # 防 forensic 路径在 except 块内 getattr/str(agent.model) raise 致整 cycle 写入丢失.
     model_id_var = getattr(model, 'model_name', str(model)) if model else str(agent.model)
 
-    # Wake-event time clause (spec 2026-06-08): {verb} {UTC} ({age}) on the event line.
-    # now-anchor = cycle_started_at; scheduled's fire time ≡ now → renders "just now".
-    header_line = f"You have been woken up by a {trigger_type} trigger"
-    if trigger_type == "scheduled":
-        header_line += _wake_time_suffix(
-            "fired", int(cycle_started_at.timestamp() * 1000), cycle_started_at,
-        )
+    # Wake prompt (spec 2026-06-08 §2): priority-sectioned. N==1 is byte-identical to the
+    # prior single-event prompt; N>1 uses a multi-trigger header + one block per event in
+    # heap priority order (fills before alerts).
+    header_line = _wake_header_line(events, cycle_started_at)
     prompt = (
         f"{header_line}.\n"
         f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"
         "Assess the situation and decide what to do."
     )
-    if trigger_type == "conditional" and context is not None:
-        msg = (
-            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
-            f"— {context.symbol} {context.amount} @ {context.fill_price}"
-        )
-        if context.pnl is None:
-            # Open fill — fee only
-            msg += f", Fee: {-context.fee:+.2f} USDT"
-        elif context.is_full_close and context.entry_price is not None:
-            # Full close fill — fee + gross + equiv-round-trip net.
-            # contract_size factor required for USDT-denominated entry_fee — matches
-            # tools_perception.py / tools_execution.py convention.
-            _contract_size = await deps.exchange.get_contract_size(context.symbol)
-            entry_fee_recompute = (
-                context.entry_price * context.amount * _contract_size * deps.fee_rate
-            )
-            round_trip_net = -entry_fee_recompute + context.pnl - context.fee
-            msg += (
-                f", Fee: {-context.fee:+.2f} USDT, "
-                f"PnL: {context.pnl:+.2f} USDT (gross) / "
-                f"{round_trip_net:+.2f} USDT (this fill, equiv-round-trip)"
-            )
-        else:
-            # Part close, OR full close with no entry_price (OKX cache miss —
-            # e.g., SL/TP placed in a prior process before restart). fact-provider
-            # principle: emit hint so agent knows why round-trip line is absent
-            # on full-close fills, distinguishing from part-close design.
-            base = (
-                f", Fee: {-context.fee:+.2f} USDT, "
-                f"PnL: {context.pnl:+.2f} USDT (gross)"
-            )
-            if context.is_full_close and context.entry_price is None:
-                base += " [round-trip net unavailable: entry_price not cached]"
-            msg += base
-        msg += _wake_time_suffix("filled", context.timestamp, cycle_started_at)
-        prompt += msg
-    elif trigger_type == "alert" and context is not None:
-        if isinstance(context, PriceLevelAlertInfo):
-            prompt += _format_price_level_alert_trigger(context, cycle_started_at)
-        else:
-            direction = "dropped" if context.change_pct < 0 else "surged"
-            prompt += (
-                f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
-                f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
-                + _wake_time_suffix("fired", context.timestamp, cycle_started_at)
-            )
+    for tt, ctx in events:
+        prompt += await _render_event_block(deps, tt, ctx, cycle_started_at)
 
     # R2-8b: inject most recent N=3 cycle summaries from this session
     # (D-D-E injection position: trigger context → recent).
@@ -614,7 +657,7 @@ async def run_agent_cycle(
                 session.add(AgentCycle(
                     session_id=deps.session_id,
                     cycle_id=cycle_id,
-                    triggered_by=trigger_type,
+                    triggered_by=triggered_by,
                     trigger_context=json.dumps(trigger_context_var) if trigger_context_var else None,
                     state_snapshot=json.dumps(state_snapshot_var),
                     reasoning=None,                              # R2-7 §6.5: forensic NULL
@@ -640,7 +683,7 @@ async def run_agent_cycle(
             if console is not None:
                 from src.cli.display import CycleRenderContext
                 ctx = CycleRenderContext(
-                    cycle_id=cycle_id, trigger_type=trigger_type,
+                    cycle_id=cycle_id, trigger_type=triggered_by,
                     trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
                     messages=None, final_text=None,
                     cycle_tokens=0, stats=stats, cache_hit_rate=None,
@@ -667,7 +710,7 @@ async def run_agent_cycle(
                     session.add(AgentCycle(
                         session_id=deps.session_id,
                         cycle_id=cycle_id,
-                        triggered_by=trigger_type,
+                        triggered_by=triggered_by,
                         trigger_context=json.dumps(trigger_context_var) if trigger_context_var else None,
                         state_snapshot=json.dumps(state_snapshot_var),
                         reasoning=None,
@@ -693,7 +736,7 @@ async def run_agent_cycle(
                 if console is not None:
                     from src.cli.display import CycleRenderContext
                     ctx = CycleRenderContext(
-                        cycle_id=cycle_id, trigger_type=trigger_type,
+                        cycle_id=cycle_id, trigger_type=triggered_by,
                         trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
                         messages=None, final_text=None,
                         cycle_tokens=0, stats=stats, cache_hit_rate=None,
@@ -771,7 +814,7 @@ async def run_agent_cycle(
             AgentCycle(
                 session_id=deps.session_id,
                 cycle_id=cycle_id,
-                triggered_by=trigger_type,
+                triggered_by=triggered_by,
                 trigger_context=json.dumps(trigger_context_var) if trigger_context_var else None,
                 state_snapshot=json.dumps(state_snapshot_var),
                 reasoning=thinking_text,                          # R2-7 §6.3: thinking content
@@ -804,7 +847,7 @@ async def run_agent_cycle(
     if console is not None:
         from src.cli.display import CycleRenderContext
         ctx = CycleRenderContext(
-            cycle_id=cycle_id, trigger_type=trigger_type,
+            cycle_id=cycle_id, trigger_type=triggered_by,
             trigger_context=trigger_context_var, state_snapshot=state_snapshot_var,
             messages=result.new_messages(), final_text=result.output,
             cycle_tokens=tokens, stats=stats, cache_hit_rate=hit_rate,
@@ -1077,13 +1120,13 @@ async def run(
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _signal_handler)
 
-    async def on_tick(trigger_type: str, context=None):
+    async def on_tick(events: list[tuple[str, Any]]):
         if shutdown_event.is_set():
             return
         try:
             await run_agent_cycle(
-                agent, deps, trigger_type, budget, engine,
-                context, model=result.model, console=sc, stats=stats,
+                agent, deps, events, budget, engine,
+                model=result.model, console=sc, stats=stats,
             )
         except Exception:
             logger.exception("Agent cycle failed")

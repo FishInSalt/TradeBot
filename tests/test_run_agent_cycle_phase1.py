@@ -27,7 +27,7 @@ async def test_happy_path_fills_all_8_fields(make_usage, deps_factory, db_engine
     deps = deps_factory()
     budget = TokenBudget(daily_max=100000)
     await run_agent_cycle(
-        mock_agent, deps, "scheduled", budget, db_engine,
+        mock_agent, deps, [("scheduled", None)], budget, db_engine,
     )
 
     row = (await db_session.execute(
@@ -57,7 +57,7 @@ async def test_usage_limit_exceeded_only_wall_time_filled(deps_factory, db_engin
     deps = deps_factory()
     budget = TokenBudget(daily_max=100000)
     await run_agent_cycle(
-        mock_agent, deps, "scheduled", budget, db_engine,
+        mock_agent, deps, [("scheduled", None)], budget, db_engine,
     )
 
     row = (await db_session.execute(
@@ -87,7 +87,7 @@ async def test_retry_exhausted_only_wall_time_filled(deps_factory, db_engine, db
     budget = TokenBudget(daily_max=100000)
     with patch("asyncio.sleep", new=AsyncMock()):  # skip backoff for fast test
         await run_agent_cycle(
-            mock_agent, deps, "scheduled", budget, db_engine,
+            mock_agent, deps, [("scheduled", None)], budget, db_engine,
         )
 
     row = (await db_session.execute(

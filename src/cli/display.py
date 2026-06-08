@@ -725,7 +725,7 @@ class CycleRenderContext:
     """
     cycle_id: str
     trigger_type: str               # "scheduled" / "conditional" / "alert"
-    trigger_context: dict | None    # in-memory dict from _capture_trigger_context
+    trigger_context: list[dict | None] | dict | None  # batch list (spec 2026-06-08); legacy single dict tolerated
     state_snapshot: dict | None     # in-memory dict from _capture_state_snapshot
     messages: list | None
     final_text: str | None
@@ -776,74 +776,41 @@ _TRIGGER_LINE_PREFIX = "  Trigger    "
 _STATE_LINE_PREFIX = "  State      "
 
 
-def _format_trigger_detail(trigger_type: str, ctx: dict | None) -> str:
-    """Format Header 'Trigger    ...' line per spec §4.1.3.
+def _format_trigger_detail(trigger_type: str, ctx) -> str:
+    """Format Header 'Trigger    ...' line (spec 2026-06-08 §3): type + count only.
 
-    Returns the entire content after the column prefix; e.g.,
-        "ALERT — vol -1.6%/10min fired (BTC 76,225 → 75,448)"
-        "SCHEDULED"
+    Per-event detail (fill PnL / alert summary) lives in the ▾ Context section now,
+    not the Header (the Header can't fit N events; detail is preserved losslessly in
+    Context). Accepts the new batch list `list[dict|None]`, a legacy single dict, or None.
+
+    Returns:
+        N<=1 (incl. legacy single-object / None) → bare type, e.g. "ALERT" / "SCHEDULED".
+        N>1 → "<TYPE> +<N-1> (<breakdown>)", e.g. "CONDITIONAL +2 (1 fill, 2 alerts)".
     """
     type_upper = trigger_type.upper()
-    if not ctx:
+    if ctx is None:
+        events = []
+    elif isinstance(ctx, dict):
+        events = [ctx]                       # legacy single-object row
+    else:
+        events = list(ctx)
+    n = len(events)
+    if n <= 1:
         return type_upper
-
-    ctx_type = ctx.get("type")
-
-    if ctx_type == "scheduled_tick":
-        # spec §4.1.3 verbatim: "Trigger    SCHEDULED" — 无 em-dash 后缀
-        return type_upper
-
-    if ctx_type == "fill":
-        # spec §6.1 T-EH-3 partial degradation: 缺 fill_price / 其他字段 → 保留 trigger_reason
-        # （TP/SL/liquidation/market_close 区分是 conditional cycle 排查关键信息）
-        tr = ctx.get("trigger_reason")
-        if tr is None:
-            return type_upper  # 连 trigger_reason 都缺 → 全 fallback
-        # FillEvent.pnl 开仓时正常即 None — PnL 段独立 try，不让 None 拖垮前段渲染
-        try:
-            symbol_short = (ctx.get("symbol") or "").split("/")[0]
-            front = (
-                f"{type_upper} — {tr} {ctx['position_side']} "
-                f"{symbol_short} {ctx['amount']} @ ${ctx['fill_price']:,.0f}"
-            )
-        except (KeyError, TypeError):
-            return f"{type_upper} — {tr}"  # spec §6.1 T-EH-3: 部分降级保留 trigger_reason
-        pnl = ctx.get("pnl")
-        if pnl is not None:
-            try:
-                return f"{front}, PnL {pnl:+.2f} USDT"
-            except (TypeError, ValueError):
-                pass  # pnl 字段类型异常 → 回落到无 PnL 段
-        return front
-
-    if ctx_type == "price_level_alert":
-        try:
-            symbol_short = (ctx.get("symbol") or "").split("/")[0]
-            return (
-                f"{type_upper} — {symbol_short} reached "
-                f"{ctx['current_price']:,.0f} ({ctx['direction']} "
-                f"${ctx['target_price']:,.0f} alert)"
-            )
-        except (KeyError, TypeError):
-            return type_upper
-
-    if ctx_type == "percentage_alert":
-        try:
-            symbol_short = (ctx.get("symbol") or "").split("/")[0]
-            return (
-                f"{type_upper} — vol {ctx['change_pct']:+.1f}%/{ctx['window_minutes']}min "
-                f"fired ({symbol_short} {ctx['reference_price']:,.0f} → "
-                f"{ctx['current_price']:,.0f})"
-            )
-        except (KeyError, TypeError):
-            return type_upper
-
-    # Unknown type (schema drift) — fallback to bare type
-    logger.warning(
-        "trigger_context.type unknown: %r (keys=%r)",
-        ctx_type, list(ctx.keys()) if ctx else None,
+    # None entries (per-event capture failure) are counted in n / the +{n-1} total but
+    # not in the type breakdown — the breakdown reflects recognized types only.
+    n_fill = sum(1 for e in events if isinstance(e, dict) and e.get("type") == "fill")
+    n_alert = sum(
+        1 for e in events
+        if isinstance(e, dict) and e.get("type") in ("price_level_alert", "percentage_alert")
     )
-    return type_upper
+    parts: list[str] = []
+    if n_fill:
+        parts.append(f"{n_fill} fill{'s' if n_fill > 1 else ''}")
+    if n_alert:
+        parts.append(f"{n_alert} alert{'s' if n_alert > 1 else ''}")
+    breakdown = ", ".join(parts) if parts else f"{n} events"
+    return f"{type_upper} +{n - 1} ({breakdown})"
 
 
 def _format_state_line(state_snapshot: dict | None) -> str:
@@ -891,7 +858,7 @@ def _format_state_line(state_snapshot: dict | None) -> str:
 def _render_header(
     cycle_id: str,
     trigger_type: str,
-    trigger_context: dict | None,
+    trigger_context: list[dict | None] | dict | None,
     state_snapshot: dict | None,
     cycle_started_at: datetime,
     stats: SessionStats,
@@ -908,7 +875,15 @@ def _render_header(
     sep_top = "═" * 75
     sep_mid = "─" * 75
 
-    trigger_line = _format_trigger_detail(trigger_type, trigger_context)
+    try:
+        trigger_line = _format_trigger_detail(trigger_type, trigger_context)
+    except Exception:
+        # _render_header is NOT inside a try in format_cycle_output; a raise here
+        # propagates out of the whole renderer to on_tick's except → misleading
+        # "Agent cycle failed" even though the cycle already committed. Degrade like
+        # _render_context does (spec 2026-06-08 §3).
+        logger.warning("Trigger header render failed; falling back to bare type", exc_info=True)
+        trigger_line = trigger_type.upper()
     state_line = _format_state_line(state_snapshot)
 
     return (
@@ -1005,23 +980,27 @@ def _truncate_with_marker(text: str, max_chars: int) -> str:
     return text[:max_chars] + f" ... [+{len(text) - max_chars} chars]"
 
 
-def _extract_event_line(wake_half: str, trigger_type: str) -> str | None:
-    """Extract the verbatim variable event text from the wake prompt (spec §3.3).
+def _extract_event_lines(wake_half: str, trigger_type: str) -> list[str]:
+    """Extract the verbatim variable event text(s) from the wake prompt (spec 2026-06-08 §3).
 
-    scheduled → None（无变量事件行；纯样板、零增量）。注：render 层
-    `_render_context` 仍为 scheduled 渲一行类型标签 `Woke by — SCHEDULED`
-    （镜像 Header `Trigger SCHEDULED`，使 Context 段跨 trigger 类型一致 / 自包含）。
-    conditional/alert → 以已知前缀（IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL）
-    锚定到 wake_half 末尾，原样保留（alert id / reasoning / fee / PnL / round-trip），
-    collapse 空白 + 上限截断。识别不到前缀 → None。
+    scheduled → [] (no variable event line; pure boilerplate). conditional/alert →
+    split `wake_half` at each known prefix (IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL)
+    into one segment per event, preserving alert id / reasoning / fee / PnL / age clause,
+    collapsing whitespace and truncating **each event individually** to `_CONTEXT_EVENT_CAP`.
+    No prefix found → [].
     """
     if trigger_type == "scheduled":
-        return None
-    positions = [p for p in (wake_half.find(pre) for pre in _EVENT_PREFIXES) if p != -1]
+        return []
+    pattern = re.compile("|".join(re.escape("\n\n" + p) for p in _EVENT_PREFIXES))
+    positions = [m.start() for m in pattern.finditer(wake_half)]
     if not positions:
-        return None
-    event = re.sub(r"\s+", " ", wake_half[min(positions):]).strip()
-    return _truncate_with_marker(event, _CONTEXT_EVENT_CAP)
+        return []
+    out: list[str] = []
+    for i, start in enumerate(positions):
+        end = positions[i + 1] if i + 1 < len(positions) else len(wake_half)
+        seg = re.sub(r"\s+", " ", wake_half[start:end]).strip()
+        out.append(_truncate_with_marker(seg, _CONTEXT_EVENT_CAP))
+    return out
 
 
 def _extract_scheduled_wake_suffix(wake_half: str) -> str:
@@ -1152,15 +1131,20 @@ def _render_context(
         return ""
     try:
         wake_half, summaries_half = _split_wake_prompt(user_prompt_snapshot)
-        event_line = _extract_event_line(wake_half, trigger_type)
+        event_lines = _extract_event_lines(wake_half, trigger_type)
         blocks = _parse_injected_summaries(summaries_half)
 
         lines: list[str] = []
-        if event_line:
-            lines.append(f"  Woke by — {escape(event_line)}")
+        if len(event_lines) == 1:
+            lines.append(f"  Woke by — {escape(event_lines[0])}")
+        elif len(event_lines) > 1:
+            # Batch wake (spec 2026-06-08 §3): one bullet per event, each truncated
+            # individually (Header carries only type+count; Context owns the detail).
+            lines.append(f"  Woke by — {len(event_lines)} events:")
+            for el in event_lines:
+                lines.append(f"    • {escape(el)}")
         elif trigger_type == "scheduled":
-            # scheduled 无变量事件行（_extract_event_line → None）；仍渲类型标签 +
-            # header 上的唤醒时间后缀，使 Context 段自包含（不必回看 Header 取 cycle 时间）。
+            # scheduled 无变量事件行；仍渲类型标签 + header 唤醒时间后缀，使 Context 段自包含。
             lines.append(f"  Woke by — SCHEDULED{_extract_scheduled_wake_suffix(wake_half)}")
 
         if blocks:

@@ -69,20 +69,28 @@ def test_split_wake_prompt_no_marker():
     assert summaries == ""
 
 
-def test_extract_event_line_scheduled_returns_none():
-    """scheduled → 事件行整体省略（spec §3.3）。"""
-    from src.cli.display import _extract_event_line
+def test_extract_event_lines_scheduled_empty():
+    from src.cli.display import _extract_event_lines
+    assert _extract_event_lines("anything", "scheduled") == []
+
+
+def test_extract_event_lines_single():
+    from src.cli.display import _extract_event_lines
     wake = (
-        "You have been woken up by a scheduled trigger.\n"
-        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
-        "Assess the situation and decide what to do."
+        "You have been woken up by a alert trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 15m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "PRICE LEVEL: BTC/USDT:USDT reached 80050.00 (alert id=a1 above 80000.00 — r)"
+        " — fired 2026-06-01 14:34 UTC (4 min ago)"
     )
-    assert _extract_event_line(wake, "scheduled") is None
+    lines = _extract_event_lines(wake, "alert")
+    assert len(lines) == 1
+    assert lines[0].startswith("PRICE LEVEL: BTC/USDT:USDT reached 80050.00")
 
 
-def test_extract_event_line_price_level_verbatim():
+def test_extract_event_lines_price_level_verbatim():
     """price-level alert → 保 alert id + reasoning，空白 collapse。"""
-    from src.cli.display import _extract_event_line
+    from src.cli.display import _extract_event_lines
     wake = (
         "You have been woken up by a alert trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
@@ -90,17 +98,17 @@ def test_extract_event_line_price_level_verbatim():
         "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 "
         "(alert id=934cfd above 73384.00 — MA20 reclaim: bounce)"
     )
-    line = _extract_event_line(wake, "alert")
-    assert line is not None
-    assert line.startswith("PRICE LEVEL:")
-    assert "alert id=934cfd" in line
-    assert "MA20 reclaim: bounce" in line
-    assert "You have been woken up" not in line  # scaffold 已剥离
+    lines = _extract_event_lines(wake, "alert")
+    assert len(lines) == 1
+    assert lines[0].startswith("PRICE LEVEL:")
+    assert "alert id=934cfd" in lines[0]
+    assert "MA20 reclaim: bounce" in lines[0]
+    assert "You have been woken up" not in lines[0]  # scaffold 已剥离
 
 
-def test_extract_event_line_conditional_fill():
+def test_extract_event_lines_conditional_fill():
     """conditional fill → 保 fee/PnL 段。"""
-    from src.cli.display import _extract_event_line
+    from src.cli.display import _extract_event_lines
     wake = (
         "You have been woken up by a conditional trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
@@ -108,16 +116,50 @@ def test_extract_event_line_conditional_fill():
         "IMPORTANT EVENT: take_profit triggered — BTC/USDT:USDT 0.265 @ 75350.0, "
         "Fee: -2.10 USDT, PnL: +12.40 USDT (gross) / +8.20 USDT (this fill, equiv-round-trip)"
     )
-    line = _extract_event_line(wake, "conditional")
-    assert line.startswith("IMPORTANT EVENT: take_profit triggered")
-    assert "PnL: +12.40 USDT (gross)" in line
+    lines = _extract_event_lines(wake, "conditional")
+    assert len(lines) == 1
+    assert lines[0].startswith("IMPORTANT EVENT: take_profit triggered")
+    assert "PnL: +12.40 USDT (gross)" in lines[0]
 
 
-def test_extract_event_line_no_known_prefix_returns_none():
-    """alert 但无任何已知前缀（识别不到）→ None（不渲 Woke by）。"""
-    from src.cli.display import _extract_event_line
+def test_extract_event_lines_no_known_prefix_returns_empty():
+    """alert 但无任何已知前缀（识别不到）→ []（不渲 Woke by）。"""
+    from src.cli.display import _extract_event_lines
     wake = "You have been woken up by a alert trigger.\nTrading pair: X | Timeframe: 5m\n..."
-    assert _extract_event_line(wake, "alert") is None
+    assert _extract_event_lines(wake, "alert") == []
+
+
+def test_extract_event_lines_multi_splits_per_prefix():
+    from src.cli.display import _extract_event_lines
+    wake = (
+        "You have been woken up by 2 triggers (1 fill, 1 alert) since the last cycle.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 15m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "IMPORTANT EVENT: tp triggered — BTC/USDT:USDT 1.0 @ 80000, Fee: -1.00 USDT"
+        " — filled 2026-06-01 14:34 UTC (1 min ago)\n\n"
+        "PRICE ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)"
+        " — fired 2026-06-01 14:34 UTC (2 min ago)"
+    )
+    lines = _extract_event_lines(wake, "conditional")
+    assert len(lines) == 2
+    assert lines[0].startswith("IMPORTANT EVENT: tp triggered")
+    assert lines[1].startswith("PRICE ALERT: BTC/USDT:USDT surged")
+
+
+def test_extract_event_lines_prefix_in_freetext_no_oversplit():
+    from src.cli.display import _extract_event_lines
+    # A price-level alert whose reasoning literally contains "PRICE ALERT" must stay ONE bullet.
+    wake = (
+        "You have been woken up by a alert trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 15m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "PRICE LEVEL: BTC/USDT:USDT reached 80050.00 (alert id=a1 above 80000.00 "
+        "— watch for PRICE ALERT confirmation) — fired 2026-06-01 14:34 UTC (4 min ago)"
+    )
+    lines = _extract_event_lines(wake, "alert")
+    assert len(lines) == 1
+    assert lines[0].startswith("PRICE LEVEL: BTC/USDT:USDT reached 80050.00")
+    assert "watch for PRICE ALERT confirmation" in lines[0]
 
 
 def test_clean_field_strips_bold_and_collapses_whitespace():
@@ -502,6 +544,26 @@ def test_render_context_alert_first_cycle_woke_by_and_placeholder():
     out = format_cycle_output(_ctx("alert", snap, messages=msgs))  # default stats = 首 cycle
     assert "Woke by — PRICE LEVEL:" in out
     assert "Carried thesis — none (first cycle in this session)" in out
+
+
+def test_render_context_multi_event_batch_bullets():
+    """batch wake (2 events) → Context 段含 'Woke by — 2 events:' + 两条 bullet 行。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    snap = (
+        "You have been woken up by 2 triggers (1 fill, 1 alert) since the last cycle.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 15m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "IMPORTANT EVENT: tp triggered — BTC/USDT:USDT 1.0 @ 80000, Fee: -1.00 USDT"
+        " — filled 2026-06-01 14:34 UTC (1 min ago)\n\n"
+        "PRICE ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)"
+        " — fired 2026-06-01 14:34 UTC (2 min ago)"
+    )
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("conditional", snap, messages=msgs))
+    assert "Woke by — 2 events:" in out
+    assert "• IMPORTANT EVENT: tp triggered" in out
+    assert "• PRICE ALERT: BTC/USDT:USDT surged" in out
 
 
 def test_render_context_non_first_cycle_empty_blocks_no_false_placeholder():

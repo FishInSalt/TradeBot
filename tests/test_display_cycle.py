@@ -583,9 +583,8 @@ def test_render_header_full_alert_trigger():
     assert "9f57" in out
     assert "18:14:23 UTC" in out
     assert "+12 min from prev" in out
+    # Header Trigger line: spec 2026-06-08 §3 — type+count only (per-event detail in Context)
     assert "ALERT" in out
-    assert "vol -1.6%/10min" in out
-    assert "75,448" in out and "76,225" in out
     assert "Short 0.265 @ $75,350" in out
     assert "(5x)" in out
     assert "PnL +0.10%" in out
@@ -1137,21 +1136,22 @@ def test_int_12_decision_empty_string_placeholder():
     assert "[empty decision text]" in out
 
 
-def test_int_10_unknown_trigger_type_fallback(caplog):
-    """T-INT-10 / T-EH-2 (renumbered): trigger_context.type 未知 → fallback {TYPE_UPPER} 不带详情."""
-    import logging
+def test_int_10_unknown_trigger_type_fallback():
+    """T-INT-10 / T-EH-2 (renumbered): trigger_context.type 未知 (single dict) → bare {TYPE_UPPER}.
+
+    spec 2026-06-08 §3: single-event (dict or 1-element list) → bare type, no detail.
+    Unknown type is just a single-event case — falls through to bare type without warning.
+    """
     from src.cli.display import format_cycle_output
     from tests.fixtures.cycle_fixtures import build_cycle_messages
     msgs = build_cycle_messages(thinking_segments=["t"], tool_call_segments=[[]], final_text="d")
-    with caplog.at_level(logging.WARNING):
-        out = format_cycle_output(_make_ctx(
-            messages=msgs, final_text="d", trigger_type="alert",
-            trigger_context={"type": "unknown_future_type"},
-        ))
+    out = format_cycle_output(_make_ctx(
+        messages=msgs, final_text="d", trigger_type="alert",
+        trigger_context={"type": "unknown_future_type"},
+    ))
     trigger_line = next(l for l in out.splitlines() if "Trigger" in l)
     assert "ALERT" in trigger_line
     assert "—" not in trigger_line
-    assert any("trigger_context.type unknown" in r.message for r in caplog.records)
 
 
 # === R2-8a: Drift guards (T-DG-1/2/3) ===
@@ -1239,22 +1239,35 @@ def test_eh_1_trigger_context_none_renders_bare_type():
     assert out == "CONDITIONAL"
 
 
-def test_eh_3_conditional_fill_missing_price_partial_degrade():
-    """T-EH-3 (spec §6.1): conditional fill 缺 fill_price → 部分降级保留 trigger_reason."""
+def test_format_trigger_detail_single_is_type_only():
     from src.cli.display import _format_trigger_detail
-    out = _format_trigger_detail("conditional", {
-        "type": "fill", "trigger_reason": "TP_FILL",
-    })
-    assert out == "CONDITIONAL — TP_FILL", (
-        f"spec §6.1 T-EH-3 要求保留 trigger_reason 部分降级；实际 {out!r}"
-    )
+    assert _format_trigger_detail("alert", {"type": "price_level_alert", "alert_id": "a1"}) == "ALERT"
+    assert _format_trigger_detail("conditional", [{"type": "fill", "trigger_reason": "tp"}]) == "CONDITIONAL"
+    assert _format_trigger_detail("scheduled", [{"type": "scheduled_tick"}]) == "SCHEDULED"
+    assert _format_trigger_detail("scheduled", None) == "SCHEDULED"
 
 
-def test_eh_3b_conditional_fill_no_trigger_reason_full_fallback():
-    """T-EH-3b: conditional fill 连 trigger_reason 都缺 → 全 fallback 到 {TYPE_UPPER}."""
+def test_format_trigger_detail_multi_is_type_plus_count():
     from src.cli.display import _format_trigger_detail
-    out = _format_trigger_detail("conditional", {"type": "fill"})
-    assert out == "CONDITIONAL"
+    batch = [
+        {"type": "fill", "trigger_reason": "tp"},
+        {"type": "price_level_alert", "alert_id": "a1"},
+        {"type": "percentage_alert"},
+    ]
+    assert _format_trigger_detail("conditional", batch) == "CONDITIONAL +2 (1 fill, 2 alerts)"
+
+
+def test_format_trigger_detail_multi_alerts_only():
+    from src.cli.display import _format_trigger_detail
+    batch = [{"type": "price_level_alert"}, {"type": "price_level_alert"}]
+    assert _format_trigger_detail("alert", batch) == "ALERT +1 (2 alerts)"
+
+
+def test_format_trigger_detail_multi_unrecognized_types_fallback():
+    from src.cli.display import _format_trigger_detail
+    # N>1 with no recognized fill/alert types → "{n} events" fallback breakdown
+    assert _format_trigger_detail("alert", [None, None]) == "ALERT +1 (2 events)"
+    assert _format_trigger_detail("alert", [{"type": "future_unknown"}, {"type": "x"}]) == "ALERT +1 (2 events)"
 
 
 def test_es_1_state_snapshot_none_unavailable():
@@ -1309,47 +1322,6 @@ def test_re_2_thinking_empty_string_skipped():
     msgs = [ModelResponse(parts=[ThinkingPart(content=""), TextPart(content="d")])]
     out = format_cycle_output(_make_ctx(messages=msgs, final_text="d"))
     assert "▾ Reasoning" not in out, "空 ThinkingPart 不应渲染 Reasoning 段"
-
-
-def test_eh_3c_conditional_open_fill_pnl_none_keeps_full_context():
-    """T-EH-3c (review 2nd round Important): 开仓 fill (trigger_reason=market, pnl=None) →
-    前段 symbol/side/amount/fill_price 必保留，仅 PnL 段省略。
-
-    spec §6.1 T-EH-3 部分降级原意是缺 fill_price 等字段时保留 trigger_reason；
-    但 FillEvent.pnl 在开仓时**正常即 None**（不是缺字段），不应触发 fallback
-    丢掉 symbol/side/amount 全部上下文。"""
-    from src.cli.display import _format_trigger_detail
-    out = _format_trigger_detail("conditional", {
-        "type": "fill", "trigger_reason": "market",
-        "symbol": "BTC/USDT:USDT", "side": "buy", "position_side": "long",
-        "amount": 0.265, "fill_price": 75350.0,
-        "fee": 5.0, "pnl": None,  # 开仓 fill: 已实现盈亏 None
-        "order_id": "abc123", "timestamp": 0, "is_full_close": False,
-    })
-    # 前段必保留 — symbol / side / amount / fill_price
-    assert "long" in out
-    assert "BTC" in out
-    assert "0.265" in out
-    assert "$75,350" in out
-    assert "market" in out  # trigger_reason
-    # PnL 段省略 (pnl=None)
-    assert "PnL" not in out, f"开仓 fill 不应渲染 PnL 段；实际 {out!r}"
-
-
-def test_eh_3d_conditional_close_fill_with_pnl_renders_pnl_segment():
-    """T-EH-3d: 平仓 fill (pnl 非 None) → 完整渲染含 PnL 段."""
-    from src.cli.display import _format_trigger_detail
-    out = _format_trigger_detail("conditional", {
-        "type": "fill", "trigger_reason": "TP_FILL",
-        "symbol": "BTC/USDT:USDT", "side": "sell", "position_side": "long",
-        "amount": 0.265, "fill_price": 78000.0,
-        "fee": 5.0, "pnl": 700.50,
-        "order_id": "abc456", "timestamp": 0, "is_full_close": True,
-    })
-    assert "TP_FILL" in out
-    assert "long" in out
-    assert "$78,000" in out
-    assert "PnL +700.50 USDT" in out
 
 
 # === R2-8c helper tests ===
