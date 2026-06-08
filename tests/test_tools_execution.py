@@ -451,6 +451,32 @@ def test_close_position_wrapper_docstring_mentions_fee():
     assert "est. round-trip net PnL" in docstring
 
 
+# === Task 6: close_position sync FillEvent → realized PnL + round-trip net ===
+
+
+@pytest.mark.asyncio
+async def test_close_position_sync_realized_pnl_receipt():
+    """create_order 返 FillEvent → close_position 返 realized PnL（gross + round-trip net）。"""
+    from src.integrations.exchange.base import FillEvent
+    deps = _make_deps(order_id="c1", entry_price=80000.0)
+    deps.db_engine = None
+    # fetch_positions 返一个 long 0.1 @ 80000；create_order 同步平 @ 82000
+    deps.exchange.create_order = AsyncMock(return_value=FillEvent(
+        order_id="c1", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+        trigger_reason="market", fill_price=82000.0, amount=0.1, fee=4.1,
+        pnl=200.0, timestamp=1712534400000, is_full_close=True, entry_price=80000.0,
+    ))
+    from src.agent.tools_execution import close_position
+    out = await close_position(deps, reasoning="TP hit")
+    assert out.startswith("Closed")
+    assert "Realized PnL" in out
+    assert "+200.00" in out          # gross
+    # round-trip net = -entry_fee(80000*0.1*1.0*0.0005=4.0) + 200.0 - 4.1 = 191.90
+    assert "+191.90" in out
+    # 同步路径不调 register_close_order_entry
+    deps.exchange.register_close_order_entry.assert_not_called()
+
+
 # === Task 22: place_limit_order Est. entry fee if filled output ===
 
 def _make_limit_deps(*, fee_rate=0.0005, free_usdt=1000.0, order_id="lim1"):

@@ -19,19 +19,6 @@ logger = logging.getLogger(__name__)
 # update _EXECUTION_SUCCESS_PREFIXES in display.py accordingly.
 
 
-def _order_id(result) -> str:
-    """Extract the order id from create_order's heterogeneous return.
-
-    Sim market orders now settle synchronously and return a FillEvent
-    (.order_id); limit/stop/take_profit (and the deferred OKX async path) still
-    return an Order (.id). Full sync-receipt rendering is handled in later
-    iter-sync-market-fill tasks; this shim only normalizes the id so existing
-    recording / receipt paths keep working. Explicit isinstance dispatch (not
-    getattr) avoids MagicMock auto-attr false positives in test mocks.
-    """
-    return result.order_id if isinstance(result, FillEvent) else result.id
-
-
 async def _record_action(deps: TradingDeps, action: str, *,
                           order_id: str | None = None,
                           alert_id: str | None = None,
@@ -198,21 +185,50 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
         return "Close rejected by human approval."
 
     order_ids = []
+    sync_fills = []
     for p in positions:
         order_side = "sell" if p.side == "long" else "buy"
-        order = await deps.exchange.create_order(
+        result = await deps.exchange.create_order(
             symbol=deps.symbol, side=order_side, order_type="market",
             amount=p.contracts,
-            params={"reduceOnly": True},  # ensures OKX echoes info.reduceOnly=true in fill event
+            params={"reduceOnly": True},  # OKX echoes info.reduceOnly=true in fill event
         )
-        order_id = _order_id(order)
-        deps.exchange.register_close_order_entry(order_id, p.entry_price)
-        order_ids.append(order_id)
-        await _record_action(
-            deps, action="close_position", order_id=order_id,
-            side=p.side, reasoning=reasoning,
+        if isinstance(result, FillEvent):
+            # 同步平仓：sim 在 _fill_market_close 已直接 capture entry，无需 register（G9）。
+            await _record_action(
+                deps, action="close_position", order_id=result.order_id,
+                side=p.side, reasoning=reasoning,
+            )
+            await _record_order_filled(deps, result)
+            order_ids.append(result.order_id)
+            sync_fills.append(result)
+        else:
+            deps.exchange.register_close_order_entry(result.id, p.entry_price)
+            await _record_action(
+                deps, action="close_position", order_id=result.id,
+                side=p.side, reasoning=reasoning,
+            )
+            order_ids.append(result.id)
+
+    if sync_fills:
+        # 同步：realized PnL 即时已知。round-trip net per fill =
+        # -entry_fee + realized_pnl - exit_fee（entry_fee 带 contract_size 因子，
+        # 与 app.py IMPORTANT EVENT 渲染 + close 估算约定一致）。
+        total_realized = sum(f.pnl for f in sync_fills if f.pnl is not None)
+        total_exit_fee = sum(f.fee for f in sync_fills)
+        total_entry_fee_actual = sum(
+            (f.entry_price or 0.0) * f.amount * contract_size * deps.fee_rate
+            for f in sync_fills
+        )
+        round_trip_net = -total_entry_fee_actual + total_realized - total_exit_fee
+        return (
+            f"Closed {len(sync_fills)} position(s) | IDs: {', '.join(order_ids)}\n"
+            f"Realized PnL: {total_realized:+.2f} USDT (gross) / "
+            f"{round_trip_net:+.2f} USDT (round-trip net)\n"
+            f"Exit fee: -{total_exit_fee:.2f} USDT"
         )
 
+    # 异步（OKX，deferred）：维持 submit-and-notify。
     return (
         f"Orders submitted: close {len(positions)} position(s) | IDs: {', '.join(order_ids)}\n"
         f"Est. exit fee: ~-{est_exit_fee:.2f} USDT "
