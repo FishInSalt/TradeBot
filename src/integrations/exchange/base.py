@@ -130,6 +130,13 @@ class BaseExchange(ABC):
 
     @abstractmethod
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list[Candle]: ...
+    # create_order return type is heterogeneous by order_type:
+    #   market → settles synchronously (sim) → FillEvent (actual fill_price/fee/
+    #            pnl/entry_price); callers dispatch on isinstance(result, FillEvent).
+    #   limit / stop / take_profit → Order (status='open'); fills later (async),
+    #            notifies via the fill callback.
+    # (OKX live path, deferred, still returns Order for market — CLAUDE.md Tier 3;
+    #  the FillEvent branch is sim-only for now.)
     @abstractmethod
     async def create_order(
         self,
@@ -139,7 +146,7 @@ class BaseExchange(ABC):
         amount: float,
         price: float | None = None,
         params: dict | None = None,
-    ) -> Order: ...
+    ) -> Order | FillEvent: ...
     @abstractmethod
     async def fetch_balance(self) -> Balance: ...
     @abstractmethod
