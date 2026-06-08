@@ -74,7 +74,7 @@ class Scheduler:
 
             if self._pending_events:
                 events: list[tuple[str, Any]] = []
-                while self._pending_events and len(events) < 20:
+                while self._pending_events and len(events) < 20:   # cap 20 = guard threshold (5× observed max 4), not a tuning knob; defer+warn, never drop
                     ev = heapq.heappop(self._pending_events)   # heap already priority-ordered
                     events.append((ev.trigger_type, ev.context))
                 deferred = len(self._pending_events)           # leftover == post-drain heap depth

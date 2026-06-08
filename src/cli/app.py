@@ -377,7 +377,7 @@ def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetim
     )
 
 
-def _wake_header_line(events: list[tuple], cycle_started_at: datetime) -> str:
+def _wake_header_line(events: list[tuple[str, object]], cycle_started_at: datetime) -> str:
     """Build the wake-prompt header line (spec 2026-06-08 §2).
 
     N==1: byte-identical to the prior single-trigger header
@@ -593,7 +593,8 @@ async def run_agent_cycle(
     # (重复 capture 会让 IO 4× retry + state_snapshot 时刻漂移 + 违反 §6.7 不变量)
     trigger_context_var = _capture_trigger_contexts(cycle_id, events)
     # triggered_by = dominant (highest-priority) type — events arrive in heap priority
-    # order (conditional > alert > scheduled), so the lead element is the dominant type.
+    # order (conditional > alert > scheduled; see scheduler.py drain), so the lead element
+    # is the dominant type.
     triggered_by = events[0][0]
     state_snapshot_var = await _capture_state_snapshot(cycle_id, deps)
     # PR #35 I3: 与 capture-once P8 同模式 — hoist model_id 到 retry loop 之前
