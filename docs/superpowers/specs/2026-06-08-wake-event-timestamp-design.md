@@ -69,6 +69,14 @@ follow the existing house style.
   **abs-UTC** (the prompt-build wall clock, in-prompt without a tool call) — not a "now anchor" the
   agent otherwise lacks (it already reads `now` from any perception tool's `@ HH:MM:SS UTC` stamp).
   It does **not** signal wake-punctuality (see Non-goals).
+- **session-log Context self-containment** — the scheduled suffix sits on the header line, which
+  `_extract_event_line` does not capture (it anchors on the `PRICE …`/`IMPORTANT EVENT` prefixes).
+  So the session-log `▾ Context` section renders the scheduled wake-time clause via a dedicated
+  `_extract_scheduled_wake_suffix` (parsed verbatim from `user_prompt_snapshot`, same source as the
+  alert/fill event lines): `Woke by — SCHEDULED — fired 2026-06-01 14:38 UTC (just now)`. This keeps
+  the section self-contained (each section stands on its own — the cycle time also appears in the
+  Header `HH:MM:SS UTC`, but Context no longer relies on the reader looking up there). Legacy
+  snapshots without the clause fall back to the bare `Woke by — SCHEDULED` label.
 
 ### Relative-age ladder — `_format_event_age(now, then)`
 
@@ -94,7 +102,9 @@ not fork (F5 drift-guard).
 ## Scope / non-goals
 
 - **In**: prompt rendering for scheduled / alert (pct + level) / conditional in `run_agent_cycle`
-  + `_format_price_level_alert_trigger` + a new `_format_event_age` helper. Sim-only phase.
+  + `_format_price_level_alert_trigger` + a new `_format_event_age` helper. Plus the session-log
+  `▾ Context` section surfacing the scheduled wake-time clause (`src/cli/display.py`,
+  `_extract_scheduled_wake_suffix`). Sim-only phase.
 - **Out — wake punctuality**: "did I wake on time / did the system sleep" needs the scheduler to
   capture *intended* wake time (a different datum than fire time). Separate issue. Not covered here.
 - **Out — scheduler / cycle_capture changes**: none required. Scheduled's fire time ≡
@@ -117,6 +127,9 @@ not fork (F5 drift-guard).
 3. Each of the 4 branches calls `_wake_time_suffix` and appends to its event line; `now` =
    `cycle_started_at`. fill/alert pass `context.timestamp`; scheduled passes
    `int(cycle_started_at.timestamp() * 1000)` (→ "just now").
+4. `src/cli/display.py`: `_extract_scheduled_wake_suffix(wake_half) -> str` parses the
+   ` — fired …` clause off the scheduled header line; `_render_context`'s scheduled branch appends
+   it to the `Woke by — SCHEDULED` label. "" for legacy snapshots (backward-compatible).
 
 ## Testing
 
@@ -126,6 +139,9 @@ not fork (F5 drift-guard).
   pct/level alert→`fired`, fill→`filled` (assert no double `triggered`); future ts → UTC-only,
   no parenthetical.
 - Branch integration: each of the 4 wake branches embeds the suffix on its event line.
+- `_extract_scheduled_wake_suffix`: new header → ` — fired … (just now)`; legacy header → `""`.
+- session-log Context: scheduled snapshot with the clause → `Woke by — SCHEDULED — fired …` in the
+  rendered `▾ Context`; legacy snapshot → bare `Woke by — SCHEDULED` (existing substring tests hold).
 - Existing 3 prompt-asserting test files (`test_p4_cycle_capture`, `test_agent_cycle_injection`,
   `test_session_log_cycle_context`) — clause is appended, not substituted; verify substrings still
   pass and update any end-anchored assertions.

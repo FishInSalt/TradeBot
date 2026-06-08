@@ -1024,6 +1024,24 @@ def _extract_event_line(wake_half: str, trigger_type: str) -> str | None:
     return _truncate_with_marker(event, _CONTEXT_EVENT_CAP)
 
 
+def _extract_scheduled_wake_suffix(wake_half: str) -> str:
+    """Pull the ' — fired {UTC} ({age})' clause off the scheduled wake header line.
+
+    scheduled has no variable event line, but its header carries the wake-time clause
+    (spec 2026-06-08). Returns "" for legacy snapshots without the clause so the Context
+    section keeps rendering the bare `Woke by — SCHEDULED` label (backward-compatible).
+    """
+    first_line = wake_half.split("\n", 1)[0]
+    marker = "scheduled trigger — "
+    idx = first_line.find(marker)
+    if idx == -1:
+        return ""
+    clause = first_line[idx + len(marker):].strip()
+    if clause.endswith("."):
+        clause = clause[:-1]
+    return f" — {clause}" if clause else ""
+
+
 def _clean_field(text: str) -> str:
     """Strip markdown bold + collapse internal whitespace（log 渲 plain text）。"""
     return re.sub(r"\s+", " ", text.replace("**", "")).strip()
@@ -1141,9 +1159,9 @@ def _render_context(
         if event_line:
             lines.append(f"  Woke by — {escape(event_line)}")
         elif trigger_type == "scheduled":
-            # scheduled 无变量事件行（_extract_event_line → None）；仍渲类型标签，
-            # 使 Context 段跨 trigger 类型一致 / 自包含（镜像 Header `Trigger SCHEDULED`）。
-            lines.append("  Woke by — SCHEDULED")
+            # scheduled 无变量事件行（_extract_event_line → None）；仍渲类型标签 +
+            # header 上的唤醒时间后缀，使 Context 段自包含（不必回看 Header 取 cycle 时间）。
+            lines.append(f"  Woke by — SCHEDULED{_extract_scheduled_wake_suffix(wake_half)}")
 
         if blocks:
             n = len(blocks)

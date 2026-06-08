@@ -421,6 +421,42 @@ def test_render_context_scheduled_renders_woke_by_label():
     assert "none (first cycle" not in out  # 有 prior → 不渲占位
 
 
+def test_extract_scheduled_wake_suffix_present():
+    """新 header 后缀（spec 2026-06-08）→ 抽出 ' — fired {UTC} ({age})'。"""
+    from src.cli.display import _extract_scheduled_wake_suffix
+    wake = (
+        "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    assert _extract_scheduled_wake_suffix(wake) == " — fired 2026-06-01 14:38 UTC (just now)"
+
+
+def test_extract_scheduled_wake_suffix_legacy_returns_empty():
+    """无后缀的 legacy scheduled snapshot → ''（向后兼容，仍渲纯标签）。"""
+    from src.cli.display import _extract_scheduled_wake_suffix
+    wake = (
+        "You have been woken up by a scheduled trigger.\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    assert _extract_scheduled_wake_suffix(wake) == ""
+
+
+def test_render_context_scheduled_shows_wake_time_in_section():
+    """scheduled Context 段自包含 cycle 唤醒时间（abs-UTC + age），不依赖 Header。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    snap = (
+        "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs))
+    assert "Woke by — SCHEDULED — fired 2026-06-01 14:38 UTC (just now)" in out
+
+
 def test_render_context_none_snapshot_omits_section():
     """user_prompt_snapshot=None → 整段省略（spec §5）。"""
     from src.cli.display import format_cycle_output
