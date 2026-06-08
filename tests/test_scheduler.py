@@ -277,6 +277,7 @@ async def test_scheduler_drain_cap_20(caplog):
     await task
 
     non_bootstrap = [b for b in batches if b != [("scheduled", None)]]
+    assert non_bootstrap, "expected at least one non-bootstrap drain batch"
     assert len(non_bootstrap[0]) == 20
     delivered = [c for b in non_bootstrap for (_, c) in b]
     assert len(delivered) == 21

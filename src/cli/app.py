@@ -595,7 +595,8 @@ async def run_agent_cycle(
     trigger_context_var = _capture_trigger_contexts(cycle_id, events)
     # triggered_by = dominant (highest-priority) type — events arrive in heap priority
     # order (conditional > alert > scheduled; see scheduler.py drain), so the lead element
-    # is the dominant type.
+    # is the dominant type. Precondition: events is always non-empty — the scheduler passes
+    # at least the degenerate [("scheduled", None)] tick — so events[0] never IndexErrors.
     triggered_by = events[0][0]
     state_snapshot_var = await _capture_state_snapshot(cycle_id, deps)
     # PR #35 I3: 与 capture-once P8 同模式 — hoist model_id 到 retry loop 之前
