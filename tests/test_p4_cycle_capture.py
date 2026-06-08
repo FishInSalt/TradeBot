@@ -71,6 +71,35 @@ async def _make_deps_engine_with_capture_mocks(session_id: str = "sess-p4c"):
     return deps, engine
 
 
+def test_capture_trigger_contexts_maps_batch():
+    from src.services.cycle_capture import _capture_trigger_contexts
+    from src.integrations.exchange.base import PriceLevelAlertInfo
+
+    alert = PriceLevelAlertInfo(
+        alert_id="a1", symbol="BTC/USDT:USDT", current_price=80050.0,
+        target_price=80000.0, direction="above", reasoning="r", timestamp=1_700_000_000_000,
+    )
+    out = _capture_trigger_contexts("cyc1", [("scheduled", None), ("alert", alert)])
+    assert isinstance(out, list)
+    assert len(out) == 2
+    assert out[0] == {"type": "scheduled_tick"}
+    assert out[1]["type"] == "price_level_alert"
+    assert out[1]["alert_id"] == "a1"
+
+
+def test_capture_trigger_contexts_all_fail_yields_none_slots():
+    from src.services.cycle_capture import _capture_trigger_contexts
+
+    # context that raises on attribute access → per-event None, count preserved
+    class Bad:
+        def __getattr__(self, name):
+            raise RuntimeError("boom")
+
+    out = _capture_trigger_contexts("cyc1", [("conditional", Bad()), ("conditional", Bad())])
+    assert out == [None, None]
+
+
+
 async def test_cycle_captures_user_prompt_snapshot_happy():
     """AC-3 happy path: user_prompt_snapshot non-NULL + contains trigger phrase."""
     from src.cli.app import TokenBudget, run_agent_cycle

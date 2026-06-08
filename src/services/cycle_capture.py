@@ -81,6 +81,17 @@ def _capture_trigger_context(cycle_id: str, trigger_type: str, context) -> dict 
         return None
 
 
+def _capture_trigger_contexts(cycle_id: str, events: list) -> list[dict | None]:
+    """Capture trigger metadata for a batch of events (spec 2026-06-08 §3).
+
+    Maps `_capture_trigger_context` over the drained `(trigger_type, context)` list.
+    Per-event best-effort: a failing event yields `None` in its slot without sinking
+    the batch. Always returns a list of the same length as `events` (count preserved;
+    all-fail → `[None, ...]`, never a `scheduled_tick` mislabel).
+    """
+    return [_capture_trigger_context(cycle_id, tt, ctx) for tt, ctx in events]
+
+
 async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
     """Capture system-side objective state at decision time. Best-effort per-field.
 
