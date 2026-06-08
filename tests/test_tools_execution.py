@@ -477,6 +477,50 @@ async def test_close_position_sync_realized_pnl_receipt():
     deps.exchange.register_close_order_entry.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_close_position_sync_realized_pnl_receipt_two_positions():
+    """2 仓位同步平仓 → total_realized / total_exit_fee / total_entry_fee_actual sum 累加。"""
+    from src.integrations.exchange.base import FillEvent
+    deps = _make_deps(entry_price=80000.0)
+    deps.db_engine = None
+    # 覆盖 fetch_positions 返 2 个 long（order_side=sell）：BTC 0.1 @ 80000 + ETH-ish 1.0 @ 3000
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(
+            symbol="BTC/USDT:USDT", side="long", contracts=0.1, entry_price=80000.0,
+            unrealized_pnl=200.0, leverage=10, liquidation_price=72000.0, created_at=None,
+        ),
+        Position(
+            symbol="BTC/USDT:USDT", side="long", contracts=1.0, entry_price=3000.0,
+            unrealized_pnl=100.0, leverage=10, liquidation_price=2700.0, created_at=None,
+        ),
+    ])
+    # create_order 两次调用返不同 FillEvent
+    deps.exchange.create_order = AsyncMock(side_effect=[
+        FillEvent(
+            order_id="c1", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+            trigger_reason="market", fill_price=82000.0, amount=0.1, fee=4.1,
+            pnl=200.0, timestamp=1712534400000, is_full_close=True, entry_price=80000.0,
+        ),
+        FillEvent(
+            order_id="c2", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+            trigger_reason="market", fill_price=3100.0, amount=1.0, fee=1.55,
+            pnl=100.0, timestamp=1712534401000, is_full_close=True, entry_price=3000.0,
+        ),
+    ])
+    from src.agent.tools_execution import close_position
+    out = await close_position(deps, reasoning="rebalance close")
+    # gross = 200.0 + 100.0 = 300.0
+    assert "+300.00" in out
+    # total_exit_fee = 4.1 + 1.55 = 5.65
+    assert "Exit fee: -5.65 USDT" in out
+    # total_entry_fee_actual = 80000*0.1*1.0*0.0005 + 3000*1.0*1.0*0.0005 = 4.0 + 1.5 = 5.5
+    # round_trip_net = -5.5 + 300.0 - 5.65 = 288.85
+    assert "+288.85" in out
+    assert "Closed 2 position(s)" in out
+    assert "c1" in out and "c2" in out
+    deps.exchange.register_close_order_entry.assert_not_called()
+
+
 # === Task 22: place_limit_order Est. entry fee if filled output ===
 
 def _make_limit_deps(*, fee_rate=0.0005, free_usdt=1000.0, order_id="lim1"):

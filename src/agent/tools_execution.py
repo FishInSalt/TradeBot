@@ -210,6 +210,8 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
             )
             order_ids.append(result.id)
 
+    # 单次 close_position 的 deps.exchange 同质：要么全 sim（FillEvent），要么全 OKX（Order），
+    # 不会 sync+async 混合，故 len(sync_fills) 报数与实际同步平仓数一致。
     if sync_fills:
         # 同步：realized PnL 即时已知。round-trip net per fill =
         # -entry_fee + realized_pnl - exit_fee（entry_fee 带 contract_size 因子，
@@ -217,6 +219,8 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
         total_realized = sum(f.pnl for f in sync_fills if f.pnl is not None)
         total_exit_fee = sum(f.fee for f in sync_fills)
         total_entry_fee_actual = sum(
+            # entry_price 由 sim _fill_market_close 从 pos.entry_price 直接 capture，恒非 None；
+            # `or 0.0` 是防御性 fallback（理论不可达）。
             (f.entry_price or 0.0) * f.amount * contract_size * deps.fee_rate
             for f in sync_fills
         )
