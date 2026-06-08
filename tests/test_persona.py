@@ -664,12 +664,11 @@ def test_market_context_segment_no_evaluation_words():
 def test_persona_market_sync_replaces_separate_trigger():
     """市价同步语义改写：不再含 'do not attempt in the same cycle' 类冲突措辞。"""
     from src.agent.persona import generate_system_prompt
-    from src.config import PersonaConfig
     prompt = generate_system_prompt(PersonaConfig())
     low = prompt.lower()
     # 新措辞present
-    assert "synchronous" in low or "fills synchronously" in low or "same cycle" in low
-    assert "unprotected" in low or "set stop loss and take profit" in low
+    assert "synchronous" in low
+    assert "set stop loss and take profit" in low
     # 旧冲突措辞absent
     assert "do not attempt in the same cycle" not in low
     assert "separate trigger" not in low
