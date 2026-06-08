@@ -172,7 +172,7 @@ def _summarize_get_performance(content: str) -> str:
 
 
 def _summarize_open_position(content: str) -> str:
-    m = re.search(r"Order submitted:\s*(\w+)\s+([\d.]+)\s*@\s*~?([\d.]+),\s*(\d+)x", content)
+    m = re.search(r"(?:Order submitted|Filled):\s*(\w+)\s+([\d.]+)\s*@\s*~?([\d.]+),\s*(\d+)x", content)
     if m:
         return f"{m.group(1)} {m.group(2)} @ ~${float(m.group(3)):,.0f}, {m.group(4)}x"
     return _fallback_summary(content)
@@ -181,7 +181,8 @@ def _summarize_open_position(content: str) -> str:
 def _summarize_close_position(content: str) -> str:
     # "No positions to close." is a business rejection — is_tool_error catches it
     # before this parser runs, so no need to handle it here.
-    m = re.search(r"close\s+(\d+)\s+position", content)
+    # Async path: "Orders submitted: close N position(s)" / sync path: "Closed N position(s)".
+    m = re.search(r"[Cc]lose(?:d)?\s+(\d+)\s+position", content)
     if m:
         return f"Close {m.group(1)} position(s)"
     return _fallback_summary(content)
@@ -304,8 +305,8 @@ _EXECUTION_PARSERS = {
 
 # Success prefix whitelist for execution tools (business rejection detection)
 _EXECUTION_SUCCESS_PREFIXES = {
-    "open_position": "Order submitted:",
-    "close_position": "Orders submitted:",
+    "open_position": ("Order submitted:", "Filled:"),
+    "close_position": ("Orders submitted:", "Closed"),
     "set_stop_loss": "Stop loss set at",
     "set_take_profit": "Take profit set at",
     "adjust_leverage": "Leverage adjusted to",
