@@ -113,6 +113,36 @@ def _format_relative_time(now: datetime, then: datetime) -> str:
     return f"{days} day{'s' if days > 1 else ''} ago"
 
 
+def _format_event_age(now: datetime, then: datetime) -> str | None:
+    """Age of a wake event for the prompt: None when the event timestamp is ahead of
+    `now` (clock skew / sleep artifact — caller renders UTC only), "just now" when <2s,
+    otherwise the existing second-granular ladder.
+
+    `then` is always tz-aware on the wake-event path (built from an int-ms epoch), so no
+    tz-naive normalization is exercised here — see spec 2026-06-08.
+    """
+    if then > now:
+        return None
+    if (now - then).total_seconds() < 2:
+        return "just now"
+    return _format_relative_time(now, then)
+
+
+def _wake_time_suffix(verb: str, event_ts_ms: int, now: datetime) -> str:
+    """Assemble the wake-event time clause ` — {verb} {abs-UTC} ({age})`.
+
+    Owns the int-ms→datetime conversion. When the event timestamp is ahead of `now`
+    (skew / sleep artifact) the relative age is dropped, leaving ` — {verb} {abs-UTC}`.
+    Pure + sync — `now` is the cycle-start anchor passed by the caller (spec 2026-06-08).
+    """
+    then = datetime.fromtimestamp(event_ts_ms / 1000, tz=timezone.utc)
+    abs_utc = then.strftime("%Y-%m-%d %H:%M UTC")
+    age = _format_event_age(now, then)
+    if age is None:
+        return f" — {verb} {abs_utc}"
+    return f" — {verb} {abs_utc} ({age})"
+
+
 def _truncate_decision(
     text: str,
     hard_cap_words: int = CYCLE_DECISION_WORD_CAP,
@@ -334,12 +364,16 @@ def _render_recent_summaries(
     return f"{header_top}\n\n" + "\n\n".join(blocks)
 
 
-def _format_price_level_alert_trigger(context: PriceLevelAlertInfo) -> str:
-    """Build the PRICE LEVEL trigger suffix exposing alert_id for lifecycle joins."""
+def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetime) -> str:
+    """Build the PRICE LEVEL trigger suffix exposing alert_id for lifecycle joins.
+
+    `now` is the cycle-start anchor for the trailing event-age clause (spec 2026-06-08).
+    """
     return (
         f"\n\nPRICE LEVEL: {context.symbol} reached {context.current_price:.2f} "
         f"(alert id={context.alert_id} {context.direction} {context.target_price:.2f} "
         f"— {context.reasoning})"
+        + _wake_time_suffix("fired", context.timestamp, now)
     )
 
 
@@ -479,8 +513,15 @@ async def run_agent_cycle(
     # 防 forensic 路径在 except 块内 getattr/str(agent.model) raise 致整 cycle 写入丢失.
     model_id_var = getattr(model, 'model_name', str(model)) if model else str(agent.model)
 
+    # Wake-event time clause (spec 2026-06-08): {verb} {UTC} ({age}) on the event line.
+    # now-anchor = cycle_started_at; scheduled's fire time ≡ now → renders "just now".
+    header_line = f"You have been woken up by a {trigger_type} trigger"
+    if trigger_type == "scheduled":
+        header_line += _wake_time_suffix(
+            "fired", int(cycle_started_at.timestamp() * 1000), cycle_started_at,
+        )
     prompt = (
-        f"You have been woken up by a {trigger_type} trigger.\n"
+        f"{header_line}.\n"
         f"Trading pair: {deps.symbol} | Timeframe: {deps.timeframe}\n"
         "Assess the situation and decide what to do."
     )
@@ -518,15 +559,17 @@ async def run_agent_cycle(
             if context.is_full_close and context.entry_price is None:
                 base += " [round-trip net unavailable: entry_price not cached]"
             msg += base
+        msg += _wake_time_suffix("filled", context.timestamp, cycle_started_at)
         prompt += msg
     elif trigger_type == "alert" and context is not None:
         if isinstance(context, PriceLevelAlertInfo):
-            prompt += _format_price_level_alert_trigger(context)
+            prompt += _format_price_level_alert_trigger(context, cycle_started_at)
         else:
             direction = "dropped" if context.change_pct < 0 else "surged"
             prompt += (
                 f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
                 f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+                + _wake_time_suffix("fired", context.timestamp, cycle_started_at)
             )
 
     # R2-8b: inject most recent N=3 cycle summaries from this session

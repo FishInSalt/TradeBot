@@ -39,7 +39,7 @@ def test_format_price_level_alert_trigger_includes_alert_id():
         reasoning="Reclaim of 17:15 candle high — early warning before SL.",
         timestamp=1779800855603, alert_id="725cfc9f",
     )
-    out = _format_price_level_alert_trigger(context)
+    out = _format_price_level_alert_trigger(context, datetime.now(timezone.utc))
 
     assert "id=725cfc9f" in out
     assert "above 76470.00" in out
@@ -59,7 +59,7 @@ def test_format_price_level_alert_trigger_drops_pronoun():
         symbol="BTC/USDT:USDT", target_price=76470.0, direction="above",
         current_price=76482.5, reasoning="x", timestamp=0, alert_id="abc12345",
     )
-    out = _format_price_level_alert_trigger(context)
+    out = _format_price_level_alert_trigger(context, datetime.now(timezone.utc))
 
     assert "your alert" not in out
     assert "(alert id=" in out  # new form starts with `(alert id=`
