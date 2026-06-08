@@ -295,6 +295,33 @@ def test_open_position_wrapper_docstring_mentions_fee():
     assert "Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee." in docstring
 
 
+async def test_open_position_sync_fill_receipt():
+    """create_order 返 FillEvent → open_position 返同步回执（含 fill_price/fee + UNPROTECTED 提示）。"""
+    from src.integrations.exchange.base import FillEvent
+    deps = _make_open_deps(order_id="op1")
+    deps.exchange.create_order = AsyncMock(return_value=FillEvent(
+        order_id="op1", symbol="BTC/USDT:USDT", side="buy", position_side="long",
+        trigger_reason="market", fill_price=80050.0, amount=0.1, fee=4.0,
+        pnl=None, timestamp=1712534400000, is_full_close=False,
+    ))
+    deps.db_engine = None   # 跳过 DB 记账，只测回执
+    from src.agent.tools_execution import open_position
+    out = await open_position(deps, "long", 50.0, 3, reasoning="breakout")
+    assert out.startswith("Filled:")
+    assert "80050.00" in out
+    assert "UNPROTECTED" in out
+    assert "op1" in out
+
+
+async def test_open_position_async_order_receipt_unchanged():
+    """create_order 返 Order（OKX 路径）→ 维持旧异步回执。"""
+    deps = _make_open_deps(order_id="op2")   # 既有工厂默认 create_order 返 Order
+    deps.db_engine = None
+    from src.agent.tools_execution import open_position
+    out = await open_position(deps, "long", 50.0, 3, reasoning="breakout")
+    assert "You will be notified when filled." in out
+
+
 # === Task 21: close_position round-trip net PnL + approval message net view ===
 
 def _make_close_deps(*, position_side="long", entry_price=80000.0, contracts=0.5,

@@ -6,11 +6,11 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal
 
+from src.integrations.exchange.base import FillEvent
 from src.services.tool_call_recorder import note_biz_error
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
-    from src.integrations.exchange.base import FillEvent
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,6 @@ def _order_id(result) -> str:
     recording / receipt paths keep working. Explicit isinstance dispatch (not
     getattr) avoids MagicMock auto-attr false positives in test mocks.
     """
-    from src.integrations.exchange.base import FillEvent
     return result.order_id if isinstance(result, FillEvent) else result.id
 
 
@@ -132,20 +131,34 @@ async def open_position(
 
     await deps.exchange.set_leverage(deps.symbol, leverage)
     order_side = "buy" if side == "long" else "sell"
-    order = await deps.exchange.create_order(
+    result = await deps.exchange.create_order(
         symbol=deps.symbol, side=order_side, order_type="market", amount=quantity
     )
-    order_id = _order_id(order)
 
+    if isinstance(result, FillEvent):
+        # 同步成交（sim）：记 intent + order_filled，返真实回执 + UNPROTECTED 提示。
+        await _record_action(
+            deps, action="open_position", order_id=result.order_id,
+            side=side, reasoning=reasoning,
+        )
+        await _record_order_filled(deps, result)
+        fill_notional = result.fill_price * result.amount * contract_size
+        return (
+            f"Filled: {side} {result.amount:.6f} @ {result.fill_price:.2f}, {leverage}x "
+            f"| ID: {result.order_id}\n"
+            f"Entry fee: -{result.fee:.2f} USDT (notional {fill_notional:,.2f})\n"
+            f"Position OPEN — UNPROTECTED. Set stop loss and take profit now."
+        )
+
+    # 异步（OKX，deferred）：维持 submit-and-notify。
     await _record_action(
-        deps, action="open_position", order_id=order_id,
+        deps, action="open_position", order_id=result.id,
         side=side, reasoning=reasoning,
     )
-
     notional = ticker.last * quantity * contract_size
     est_entry_fee = notional * deps.fee_rate
     return (
-        f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order_id}\n"
+        f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {result.id}\n"
         f"Est. entry fee: ~-{est_entry_fee:.2f} USDT "
         f"(notional ~{notional:,.2f} × ~{deps.fee_rate*100:.3f}%)\n"
         f"You will be notified when filled."
