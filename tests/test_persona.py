@@ -296,8 +296,11 @@ def test_layer1_no_tool_invocation_descriptions():
 
 def test_prompt_l27_softened():
     """L27 Open fill response softening (spec §3.2): hard-rule wording removed.
-    Old phrases ('check the chart', 'do not skip', 'arbitrary ones') deleted;
-    softened wording ('use market data') retained.
+    Old phrases ('check the chart', 'do not skip', 'arbitrary ones') deleted.
+    The sync-market-fill rewrite replaced the 'use market data' guidance with
+    'using the thesis you just formed' (SL/TP set right after the synchronous
+    open rather than on a separate trigger wake); softened (non-hard-rule)
+    wording remains.
     """
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig()).lower()
@@ -306,7 +309,7 @@ def test_prompt_l27_softened():
     assert "structural support/resistance" not in prompt
     assert "arbitrary ones" not in prompt
     # Softened wording must be present
-    assert "use market data" in prompt
+    assert "using the thesis you just formed" in prompt
 
 
 def test_prompt_l65_softened():
@@ -656,3 +659,17 @@ def test_market_context_segment_no_evaluation_words():
     forbidden = ["frequent small trades", "erode capital", "friction costs alone"]
     for word in forbidden:
         assert word not in market_ctx_segment, f"'{word}' still present in Market Context"
+
+
+def test_persona_market_sync_replaces_separate_trigger():
+    """市价同步语义改写：不再含 'do not attempt in the same cycle' 类冲突措辞。"""
+    from src.agent.persona import generate_system_prompt
+    from src.config import PersonaConfig
+    prompt = generate_system_prompt(PersonaConfig())
+    low = prompt.lower()
+    # 新措辞present
+    assert "synchronous" in low or "fills synchronously" in low or "same cycle" in low
+    assert "unprotected" in low or "set stop loss and take profit" in low
+    # 旧冲突措辞absent
+    assert "do not attempt in the same cycle" not in low
+    assert "separate trigger" not in low

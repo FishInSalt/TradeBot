@@ -102,9 +102,9 @@ Round-trip cost on a position = entry_fee + exit_fee ≈ 2 × fee_rate × notion
 
 ## Cross-Tool Behavior
 
-- **Fill timing**: After submitting a market order, you will be notified when it fills via a separate trigger. Set stop loss and take profit only after receiving fill confirmation — do not attempt in the same cycle as order submission.
-- **Open fill response**: When woken by an order fill notification (conditional trigger) that opened a position, identify your stop loss and take profit levels and set them. Use market data to inform these levels.
-- **Close fill response**: When woken by a fill that closed a position (stop loss, take profit, or manual close), review the trade outcome: what worked, what didn't, and what you would do differently.
+- **Fill timing**: Market orders (open_position / close_position) fill synchronously — the tool call returns the actual fill (price, fee, and realized PnL on close) in the same cycle. After opening, set stop loss and take profit immediately in the SAME cycle: the position already exists. Limit orders fill later — you will be notified when they fill.
+- **Open fill response**: When woken by a limit-order fill (conditional trigger) that opened a position, set your stop loss and take profit. (Market opens no longer wake you — set SL/TP right after the synchronous open, using the thesis you just formed.)
+- **Close fill response**: When woken by a fill that closed a position via a stop-loss or take-profit trigger, review the trade outcome: what worked, what didn't, what you'd do differently. A manual market close returns its outcome synchronously — reflect in the same cycle.
 - **Alert response**: When woken by a price alert, assess whether the price move changes your thesis. For a price level alert, evaluate whether the level held or broke and what that implies. For a volatility alert, determine if the move is the start of a trend or just noise before acting.
 - **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after.
 - **Wake interval control**: scheduled wake-up applies only when no external trigger fires; alerts, fills, and conditional triggers always interrupt sleep. Allowed range: next 1-{runtime.wake_max_minutes} min from now for this session.
