@@ -85,9 +85,13 @@ FROM ac_with_anchors ac
 
 
 V_ALERT_LIFECYCLE_SQL = """
--- direction 不在本 view 投影 (spec §4.2 OOS); analyst 需 above/below 时:
---   SELECT json_extract(ac.trigger_context, '$.direction')
---   FROM agent_cycles ac WHERE ac.cycle_id = <triggered cycle>
+-- direction 不在本 view 投影 (spec §4.2 OOS); analyst 需 above/below 时从 trigger_context
+-- 数组取 (spec 2026-06-08 起 trigger_context 是 JSON 数组):
+--   SELECT json_extract(e.value, '$.direction')
+--   FROM agent_cycles ac,
+--        json_each(CASE WHEN json_type(ac.trigger_context)='array' THEN ac.trigger_context
+--                       ELSE json_array(json(ac.trigger_context)) END) e
+--   WHERE ac.cycle_id = <triggered cycle> AND json_extract(e.value,'$.type')='price_level_alert'
 -- (T2 已 mirror PriceLevelAlertInfo.alert_id + direction 等到 trigger_context JSON;
 --  PR #42 review v5 I-1)
 CREATE VIEW v_alert_lifecycle AS
@@ -100,14 +104,24 @@ WITH registers AS (
   WHERE action='add_price_level_alert' AND alert_id IS NOT NULL
 ),
 triggers AS (
-  SELECT session_id,
-         json_extract(trigger_context, '$.alert_id') AS alert_id,
-         created_at AS triggered_at,
-         CAST(json_extract(trigger_context, '$.current_price') AS REAL) AS triggered_price
-  FROM agent_cycles
-  WHERE triggered_by='alert'
-    AND json_extract(trigger_context, '$.type')='price_level_alert'
-    AND json_extract(trigger_context, '$.alert_id') IS NOT NULL
+  -- spec 2026-06-08: trigger_context is now a JSON array (one element per drained event);
+  -- unnest it. Legacy single-object rows are wrapped in json_array() first — bare
+  -- json_each('{...}') on an object iterates BY KEY (one row per field), polluting the
+  -- result. Drop the old `triggered_by='alert'` clause: a price-level alert batched with a
+  -- fill has triggered_by='conditional', so that clause would silently drop it; filter
+  -- per-element on '$.type' instead. ALL per-element reads come from json_each.value.
+  SELECT ac.session_id,
+         json_extract(e.value, '$.alert_id') AS alert_id,
+         ac.created_at AS triggered_at,
+         CAST(json_extract(e.value, '$.current_price') AS REAL) AS triggered_price
+  FROM agent_cycles ac,
+       json_each(
+         CASE WHEN json_type(ac.trigger_context) = 'array'
+              THEN ac.trigger_context
+              ELSE json_array(json(ac.trigger_context)) END
+       ) e
+  WHERE json_extract(e.value, '$.type') = 'price_level_alert'
+    AND json_extract(e.value, '$.alert_id') IS NOT NULL
 ),
 cancels AS (
   SELECT session_id, alert_id,
