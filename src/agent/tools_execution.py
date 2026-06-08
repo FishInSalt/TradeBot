@@ -10,6 +10,7 @@ from src.services.tool_call_recorder import note_biz_error
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
+    from src.integrations.exchange.base import FillEvent
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ async def _record_action(deps: TradingDeps, action: str, *,
         logger.warning("Failed to record TradeAction", exc_info=True)
 
 
-async def _record_order_filled(deps: TradingDeps, fill) -> None:
+async def _record_order_filled(deps: TradingDeps, fill: FillEvent) -> None:
     """从同步 FillEvent 记一条 order_filled TradeAction（sim 同步市价路径）。
 
     字段集与 app._record_action_from_fill 对齐，使 metrics.total_fees /

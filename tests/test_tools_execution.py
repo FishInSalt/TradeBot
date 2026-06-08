@@ -712,3 +712,38 @@ async def test_record_order_filled_writes_all_fields(db_engine):
     assert row.trigger_reason == "market"
     assert row.pnl == 200.0
     assert row.cycle_id == "cyc1"
+
+
+async def test_record_order_filled_open_fill_nulls(db_engine):
+    """开仓 FillEvent（entry_price/pnl 为 None）→ order_filled 行对应列写 NULL，amount/fee/trigger_reason 仍齐。"""
+    from sqlalchemy import select
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from src.integrations.exchange.base import FillEvent
+    from src.agent.tools_execution import _record_order_filled
+    from tests._sim_fixtures import make_session
+    from unittest.mock import MagicMock
+
+    sid = await make_session(db_engine)
+    deps = MagicMock()
+    deps.db_engine = db_engine
+    deps.session_id = sid
+    deps.cycle_id = "cyc1"
+    deps.symbol = "BTC/USDT:USDT"
+    fill = FillEvent(
+        order_id="oid_open", symbol="BTC/USDT:USDT", side="buy", position_side="long",
+        trigger_reason="market", fill_price=80050.0, amount=0.1, fee=4.0,
+        pnl=None, timestamp=1712534400000, is_full_close=False,
+    )
+    await _record_order_filled(deps, fill)
+
+    async with get_session(db_engine) as s:
+        row = (await s.execute(
+            select(TradeAction).where(TradeAction.order_id == "oid_open")
+                               .where(TradeAction.action == "order_filled")
+        )).scalar_one()
+    assert row.entry_price is None
+    assert row.pnl is None
+    assert row.amount == 0.1
+    assert row.fee == 4.0
+    assert row.trigger_reason == "market"
