@@ -725,7 +725,7 @@ class CycleRenderContext:
     """
     cycle_id: str
     trigger_type: str               # "scheduled" / "conditional" / "alert"
-    trigger_context: dict | None    # in-memory dict from _capture_trigger_context
+    trigger_context: list[dict | None] | dict | None  # batch list (spec 2026-06-08); legacy single dict tolerated
     state_snapshot: dict | None     # in-memory dict from _capture_state_snapshot
     messages: list | None
     final_text: str | None
@@ -873,7 +873,15 @@ def _render_header(
     sep_top = "═" * 75
     sep_mid = "─" * 75
 
-    trigger_line = _format_trigger_detail(trigger_type, trigger_context)
+    try:
+        trigger_line = _format_trigger_detail(trigger_type, trigger_context)
+    except Exception:
+        # _render_header is NOT inside a try in format_cycle_output; a raise here
+        # propagates out of the whole renderer to on_tick's except → misleading
+        # "Agent cycle failed" even though the cycle already committed. Degrade like
+        # _render_context does (spec 2026-06-08 §3).
+        logger.warning("Trigger header render failed; falling back to bare type", exc_info=True)
+        trigger_line = trigger_type.upper()
     state_line = _format_state_line(state_snapshot)
 
     return (
@@ -970,23 +978,27 @@ def _truncate_with_marker(text: str, max_chars: int) -> str:
     return text[:max_chars] + f" ... [+{len(text) - max_chars} chars]"
 
 
-def _extract_event_line(wake_half: str, trigger_type: str) -> str | None:
-    """Extract the verbatim variable event text from the wake prompt (spec §3.3).
+def _extract_event_lines(wake_half: str, trigger_type: str) -> list[str]:
+    """Extract the verbatim variable event text(s) from the wake prompt (spec 2026-06-08 §3).
 
-    scheduled → None（无变量事件行；纯样板、零增量）。注：render 层
-    `_render_context` 仍为 scheduled 渲一行类型标签 `Woke by — SCHEDULED`
-    （镜像 Header `Trigger SCHEDULED`，使 Context 段跨 trigger 类型一致 / 自包含）。
-    conditional/alert → 以已知前缀（IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL）
-    锚定到 wake_half 末尾，原样保留（alert id / reasoning / fee / PnL / round-trip），
-    collapse 空白 + 上限截断。识别不到前缀 → None。
+    scheduled → [] (no variable event line; pure boilerplate). conditional/alert →
+    split `wake_half` at each known prefix (IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL)
+    into one segment per event, preserving alert id / reasoning / fee / PnL / age clause,
+    collapsing whitespace and truncating **each event individually** to `_CONTEXT_EVENT_CAP`.
+    No prefix found → [].
     """
     if trigger_type == "scheduled":
-        return None
-    positions = [p for p in (wake_half.find(pre) for pre in _EVENT_PREFIXES) if p != -1]
+        return []
+    pattern = re.compile("|".join(re.escape(p) for p in _EVENT_PREFIXES))
+    positions = [m.start() for m in pattern.finditer(wake_half)]
     if not positions:
-        return None
-    event = re.sub(r"\s+", " ", wake_half[min(positions):]).strip()
-    return _truncate_with_marker(event, _CONTEXT_EVENT_CAP)
+        return []
+    out: list[str] = []
+    for i, start in enumerate(positions):
+        end = positions[i + 1] if i + 1 < len(positions) else len(wake_half)
+        seg = re.sub(r"\s+", " ", wake_half[start:end]).strip()
+        out.append(_truncate_with_marker(seg, _CONTEXT_EVENT_CAP))
+    return out
 
 
 def _extract_scheduled_wake_suffix(wake_half: str) -> str:
@@ -1117,15 +1129,20 @@ def _render_context(
         return ""
     try:
         wake_half, summaries_half = _split_wake_prompt(user_prompt_snapshot)
-        event_line = _extract_event_line(wake_half, trigger_type)
+        event_lines = _extract_event_lines(wake_half, trigger_type)
         blocks = _parse_injected_summaries(summaries_half)
 
         lines: list[str] = []
-        if event_line:
-            lines.append(f"  Woke by — {escape(event_line)}")
+        if len(event_lines) == 1:
+            lines.append(f"  Woke by — {escape(event_lines[0])}")
+        elif len(event_lines) > 1:
+            # Batch wake (spec 2026-06-08 §3): one bullet per event, each truncated
+            # individually (Header carries only type+count; Context owns the detail).
+            lines.append(f"  Woke by — {len(event_lines)} events:")
+            for el in event_lines:
+                lines.append(f"    • {escape(el)}")
         elif trigger_type == "scheduled":
-            # scheduled 无变量事件行（_extract_event_line → None）；仍渲类型标签 +
-            # header 上的唤醒时间后缀，使 Context 段自包含（不必回看 Header 取 cycle 时间）。
+            # scheduled 无变量事件行；仍渲类型标签 + header 唤醒时间后缀，使 Context 段自包含。
             lines.append(f"  Woke by — SCHEDULED{_extract_scheduled_wake_suffix(wake_half)}")
 
         if blocks:
