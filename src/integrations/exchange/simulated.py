@@ -456,6 +456,9 @@ class SimulatedExchange(BaseExchange):
                 if o.symbol in self._positions:
                     remaining.append(o)
                 # else: conditional orders have no frozen margin, just drop
+            # NOTE: sim market orders settle synchronously in create_order and never
+            # enter _pending_orders, so this branch is dead for sim (same root cause as
+            # has_pending_market_order). Kept for the OKX async path (deferred) which may pend.
             elif o.order_type == "market" and self._is_close_order_static(o):
                 if o.symbol in self._positions:
                     remaining.append(o)
@@ -596,7 +599,7 @@ class SimulatedExchange(BaseExchange):
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
-        """Process a single tick -- match market orders, check liquidations, conditional orders, alerts."""
+        """Process a single tick -- check liquidations, conditional/limit orders, alerts."""
         self._latest_ticker = ticker
         self._latest_price = ticker.last
 
