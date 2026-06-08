@@ -190,3 +190,41 @@ async def test_render_event_block_scheduled_empty():
     from src.cli.app import _render_event_block
     now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
     assert await _render_event_block(deps=None, trigger_type="scheduled", context=None, cycle_started_at=now) == ""
+
+
+async def test_render_event_block_open_fill_fee_only():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from src.cli.app import _render_event_block
+    now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
+    ctx = SimpleNamespace(
+        trigger_reason="market", symbol="BTC/USDT:USDT", amount=1.0, fill_price=80000.0,
+        pnl=None, fee=1.0, is_full_close=False, entry_price=None,
+        timestamp=int(now.timestamp() * 1000),
+    )
+    block = await _render_event_block(deps=None, trigger_type="conditional", context=ctx, cycle_started_at=now)
+    assert block.startswith("\n\nIMPORTANT EVENT: market triggered — BTC/USDT:USDT 1.0 @ 80000.0")
+    assert ", Fee: -1.00 USDT" in block
+    assert "filled 2026-06-01 14:38 UTC" in block
+
+
+async def test_render_event_block_full_close_round_trip_net():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from src.cli.app import _render_event_block
+    now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
+
+    async def _get_cs(symbol):
+        return 0.01
+
+    deps = SimpleNamespace(exchange=SimpleNamespace(get_contract_size=_get_cs), fee_rate=0.0005)
+    ctx = SimpleNamespace(
+        trigger_reason="tp", symbol="BTC/USDT:USDT", amount=1.0, fill_price=81000.0,
+        pnl=10.0, fee=0.405, is_full_close=True, entry_price=80000.0,
+        timestamp=int(now.timestamp() * 1000),
+    )
+    block = await _render_event_block(deps=deps, trigger_type="conditional", context=ctx, cycle_started_at=now)
+    assert "PnL: +10.00 USDT (gross)" in block
+    assert "(this fill, equiv-round-trip)" in block
+    # round_trip_net = -(80000.0 * 1.0 * 0.01 * 0.0005) + 10.0 - 0.405 = -0.4 + 10.0 - 0.405 = 9.195 → +9.20
+    assert "+9.20 USDT (this fill, equiv-round-trip)" in block

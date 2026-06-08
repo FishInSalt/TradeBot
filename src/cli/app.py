@@ -377,14 +377,15 @@ def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetim
     )
 
 
-def _wake_header_line(events: list, cycle_started_at: datetime) -> str:
+def _wake_header_line(events: list[tuple], cycle_started_at: datetime) -> str:
     """Build the wake-prompt header line (spec 2026-06-08 §2).
 
     N==1: byte-identical to the prior single-trigger header
     (`You have been woken up by a {type} trigger`), with the scheduled fire-time suffix
     appended only for scheduled (its fire time ≡ cycle_started_at → "just now").
     N>1: a multi-event header `You have been woken up by {n} triggers ({breakdown}) since
-    the last cycle`, breakdown counted fill-first then alert (heap pop order).
+    the last cycle`, breakdown lists fills before alerts (matching heap priority
+    conditional<alert).
     """
     if len(events) == 1:
         tt = events[0][0]
