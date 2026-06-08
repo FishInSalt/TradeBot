@@ -120,8 +120,11 @@ triggers AS (
               THEN ac.trigger_context
               ELSE json_array(json(ac.trigger_context)) END
        ) e
-  WHERE json_extract(e.value, '$.type') = 'price_level_alert'
+  WHERE ac.trigger_context IS NOT NULL
+    AND json_extract(e.value, '$.type') = 'price_level_alert'
     AND json_extract(e.value, '$.alert_id') IS NOT NULL
+  -- ELSE branch assumes legacy rows are valid JSON (written by json.dumps); a manually
+  -- inserted malformed string would raise at query time — not guarded (never happens in practice).
 ),
 cancels AS (
   SELECT session_id, alert_id,

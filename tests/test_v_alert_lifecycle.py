@@ -171,6 +171,36 @@ async def test_alert_lifecycle_alert_batched_with_fill(db_session):
 
 
 @pytest.mark.asyncio
+async def test_alert_lifecycle_two_alerts_one_batch_fan_out(db_session):
+    """Two distinct price_level_alerts batched in one cycle's trigger_context array each
+    resolve to their own view row (json_each fan-out)."""
+    for aid, price in (("batch_a1", 80000.0), ("batch_a2", 81000.0)):
+        db_session.add(TradeAction(
+            session_id="test-fanout", cycle_id="c1", action="add_price_level_alert",
+            alert_id=aid, symbol="BTC/USDT:USDT", price=price, reasoning=f"above {price}",
+        ))
+    db_session.add(AgentCycle(
+        session_id="test-fanout", cycle_id="c2", triggered_by="alert",
+        trigger_context=json.dumps([
+            {"type": "price_level_alert", "alert_id": "batch_a1",
+             "current_price": 80050.0, "target_price": 80000.0, "direction": "above"},
+            {"type": "price_level_alert", "alert_id": "batch_a2",
+             "current_price": 81050.0, "target_price": 81000.0, "direction": "above"},
+        ]),
+        state_snapshot=json.dumps({"position": None}), decision="hold",
+    ))
+    await db_session.commit()
+    rows = (await db_session.execute(text(
+        "SELECT alert_id, final_status, triggered_price FROM v_alert_lifecycle "
+        "WHERE session_id='test-fanout' ORDER BY alert_id"
+    ))).mappings().all()
+    assert len(rows) == 2
+    assert rows[0]["alert_id"] == "batch_a1" and rows[0]["final_status"] == "triggered"
+    assert rows[0]["triggered_price"] == 80050.0
+    assert rows[1]["alert_id"] == "batch_a2" and rows[1]["triggered_price"] == 81050.0
+
+
+@pytest.mark.asyncio
 async def test_alert_lifecycle_filters_null_alert_id(db_session):
     """T16.5: 历史数据 alert_id NULL 行被 view 自动过滤（不污染输出）。"""
     db_session.add(TradeAction(
