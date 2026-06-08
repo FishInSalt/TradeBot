@@ -1653,51 +1653,62 @@ async def test_sync_market_writes_closed_sim_order(db_engine):
 # === Task 10: order_id end-to-end chain (SimOrder → FillEvent → order_filled → view) ===
 
 
-async def test_order_id_chain_open_to_view(db_engine):
-    """SimOrder.order_id == FillEvent.order_id == order_filled.order_id,
+async def test_order_id_chain_open_to_view(deps_factory):
+    """SimOrder.order_id == order_filled.order_id == open_position.order_id,
     且 v_order_lifecycle.originated_cycle_id 能解析到发起 cycle。
 
-    端到端链路回归锁定（Task 1-9 已实现）：sync market create_order 返回的
-    FillEvent.order_id 既写进 sim_orders（G3 closed 行）又被工具层 order_filled
-    trade_action 引用；view 的 originated_cycle_id 子查询经 open_position intent
-    行关联回发起它的 cycle。
+    端到端链路回归锁定（Task 1-9 已实现），全部三条 order_id leg 均由【生产代码】
+    产生 —— 经真实工具层 `tools_execution.open_position(deps, ...)` 调用：
+      - sim 同步市价 create_order 写 sim_orders G3 closed 行（leg 1: SimOrder.order_id）
+      - open_position intent trade_action（leg 2，view originated_cycle_id 子查询锚点）
+      - _record_order_filled 写 order_filled trade_action（leg 3）
+    本测试【不】手插任何 TradeAction，故若 _record_order_filled 把 order_id 接错线，
+    leg 3 断言会红（已 mutation 验证）。view 经 sim_orders ↔ open_position intent
+    关联回发起 cycle。
     """
     from sqlalchemy import text
-    from src.integrations.exchange.base import Ticker
-    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.agent.tools_execution import open_position
     from src.storage.database import get_session
-    from src.storage.models import TradeAction
-    from tests._sim_fixtures import make_session, make_cycle
-    from unittest.mock import MagicMock
 
-    sid = await make_session(db_engine, initial_balance=100.0, fee_rate=0.0005)
-    await make_cycle(db_engine, sid, "cyc1")
-    config = MagicMock(); config.fee_rate = 0.0005
-    ex = SimulatedExchange(config=config, db_engine=db_engine, session_id=sid,
-                           symbol="BTC/USDT:USDT")
-    ex._free_usdt = 100.0; ex._used_usdt = 0.0; ex._frozen_usdt = 0.0
-    ex._positions = {}; ex._pending_orders = []; ex._leverage = {"BTC/USDT:USDT": 3}
-    ex._latest_ticker = Ticker(symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0,
-                               ask=95010.0, high=96000.0, low=94000.0,
-                               base_volume=1000.0, timestamp=1712534400000)
-    ex._latest_mark_price = 95000.0
+    deps = deps_factory(initial_balance=100.0)
+    deps.cycle_id = "cyc1"   # run_agent_cycle 在 agent.run() 前注入 cycle_id（见 trader.py §3.3）
 
-    fill = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    # 真实工具调用：写 open_position intent + order_filled 两条 TradeAction，
+    # order_id 全来自真实 FillEvent。
+    receipt = await open_position(deps, "long", 50.0, 3, reasoning="chain regression")
+    assert receipt.startswith("Filled:"), f"同步市价未成交，回执：\n{receipt}"
 
-    # 模拟工具层记 intent（open_position）+ order_filled，cycle_id=cyc1
+    db_engine = deps.db_engine
+
+    # leg 1：从 sim_orders 取该 session 真实 market order 的 order_id（最干净取法，
+    # 与回执字符串格式解耦）。
     async with get_session(db_engine) as s:
-        s.add(TradeAction(session_id=sid, cycle_id="cyc1", action="open_position",
-                          order_id=fill.order_id, symbol="BTC/USDT:USDT", side="long"))
-        s.add(TradeAction(session_id=sid, cycle_id="cyc1", action="order_filled",
-                          order_id=fill.order_id, symbol="BTC/USDT:USDT", side="long",
-                          price=fill.fill_price, fee=fill.fee, amount=fill.amount,
-                          trigger_reason="market"))
-        await s.commit()
+        sim_order = (await s.execute(text(
+            "SELECT order_id, status FROM sim_orders "
+            "WHERE session_id = :sid AND order_type = 'market'"),
+            {"sid": deps.session_id})).first()
+    assert sim_order is not None, "sim_orders 未写入 market order 行（leg 1 缺失）"
+    real_order_id = sim_order.order_id
 
+    # leg 3（关键）：DB 里确有真实 _record_order_filled 写的 order_filled 行，
+    # 且其 order_id 与 sim_orders 一致。改坏 _record_order_filled 的 order_id 此处会红。
+    async with get_session(db_engine) as s:
+        filled = (await s.execute(text(
+            "SELECT order_id, cycle_id FROM trade_actions "
+            "WHERE session_id = :sid AND action = 'order_filled'"),
+            {"sid": deps.session_id})).first()
+    assert filled is not None, "order_filled trade_action 缺失（_record_order_filled 未跑）"
+    assert filled.order_id == real_order_id, (
+        f"order_filled.order_id ({filled.order_id!r}) 与 sim_orders.order_id "
+        f"({real_order_id!r}) 不一致 —— _record_order_filled order_id 接线错误（leg 3）"
+    )
+    assert filled.cycle_id == "cyc1"
+
+    # view：originated_cycle_id 经 open_position intent leg 关联回发起 cycle。
     async with db_engine.connect() as conn:
         row = (await conn.execute(text(
             "SELECT originated_cycle_id FROM v_order_lifecycle WHERE order_id = :oid"),
-            {"oid": fill.order_id})).first()
+            {"oid": real_order_id})).first()
     assert row is not None
     assert row.originated_cycle_id == "cyc1"
 
