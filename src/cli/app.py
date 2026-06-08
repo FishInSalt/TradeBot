@@ -377,6 +377,90 @@ def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetim
     )
 
 
+def _wake_header_line(events: list, cycle_started_at: datetime) -> str:
+    """Build the wake-prompt header line (spec 2026-06-08 §2).
+
+    N==1: byte-identical to the prior single-trigger header
+    (`You have been woken up by a {type} trigger`), with the scheduled fire-time suffix
+    appended only for scheduled (its fire time ≡ cycle_started_at → "just now").
+    N>1: a multi-event header `You have been woken up by {n} triggers ({breakdown}) since
+    the last cycle`, breakdown counted fill-first then alert (heap pop order).
+    """
+    if len(events) == 1:
+        tt = events[0][0]
+        line = f"You have been woken up by a {tt} trigger"
+        if tt == "scheduled":
+            line += _wake_time_suffix(
+                "fired", int(cycle_started_at.timestamp() * 1000), cycle_started_at,
+            )
+        return line
+    n = len(events)
+    n_fill = sum(1 for tt, _ in events if tt == "conditional")
+    n_alert = sum(1 for tt, _ in events if tt == "alert")
+    parts: list[str] = []
+    if n_fill:
+        parts.append(f"{n_fill} fill{'s' if n_fill > 1 else ''}")
+    if n_alert:
+        parts.append(f"{n_alert} alert{'s' if n_alert > 1 else ''}")
+    breakdown = ", ".join(parts) if parts else f"{n} events"
+    return f"You have been woken up by {n} triggers ({breakdown}) since the last cycle"
+
+
+async def _render_event_block(deps, trigger_type: str, context, cycle_started_at: datetime) -> str:
+    """Render one event's prompt block (spec 2026-06-08 §2), verbatim with the prior
+    inline assembly so N==1 prompts are byte-identical.
+
+    Async + IO: the full-close fill branch awaits `deps.exchange.get_contract_size` and
+    reads `deps.fee_rate` (symbol from `context.symbol`). scheduled / context-None → "".
+    """
+    if trigger_type == "conditional" and context is not None:
+        msg = (
+            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
+            f"— {context.symbol} {context.amount} @ {context.fill_price}"
+        )
+        if context.pnl is None:
+            # Open fill — fee only
+            msg += f", Fee: {-context.fee:+.2f} USDT"
+        elif context.is_full_close and context.entry_price is not None:
+            # Full close fill — fee + gross + equiv-round-trip net.
+            # contract_size factor required for USDT-denominated entry_fee — matches
+            # tools_perception.py / tools_execution.py convention.
+            _contract_size = await deps.exchange.get_contract_size(context.symbol)
+            entry_fee_recompute = (
+                context.entry_price * context.amount * _contract_size * deps.fee_rate
+            )
+            round_trip_net = -entry_fee_recompute + context.pnl - context.fee
+            msg += (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} USDT (gross) / "
+                f"{round_trip_net:+.2f} USDT (this fill, equiv-round-trip)"
+            )
+        else:
+            # Part close, OR full close with no entry_price (OKX cache miss —
+            # e.g., SL/TP placed in a prior process before restart). fact-provider
+            # principle: emit hint so agent knows why round-trip line is absent
+            # on full-close fills, distinguishing from part-close design.
+            base = (
+                f", Fee: {-context.fee:+.2f} USDT, "
+                f"PnL: {context.pnl:+.2f} USDT (gross)"
+            )
+            if context.is_full_close and context.entry_price is None:
+                base += " [round-trip net unavailable: entry_price not cached]"
+            msg += base
+        msg += _wake_time_suffix("filled", context.timestamp, cycle_started_at)
+        return msg
+    if trigger_type == "alert" and context is not None:
+        if isinstance(context, PriceLevelAlertInfo):
+            return _format_price_level_alert_trigger(context, cycle_started_at)
+        direction = "dropped" if context.change_pct < 0 else "surged"
+        return (
+            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
+            + _wake_time_suffix("fired", context.timestamp, cycle_started_at)
+        )
+    return ""
+
+
 async def _build_recent_summaries_block(
     engine, session_id: str, n: int = 3,
 ) -> str:

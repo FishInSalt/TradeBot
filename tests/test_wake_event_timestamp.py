@@ -143,3 +143,50 @@ async def test_percentage_alert_prompt_has_fired_suffix():
     assert "PRICE ALERT:" in prompt
     assert " — fired " in prompt
     assert "(4 min ago)" in prompt
+
+
+# ---------------------------------------------------- _wake_header_line
+
+def test_wake_header_line_single_scheduled_has_suffix():
+    from datetime import datetime, timezone
+    from src.cli.app import _wake_header_line
+    now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
+    line = _wake_header_line([("scheduled", None)], now)
+    assert line == "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now)"
+
+
+def test_wake_header_line_single_conditional_no_suffix():
+    from datetime import datetime, timezone
+    from src.cli.app import _wake_header_line
+    now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
+    assert _wake_header_line([("conditional", object())], now) == "You have been woken up by a conditional trigger"
+
+
+def test_wake_header_line_multi_breakdown():
+    from datetime import datetime, timezone
+    from src.cli.app import _wake_header_line
+    now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
+    events = [("conditional", object()), ("alert", object()), ("alert", object())]
+    line = _wake_header_line(events, now)
+    assert line == "You have been woken up by 3 triggers (1 fill, 2 alerts) since the last cycle"
+
+
+async def test_render_event_block_percentage_alert():
+    from datetime import datetime, timezone
+    from src.cli.app import _render_event_block
+    from src.services.price_alert import AlertInfo
+    now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
+    alert = AlertInfo(
+        symbol="BTC/USDT:USDT", current_price=79170.0, reference_price=78000.0,
+        change_pct=1.5, window_minutes=15, timestamp=int(now.timestamp() * 1000),
+    )
+    block = await _render_event_block(deps=None, trigger_type="alert", context=alert, cycle_started_at=now)
+    assert block.startswith("\n\nPRICE ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)")
+    assert "fired 2026-06-01 14:38 UTC" in block
+
+
+async def test_render_event_block_scheduled_empty():
+    from datetime import datetime, timezone
+    from src.cli.app import _render_event_block
+    now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
+    assert await _render_event_block(deps=None, trigger_type="scheduled", context=None, cycle_started_at=now) == ""
