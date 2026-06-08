@@ -1263,6 +1263,13 @@ def test_format_trigger_detail_multi_alerts_only():
     assert _format_trigger_detail("alert", batch) == "ALERT +1 (2 alerts)"
 
 
+def test_format_trigger_detail_multi_unrecognized_types_fallback():
+    from src.cli.display import _format_trigger_detail
+    # N>1 with no recognized fill/alert types → "{n} events" fallback breakdown
+    assert _format_trigger_detail("alert", [None, None]) == "ALERT +1 (2 events)"
+    assert _format_trigger_detail("alert", [{"type": "future_unknown"}, {"type": "x"}]) == "ALERT +1 (2 events)"
+
+
 def test_es_1_state_snapshot_none_unavailable():
     """T-ES-1: state_snapshot=None → State 段 [snapshot unavailable]."""
     from src.cli.display import _format_state_line

@@ -797,6 +797,8 @@ def _format_trigger_detail(trigger_type: str, ctx) -> str:
     n = len(events)
     if n <= 1:
         return type_upper
+    # None entries (per-event capture failure) are counted in n / the +{n-1} total but
+    # not in the type breakdown — the breakdown reflects recognized types only.
     n_fill = sum(1 for e in events if isinstance(e, dict) and e.get("type") == "fill")
     n_alert = sum(
         1 for e in events
@@ -856,7 +858,7 @@ def _format_state_line(state_snapshot: dict | None) -> str:
 def _render_header(
     cycle_id: str,
     trigger_type: str,
-    trigger_context: dict | None,
+    trigger_context: list[dict | None] | dict | None,
     state_snapshot: dict | None,
     cycle_started_at: datetime,
     stats: SessionStats,
