@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 # update _EXECUTION_SUCCESS_PREFIXES in display.py accordingly.
 
 
+def _order_id(result) -> str:
+    """Extract the order id from create_order's heterogeneous return.
+
+    Sim market orders now settle synchronously and return a FillEvent
+    (.order_id); limit/stop/take_profit (and the deferred OKX async path) still
+    return an Order (.id). Full sync-receipt rendering is handled in later
+    iter-sync-market-fill tasks; this shim only normalizes the id so existing
+    recording / receipt paths keep working. Explicit isinstance dispatch (not
+    getattr) avoids MagicMock auto-attr false positives in test mocks.
+    """
+    from src.integrations.exchange.base import FillEvent
+    return result.order_id if isinstance(result, FillEvent) else result.id
+
+
 async def _record_action(deps: TradingDeps, action: str, *,
                           order_id: str | None = None,
                           alert_id: str | None = None,
@@ -95,16 +109,17 @@ async def open_position(
     order = await deps.exchange.create_order(
         symbol=deps.symbol, side=order_side, order_type="market", amount=quantity
     )
+    order_id = _order_id(order)
 
     await _record_action(
-        deps, action="open_position", order_id=order.id,
+        deps, action="open_position", order_id=order_id,
         side=side, reasoning=reasoning,
     )
 
     notional = ticker.last * quantity * contract_size
     est_entry_fee = notional * deps.fee_rate
     return (
-        f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order.id}\n"
+        f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order_id}\n"
         f"Est. entry fee: ~-{est_entry_fee:.2f} USDT "
         f"(notional ~{notional:,.2f} × ~{deps.fee_rate*100:.3f}%)\n"
         f"You will be notified when filled."
@@ -151,10 +166,11 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
             amount=p.contracts,
             params={"reduceOnly": True},  # ensures OKX echoes info.reduceOnly=true in fill event
         )
-        deps.exchange.register_close_order_entry(order.id, p.entry_price)
-        order_ids.append(order.id)
+        order_id = _order_id(order)
+        deps.exchange.register_close_order_entry(order_id, p.entry_price)
+        order_ids.append(order_id)
         await _record_action(
-            deps, action="close_position", order_id=order.id,
+            deps, action="close_position", order_id=order_id,
             side=p.side, reasoning=reasoning,
         )
 
