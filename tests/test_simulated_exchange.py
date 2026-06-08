@@ -1648,3 +1648,112 @@ async def test_sync_market_writes_closed_sim_order(db_engine):
 
     closed = await ex.fetch_closed_orders("BTC/USDT:USDT")
     assert len([o for o in closed if o.order_type == "market"]) == 2
+
+
+# === Task 10: order_id end-to-end chain (SimOrder → FillEvent → order_filled → view) ===
+
+
+async def test_order_id_chain_open_to_view(db_engine):
+    """SimOrder.order_id == FillEvent.order_id == order_filled.order_id,
+    且 v_order_lifecycle.originated_cycle_id 能解析到发起 cycle。
+
+    端到端链路回归锁定（Task 1-9 已实现）：sync market create_order 返回的
+    FillEvent.order_id 既写进 sim_orders（G3 closed 行）又被工具层 order_filled
+    trade_action 引用；view 的 originated_cycle_id 子查询经 open_position intent
+    行关联回发起它的 cycle。
+    """
+    from sqlalchemy import text
+    from src.integrations.exchange.base import Ticker
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from tests._sim_fixtures import make_session, make_cycle
+    from unittest.mock import MagicMock
+
+    sid = await make_session(db_engine, initial_balance=100.0, fee_rate=0.0005)
+    await make_cycle(db_engine, sid, "cyc1")
+    config = MagicMock(); config.fee_rate = 0.0005
+    ex = SimulatedExchange(config=config, db_engine=db_engine, session_id=sid,
+                           symbol="BTC/USDT:USDT")
+    ex._free_usdt = 100.0; ex._used_usdt = 0.0; ex._frozen_usdt = 0.0
+    ex._positions = {}; ex._pending_orders = []; ex._leverage = {"BTC/USDT:USDT": 3}
+    ex._latest_ticker = Ticker(symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0,
+                               ask=95010.0, high=96000.0, low=94000.0,
+                               base_volume=1000.0, timestamp=1712534400000)
+    ex._latest_mark_price = 95000.0
+
+    fill = await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+
+    # 模拟工具层记 intent（open_position）+ order_filled，cycle_id=cyc1
+    async with get_session(db_engine) as s:
+        s.add(TradeAction(session_id=sid, cycle_id="cyc1", action="open_position",
+                          order_id=fill.order_id, symbol="BTC/USDT:USDT", side="long"))
+        s.add(TradeAction(session_id=sid, cycle_id="cyc1", action="order_filled",
+                          order_id=fill.order_id, symbol="BTC/USDT:USDT", side="long",
+                          price=fill.fill_price, fee=fill.fee, amount=fill.amount,
+                          trigger_reason="market"))
+        await s.commit()
+
+    async with db_engine.connect() as conn:
+        row = (await conn.execute(text(
+            "SELECT originated_cycle_id FROM v_order_lifecycle WHERE order_id = :oid"),
+            {"oid": fill.order_id})).first()
+    assert row is not None
+    assert row.originated_cycle_id == "cyc1"
+
+
+# === Task 10: cross-file drift guard — tools_execution receipt prefix ↔ display ===
+#
+# Task 5/6 的回执前缀（"Filled:" / "Closed"）与 display.py 的
+# _EXECUTION_SUCCESS_PREFIXES / _summarize_* 正则是跨文件硬耦合。其余 display
+# 测试喂的是硬编码回执串（测 copy 不测 source）——改了 tools_execution 回执前缀
+# 而漏改 display，那些测试仍绿但生产会炸。本守卫用 deps_factory 跑真实
+# SimulatedExchange + 真实工具层 open_position/close_position，把它们【实际返回】
+# 的回执串喂给 display 的 is_tool_error + _summarize_*，断言被判成功 + 摘要正确。
+# 这是唯一能抓跨文件 drift 的守卫：若未来改 tools_execution 回执前缀但漏改
+# display，此测试会红（已 mutation 验证）。
+
+
+async def test_sync_open_receipt_recognized_by_display(deps_factory):
+    """真实 sim open_position 回执串 → display is_tool_error 判成功 + summary 正确。"""
+    from src.agent.tools_execution import open_position
+    from src.cli.display import is_tool_error, _summarize_open_position
+
+    deps = deps_factory()
+    deps.cycle_id = "cyc-drift-open"
+
+    receipt = await open_position(deps, "long", 50.0, 3, reasoning="drift guard")
+
+    # 真实回执（非硬编码）来自 source；前缀漂移此处会红。
+    assert not is_tool_error("open_position", receipt, outcome="success"), (
+        f"display 未把真实 open_position 回执判成功——回执前缀与 "
+        f"_EXECUTION_SUCCESS_PREFIXES['open_position'] 跨文件 drift。回执：\n{receipt}"
+    )
+    summary = _summarize_open_position(receipt)
+    assert summary.startswith("long "), (
+        f"_summarize_open_position 解析失败（正则与真实回执格式 drift）：{summary!r}"
+    )
+    assert "3x" in summary
+
+
+async def test_sync_close_receipt_recognized_by_display(deps_factory):
+    """真实 sim 先开仓后平仓 → close_position 回执串 → display 判成功 + summary 正确。"""
+    from src.agent.tools_execution import open_position, close_position
+    from src.cli.display import is_tool_error, _summarize_close_position
+
+    deps = deps_factory()
+    deps.cycle_id = "cyc-drift-close"
+
+    open_receipt = await open_position(deps, "long", 50.0, 3, reasoning="seed for close")
+    assert open_receipt.startswith("Filled:")   # 前置条件：仓位真实开出
+
+    receipt = await close_position(deps, reasoning="drift guard close")
+
+    assert not is_tool_error("close_position", receipt, outcome="success"), (
+        f"display 未把真实 close_position 回执判成功——回执前缀与 "
+        f"_EXECUTION_SUCCESS_PREFIXES['close_position'] 跨文件 drift。回执：\n{receipt}"
+    )
+    summary = _summarize_close_position(receipt)
+    assert summary == "Close 1 position(s)", (
+        f"_summarize_close_position 解析失败（正则与真实回执格式 drift）：{summary!r}"
+    )
