@@ -812,18 +812,18 @@ async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mock
 
     budget = TokenBudget(daily_max=1_000_000)
 
-    # Patch capture helpers. Note: _capture_trigger_context is SYNC (def, not
-    # async def — see src/services/cycle_capture.py:24); call site cli/app.py:393
-    # has no await. AsyncMock here would yield a coroutine assigned to
+    # Patch capture helpers. Note: _capture_trigger_contexts is SYNC (def, not
+    # async def — see src/services/cycle_capture.py); call site in cli/app.py has
+    # no await. AsyncMock here would yield a coroutine assigned to
     # trigger_context_var, then `json.dumps(coroutine)` at the retry-exhausted
-    # write would TypeError. _capture_state_snapshot IS async (line 394 awaits).
+    # write would TypeError. _capture_state_snapshot IS async (awaited).
     monkeypatch.setattr(
         "src.cli.app._capture_state_snapshot",
         AsyncMock(return_value={}),
     )
     monkeypatch.setattr(
-        "src.cli.app._capture_trigger_context",
-        mocker.Mock(return_value=None),  # sync — must NOT be AsyncMock
+        "src.cli.app._capture_trigger_contexts",
+        mocker.Mock(return_value=[None]),  # sync — must NOT be AsyncMock
     )
 
     # _build_recent_summaries_block runs real SQL but the empty sess-fp14-9
@@ -831,8 +831,8 @@ async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mock
 
     # Run the cycle — should hit retry_exhausted branch (3 RuntimeError → DB write)
     result = await run_agent_cycle(
-        agent, deps, "scheduled", budget, engine,
-        context=None, model=None, console=None, stats=None,
+        agent, deps, [("scheduled", None)], budget, engine,
+        model=None, console=None, stats=None,
     )
     assert result is None  # retry_exhausted returns None
 
@@ -898,13 +898,13 @@ async def test_usage_limit_exceeded_writes_null_reasoning_unchanged(monkeypatch,
         AsyncMock(return_value={}),
     )
     monkeypatch.setattr(
-        "src.cli.app._capture_trigger_context",
-        mocker.Mock(return_value=None),  # sync — must NOT be AsyncMock
+        "src.cli.app._capture_trigger_contexts",
+        mocker.Mock(return_value=[None]),  # sync — must NOT be AsyncMock
     )
 
     result = await run_agent_cycle(
-        agent, deps, "scheduled", budget, engine,
-        context=None, model=None, console=None, stats=None,
+        agent, deps, [("scheduled", None)], budget, engine,
+        model=None, console=None, stats=None,
     )
     assert result is None  # usage_limit_exceeded returns None
 

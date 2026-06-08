@@ -112,9 +112,9 @@ async def test_fill_notification_open_includes_fee():
     )
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="conditional",
+        agent=agent, deps=deps, events=[("conditional", fill)],
         budget=TokenBudget(daily_max=500_000),
-        engine=engine, context=fill,
+        engine=engine,
     )
 
     prompt = captured["prompt"]
@@ -149,9 +149,9 @@ async def test_fill_notification_close_full_includes_round_trip_net_uses_entry_p
     )
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="conditional",
+        agent=agent, deps=deps, events=[("conditional", fill)],
         budget=TokenBudget(daily_max=500_000),
-        engine=engine, context=fill,
+        engine=engine,
     )
 
     prompt = captured["prompt"]
@@ -181,9 +181,9 @@ async def test_fill_notification_close_partial_omits_round_trip():
     )
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="conditional",
+        agent=agent, deps=deps, events=[("conditional", fill)],
         budget=TokenBudget(daily_max=500_000),
-        engine=engine, context=fill,
+        engine=engine,
     )
 
     prompt = captured["prompt"]
@@ -213,9 +213,9 @@ async def test_fill_notification_label_uses_this_fill_equiv_round_trip():
     )
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="conditional",
+        agent=agent, deps=deps, events=[("conditional", fill)],
         budget=TokenBudget(daily_max=500_000),
-        engine=engine, context=fill,
+        engine=engine,
     )
 
     prompt = captured["prompt"]
@@ -252,9 +252,9 @@ async def test_fill_notification_pnl_cap_scenario_uses_actual_entry_price():
     )
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="conditional",
+        agent=agent, deps=deps, events=[("conditional", fill)],
         budget=TokenBudget(daily_max=500_000),
-        engine=engine, context=fill,
+        engine=engine,
     )
 
     prompt = captured["prompt"]
@@ -291,9 +291,9 @@ async def test_fill_notification_full_close_cache_miss_emits_hint():
     )
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="conditional",
+        agent=agent, deps=deps, events=[("conditional", fill)],
         budget=TokenBudget(daily_max=500_000),
-        engine=engine, context=fill,
+        engine=engine,
     )
 
     prompt = captured["prompt"]

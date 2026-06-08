@@ -102,7 +102,7 @@ async def test_usage_limits_passed_to_agent_run(monkeypatch):
     await run_agent_cycle(
         agent=mock_agent,
         deps=deps,
-        trigger_type="scheduled",
+        events=[("scheduled", None)],
         budget=budget,
         engine=engine,
     )
@@ -138,7 +138,7 @@ async def test_usage_limit_exceeded_writes_forensic_agent_cycle():
     result = await run_agent_cycle(
         agent=mock_agent,
         deps=deps,
-        trigger_type="scheduled",
+        events=[("scheduled", None)],
         budget=budget,
         engine=engine,
     )
@@ -180,7 +180,7 @@ async def test_usage_limit_exceeded_does_not_retry():
     mock_agent.model = "test-model"
 
     await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -218,7 +218,7 @@ async def test_generic_exception_still_retries_3_times(monkeypatch):
     mock_agent.model = "test-model"
 
     result = await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -252,7 +252,7 @@ async def test_t9_success_path_writes_execution_status_ok_and_full_decision():
     mock_agent.model = "test-model"
 
     await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -340,7 +340,7 @@ async def test_wp_1_success_path_writes_thinking_and_full_decision():
     mock_agent.model = "test-model"
 
     await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -385,7 +385,7 @@ async def test_wp_2_forensic_path_writes_null_reasoning_decision():
     mock_agent.model = "test-model"
 
     result = await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
     assert result is None
@@ -425,7 +425,7 @@ async def test_wp_3_forensic_path_writes_trigger_context():
     mock_agent.model = "test-model"
 
     await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -437,9 +437,10 @@ async def test_wp_3_forensic_path_writes_trigger_context():
     assert len(rows) == 1
     row = rows[0]
     assert row.trigger_context is not None, \
-        "trigger_context 应有 (scheduled trigger 也写非 None: {'type': 'scheduled_tick'})"
+        "trigger_context 应有 (scheduled trigger 也写非 None: [{'type': 'scheduled_tick'}])"
+    # batch-drain: trigger_context 现为 JSON 数组（每事件一元素）；单事件 → 1 元素
     parsed = json_mod.loads(row.trigger_context)
-    assert parsed == {"type": "scheduled_tick"}
+    assert parsed == [{"type": "scheduled_tick"}]
 
 
 # === R2-8a: T-EX retry-exhausted forensic write ===
@@ -466,7 +467,7 @@ async def test_usage_limit_exceeded_renders_session_log_placeholder():
     mock_console.print = lambda s: captured_print.append(s)
 
     result = await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine, console=mock_console,
     )
     assert result is None
@@ -497,7 +498,7 @@ async def test_retry_exhausted_writes_forensic_agent_cycle():
     mock_agent.model = "test-model"
 
     result = await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
     assert result is None
@@ -535,7 +536,7 @@ async def test_retry_exhausted_session_log_renders_aborted_placeholder():
     mock_console.print = lambda s: captured_print.append(s)
 
     result = await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine, console=mock_console,
     )
     assert result is None
@@ -562,7 +563,7 @@ async def test_retry_exhausted_records_session_stats():
     mock_agent.model = "test-model"
 
     await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine, stats=stats,
     )
     assert stats.cycle_count == 1
@@ -590,7 +591,7 @@ async def test_retry_exhausted_error_message_truncated_at_200():
     mock_console.print = lambda s: captured.append(s)
 
     await run_agent_cycle(
-        agent=mock_agent, deps=deps, trigger_type="scheduled",
+        agent=mock_agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine, console=mock_console,
     )
     rendered = "\n".join(str(s) for s in captured)

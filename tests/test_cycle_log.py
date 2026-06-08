@@ -99,7 +99,7 @@ async def test_cycle_log_includes_cache_fields_when_present(caplog, make_usage):
 
     with caplog.at_level(logging.INFO, logger="src.cli.app"):
         await run_agent_cycle(
-            agent=agent, deps=deps, trigger_type="scheduled",
+            agent=agent, deps=deps, events=[("scheduled", None)],
             budget=budget, engine=engine,
         )
 
@@ -131,7 +131,7 @@ async def test_cycle_log_hit_rate_zero_when_no_cache_data(caplog, make_usage):
 
     with caplog.at_level(logging.INFO, logger="src.cli.app"):
         await run_agent_cycle(
-            agent=agent, deps=deps, trigger_type="scheduled",
+            agent=agent, deps=deps, events=[("scheduled", None)],
             budget=budget, engine=engine,
         )
 
@@ -159,7 +159,7 @@ async def test_cycle_log_hit_rate_zero_division_safe(caplog, make_usage):
 
     with caplog.at_level(logging.INFO, logger="src.cli.app"):
         result = await run_agent_cycle(
-            agent=agent, deps=deps, trigger_type="scheduled",
+            agent=agent, deps=deps, events=[("scheduled", None)],
             budget=budget, engine=engine,
         )
 

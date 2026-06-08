@@ -111,7 +111,7 @@ async def test_first_cycle_does_not_inject_prior_summaries():
     agent, captured = _make_capturing_agent()
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="scheduled",
+        agent=agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -129,7 +129,7 @@ async def test_subsequent_cycle_injects_prior_summaries_with_header():
     agent, captured = _make_capturing_agent()
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="scheduled",
+        agent=agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -176,7 +176,7 @@ async def test_injection_appears_after_trigger_no_memory():
     agent, captured = _make_capturing_agent()
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="scheduled",
+        agent=agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -201,7 +201,7 @@ async def test_injection_caps_at_n_3_after_4_cycles():
     agent, captured = _make_capturing_agent()
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="scheduled",
+        agent=agent, deps=deps, events=[("scheduled", None)],
         budget=budget, engine=engine,
     )
 
@@ -235,7 +235,7 @@ async def test_any_injection_error_does_not_abort_cycle(caplog, monkeypatch):
 
     with caplog.at_level(logging.WARNING, logger="src.cli.app"):
         result = await run_agent_cycle(
-            agent=agent, deps=deps, trigger_type="scheduled",
+            agent=agent, deps=deps, events=[("scheduled", None)],
             budget=budget, engine=engine,
         )
 
@@ -277,7 +277,7 @@ async def test_subsequent_cycle_with_alert_trigger_injects_after_price_alert():
     )
 
     await run_agent_cycle(
-        agent=agent, deps=deps, trigger_type="alert", context=alert_ctx,
+        agent=agent, deps=deps, events=[("alert", alert_ctx)],
         budget=budget, engine=engine,
     )
 

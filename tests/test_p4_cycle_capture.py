@@ -122,8 +122,8 @@ async def test_cycle_captures_user_prompt_snapshot_happy():
     agent.model = "test-model"
 
     await run_agent_cycle(
-        agent, deps, "scheduled", budget, engine,
-        context=None, model="test-model",
+        agent, deps, [("scheduled", None)], budget, engine,
+        model="test-model",
     )
 
     async with get_session(engine) as db:
@@ -160,8 +160,8 @@ async def test_cycle_captures_user_prompt_snapshot_usage_limit():
     agent.model = "test-model"
 
     await run_agent_cycle(
-        agent, deps, "scheduled", budget, engine,
-        context=None, model="test-model",
+        agent, deps, [("scheduled", None)], budget, engine,
+        model="test-model",
     )
 
     async with get_session(engine) as db:
@@ -208,8 +208,8 @@ async def test_cycle_captures_user_prompt_snapshot_retry_exhausted(monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
 
     await run_agent_cycle(
-        agent, deps, "scheduled", budget, engine,
-        context=None, model="test-model",
+        agent, deps, [("scheduled", None)], budget, engine,
+        model="test-model",
     )
 
     async with get_session(engine) as db:
@@ -256,8 +256,8 @@ async def test_cycle_console_renders_context_section_happy():
         alert_id="934cfd12",
     )
     await run_agent_cycle(
-        agent, deps, "alert", TokenBudget(daily_max=1_000_000), engine,
-        context=alert, console=console, model="test-model",
+        agent, deps, [("alert", alert)], TokenBudget(daily_max=1_000_000), engine,
+        console=console, model="test-model",
     )
     out = buf.getvalue()
     assert "▾ Context (carried into this cycle)" in out
@@ -289,8 +289,8 @@ async def test_cycle_console_renders_context_on_forensic():
         alert_id="934cfd12",
     )
     await run_agent_cycle(
-        agent, deps, "alert", TokenBudget(daily_max=1_000_000), engine,
-        context=alert, console=console, model="test-model",
+        agent, deps, [("alert", alert)], TokenBudget(daily_max=1_000_000), engine,
+        console=console, model="test-model",
     )
     out = buf.getvalue()
     assert "▾ Context (carried into this cycle)" in out

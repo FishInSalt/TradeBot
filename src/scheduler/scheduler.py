@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 _PRIORITY_MAP = {"conditional": 0, "alert": 1, "scheduled": 2}
 
 
+def _type_counts(events: list[tuple[str, Any]]) -> str:
+    """Compact `type:count` summary for the drain-cap WARNING, e.g. 'alert:18 conditional:2'."""
+    counts: dict[str, int] = {}
+    for trigger_type, _ in events:
+        counts[trigger_type] = counts.get(trigger_type, 0) + 1
+    return " ".join(f"{k}:{v}" for k, v in sorted(counts.items()))
+
+
 @dataclass(order=True)
 class _TriggerEvent:
     priority: int
@@ -27,7 +35,7 @@ class Scheduler:
     def __init__(
         self,
         interval_seconds: float,
-        callback: Callable[[str, Any | None], Awaitable[None]],
+        callback: Callable[[list[tuple[str, Any]]], Awaitable[None]],
     ):
         self._interval = interval_seconds
         self._callback = callback
@@ -55,7 +63,7 @@ class Scheduler:
         self._running = True
         logger.info(f"Scheduler started (interval={self._interval}s)")
 
-        await self._run_cycle("scheduled", None)
+        await self._run_cycle([("scheduled", None)])
 
         while self._running:
             interval = self._next_interval if self._next_interval is not None else self._interval
@@ -65,24 +73,29 @@ class Scheduler:
                 break
 
             if self._pending_events:
-                # 安全阀：单次最多 drain 10 个事件，防止 cycle 内产生的新事件导致无限循环
-                for _ in range(min(len(self._pending_events), 10)):
-                    if not self._running or not self._pending_events:
-                        break
-                    event = heapq.heappop(self._pending_events)
-                    await self._run_cycle(event.trigger_type, event.context)
+                events: list[tuple[str, Any]] = []
+                while self._pending_events and len(events) < 20:
+                    ev = heapq.heappop(self._pending_events)   # heap already priority-ordered
+                    events.append((ev.trigger_type, ev.context))
+                deferred = len(self._pending_events)           # leftover == post-drain heap depth
+                if deferred > 0:                               # ⟺ started with strictly >20
+                    logger.warning(
+                        "event drain capped: drained=%d deferred=%d total=%d types=%s",
+                        len(events), deferred, len(events) + deferred, _type_counts(events),
+                    )
+                await self._run_cycle(events)                  # ONE cycle consumes the batch
             else:
-                await self._run_cycle("scheduled", None)
+                await self._run_cycle([("scheduled", None)])
 
     def stop(self) -> None:
         self._running = False
         self._wake_event.set()
         logger.info("Scheduler stopped")
 
-    async def _run_cycle(self, trigger_type: str, context: Any | None) -> None:
+    async def _run_cycle(self, events: list[tuple[str, Any]]) -> None:
         self._cycle_running = True
         try:
-            await self._callback(trigger_type, context)
+            await self._callback(events)
         except Exception:
             logger.exception("Agent cycle failed")
         finally:
