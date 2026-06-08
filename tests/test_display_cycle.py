@@ -3814,4 +3814,4 @@ def test_summarize_sync_open_fill():
 def test_summarize_sync_close():
     from src.cli.display import _summarize_close_position
     out = _summarize_close_position("Closed 2 position(s) | IDs: a, b")
-    assert "2" in out
+    assert out == "Close 2 position(s)"
