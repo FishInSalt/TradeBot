@@ -772,6 +772,11 @@ class SimulatedExchange(BaseExchange):
             if order is None:
                 raise ValueError(f"Order not found: {order_id}")
 
+            # NOTE: sim market orders settle synchronously in create_order and
+            # never enter _pending_orders, so the "Order not found" guard above
+            # always fires first — this branch is dead for sim market. Kept for
+            # the OKX async path (deferred) which may still have a pending market
+            # order to reject.
             if order.order_type == "market":
                 raise ValueError("Cannot cancel market orders")
 

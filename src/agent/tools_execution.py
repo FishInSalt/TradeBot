@@ -68,6 +68,10 @@ async def _record_order_filled(deps: TradingDeps, fill: FillEvent) -> None:
 
     字段集与 app._record_action_from_fill 对齐，使 metrics.total_fees /
     models amount-invariant / trigger_reason 分类在同步路径下仍成立（spec §5.1）。
+
+    有意分叉（非 bug）：此同步路径经 _record_action 写 cycle_id=deps.cycle_id，
+    故 order_filled 行带 cycle_id；app._record_action_from_fill 是模块级、无 deps，
+    其 TradeAction 不设 cycle_id 留 NULL（documented G4a behavior）。
     """
     await _record_action(
         deps, action="order_filled", order_id=fill.order_id,
