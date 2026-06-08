@@ -274,7 +274,7 @@ async def test_open_position_output_includes_est_entry_fee():
 
 
 def test_open_position_wrapper_docstring_mentions_fee():
-    """Wrapper docstring preserves fill-timing sentence + appends fee mention."""
+    """Wrapper docstring carries sync-fill timing sentence + fee mention."""
     import ast
 
     src = _TRADER_PY.read_text()
@@ -291,8 +291,39 @@ def test_open_position_wrapper_docstring_mentions_fee():
                 break
 
     assert docstring is not None, "open_position wrapper docstring not found in trader.py"
-    assert "Position fills via market order; you will receive a fill notification" in docstring
-    assert "Entry incurs taker fee = notional × fee_rate. Fill notification reports actual fee." in docstring
+    assert "The market order fills synchronously" in docstring
+    assert "Entry incurs taker fee = notional × fee_rate; the return reports the actual fee." in docstring
+
+
+@pytest.mark.asyncio
+async def test_open_position_sync_fill_receipt():
+    """create_order 返 FillEvent → open_position 返同步回执（含 fill_price/fee + UNPROTECTED 提示）。"""
+    from src.integrations.exchange.base import FillEvent
+    deps = _make_open_deps(order_id="op1")
+    deps.exchange.create_order = AsyncMock(return_value=FillEvent(
+        order_id="op1", symbol="BTC/USDT:USDT", side="buy", position_side="long",
+        trigger_reason="market", fill_price=80050.0, amount=0.1, fee=4.0,
+        pnl=None, timestamp=1712534400000, is_full_close=False,
+    ))
+    deps.db_engine = None   # 跳过 DB 记账，只测回执
+    from src.agent.tools_execution import open_position
+    out = await open_position(deps, "long", 50.0, 3, reasoning="breakout")
+    assert out.startswith("Filled:")
+    assert "80050.00" in out
+    assert "UNPROTECTED" in out
+    assert "op1" in out
+    # contract_size 默认 1.0（_make_open_deps），notional = 80050.0 * 0.1 * 1.0 = 8005.00
+    assert "Entry fee: -4.00 USDT (notional 8,005.00)" in out
+
+
+@pytest.mark.asyncio
+async def test_open_position_async_order_receipt_unchanged():
+    """create_order 返 Order（OKX 路径）→ 维持旧异步回执。"""
+    deps = _make_open_deps(order_id="op2")   # 既有工厂默认 create_order 返 Order
+    deps.db_engine = None
+    from src.agent.tools_execution import open_position
+    out = await open_position(deps, "long", 50.0, 3, reasoning="breakout")
+    assert "You will be notified when filled." in out
 
 
 # === Task 21: close_position round-trip net PnL + approval message net view ===
@@ -400,7 +431,7 @@ async def test_close_position_approval_message_includes_gross_and_net():
 
 
 def test_close_position_wrapper_docstring_mentions_fee():
-    """Wrapper docstring appends fee/net-PnL mention."""
+    """Wrapper docstring carries sync realized-PnL timing + fee/net mention."""
     import ast
 
     src = _TRADER_PY.read_text()
@@ -415,9 +446,79 @@ def test_close_position_wrapper_docstring_mentions_fee():
                 break
 
     assert docstring is not None, "close_position wrapper docstring not found in trader.py"
-    assert "Close incurs taker fee on exit." in docstring
-    assert "est. exit fee" in docstring
-    assert "est. round-trip net PnL" in docstring
+    assert "The close fills synchronously" in docstring
+    assert "realized PnL" in docstring
+    assert "Close incurs taker fee on exit (included in the round-trip net)." in docstring
+
+
+# === Task 6: close_position sync FillEvent → realized PnL + round-trip net ===
+
+
+@pytest.mark.asyncio
+async def test_close_position_sync_realized_pnl_receipt():
+    """create_order 返 FillEvent → close_position 返 realized PnL（gross + round-trip net）。"""
+    from src.integrations.exchange.base import FillEvent
+    deps = _make_deps(order_id="c1", entry_price=80000.0)
+    deps.db_engine = None
+    # fetch_positions 返一个 long 0.1 @ 80000；create_order 同步平 @ 82000
+    deps.exchange.create_order = AsyncMock(return_value=FillEvent(
+        order_id="c1", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+        trigger_reason="market", fill_price=82000.0, amount=0.1, fee=4.1,
+        pnl=200.0, timestamp=1712534400000, is_full_close=True, entry_price=80000.0,
+    ))
+    from src.agent.tools_execution import close_position
+    out = await close_position(deps, reasoning="TP hit")
+    assert out.startswith("Closed")
+    assert "Realized PnL" in out
+    assert "+200.00" in out          # gross
+    # round-trip net = -entry_fee(80000*0.1*1.0*0.0005=4.0) + 200.0 - 4.1 = 191.90
+    assert "+191.90" in out
+    # 同步路径不调 register_close_order_entry
+    deps.exchange.register_close_order_entry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_close_position_sync_realized_pnl_receipt_two_positions():
+    """2 仓位同步平仓 → total_realized / total_exit_fee / total_entry_fee_actual sum 累加。"""
+    from src.integrations.exchange.base import FillEvent
+    deps = _make_deps(entry_price=80000.0)
+    deps.db_engine = None
+    # 覆盖 fetch_positions 返 2 个 long（order_side=sell）：BTC 0.1 @ 80000 + ETH-ish 1.0 @ 3000
+    deps.exchange.fetch_positions = AsyncMock(return_value=[
+        Position(
+            symbol="BTC/USDT:USDT", side="long", contracts=0.1, entry_price=80000.0,
+            unrealized_pnl=200.0, leverage=10, liquidation_price=72000.0, created_at=None,
+        ),
+        Position(
+            symbol="BTC/USDT:USDT", side="long", contracts=1.0, entry_price=3000.0,
+            unrealized_pnl=100.0, leverage=10, liquidation_price=2700.0, created_at=None,
+        ),
+    ])
+    # create_order 两次调用返不同 FillEvent
+    deps.exchange.create_order = AsyncMock(side_effect=[
+        FillEvent(
+            order_id="c1", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+            trigger_reason="market", fill_price=82000.0, amount=0.1, fee=4.1,
+            pnl=200.0, timestamp=1712534400000, is_full_close=True, entry_price=80000.0,
+        ),
+        FillEvent(
+            order_id="c2", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+            trigger_reason="market", fill_price=3100.0, amount=1.0, fee=1.55,
+            pnl=100.0, timestamp=1712534401000, is_full_close=True, entry_price=3000.0,
+        ),
+    ])
+    from src.agent.tools_execution import close_position
+    out = await close_position(deps, reasoning="rebalance close")
+    # gross = 200.0 + 100.0 = 300.0
+    assert "+300.00" in out
+    # total_exit_fee = 4.1 + 1.55 = 5.65
+    assert "Exit fee: -5.65 USDT" in out
+    # total_entry_fee_actual = 80000*0.1*1.0*0.0005 + 3000*1.0*1.0*0.0005 = 4.0 + 1.5 = 5.5
+    # round_trip_net = -5.5 + 300.0 - 5.65 = 288.85
+    assert "+288.85" in out
+    assert "Closed 2 position(s)" in out
+    assert "c1" in out and "c2" in out
+    deps.exchange.register_close_order_entry.assert_not_called()
 
 
 # === Task 22: place_limit_order Est. entry fee if filled output ===
@@ -676,3 +777,74 @@ def test_set_take_profit_wrapper_docstring_no_oco_drift():
     assert "algoid" not in lower
     assert "atomic" not in lower
     assert "Auto-cancels any existing take_profit orders" in doc
+
+
+async def test_record_order_filled_writes_all_fields(db_engine):
+    """_record_order_filled 把 FillEvent 的 fee/amount/entry_price/trigger_reason 全写入。"""
+    from sqlalchemy import select
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from src.integrations.exchange.base import FillEvent
+    from src.agent.tools_execution import _record_order_filled
+    from tests._sim_fixtures import make_session
+    from unittest.mock import MagicMock
+
+    sid = await make_session(db_engine)
+    deps = MagicMock()
+    deps.db_engine = db_engine
+    deps.session_id = sid
+    deps.cycle_id = "cyc1"
+    deps.symbol = "BTC/USDT:USDT"
+    fill = FillEvent(
+        order_id="oid1", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+        trigger_reason="market", fill_price=82000.0, amount=0.1, fee=4.1,
+        pnl=200.0, timestamp=1712534400000, is_full_close=True, entry_price=80000.0,
+    )
+    await _record_order_filled(deps, fill)
+
+    async with get_session(db_engine) as s:
+        row = (await s.execute(
+            select(TradeAction).where(TradeAction.order_id == "oid1")
+                               .where(TradeAction.action == "order_filled")
+        )).scalar_one()
+    assert row.fee == 4.1
+    assert row.amount == 0.1
+    assert row.entry_price == 80000.0
+    assert row.trigger_reason == "market"
+    assert row.pnl == 200.0
+    assert row.cycle_id == "cyc1"
+
+
+async def test_record_order_filled_open_fill_nulls(db_engine):
+    """开仓 FillEvent（entry_price/pnl 为 None）→ order_filled 行对应列写 NULL，amount/fee/trigger_reason 仍齐。"""
+    from sqlalchemy import select
+    from src.storage.database import get_session
+    from src.storage.models import TradeAction
+    from src.integrations.exchange.base import FillEvent
+    from src.agent.tools_execution import _record_order_filled
+    from tests._sim_fixtures import make_session
+    from unittest.mock import MagicMock
+
+    sid = await make_session(db_engine)
+    deps = MagicMock()
+    deps.db_engine = db_engine
+    deps.session_id = sid
+    deps.cycle_id = "cyc1"
+    deps.symbol = "BTC/USDT:USDT"
+    fill = FillEvent(
+        order_id="oid_open", symbol="BTC/USDT:USDT", side="buy", position_side="long",
+        trigger_reason="market", fill_price=80050.0, amount=0.1, fee=4.0,
+        pnl=None, timestamp=1712534400000, is_full_close=False,
+    )
+    await _record_order_filled(deps, fill)
+
+    async with get_session(db_engine) as s:
+        row = (await s.execute(
+            select(TradeAction).where(TradeAction.order_id == "oid_open")
+                               .where(TradeAction.action == "order_filled")
+        )).scalar_one()
+    assert row.entry_price is None
+    assert row.pnl is None
+    assert row.amount == 0.1
+    assert row.fee == 4.0
+    assert row.trigger_reason == "market"

@@ -3784,3 +3784,35 @@ def test_taker_flow_full_kept_degraded_no_data():
                "No taker-volume data available for X 5m (rubik returned 0 bars).")
     out = _render_tool_body("get_taker_flow", content)
     assert "No taker-volume data available" in out
+
+
+def test_is_tool_error_sync_open_fill_not_error():
+    """同步开仓回执 'Filled: ...' 判为成功（非业务拒绝）；旧异步前缀仍成功。"""
+    from src.cli.display import is_tool_error
+    assert not is_tool_error(
+        "open_position", "Filled: long 0.050000 @ 84200.50, 3x | ID: op1",
+        outcome="success")
+    assert not is_tool_error(
+        "open_position", "Order submitted: long 0.05 @ ~84200, 3x", outcome="success")
+
+
+def test_is_tool_error_sync_close_not_error():
+    from src.cli.display import is_tool_error
+    assert not is_tool_error(
+        "close_position", "Closed 1 position(s) | IDs: c1", outcome="success")
+    assert not is_tool_error(
+        "close_position", "Orders submitted: close 1 position(s) | IDs: x",
+        outcome="success")
+
+
+def test_summarize_sync_open_fill():
+    from src.cli.display import _summarize_open_position
+    out = _summarize_open_position("Filled: long 0.050000 @ 84200.00, 3x | ID: op1")
+    assert "long" in out and "84,200" in out and "3x" in out
+    assert "0.050000" in out
+
+
+def test_summarize_sync_close():
+    from src.cli.display import _summarize_close_position
+    out = _summarize_close_position("Closed 2 position(s) | IDs: a, b")
+    assert out == "Close 2 position(s)"

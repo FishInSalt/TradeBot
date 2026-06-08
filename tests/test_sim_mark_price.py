@@ -49,8 +49,9 @@ async def test_get_mark_price_raises_before_seed():
 async def test_unrealized_pnl_uses_mark_not_bid_ask():
     ex = make_sim_exchange()            # contract_size=1.0
     ex._leverage["BTC/USDT:USDT"] = 5
-    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.01)
-    await _advance(ex, make_ticker(last=50000.0, bid=50000.0, ask=50000.0), mark=50000.0)   # fill @ 50000
+    # Sync open fills at seed ticker ask; pre-set bid=ask=50000 → entry = 50000.
+    ex._latest_ticker = make_ticker(last=50000.0, bid=50000.0, ask=50000.0)
+    await ex.create_order("BTC/USDT:USDT", "buy", "market", 0.01)   # fill @ 50000
     # ticker bid up to 51990 but mark only 51000 — uPnL must read mark
     await _advance(ex, make_ticker(last=52000.0, bid=51990.0, ask=52010.0), mark=51000.0)
     pos = (await ex.fetch_positions("BTC/USDT:USDT"))[0]
@@ -60,8 +61,9 @@ async def test_unrealized_pnl_uses_mark_not_bid_ask():
 async def test_unrealized_pnl_short_uses_mark():
     ex = make_sim_exchange()
     ex._leverage["BTC/USDT:USDT"] = 5
-    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.01)
-    await _advance(ex, make_ticker(last=50000.0, bid=50000.0, ask=50000.0), mark=50000.0)   # fill @ 50000
+    # Sync open fills at seed ticker bid; pre-set bid=ask=50000 → entry = 50000.
+    ex._latest_ticker = make_ticker(last=50000.0, bid=50000.0, ask=50000.0)
+    await ex.create_order("BTC/USDT:USDT", "sell", "market", 0.01)   # fill @ 50000
     await _advance(ex, make_ticker(last=48000.0, bid=47990.0, ask=48010.0), mark=49000.0)
     pos = (await ex.fetch_positions("BTC/USDT:USDT"))[0]
     assert pos.unrealized_pnl == pytest.approx((50000 - 49000) * 0.01)  # 10.0 mark-based, not ask-based 19.9

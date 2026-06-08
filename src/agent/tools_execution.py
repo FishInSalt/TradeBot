@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal
 
+from src.integrations.exchange.base import FillEvent
 from src.services.tool_call_recorder import note_biz_error
 
 if TYPE_CHECKING:
@@ -22,11 +23,17 @@ async def _record_action(deps: TradingDeps, action: str, *,
                           order_id: str | None = None,
                           alert_id: str | None = None,
                           side: str | None = None, price: float | None = None,
-                          pnl: float | None = None, reasoning: str | None = None) -> None:
+                          pnl: float | None = None, reasoning: str | None = None,
+                          fee: float | None = None, amount: float | None = None,
+                          entry_price: float | None = None,
+                          trigger_reason: str | None = None) -> None:
     """写入一条 TradeAction 记录。写入失败不影响 tool 返回（容错）。
 
     `*` 之后全 kwarg-only — 防 future positional caller 把例如 side="long"
     误写入 alert_id 列（PR #42 review v4 I-5 修订）。
+
+    fee/amount/entry_price/trigger_reason 供 order_filled 行使用（同步市价路径，
+    per spec §5.1）；非 fill 行留 None。
     """
     if deps.db_engine is None:
         return
@@ -46,10 +53,33 @@ async def _record_action(deps: TradingDeps, action: str, *,
                 price=price,
                 pnl=pnl,
                 reasoning=reasoning,
+                fee=fee,
+                amount=amount,
+                entry_price=entry_price,
+                trigger_reason=trigger_reason,
             ))
             await session.commit()
     except Exception:
         logger.warning("Failed to record TradeAction", exc_info=True)
+
+
+async def _record_order_filled(deps: TradingDeps, fill: FillEvent) -> None:
+    """从同步 FillEvent 记一条 order_filled TradeAction（sim 同步市价路径）。
+
+    字段集与 app._record_action_from_fill 对齐，使 metrics.total_fees /
+    models amount-invariant / trigger_reason 分类在同步路径下仍成立（spec §5.1）。
+
+    有意分叉（非 bug）：此同步路径经 _record_action 写 cycle_id=deps.cycle_id，
+    故 order_filled 行带 cycle_id；app._record_action_from_fill 是模块级、无 deps，
+    其 TradeAction 不设 cycle_id 留 NULL（documented G4a behavior）。
+    """
+    await _record_action(
+        deps, action="order_filled", order_id=fill.order_id,
+        side=fill.position_side, price=fill.fill_price, pnl=fill.pnl,
+        fee=fill.fee, amount=fill.amount, entry_price=fill.entry_price,
+        trigger_reason=fill.trigger_reason,
+        reasoning=f"(exchange: {fill.trigger_reason} order filled @ {fill.fill_price:.2f})",
+    )
 
 
 async def _check_approval(deps: TradingDeps, action: str, action_desc: str,
@@ -92,19 +122,34 @@ async def open_position(
 
     await deps.exchange.set_leverage(deps.symbol, leverage)
     order_side = "buy" if side == "long" else "sell"
-    order = await deps.exchange.create_order(
+    result = await deps.exchange.create_order(
         symbol=deps.symbol, side=order_side, order_type="market", amount=quantity
     )
 
+    if isinstance(result, FillEvent):
+        # 同步成交（sim）：记 intent + order_filled，返真实回执 + UNPROTECTED 提示。
+        await _record_action(
+            deps, action="open_position", order_id=result.order_id,
+            side=side, reasoning=reasoning,
+        )
+        await _record_order_filled(deps, result)
+        fill_notional = result.fill_price * result.amount * contract_size
+        return (
+            f"Filled: {side} {result.amount:.6f} @ {result.fill_price:.2f}, {leverage}x "
+            f"| ID: {result.order_id}\n"
+            f"Entry fee: -{result.fee:.2f} USDT (notional {fill_notional:,.2f})\n"
+            f"Position OPEN — UNPROTECTED. Set stop loss and take profit now."
+        )
+
+    # 异步（OKX，deferred）：维持 submit-and-notify。
     await _record_action(
-        deps, action="open_position", order_id=order.id,
+        deps, action="open_position", order_id=result.id,
         side=side, reasoning=reasoning,
     )
-
     notional = ticker.last * quantity * contract_size
     est_entry_fee = notional * deps.fee_rate
     return (
-        f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {order.id}\n"
+        f"Order submitted: {side} {quantity:.6f} @ ~{ticker.last:.2f}, {leverage}x | ID: {result.id}\n"
         f"Est. entry fee: ~-{est_entry_fee:.2f} USDT "
         f"(notional ~{notional:,.2f} × ~{deps.fee_rate*100:.3f}%)\n"
         f"You will be notified when filled."
@@ -144,20 +189,54 @@ async def close_position(deps: TradingDeps, reasoning: str) -> str:
         return "Close rejected by human approval."
 
     order_ids = []
+    sync_fills = []
     for p in positions:
         order_side = "sell" if p.side == "long" else "buy"
-        order = await deps.exchange.create_order(
+        result = await deps.exchange.create_order(
             symbol=deps.symbol, side=order_side, order_type="market",
             amount=p.contracts,
-            params={"reduceOnly": True},  # ensures OKX echoes info.reduceOnly=true in fill event
+            params={"reduceOnly": True},  # OKX echoes info.reduceOnly=true in fill event
         )
-        deps.exchange.register_close_order_entry(order.id, p.entry_price)
-        order_ids.append(order.id)
-        await _record_action(
-            deps, action="close_position", order_id=order.id,
-            side=p.side, reasoning=reasoning,
+        if isinstance(result, FillEvent):
+            # 同步平仓：sim 在 _fill_market_close 已直接 capture entry，无需 register（G9）。
+            await _record_action(
+                deps, action="close_position", order_id=result.order_id,
+                side=p.side, reasoning=reasoning,
+            )
+            await _record_order_filled(deps, result)
+            order_ids.append(result.order_id)
+            sync_fills.append(result)
+        else:
+            deps.exchange.register_close_order_entry(result.id, p.entry_price)
+            await _record_action(
+                deps, action="close_position", order_id=result.id,
+                side=p.side, reasoning=reasoning,
+            )
+            order_ids.append(result.id)
+
+    # 单次 close_position 的 deps.exchange 同质：要么全 sim（FillEvent），要么全 OKX（Order），
+    # 不会 sync+async 混合，故 len(sync_fills) 报数与实际同步平仓数一致。
+    if sync_fills:
+        # 同步：realized PnL 即时已知。round-trip net per fill =
+        # -entry_fee + realized_pnl - exit_fee（entry_fee 带 contract_size 因子，
+        # 与 app.py IMPORTANT EVENT 渲染 + close 估算约定一致）。
+        total_realized = sum(f.pnl for f in sync_fills if f.pnl is not None)
+        total_exit_fee = sum(f.fee for f in sync_fills)
+        total_entry_fee_actual = sum(
+            # entry_price 由 sim _fill_market_close 从 pos.entry_price 直接 capture，恒非 None；
+            # `or 0.0` 是防御性 fallback（理论不可达）。
+            (f.entry_price or 0.0) * f.amount * contract_size * deps.fee_rate
+            for f in sync_fills
+        )
+        round_trip_net = -total_entry_fee_actual + total_realized - total_exit_fee
+        return (
+            f"Closed {len(sync_fills)} position(s) | IDs: {', '.join(order_ids)}\n"
+            f"Realized PnL: {total_realized:+.2f} USDT (gross) / "
+            f"{round_trip_net:+.2f} USDT (round-trip net)\n"
+            f"Exit fee: -{total_exit_fee:.2f} USDT"
         )
 
+    # 异步（OKX，deferred）：维持 submit-and-notify。
     return (
         f"Orders submitted: close {len(positions)} position(s) | IDs: {', '.join(order_ids)}\n"
         f"Est. exit fee: ~-{est_exit_fee:.2f} USDT "

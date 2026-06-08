@@ -627,7 +627,9 @@ async def test_get_price_pivots_global_wordlist_fact_only():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invoker", [
     "_invoke_open_position",
+    "_invoke_open_position_sync_fill",
     "_invoke_close_position",
+    "_invoke_close_position_sync_fill",
     "_invoke_set_stop_loss",
     "_invoke_set_take_profit",
     "_invoke_adjust_leverage",
@@ -672,10 +674,67 @@ async def _invoke_open_position(deps, mocker):
     return await open_position(deps, "long", 10.0, 5, reasoning="test")
 
 
+async def _invoke_open_position_sync_fill(deps, mocker):
+    """Sync path: create_order returns a FillEvent → 'Filled: ... UNPROTECTED' receipt.
+
+    Forward-covers the synchronous open receipt (sim market settles in
+    create_order). Mirrors test_tools_execution.test_open_position_sync_fill_receipt.
+    """
+    from src.agent.tools_execution import open_position
+    from src.integrations.exchange.base import FillEvent
+    deps.exchange.fetch_balance = AsyncMock(return_value=Balance(
+        total_usdt=10000.0, free_usdt=8000.0, used_usdt=2000.0,
+    ))
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=64000.0, bid=63999.5, ask=64000.5,
+        high=65000.0, low=63000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.amount_to_precision = mocker.Mock(return_value=0.01)
+    deps.exchange.has_pending_market_order = mocker.Mock(return_value=False)
+    deps.exchange.set_leverage = AsyncMock(return_value=None)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.create_order = AsyncMock(return_value=FillEvent(
+        order_id="ord1", symbol="BTC/USDT:USDT", side="buy", position_side="long",
+        trigger_reason="market", fill_price=64050.0, amount=0.01, fee=0.32,
+        pnl=None, timestamp=0, is_full_close=False,
+    ))
+    return await open_position(deps, "long", 10.0, 5, reasoning="test")
+
+
 async def _invoke_close_position(deps, mocker):
     """Early return: no positions."""
     from src.agent.tools_execution import close_position
     deps.exchange.fetch_positions = AsyncMock(return_value=[])
+    return await close_position(deps, reasoning="test")
+
+
+async def _invoke_close_position_sync_fill(deps, mocker):
+    """Sync path: create_order returns an is_full_close FillEvent →
+    'Closed ... Realized PnL ... round-trip net ... Exit fee' receipt.
+
+    Forward-covers the synchronous close receipt. Mirrors
+    test_tools_execution.test_close_position_sync_realized_pnl_receipt.
+    """
+    from src.agent.tools_execution import close_position
+    from src.integrations.exchange.base import FillEvent
+    deps.exchange.fetch_positions = AsyncMock(return_value=[Position(
+        symbol="BTC/USDT:USDT", side="long", contracts=0.1, entry_price=80000.0,
+        unrealized_pnl=200.0, leverage=10, liquidation_price=72000.0,
+    )])
+    deps.exchange.has_pending_market_order = mocker.Mock(return_value=False)
+    deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
+    deps.exchange.register_close_order_entry = mocker.Mock()
+    deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    deps.exchange.algo_trigger_reference = "last"
+    deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
+        symbol="BTC/USDT:USDT", last=82000.0, bid=81999.5, ask=82000.5,
+        high=83000.0, low=80000.0, base_volume=1000.0, timestamp=0,
+    ))
+    deps.exchange.create_order = AsyncMock(return_value=FillEvent(
+        order_id="c1", symbol="BTC/USDT:USDT", side="sell", position_side="long",
+        trigger_reason="market", fill_price=82000.0, amount=0.1, fee=4.1,
+        pnl=200.0, timestamp=0, is_full_close=True, entry_price=80000.0,
+    ))
     return await close_position(deps, reasoning="test")
 
 

@@ -213,7 +213,9 @@ class SimulatedExchange(BaseExchange):
         amount: float,
         price: float | None = None,
         params: dict | None = None,
-    ) -> Order:
+    ) -> Order | FillEvent:
+        # market 分支同步结算返回 FillEvent；limit/stop/take_profit 仍返回 Order
+        # (尚未成交，无 fill 信息)。BaseExchange 接口签名同形 (Task 3)。
         # Sim doesn't need reduceOnly: its _is_close_order_static + position
         # state logic handles full-close inference natively. Accept params for
         # API parity with OKX (Remediation A); ignored at the sim layer.
@@ -231,42 +233,29 @@ class SimulatedExchange(BaseExchange):
                     raise RuntimeError("No ticker data available")
                 ticker = self._latest_ticker
                 is_close = self._is_close_order(symbol, side)
+                order_id = str(uuid.uuid4())
 
                 if is_close:
-                    pos = self._positions[symbol]
-                    position_side = pos.side
-                    estimated_price = ticker.bid if pos.side == "long" else ticker.ask
-                    estimated_fee = estimated_price * self._base_qty(amount) * self._fee_rate
-                    frozen = min(estimated_fee, self._free_usdt)
+                    fill = self._fill_market_close(order_id, symbol, side, amount, ticker)
+                    # G1：full close → 撤孤儿 SL/TP（内存）+ 清 price-level 告警。
+                    # 同步路径绕开 _process_tick，这两件善后都不会自愈（spec §6.1 G1）。
+                    if fill.is_full_close:
+                        self._cancel_orphaned_orders()
+                        self._clear_stale_alerts_for_full_close(fill)
                 else:
-                    position_side = "long" if side == "buy" else "short"
-                    estimated_price = ticker.ask if side == "buy" else ticker.bid
                     leverage = self._leverage.get(symbol, 1)
-                    estimated_margin = (estimated_price * self._base_qty(amount)) / leverage
-                    estimated_fee = estimated_price * self._base_qty(amount) * self._fee_rate
-                    frozen = (estimated_margin + estimated_fee) * 1.002
-                    if self._free_usdt < frozen:
-                        raise ValueError(
-                            f"Insufficient balance: need {frozen:.2f}, have {self._free_usdt:.2f}"
-                        )
+                    fill = self._fill_market_open(order_id, symbol, side, amount, leverage, ticker)
 
-                self._free_usdt -= frozen
-                self._frozen_usdt += frozen
-
-                order_id = str(uuid.uuid4())
-                leverage_val = self._leverage.get(symbol, 1)
-                self._pending_orders.append(_PendingOrder(
-                    id=order_id, symbol=symbol, side=side,
-                    position_side=position_side, order_type="market",
-                    amount=amount, trigger_price=None,
-                    frozen_margin=frozen, leverage=leverage_val,
-                ))
+                # G3：直接写一行 closed SimOrder（市价单不再有 open 中间态）。
+                # _persist_state 同时 upsert 余额/仓位 + DB 撤孤儿（step 3b）。
                 if self._db_engine:
-                    await self._persist_state()
-                return Order(
-                    id=order_id, symbol=symbol, side=side, order_type="market",
-                    amount=amount, price=None, status="open",
-                )
+                    closed_order = Order(
+                        id=order_id, symbol=symbol, side=side, order_type="market",
+                        amount=fill.amount, price=fill.fill_price,
+                        status="closed", fee=fill.fee,
+                    )
+                    await self._persist_state(new_orders=[(closed_order, fill.position_side)])
+                return fill
             elif order_type == "limit":
                 # Limit orders are open-only (first version — D4)
                 pos = self._positions.get(symbol)
@@ -309,115 +298,88 @@ class SimulatedExchange(BaseExchange):
                     await self._persist_state()
                 return order
 
-    def _fill_market_open(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
-        """Fill a pending market open order. Returns None if cancelled due to conflict."""
-        pos = self._positions.get(order.symbol)
-        position_side = "long" if order.side == "buy" else "short"
-
-        # Defensive: reverse position conflict
+    def _fill_market_open(
+        self, order_id: str, symbol: str, side: str,
+        amount: float, leverage: int, ticker: Ticker,
+    ) -> FillEvent:
+        """Synchronously settle a market open. Direct margin occupation (no
+        prior freeze). Raises ValueError on reverse/leverage conflict or
+        insufficient balance (explicit reject, per tool-design principle 1)."""
+        pos = self._positions.get(symbol)
+        position_side = "long" if side == "buy" else "short"
         if pos is not None and pos.side != position_side:
-            logger.warning(f"Market open {order.id} cancelled: conflicts with {pos.side} position")
-            self._frozen_usdt -= order.frozen_margin
-            self._free_usdt += order.frozen_margin
-            return None
-
-        # Defensive: leverage mismatch
-        if pos is not None and pos.leverage != order.leverage:
-            logger.warning(
-                f"Market open {order.id} cancelled: leverage mismatch "
-                f"(order={order.leverage}x, position={pos.leverage}x)"
+            raise ValueError(
+                f"Cannot open {position_side}: existing {pos.side} position. Close it first."
             )
-            self._frozen_usdt -= order.frozen_margin
-            self._free_usdt += order.frozen_margin
-            return None
-
-        fill_price = ticker.ask if order.side == "buy" else ticker.bid
-        leverage = order.leverage
-        actual_margin = (fill_price * self._base_qty(order.amount)) / leverage
-        actual_fee = fill_price * self._base_qty(order.amount) * self._fee_rate
+        if pos is not None and pos.leverage != leverage:
+            raise ValueError(
+                f"Leverage mismatch: order {leverage}x vs position {pos.leverage}x. "
+                f"Close position first."
+            )
+        fill_price = ticker.ask if side == "buy" else ticker.bid
+        actual_margin = (fill_price * self._base_qty(amount)) / leverage
+        actual_fee = fill_price * self._base_qty(amount) * self._fee_rate
         actual_cost = actual_margin + actual_fee
-
-        # Unfreeze → occupy
-        diff = order.frozen_margin - actual_cost
-        self._frozen_usdt -= order.frozen_margin
-        self._used_usdt += actual_margin
-        self._free_usdt += diff
-        if self._free_usdt < 0:
-            logger.warning(
-                f"Market open {order.id}: free_usdt shortfall {-self._free_usdt:.4f} clamped to 0"
+        if self._free_usdt < actual_cost:
+            raise ValueError(
+                f"Insufficient balance: need {actual_cost:.2f}, have {self._free_usdt:.2f}"
             )
-            self._free_usdt = 0.0
-
+        # Direct occupation (sync: estimate == actual, no *1.002 buffer needed)
+        self._used_usdt += actual_margin
+        self._free_usdt -= actual_cost
         self._free_usdt = round(self._free_usdt, 8)
         self._used_usdt = round(self._used_usdt, 8)
 
-        # Create or merge position
         if pos is not None and pos.side == position_side:
-            new_contracts = pos.contracts + order.amount
-            new_entry = (pos.entry_price * pos.contracts + fill_price * order.amount) / new_contracts
+            new_contracts = pos.contracts + amount
+            pos.entry_price = (pos.entry_price * pos.contracts + fill_price * amount) / new_contracts
             pos.contracts = new_contracts
-            pos.entry_price = new_entry
             pos.updated_at = datetime.now(timezone.utc)
         else:
-            self._positions[order.symbol] = _Position(
-                side=position_side, contracts=order.amount,
+            self._positions[symbol] = _Position(
+                side=position_side, contracts=amount,
                 entry_price=fill_price, leverage=leverage,
             )
-        self._leverage[order.symbol] = leverage
+        self._leverage[symbol] = leverage
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        logger.info(f"Market open filled: {order.side} {order.amount} {order.symbol} @ {fill_price:.2f}")
+        logger.info(f"Market open filled (sync): {side} {amount} {symbol} @ {fill_price:.2f}")
         return FillEvent(
-            order_id=order.id, symbol=order.symbol, side=order.side,
+            order_id=order_id, symbol=symbol, side=side,
             position_side=position_side, trigger_reason="market",
-            fill_price=fill_price, amount=order.amount, fee=actual_fee,
-            pnl=None, timestamp=now_ms,
-            is_full_close=False,  # market open
+            fill_price=fill_price, amount=amount, fee=actual_fee,
+            pnl=None, timestamp=now_ms, is_full_close=False,
         )
 
-    def _fill_market_close(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
-        """Fill a pending market close order. Returns None if position already gone."""
-        pos = self._positions.get(order.symbol)
+    def _fill_market_close(
+        self, order_id: str, symbol: str, side: str, amount: float, ticker: Ticker,
+    ) -> FillEvent:
+        """Synchronously settle a market close (reuses _close_position_core).
+        Raises ValueError if no position (sync: caller checked is_close, so this
+        is a defensive backstop)."""
+        pos = self._positions.get(symbol)
         if pos is None:
-            logger.warning(f"Market close {order.id} cancelled: position already closed")
-            self._frozen_usdt -= order.frozen_margin
-            self._free_usdt += order.frozen_margin
-            return None
-
-        actual_amount = min(order.amount, pos.contracts)
+            raise ValueError(f"No {symbol} position to close")
+        actual_amount = min(amount, pos.contracts)
         fill_price = ticker.bid if pos.side == "long" else ticker.ask
         position_side = pos.side
-        captured_entry = pos.entry_price  # capture BEFORE close (pos may be popped from self._positions in _close_position_core)
+        captured_entry = pos.entry_price  # capture BEFORE _close_position_core may pop pos
         pnl, fee, _ = self._close_position_core(
-            order.symbol, pos.side, actual_amount, fill_price, pnl_cap=True,
+            symbol, pos.side, actual_amount, fill_price, pnl_cap=True,
         )
-
-        # Unfreeze (close doesn't occupy new margin — it's released by _close_position_core)
-        self._frozen_usdt -= order.frozen_margin
-        self._free_usdt += order.frozen_margin
-
-        is_full_close = order.symbol not in self._positions  # rely on _close_position_core having popped fully-closed symbols
-
+        is_full_close = symbol not in self._positions
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         logger.info(
-            f"Market close filled: {order.side} {actual_amount} {order.symbol} @ {fill_price:.2f}, "
+            f"Market close filled (sync): {side} {actual_amount} {symbol} @ {fill_price:.2f}, "
             f"pnl={pnl:.4f}, fee={fee:.4f}"
         )
         return FillEvent(
-            order_id=order.id, symbol=order.symbol, side=order.side,
+            order_id=order_id, symbol=symbol, side=side,
             position_side=position_side, trigger_reason="market",
             fill_price=fill_price, amount=actual_amount, fee=fee,
             pnl=pnl, timestamp=now_ms,
-            is_full_close=is_full_close,
-            entry_price=captured_entry,
+            is_full_close=is_full_close, entry_price=captured_entry,
         )
-
-    def _execute_market_fill(self, order: _PendingOrder, ticker: Ticker) -> FillEvent | None:
-        """Route pending market order to open or close fill. Uses static direction check."""
-        if self._is_close_order_static(order):
-            return self._fill_market_close(order, ticker)
-        else:
-            return self._fill_market_open(order, ticker)
 
     def _close_position_core(
         self, symbol: str, position_side: str, amount: float, fill_price: float,
@@ -494,6 +456,9 @@ class SimulatedExchange(BaseExchange):
                 if o.symbol in self._positions:
                     remaining.append(o)
                 # else: conditional orders have no frozen margin, just drop
+            # NOTE: sim market orders settle synchronously in create_order and never
+            # enter _pending_orders, so this branch is dead for sim (same root cause as
+            # has_pending_market_order). Kept for the OKX async path (deferred) which may pend.
             elif o.order_type == "market" and self._is_close_order_static(o):
                 if o.symbol in self._positions:
                     remaining.append(o)
@@ -634,7 +599,7 @@ class SimulatedExchange(BaseExchange):
         )
 
     async def _process_tick(self, ticker: Ticker) -> None:
-        """Process a single tick -- match market orders, check liquidations, conditional orders, alerts."""
+        """Process a single tick -- check liquidations, conditional/limit orders, alerts."""
         self._latest_ticker = ticker
         self._latest_price = ticker.last
 
@@ -646,16 +611,6 @@ class SimulatedExchange(BaseExchange):
         level_alerts = []
 
         async with self._lock:
-            # 0. Match pending market orders (new — before liquidation)
-            market_orders = [o for o in self._pending_orders if o.order_type == "market"]
-            for order in market_orders:
-                fill = self._execute_market_fill(order, ticker)
-                if fill is None:
-                    cancelled_order_ids.append(order.id)
-                    continue
-                filled_order_ids.append(order.id)
-                triggered.append(fill)
-
             # 1. Liquidation check (must be before conditional orders)
             #    Trigger basis = mark (real OKX); fill price = order-book bid/ask (市价吃盘口)
             mark = self._latest_mark_price
@@ -817,6 +772,11 @@ class SimulatedExchange(BaseExchange):
             if order is None:
                 raise ValueError(f"Order not found: {order_id}")
 
+            # NOTE: sim market orders settle synchronously in create_order and
+            # never enter _pending_orders, so the "Order not found" guard above
+            # always fires first — this branch is dead for sim market. Kept for
+            # the OKX async path (deferred) which may still have a pending market
+            # order to reject.
             if order.order_type == "market":
                 raise ValueError("Cannot cancel market orders")
 
@@ -836,7 +796,12 @@ class SimulatedExchange(BaseExchange):
         self._alert_callback = callback
 
     def has_pending_market_order(self, symbol: str, side: str | None = None) -> bool:
-        """Check for pending market orders matching symbol and optional side."""
+        """Check for pending market orders matching symbol and optional side.
+
+        NOTE: sim market orders settle synchronously in create_order and never
+        enter _pending_orders, so this is always False for sim market (dead
+        branch). Kept for the OKX async path (deferred) which may still pend.
+        """
         for o in self._pending_orders:
             if o.order_type == "market" and o.symbol == symbol:
                 if side is None or o.side == side:
