@@ -446,14 +446,14 @@ def create_trader_agent(
 
         Returns:
             A taker-flow report (fact-only text) for the given period and limit. Example output follows.
-            === Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:34:07 UTC) ===
+            === Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:35:12 UTC) ===
             Now (current 5m, closed):  52% taker buy · net +1.2$M · vol 1.0× (vs 20-bar avg)
             Window (12 bars = 60min):  CVD +8.4$M · 5/12 bars net-sell
             Per-bar (bar open UTC, newest first; row 1 = latest closed bar — rubik may lag candle/ticker by ~1 bar):
               Time     Buy%   Net($M)   RVol(×20-bar)   CVD($M)   Close
               04:30     52%     +1.2    1.0×     +8.4    73531
               ... (older bars) ...
-            1h-scale anchor (current 1h, 34min formed):  53% buy · net +62$M
+            1h-scale anchor (current 1h, 35min formed):  53% buy · net +62$M
         """
         from src.agent.tools_perception import get_taker_flow as _impl
 
