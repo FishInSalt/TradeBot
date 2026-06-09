@@ -1122,12 +1122,14 @@ def _derive_oi_anchors(
 
 # --- taker_flow (get_taker_flow) constants + helpers (spec §3.1-3.3) ---
 _TAKER_FLOW_PERIOD_MS = {
-    "5m": 5 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000,
-    "1d": 24 * 60 * 60_000, "1w": 7 * 24 * 60 * 60_000,
+    "5m": 5 * 60_000, "15m": 15 * 60_000, "1h": 60 * 60_000,
+    "4h": 4 * 60 * 60_000, "1d": 24 * 60 * 60_000, "1w": 7 * 24 * 60 * 60_000,
 }
-# context-anchor up-tier on the 5m->1h->4h->1d->1w ladder (§3.3). Keys are also
-# the exact set of valid *tool* periods ({5m,1h,4h,1d}); 1w is anchor-only.
-_TAKER_FLOW_ANCHOR = {"5m": "1h", "1h": "4h", "4h": "1d", "1d": "1w"}
+# context-anchor up-tier on the 5m->15m->1h->4h->1d->1w ladder (§3.3). Keys are the
+# SINGLE SOURCE OF TRUTH for the valid *tool* periods — the reject message and the
+# fetch_taker_flow Literals derive from them, so adding a period here can't leave a
+# stale enum behind. 1w is anchor-only (an up-tier, not a standalone tool period).
+_TAKER_FLOW_ANCHOR = {"5m": "1h", "15m": "1h", "1h": "4h", "4h": "1d", "1d": "1w"}
 _TAKER_FLOW_RVOL_BARS = 20  # fixed baseline window (closed bars), decoupled from limit
 
 
@@ -1280,8 +1282,9 @@ async def get_taker_flow(deps: TradingDeps, period: str = "5m", limit: int = 6) 
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     # Fact-only explicit reject (no clamp, no Literal narrowing — soft-constraint §1/§2)
-    if period not in _TAKER_FLOW_ANCHOR:  # valid tool periods == {5m,1h,4h,1d}
-        return f"Invalid period '{period}'. period must be one of: 5m, 1h, 4h, 1d"
+    if period not in _TAKER_FLOW_ANCHOR:  # anchor keys ARE the valid tool periods
+        return (f"Invalid period '{period}'. period must be one of: "
+                f"{', '.join(_TAKER_FLOW_ANCHOR)}")
     if not (1 <= limit <= 36):
         return f"Invalid limit {limit}. limit must be in [1, 36]"
 

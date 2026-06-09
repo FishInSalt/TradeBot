@@ -18,12 +18,14 @@ def test_taker_flow_bar_dataclass_fields():
 
 
 def test_taker_volume_period_map_is_complete():
-    """§3.1/§3.3/③: distinct from _OKX_OI_PERIOD; covers tool periods {5m,1h,4h,1d}
-    PLUS the 1w anchor up-tier. Reusing _OKX_OI_PERIOD would KeyError on 4h/1w."""
+    """§3.1/§3.3/③ + iter-taker-flow-audit-remediation I-5: distinct from
+    _OKX_OI_PERIOD; covers tool periods {5m,15m,1h,4h,1d} PLUS the 1w anchor up-tier.
+    Reusing _OKX_OI_PERIOD would KeyError on 15m/4h/1w."""
     from src.integrations.exchange.base import _TAKER_VOLUME_PERIOD, _OKX_OI_PERIOD
-    assert _TAKER_VOLUME_PERIOD == {"5m": "5m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
+    assert _TAKER_VOLUME_PERIOD == {
+        "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
     assert _TAKER_VOLUME_PERIOD is not _OKX_OI_PERIOD
-    for p in ("5m", "1h", "4h", "1d", "1w"):
+    for p in ("5m", "15m", "1h", "4h", "1d", "1w"):
         assert p in _TAKER_VOLUME_PERIOD
 
 
@@ -311,10 +313,41 @@ def _live_bars(n, period_ms):
 
 
 @pytest.mark.asyncio
-async def test_get_taker_flow_rejects_bad_period():
+async def test_get_taker_flow_rejects_bad_period_derived_message():
+    """I-9/F1: an out-of-set period is rejected fact-only, and the message is DERIVED
+    from the single source of truth (_TAKER_FLOW_ANCHOR keys), not a hardcoded enum.
+    15m is now a valid tool period (see test_get_taker_flow_accepts_15m_period); 30m
+    stays invalid (deliberate ladder subset — 30m would compress the bottom step to
+    ×2, principle 4)."""
+    from src.agent.tools_perception import get_taker_flow, _TAKER_FLOW_ANCHOR
+    out = await get_taker_flow(_deps_with_taker({}), period="30m")
+    assert "Invalid period '30m'" in out
+    assert f"period must be one of: {', '.join(_TAKER_FLOW_ANCHOR)}" in out
+    assert "5m, 15m, 1h, 4h, 1d" in out   # insertion-ordered dict -> natural ladder order
+
+
+def test_taker_flow_15m_period_ms_and_anchor():
+    """I-5: 15m added as a first-class tool period. period_ms = 15min; the wide-error
+    anchor routes 15m to the SAME 1h context as the 5m main frame (every fine-grained
+    frame reads the hour-scale context); 5m->1h is unchanged (no regression). Anchor
+    keys ARE the valid tool periods."""
+    from src.agent.tools_perception import _TAKER_FLOW_PERIOD_MS, _TAKER_FLOW_ANCHOR
+    assert _TAKER_FLOW_PERIOD_MS["15m"] == 900_000
+    assert _TAKER_FLOW_ANCHOR["15m"] == "1h"
+    assert _TAKER_FLOW_ANCHOR["5m"] == "1h"
+    assert set(_TAKER_FLOW_ANCHOR) == {"5m", "15m", "1h", "4h", "1d"}
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_accepts_15m_period():
+    """I-5: period=15m no longer rejected; renders the normal report (header names the
+    15m bar size; anchor fetches the 1h up-tier)."""
     from src.agent.tools_perception import get_taker_flow
-    out = await get_taker_flow(_deps_with_taker({}), period="15m")
-    assert "period must be one of: 5m, 1h, 4h, 1d" in out
+    deps = _deps_with_taker({"15m": _live_bars(21, 900_000), "1h": _live_bars(2, 3_600_000)})
+    out = await get_taker_flow(deps, "15m", 6)
+    assert "Invalid period" not in out
+    assert "=== Taker Flow (BTC/USDT:USDT · 15m bars · @" in out
+    assert "Per-bar" in out
 
 
 @pytest.mark.asyncio

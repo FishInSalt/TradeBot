@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 # below is the only translation layer.
 _OKX_OI_PERIOD = {"5m": "5m", "1h": "1H", "1d": "1D"}
 # taker-volume rubik endpoint period map. DELIBERATELY distinct from
-# _OKX_OI_PERIOD: the legal period set differs (taker flow exposes 4h + 1w; OI
-# does not), so reusing _OKX_OI_PERIOD would KeyError on 4h/1w. 1w is included
-# only as the 1d-period anchor up-tier (§3.3), not as a standalone tool period.
-_TAKER_VOLUME_PERIOD = {"5m": "5m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
+# _OKX_OI_PERIOD: the legal period set differs (taker flow exposes 15m + 4h + 1w;
+# OI does not), so reusing _OKX_OI_PERIOD would KeyError on 15m/4h/1w. 1w is
+# included only as the 1d-period anchor up-tier (§3.3), not a standalone tool period.
+_TAKER_VOLUME_PERIOD = {"5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
 
 
 @dataclass
