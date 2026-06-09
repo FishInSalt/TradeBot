@@ -1231,7 +1231,8 @@ def _render_taker_flow(
     # returned bar already closed (common on 5m; on 1h/4h/1d in the short window
     # after a bar boundary) — so the header must follow is_in_progress, not
     # assert in-progress unconditionally.
-    row1_state = "current in-progress" if is_in_progress else "latest closed bar"
+    row1_state = ("current in-progress" if is_in_progress
+                  else "latest closed bar — rubik may lag candle/ticker by ~1 bar")
     lines.append(f"Per-bar (bar open UTC, newest first; row 1 = {row1_state}):")
     lines.append(hdr)
     for b in reversed(display):                          # newest-first

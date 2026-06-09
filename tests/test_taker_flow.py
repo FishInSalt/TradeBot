@@ -218,6 +218,27 @@ def test_render_taker_flow_closed_newest_header_not_in_progress():
     assert "*" not in out.split("Per-bar")[1]           # no star on row 1
 
 
+def test_render_taker_flow_closed_row1_notes_publish_lag():
+    """I-6: when the newest returned bar is already closed (rubik publish-lag), the
+    per-bar row-1 label flags that rubik can lag the candle/ticker by ~1 bar — so the
+    agent does NOT cross-check the Close column against GMD's newer closed bar and
+    misreport a 'timestamp/join bug' (sim #15: 9/1802 false reports, e.g. L37769 /
+    L72185). In-progress renders keep the plain 'current in-progress' label and gain
+    no lag note."""
+    from src.agent.tools_perception import _render_taker_flow
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    # closed newest: opened 7min before now (period 5min) -> closed in publish-lag window
+    bars_cl = _bars(21, period_ms, base_open=now - 120_000 - 21 * period_ms)
+    out_cl = _render_taker_flow(bars_cl, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "row 1 = latest closed bar — rubik may lag candle/ticker by ~1 bar" in out_cl
+    # in-progress branch unchanged
+    bars_ip = _bars(21, period_ms, base_open=now - 120_000 - 20 * period_ms)
+    out_ip = _render_taker_flow(bars_ip, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "row 1 = current in-progress" in out_ip
+    assert "rubik may lag" not in out_ip
+
+
 def test_render_taker_flow_window_cvd_and_net_sell_count():
     from src.agent.tools_perception import _render_taker_flow
     from src.integrations.exchange.base import TakerFlowBar
