@@ -557,3 +557,48 @@ def test_get_taker_flow_docstring_row1_state_is_fact_only():
     assert "latest closed bar" in norm            # the second observable state surfaced
     # the old absolute claim must be gone (it was false whenever the newest bar was closed)
     assert "Row 1 is the current in-progress bar" not in norm
+
+
+def test_get_taker_flow_default_limit_is_12_both_signatures():
+    """I-3: tool default limit 6 -> 12 (sim #15: limit=12 = 65.1% of calls vs 6 = 10.4%;
+    principle 5 'default 反映实测主流'). The wrapper (LLM-facing, drives the JSON-schema
+    default) and the impl signature must agree. Exchange-layer fetch_taker_flow default
+    stays 6 (always called with an explicit n, never the agent's default)."""
+    import inspect
+    from src.agent.tools_perception import get_taker_flow as impl
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    assert inspect.signature(impl).parameters["limit"].default == 12
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    sch = agent._function_toolset.tools["get_taker_flow"].tool_def.parameters_json_schema
+    assert sch["properties"]["limit"]["default"] == 12
+
+
+def test_get_taker_flow_docstring_reflects_15m_default12_and_closed_example():
+    """I-2/I-3/I-9 LLM channel: the description must (a) list 15m in the summary period
+    enum and the Args (JSON-schema) enum, (b) state default limit 12 in Args, (c) show a
+    closed-form Example (closed = 91-98% mainstream; no in-progress star/footnote, row1
+    carries the I-6 publish-lag note), (d) drop the stale 'same-period 1h/4h/1d' anchor
+    enumeration. Assert tool_def.description / parameters_json_schema (LLM channels), not
+    the impl __doc__ (memory project_tool_docstring_llm_channel)."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    td = agent._function_toolset.tools["get_taker_flow"].tool_def
+    desc = td.description or ""
+    norm = " ".join(desc.split())                       # collapse line-wraps
+    sch = td.parameters_json_schema
+    # (a) summary period enum +15m; (d) stale anchor enumeration gone
+    assert "period one of 5m/15m/1h/4h/1d" in norm
+    assert "same-period 1h/4h/1d" not in norm
+    assert "coarser-tier context-anchor" in norm
+    # (a)/(b) Args (per-param JSON-schema description) reflects 15m + default 12
+    assert sch["properties"]["period"]["description"] == \
+        'bar size, one of "5m", "15m", "1h", "4h", "1d" (default "5m").'
+    assert "(default 12)" in sch["properties"]["limit"]["description"]
+    # (c) Returns Example is closed-form mainstream
+    assert "Now (current 5m, closed):" in desc
+    assert "Window (12 bars = 60min):" in desc
+    assert "row 1 = latest closed bar — rubik may lag candle/ticker by ~1 bar" in desc
+    assert "still forming" not in desc                  # no in-progress footnote
+    assert "4.0/5min formed" not in desc                # old in-progress Now value gone

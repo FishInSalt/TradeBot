@@ -1275,7 +1275,7 @@ def _render_taker_flow(
     return "\n".join(lines)
 
 
-async def get_taker_flow(deps: TradingDeps, period: str = "5m", limit: int = 6) -> str:
+async def get_taker_flow(deps: TradingDeps, period: str = "5m", limit: int = 12) -> str:
     """Minute-level taker buy/sell flow over `limit` `period`-bars (impl).
 
     LLM-visible docstring lives on the trader.py @tool wrapper.
