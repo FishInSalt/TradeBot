@@ -18,12 +18,14 @@ def test_taker_flow_bar_dataclass_fields():
 
 
 def test_taker_volume_period_map_is_complete():
-    """§3.1/§3.3/③: distinct from _OKX_OI_PERIOD; covers tool periods {5m,1h,4h,1d}
-    PLUS the 1w anchor up-tier. Reusing _OKX_OI_PERIOD would KeyError on 4h/1w."""
+    """§3.1/§3.3/③ + iter-taker-flow-audit-remediation I-5: distinct from
+    _OKX_OI_PERIOD; covers tool periods {5m,15m,1h,4h,1d} PLUS the 1w anchor up-tier.
+    Reusing _OKX_OI_PERIOD would KeyError on 15m/4h/1w."""
     from src.integrations.exchange.base import _TAKER_VOLUME_PERIOD, _OKX_OI_PERIOD
-    assert _TAKER_VOLUME_PERIOD == {"5m": "5m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
+    assert _TAKER_VOLUME_PERIOD == {
+        "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
     assert _TAKER_VOLUME_PERIOD is not _OKX_OI_PERIOD
-    for p in ("5m", "1h", "4h", "1d", "1w"):
+    for p in ("5m", "15m", "1h", "4h", "1d", "1w"):
         assert p in _TAKER_VOLUME_PERIOD
 
 
@@ -130,6 +132,32 @@ def test_base_exchange_has_fetch_taker_flow_abstractmethod():
     assert sig.parameters["limit"].default == 6
 
 
+def test_fetch_taker_flow_period_literal_matches_anchor_single_source():
+    """F2/I-9: the hand-maintained `period: Literal[...]` on all three fetch_taker_flow
+    signatures (base contract + sim active path + okx live) must stay in lockstep with
+    the single source of truth. The fetchable set = tool periods (anchor keys) PLUS the
+    anchor up-tiers (anchor values) = {5m,15m,1h,4h,1d} ∪ {1h,4h,1d,1w}. Pins the
+    Literals into the same drift-guard net as the reject message — the exact stale-enum
+    bug this iter fixes can't recur."""
+    import inspect, sys, typing
+    from src.agent.tools_perception import _TAKER_FLOW_ANCHOR
+    from src.integrations.exchange.base import BaseExchange
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.okx import OKXExchange
+    expected = set(_TAKER_FLOW_ANCHOR) | set(_TAKER_FLOW_ANCHOR.values())
+    assert expected == {"5m", "15m", "1h", "4h", "1d", "1w"}  # explicit for the reader
+    for cls in (BaseExchange, SimulatedExchange, OKXExchange):
+        ann = inspect.signature(cls.fetch_taker_flow).parameters["period"].annotation
+        # PEP 563 (from __future__ import annotations) makes `ann` a string. eval ONLY
+        # the period annotation (not the whole signature -> avoids resolving the
+        # list["TakerFlowBar"] return forward-ref). Inject Literal defensively so this
+        # works regardless of whether the module imports it at top level.
+        ns = {**vars(sys.modules[cls.__module__]), "Literal": typing.Literal}
+        period_type = eval(ann, ns)
+        assert set(typing.get_args(period_type)) == expected, \
+            f"{cls.__name__}.fetch_taker_flow period Literal drift: {ann!r}"
+
+
 @pytest.mark.asyncio
 async def test_market_data_get_taker_flow_passthrough_uncached():
     from src.integrations.market_data import MarketDataService
@@ -190,6 +218,46 @@ def test_render_taker_flow_closed_newest_header_not_in_progress():
     assert "*" not in out.split("Per-bar")[1]           # no star on row 1
 
 
+def test_render_taker_flow_closed_row1_notes_publish_lag():
+    """I-6: when the newest returned bar is already closed (rubik publish-lag), the
+    per-bar row-1 label flags that rubik can lag the candle/ticker by ~1 bar — so the
+    agent does NOT cross-check the Close column against GMD's newer closed bar and
+    misreport a 'timestamp/join bug' (sim #15: 9/1802 false reports, e.g. L37769 /
+    L72185). In-progress renders keep the plain 'current in-progress' label and gain
+    no lag note."""
+    from src.agent.tools_perception import _render_taker_flow
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    # closed newest: opened 7min before now (period 5min) -> closed in publish-lag window
+    bars_cl = _bars(21, period_ms, base_open=now - 120_000 - 21 * period_ms)
+    out_cl = _render_taker_flow(bars_cl, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "row 1 = latest closed bar — rubik may lag candle/ticker by ~1 bar" in out_cl
+    # in-progress branch unchanged
+    bars_ip = _bars(21, period_ms, base_open=now - 120_000 - 20 * period_ms)
+    out_ip = _render_taker_flow(bars_ip, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "row 1 = current in-progress" in out_ip
+    assert "rubik may lag" not in out_ip
+
+
+def test_render_taker_flow_in_progress_now_line_flags_partial_bar():
+    """I-8: an in-progress bar's RVol is partial volume / a full 20-bar average, so it
+    reads mechanically low early in the bar (not real contraction). The Now line's RVol
+    says 'partial bar' so the agent does not misread it as a volume drop. Closed bars
+    (91-98% mainstream) are unaffected."""
+    from src.agent.tools_perception import _render_taker_flow
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    # in-progress: newest bar opened 1min before now (period 5min)
+    bars_ip = _bars(21, period_ms, base_open=now - 60_000 - 20 * period_ms)
+    out_ip = _render_taker_flow(bars_ip, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "(vs 20-bar avg; partial bar)" in out_ip
+    # closed newest: opened 6min before now -> closed, plain RVol label
+    bars_cl = _bars(21, period_ms, base_open=now - 60_000 - 21 * period_ms)
+    out_cl = _render_taker_flow(bars_cl, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "partial bar" not in out_cl
+    assert "(vs 20-bar avg)" in out_cl
+
+
 def test_render_taker_flow_window_cvd_and_net_sell_count():
     from src.agent.tools_perception import _render_taker_flow
     from src.integrations.exchange.base import TakerFlowBar
@@ -215,8 +283,9 @@ def test_render_taker_flow_rvol_fixed_20_baseline_and_limit_1_no_degeneracy():
     bars = _bars(21, period_ms, base_open=now - 60_000 - 20 * period_ms)
     bars[-1].buy_usd, bars[-1].sell_usd = 2_000_000.0, 2_000_000.0   # total 4M
     out = _render_taker_flow(bars, "5m", 1, now_ms=now, symbol="X", fetch_ts="00:00")
-    # newest total 4M / 20-bar avg 2M = 2.0x ; limit=1 still computes (no "—")
-    assert "2.0× (vs 20-bar avg)" in out
+    # newest total 4M / 20-bar avg 2M = 2.0x ; limit=1 still computes (no "—").
+    # newest bar is in-progress here, so the Now-line RVol carries the partial-bar suffix (I-8).
+    assert "2.0× (vs 20-bar avg; partial bar)" in out
     assert "RVol(×20-bar)" in out
 
 
@@ -279,6 +348,30 @@ def test_render_taker_flow_anchor_line_when_provided_and_absent_when_none():
     assert "anchor" not in out2.lower()
 
 
+def test_render_taker_flow_anchor_always_carries_usd_scale_suffix():
+    """I-7 guard (audit-accepted, not fixed): the up-tier anchor line uses an
+    independent $K/$M scale (decoupled from the main column so a ~10x-larger 1h/4h bar
+    stays readable), so it MUST always carry an explicit $K or $M suffix — that suffix
+    is the only thing preventing a 1000x misread when the anchor renders at a different
+    scale than the main table. Pin it so the suffix can never be dropped."""
+    import re
+    from src.agent.tools_perception import _render_taker_flow
+    from src.integrations.exchange.base import TakerFlowBar
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    bars = _bars(21, period_ms, base_open=now - 60_000 - 20 * period_ms)
+    cases = (
+        (TakerFlowBar(ts=now - 34 * 60_000, sell_usd=120_000.0, buy_usd=80_000.0), "$K"),    # |net|=40K
+        (TakerFlowBar(ts=now - 34 * 60_000, sell_usd=8_000_000.0, buy_usd=2_000_000.0), "$M"),  # |net|=6M
+    )
+    for anchor_bar, expect in cases:
+        out = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00",
+                                 anchor=("1h", anchor_bar))
+        anchor_line = [ln for ln in out.splitlines() if "-scale anchor" in ln][0]
+        assert re.search(r"net [+-]\d+(?:\.\d+)?\$[KM]", anchor_line), anchor_line
+        assert expect in anchor_line
+
+
 import time as _time
 from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
@@ -311,10 +404,41 @@ def _live_bars(n, period_ms):
 
 
 @pytest.mark.asyncio
-async def test_get_taker_flow_rejects_bad_period():
+async def test_get_taker_flow_rejects_bad_period_derived_message():
+    """I-9/F1: an out-of-set period is rejected fact-only, and the message is DERIVED
+    from the single source of truth (_TAKER_FLOW_ANCHOR keys), not a hardcoded enum.
+    15m is now a valid tool period (see test_get_taker_flow_accepts_15m_period); 30m
+    stays invalid (deliberate ladder subset — 30m would compress the bottom step to
+    ×2, principle 4)."""
+    from src.agent.tools_perception import get_taker_flow, _TAKER_FLOW_ANCHOR
+    out = await get_taker_flow(_deps_with_taker({}), period="30m")
+    assert "Invalid period '30m'" in out
+    assert f"period must be one of: {', '.join(_TAKER_FLOW_ANCHOR)}" in out
+    assert "5m, 15m, 1h, 4h, 1d" in out   # insertion-ordered dict -> natural ladder order
+
+
+def test_taker_flow_15m_period_ms_and_anchor():
+    """I-5: 15m added as a first-class tool period. period_ms = 15min; the wide-error
+    anchor routes 15m to the SAME 1h context as the 5m main frame (every fine-grained
+    frame reads the hour-scale context); 5m->1h is unchanged (no regression). Anchor
+    keys ARE the valid tool periods."""
+    from src.agent.tools_perception import _TAKER_FLOW_PERIOD_MS, _TAKER_FLOW_ANCHOR
+    assert _TAKER_FLOW_PERIOD_MS["15m"] == 900_000
+    assert _TAKER_FLOW_ANCHOR["15m"] == "1h"
+    assert _TAKER_FLOW_ANCHOR["5m"] == "1h"
+    assert set(_TAKER_FLOW_ANCHOR) == {"5m", "15m", "1h", "4h", "1d"}
+
+
+@pytest.mark.asyncio
+async def test_get_taker_flow_accepts_15m_period():
+    """I-5: period=15m no longer rejected; renders the normal report (header names the
+    15m bar size; anchor fetches the 1h up-tier)."""
     from src.agent.tools_perception import get_taker_flow
-    out = await get_taker_flow(_deps_with_taker({}), period="15m")
-    assert "period must be one of: 5m, 1h, 4h, 1d" in out
+    deps = _deps_with_taker({"15m": _live_bars(21, 900_000), "1h": _live_bars(2, 3_600_000)})
+    out = await get_taker_flow(deps, "15m", 6)
+    assert "Invalid period" not in out
+    assert "=== Taker Flow (BTC/USDT:USDT · 15m bars · @" in out
+    assert "Per-bar" in out
 
 
 @pytest.mark.asyncio
@@ -457,3 +581,48 @@ def test_get_taker_flow_docstring_row1_state_is_fact_only():
     assert "latest closed bar" in norm            # the second observable state surfaced
     # the old absolute claim must be gone (it was false whenever the newest bar was closed)
     assert "Row 1 is the current in-progress bar" not in norm
+
+
+def test_get_taker_flow_default_limit_is_12_both_signatures():
+    """I-3: tool default limit 6 -> 12 (sim #15: limit=12 = 65.1% of calls vs 6 = 10.4%;
+    principle 5 'default 反映实测主流'). The wrapper (LLM-facing, drives the JSON-schema
+    default) and the impl signature must agree. Exchange-layer fetch_taker_flow default
+    stays 6 (always called with an explicit n, never the agent's default)."""
+    import inspect
+    from src.agent.tools_perception import get_taker_flow as impl
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    assert inspect.signature(impl).parameters["limit"].default == 12
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    sch = agent._function_toolset.tools["get_taker_flow"].tool_def.parameters_json_schema
+    assert sch["properties"]["limit"]["default"] == 12
+
+
+def test_get_taker_flow_docstring_reflects_15m_default12_and_closed_example():
+    """I-2/I-3/I-9 LLM channel: the description must (a) list 15m in the summary period
+    enum and the Args (JSON-schema) enum, (b) state default limit 12 in Args, (c) show a
+    closed-form Example (closed = 91-98% mainstream; no in-progress star/footnote, row1
+    carries the I-6 publish-lag note), (d) drop the stale 'same-period 1h/4h/1d' anchor
+    enumeration. Assert tool_def.description / parameters_json_schema (LLM channels), not
+    the impl __doc__ (memory project_tool_docstring_llm_channel)."""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    td = agent._function_toolset.tools["get_taker_flow"].tool_def
+    desc = td.description or ""
+    norm = " ".join(desc.split())                       # collapse line-wraps
+    sch = td.parameters_json_schema
+    # (a) summary period enum +15m; (d) stale anchor enumeration gone
+    assert "period one of 5m/15m/1h/4h/1d" in norm
+    assert "same-period 1h/4h/1d" not in norm
+    assert "coarser-tier context-anchor" in norm
+    # (a)/(b) Args (per-param JSON-schema description) reflects 15m + default 12
+    assert sch["properties"]["period"]["description"] == \
+        'bar size, one of "5m", "15m", "1h", "4h", "1d" (default "5m").'
+    assert "(default 12)" in sch["properties"]["limit"]["description"]
+    # (c) Returns Example is closed-form mainstream
+    assert "Now (current 5m, closed):" in desc
+    assert "Window (12 bars = 60min):" in desc
+    assert "row 1 = latest closed bar — rubik may lag candle/ticker by ~1 bar" in desc
+    assert "still forming" not in desc                  # no in-progress footnote
+    assert "4.0/5min formed" not in desc                # old in-progress Now value gone

@@ -3680,8 +3680,10 @@ def test_taker_flow_section_full_kept_limit_12():
     assert len(out.splitlines()) >= 18                   # 全 18 body 行 + head + header
 
 
-def test_taker_flow_section_full_kept_default_limit_6():
-    """附带受益：默认 limit=6（body ≥10 行）当前也被 Branch 2 折叠，新设计下全保留。"""
+def test_taker_flow_section_full_kept_limit_6():
+    """limit=6（body ≥10 行）的渲染整段保留、无折叠（旧 Branch 2 会折叠）。
+    注：tool 默认 limit 现为 12（iter-taker-flow-audit-remediation I-3），此用例守
+    更短 6-bar 输出的同等行为。"""
     from src.agent.tools_perception import _render_taker_flow
     from src.cli.display import _render_tool_body
     period_ms = 300_000

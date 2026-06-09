@@ -428,34 +428,32 @@ def create_trader_agent(
         return await _impl(ctx.deps)
 
     @tool
-    async def get_taker_flow(ctx: RunContext[TradingDeps], period: str = "5m", limit: int = 6) -> str:
+    async def get_taker_flow(ctx: RunContext[TradingDeps], period: str = "5m", limit: int = 12) -> str:
         """Minute-level taker buy/sell flow: who is hitting the book over recent bars.
 
         Server-aggregated taker volume (USD) per bar — a minute-to-hours flow
-        trend. Row 1 is the newest bar — the current in-progress bar (labeled
-        with how far it has formed) when still open, otherwise the latest closed
-        bar; CVD is
+        trend. Row 1 is the newest bar — the latest closed bar; or the current
+        in-progress bar, labeled with how far it has formed, when still open. CVD is
         cumulative net taker volume across the shown window only, so do NOT compare
         CVD across separate calls (the window's oldest bar — its zero point — rolls
         forward each call). RVol is the bar's taker total vs a fixed 20-closed-bar
-        average. A same-period 1h/4h/1d context-anchor line shows the larger bar's
-        current direction. period one of 5m/1h/4h/1d; limit 1..36 bars.
+        average. A coarser-tier context-anchor line shows the larger bar's
+        current direction. period one of 5m/15m/1h/4h/1d; limit 1..36 bars.
 
         Args:
-            period: bar size, one of "5m", "1h", "4h", "1d" (default "5m").
-            limit: number of bars to show, 1..36 (default 6).
+            period: bar size, one of "5m", "15m", "1h", "4h", "1d" (default "5m").
+            limit: number of bars to show, 1..36 (default 12).
 
         Returns:
             A taker-flow report (fact-only text) for the given period and limit. Example output follows.
-            === Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:34:07 UTC) ===
-            Now (current 5m, 4.0/5min formed):  41% taker buy · net -5.8$M · vol 0.3× (vs 20-bar avg)
-            Window (6 bars = 30min):  CVD +109.8$M · 2/6 bars net-sell
-            Per-bar (bar open UTC, newest first; row 1 = current in-progress):
+            === Taker Flow (BTC-USDT-SWAP · 5m bars · @ 04:35:12 UTC) ===
+            Now (current 5m, closed):  52% taker buy · net +1.2$M · vol 1.0× (vs 20-bar avg)
+            Window (12 bars = 60min):  CVD +8.4$M · 5/12 bars net-sell
+            Per-bar (bar open UTC, newest first; row 1 = latest closed bar — rubik may lag candle/ticker by ~1 bar):
               Time     Buy%   Net($M)   RVol(×20-bar)   CVD($M)   Close
-              04:30*    41%     -5.8    0.3×   +109.8    73531
+              04:30     52%     +1.2    1.0×     +8.4    73531
               ... (older bars) ...
-              [* row 1 = current bar still forming (4.0/5min)]
-            1h-scale anchor (current 1h, 34min formed):  53% buy · net +62$M
+            1h-scale anchor (current 1h, 35min formed):  53% buy · net +62$M
         """
         from src.agent.tools_perception import get_taker_flow as _impl
 

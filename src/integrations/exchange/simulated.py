@@ -1039,7 +1039,7 @@ class SimulatedExchange(BaseExchange):
     async def fetch_taker_flow(
         self,
         symbol: str,
-        period: Literal["5m", "1h", "4h", "1d", "1w"] = "5m",
+        period: Literal["5m", "15m", "1h", "4h", "1d", "1w"] = "5m",
         limit: int = 6,
     ) -> list[TakerFlowBar]:
         self._validate_symbol(symbol)
