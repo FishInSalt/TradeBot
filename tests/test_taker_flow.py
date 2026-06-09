@@ -348,6 +348,30 @@ def test_render_taker_flow_anchor_line_when_provided_and_absent_when_none():
     assert "anchor" not in out2.lower()
 
 
+def test_render_taker_flow_anchor_always_carries_usd_scale_suffix():
+    """I-7 guard (audit-accepted, not fixed): the up-tier anchor line uses an
+    independent $K/$M scale (decoupled from the main column so a ~10x-larger 1h/4h bar
+    stays readable), so it MUST always carry an explicit $K or $M suffix — that suffix
+    is the only thing preventing a 1000x misread when the anchor renders at a different
+    scale than the main table. Pin it so the suffix can never be dropped."""
+    import re
+    from src.agent.tools_perception import _render_taker_flow
+    from src.integrations.exchange.base import TakerFlowBar
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    bars = _bars(21, period_ms, base_open=now - 60_000 - 20 * period_ms)
+    cases = (
+        (TakerFlowBar(ts=now - 34 * 60_000, sell_usd=120_000.0, buy_usd=80_000.0), "$K"),    # |net|=40K
+        (TakerFlowBar(ts=now - 34 * 60_000, sell_usd=8_000_000.0, buy_usd=2_000_000.0), "$M"),  # |net|=6M
+    )
+    for anchor_bar, expect in cases:
+        out = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00",
+                                 anchor=("1h", anchor_bar))
+        anchor_line = [ln for ln in out.splitlines() if "-scale anchor" in ln][0]
+        assert re.search(r"net [+-]\d+(?:\.\d+)?\$[KM]", anchor_line), anchor_line
+        assert expect in anchor_line
+
+
 import time as _time
 from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
