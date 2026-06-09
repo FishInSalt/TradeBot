@@ -239,6 +239,25 @@ def test_render_taker_flow_closed_row1_notes_publish_lag():
     assert "rubik may lag" not in out_ip
 
 
+def test_render_taker_flow_in_progress_now_line_flags_partial_bar():
+    """I-8: an in-progress bar's RVol is partial volume / a full 20-bar average, so it
+    reads mechanically low early in the bar (not real contraction). The Now line's RVol
+    says 'partial bar' so the agent does not misread it as a volume drop. Closed bars
+    (91-98% mainstream) are unaffected."""
+    from src.agent.tools_perception import _render_taker_flow
+    period_ms = 300_000
+    now = 1_000_000_000_000
+    # in-progress: newest bar opened 1min before now (period 5min)
+    bars_ip = _bars(21, period_ms, base_open=now - 60_000 - 20 * period_ms)
+    out_ip = _render_taker_flow(bars_ip, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "(vs 20-bar avg; partial bar)" in out_ip
+    # closed newest: opened 6min before now -> closed, plain RVol label
+    bars_cl = _bars(21, period_ms, base_open=now - 60_000 - 21 * period_ms)
+    out_cl = _render_taker_flow(bars_cl, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
+    assert "partial bar" not in out_cl
+    assert "(vs 20-bar avg)" in out_cl
+
+
 def test_render_taker_flow_window_cvd_and_net_sell_count():
     from src.agent.tools_perception import _render_taker_flow
     from src.integrations.exchange.base import TakerFlowBar
@@ -264,8 +283,9 @@ def test_render_taker_flow_rvol_fixed_20_baseline_and_limit_1_no_degeneracy():
     bars = _bars(21, period_ms, base_open=now - 60_000 - 20 * period_ms)
     bars[-1].buy_usd, bars[-1].sell_usd = 2_000_000.0, 2_000_000.0   # total 4M
     out = _render_taker_flow(bars, "5m", 1, now_ms=now, symbol="X", fetch_ts="00:00")
-    # newest total 4M / 20-bar avg 2M = 2.0x ; limit=1 still computes (no "—")
-    assert "2.0× (vs 20-bar avg)" in out
+    # newest total 4M / 20-bar avg 2M = 2.0x ; limit=1 still computes (no "—").
+    # newest bar is in-progress here, so the Now-line RVol carries the partial-bar suffix (I-8).
+    assert "2.0× (vs 20-bar avg; partial bar)" in out
     assert "RVol(×20-bar)" in out
 
 

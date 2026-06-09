@@ -1197,7 +1197,11 @@ def _render_taker_flow(
     lines = [f"=== Taker Flow ({symbol} · {period} bars · @ {fetch_ts} UTC) ===", ""]
 
     now_rvol = (_total(newest) / baseline_avg) if baseline_avg else None
-    rvol_now = f"{now_rvol:.1f}× (vs {_TAKER_FLOW_RVOL_BARS}-bar avg)" if now_rvol is not None else "—"
+    # in-progress RVol is partial volume / a full 20-bar avg -> mechanically low early;
+    # flag it so the agent does not misread it as real contraction (I-8).
+    rvol_partial = "; partial bar" if is_in_progress else ""
+    rvol_now = (f"{now_rvol:.1f}× (vs {_TAKER_FLOW_RVOL_BARS}-bar avg{rvol_partial})"
+                if now_rvol is not None else "—")
     formed = (f"current {period}, {elapsed_min:.1f}/{period_min:g}min formed"
               if is_in_progress else f"current {period}, closed")
     lines.append(
