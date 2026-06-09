@@ -11,6 +11,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.rule import Rule
 
 
 # Module-level constant: archive suffix must match this exact pattern to be
@@ -117,3 +118,34 @@ def setup_system_logging(debug: bool, log_dir: Path) -> Console:
 def setup_session_logging(session_id: str, log_dir: Path) -> SessionConsole:
     """Phase 2 — Create SessionConsole for dual-write session output."""
     return SessionConsole(session_id=session_id, log_dir=log_dir)
+
+
+def write_session_header(
+    sc: SessionConsole,
+    *,
+    name: str,
+    session_id: str,
+    symbol: str,
+    mode: str,
+    timeframe: str,
+    interval_min: int,
+    is_new: bool,
+    started_at: datetime,
+) -> None:
+    """Write a self-contained session metadata header at the top of each launch.
+
+    Makes the session log answer "which session / when started" on its own (no
+    uuid↔DB lookup). Written every startup, so in the append-mode log it also
+    delimits run boundaries between successive launches of the same session.
+
+    `mode` is the raw exchange_type (e.g. "simulated") — deliberately the full
+    name, not the session-list abbreviation. `interval_min` is minutes (int).
+    """
+    marker = "new" if is_new else "resumed"
+    sc.print(Rule(f"Session: {name} ({marker})"))
+    sc.print(f"ID:       {session_id}")
+    sc.print(
+        f"Symbol:   {symbol}   Mode: {mode}   TF: {timeframe}   "
+        f"Interval: {interval_min}m"
+    )
+    sc.print(f"Started:  {started_at:%Y-%m-%d %H:%M:%S} UTC")

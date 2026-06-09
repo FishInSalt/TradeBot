@@ -119,6 +119,62 @@ def test_setup_session_logging_returns_session_console(tmp_path: Path):
     assert (log_dir / "session_sid-001.log").exists()
 
 
+def test_write_session_header_contains_metadata_and_resumed_marker(tmp_path: Path):
+    from datetime import datetime, timezone
+    from src.cli.logging_config import write_session_header
+
+    sc = SessionConsole(session_id="hdr-1", log_dir=tmp_path)
+    write_session_header(
+        sc,
+        name="BTC sim #1",
+        session_id="hdr-1",
+        symbol="BTC/USDT:USDT",
+        mode="simulated",
+        timeframe="15m",
+        interval_min=15,
+        is_new=False,
+        started_at=datetime(2026, 6, 9, 14, 32, 7, tzinfo=timezone.utc),
+    )
+    sc.close()
+
+    content = (tmp_path / "session_hdr-1.log").read_text()
+    assert "BTC sim #1" in content
+    assert "hdr-1" in content
+    assert "BTC/USDT:USDT" in content
+    assert "simulated" in content          # Mode full name (not abbreviated "sim")
+    assert "15m" in content                # timeframe + interval both formatted with "m"
+    assert "(resumed)" in content          # is_new=False
+    assert "(new)" not in content
+    assert "2026-06-09 14:32:07" in content
+    assert "UTC" in content
+
+
+def test_write_session_header_new_marker_and_interval_formatting(tmp_path: Path):
+    from datetime import datetime, timezone
+    from src.cli.logging_config import write_session_header
+
+    sc = SessionConsole(session_id="hdr-2", log_dir=tmp_path)
+    write_session_header(
+        sc,
+        name="ETH sim #2",
+        session_id="hdr-2",
+        symbol="ETH/USDT:USDT",
+        mode="okx",
+        timeframe="5m",
+        interval_min=30,
+        is_new=True,
+        started_at=datetime(2026, 6, 9, 0, 0, 0, tzinfo=timezone.utc),
+    )
+    sc.close()
+
+    content = (tmp_path / "session_hdr-2.log").read_text()
+    assert "ETH sim #2" in content
+    assert "okx" in content
+    assert "(new)" in content
+    assert "(resumed)" not in content
+    assert "30m" in content                # interval_min int → "30m" (not bare "30")
+
+
 def test_setup_system_logging_uses_timestamped_rotating_file_handler(tmp_path: Path):
     """R2-3 drift guard: file handler must be TimestampedRotatingFileHandler with
     maxBytes=100MB and backupCount=30.

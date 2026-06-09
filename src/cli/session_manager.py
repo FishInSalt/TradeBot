@@ -276,6 +276,9 @@ async def _display_session_list(sessions: list[Session], engine, console: Consol
     table.add_column("Position")
     table.add_column("Last Active")
 
+    # New session is a fixed key (0) at the top — see select_or_create_session.
+    table.add_row("0", "[green]+ New Session[/]", "", "", "", "")
+
     for i, s in enumerate(sessions, 1):
         mode = _EXCHANGE_DISPLAY.get(s.exchange_type, s.exchange_type)
         if s.status == "active":
@@ -303,9 +306,6 @@ async def _display_session_list(sessions: list[Session], engine, console: Consol
 
         table.add_row(str(i), s.name, mode, status, position, active_str)
 
-    table.add_row(
-        str(len(sessions) + 1), "[green]+ New Session[/]", "", "", "", "",
-    )
     console.print(table)
 
 
@@ -324,9 +324,11 @@ async def select_or_create_session(
     model_id: str | None,
     console: Console,
     config_dir: Path,
-) -> tuple[WizardResult, str]:
+) -> tuple[WizardResult, str, bool]:
     """Entry point for session management.
-    Returns (WizardResult, session_id). Calls sys.exit(0) on wizard cancel."""
+    Returns (WizardResult, session_id, is_new). is_new is True when a new session
+    was created, False when an existing one was restored. Calls sys.exit(0) on
+    wizard cancel."""
     # Fix residual active sessions from unclean shutdown
     async with engine.begin() as conn:
         await _migrate_session_table(conn)
@@ -359,20 +361,19 @@ async def select_or_create_session(
             console.print("Cancelled.")
             sys.exit(0)
         session_id = await _create_session(engine, result)
-        return result, session_id
+        return result, session_id, True
 
-    # Show session list and let user choose
+    # Show session list and let user choose. 0 = new session (default); 1..N = restore.
     await _display_session_list(sessions, engine, console)
-    new_option = len(sessions) + 1
     while True:
         choice = IntPrompt.ask(
-            "Select session", default=1, console=console,
+            "Select session", default=0, console=console,
         )
-        if 1 <= choice <= new_option:
+        if 0 <= choice <= len(sessions):
             break
-        console.print(f"[red]Please enter a number between 1 and {new_option}[/]")
+        console.print(f"[red]Please enter a number between 0 and {len(sessions)}[/]")
 
-    if choice == new_option:
+    if choice == 0:
         # New session
         result = await run_wizard(
             model_manager=model_manager,
@@ -388,7 +389,7 @@ async def select_or_create_session(
             console.print("Cancelled.")
             sys.exit(0)
         session_id = await _create_session(engine, result)
-        return result, session_id
+        return result, session_id, True
 
     # Restore existing session
     selected = sessions[choice - 1]
@@ -399,4 +400,4 @@ async def select_or_create_session(
     if result is None:
         console.print("Cancelled.")
         sys.exit(0)
-    return result, selected.id
+    return result, selected.id, False

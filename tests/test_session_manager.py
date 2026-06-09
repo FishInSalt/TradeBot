@@ -292,6 +292,38 @@ async def test_generate_session_name_counter(tmp_path):
     await engine.dispose()
 
 
+async def test_display_session_list_new_option_at_top_index_zero(tmp_path):
+    """'+ New Session' is rendered first (top) and labeled with index 0."""
+    from src.config import PersonaConfig
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(
+            id="s1", name="BTC sim #1", status="paused", symbol="BTC/USDT:USDT",
+            persona_config=json.dumps(PersonaConfig().model_dump()),
+            model_config=json.dumps({"id": "m1", "provider": "openai", "model": "gpt-4o"}),
+            last_active_at=datetime.now(timezone.utc), fee_rate=0.0005,
+        ))
+        await db_sess.commit()
+
+    from src.cli.session_manager import _display_session_list, _list_sessions
+
+    sessions = await _list_sessions(engine)
+    console = Console(record=True, width=120)
+    await _display_session_list(sessions, engine, console)
+    out = console.export_text()
+
+    assert "+ New Session" in out
+    # New option appears BEFORE the existing session row (top of the list)
+    assert out.index("New Session") < out.index("BTC sim #1")
+    # New option is labeled index 0
+    new_line = next(line for line in out.splitlines() if "New Session" in line)
+    assert "0" in new_line
+
+    await engine.dispose()
+
+
 async def test_select_or_create_no_history_runs_wizard(tmp_path):
     """With no existing sessions, wizard runs and creates a session."""
     db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
@@ -317,12 +349,13 @@ async def test_select_or_create_no_history_runs_wizard(tmp_path):
     mock_mm = MagicMock()
     with patch("src.cli.session_manager.run_wizard", new_callable=AsyncMock, return_value=mock_result), \
          patch("src.cli.session_manager._generate_session_name_from_db", new_callable=AsyncMock, return_value="BTC sim #1"):
-        result, session_id = await select_or_create_session(
+        result, session_id, is_new = await select_or_create_session(
             engine=engine, settings=Settings(), trader_config=TraderConfig(),
             model_manager=mock_mm, model_id=None,
             console=Console(), config_dir=Path(str(tmp_path)),
         )
 
+    assert is_new is True
     assert result.exchange_type == "simulated"
     assert isinstance(session_id, str)
     assert len(session_id) == 36
@@ -363,12 +396,13 @@ async def test_select_or_create_with_history_restore(tmp_path):
 
     with patch("src.cli.session_manager.IntPrompt.ask", return_value=1), \
          patch("src.cli.session_manager.Confirm.ask", return_value=True):
-        result, session_id = await select_or_create_session(
+        result, session_id, is_new = await select_or_create_session(
             engine=engine, settings=Settings(), trader_config=TraderConfig(),
             model_manager=mock_mm, model_id=None,
             console=Console(), config_dir=Path(str(tmp_path)),
         )
 
+    assert is_new is False
     assert session_id == "existing-1"
     assert result.symbol == "BTC/USDT:USDT"
 
@@ -467,15 +501,18 @@ async def test_select_or_create_with_history_new_session(tmp_path):
 
     from src.cli.session_manager import select_or_create_session
 
+    # 0 = new session; the trailing 1 is a safety value so that if validation
+    # (wrongly) rejected 0 and re-prompted, the test would restore instead of hang.
     with patch("src.cli.session_manager.run_wizard", new_callable=AsyncMock, return_value=mock_result), \
-         patch("src.cli.session_manager.IntPrompt.ask", return_value=2), \
+         patch("src.cli.session_manager.IntPrompt.ask", side_effect=[0, 1]), \
          patch("src.cli.session_manager._generate_session_name_from_db", new_callable=AsyncMock, return_value="ETH sim #1"):
-        result, session_id = await select_or_create_session(
+        result, session_id, is_new = await select_or_create_session(
             engine=engine, settings=Settings(), trader_config=TraderConfig(),
             model_manager=MagicMock(), model_id=None,
             console=Console(), config_dir=Path(str(tmp_path)),
         )
 
+    assert is_new is True
     assert result.symbol == "ETH/USDT:USDT"
     assert session_id != "existing-1"
 
@@ -484,4 +521,44 @@ async def test_select_or_create_with_history_new_session(tmp_path):
         s = r.scalar_one()
         assert s.name == "ETH sim #1"
         assert s.status == "active"
+    await engine.dispose()
+
+
+async def test_select_or_create_default_choice_is_zero(tmp_path):
+    """The 'Select session' prompt defaults to 0 (new session)."""
+    from src.config import PersonaConfig, Settings, TraderConfig
+    from src.services.model_manager import ModelConfig
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path}/test.db"
+    engine = await init_db(db_url)
+
+    model_cfg = ModelConfig(id="m1", provider="openai", model="gpt-4o", api_key="k", base_url=None)
+    async with get_session(engine) as db_sess:
+        db_sess.add(Session(
+            id="existing-1", name="BTC sim #1", status="paused", symbol="BTC/USDT:USDT",
+            persona_config=json.dumps(PersonaConfig().model_dump()),
+            model_config=json.dumps({"id": "m1", "provider": "openai", "model": "gpt-4o"}),
+            last_active_at=datetime.now(timezone.utc), fee_rate=0.0005,
+        ))
+        await db_sess.commit()
+
+    from src.cli.session_manager import select_or_create_session
+
+    mock_mm = MagicMock()
+    mock_mm.load_models.return_value = [model_cfg]
+    mock_mm.get_model_by_id.return_value = model_cfg
+    mock_mm.create_model.return_value = MagicMock()
+
+    # return_value=1 → restore (skips the wizard); we only assert the prompt default.
+    with patch("src.cli.session_manager.IntPrompt.ask", return_value=1) as mock_ask, \
+         patch("src.cli.session_manager.Confirm.ask", return_value=True):
+        _result, _session_id, is_new = await select_or_create_session(
+            engine=engine, settings=Settings(), trader_config=TraderConfig(),
+            model_manager=mock_mm, model_id=None,
+            console=Console(), config_dir=Path(str(tmp_path)),
+        )
+
+    assert is_new is False  # chose 1 → restore
+    mock_ask.assert_called_once()
+    assert mock_ask.call_args.kwargs.get("default") == 0
     await engine.dispose()

@@ -32,7 +32,12 @@ from src.cli.display import (
     display_metrics, format_cycle_output,
     is_tool_error, resolve_tool_display,
 )
-from src.cli.logging_config import SessionConsole, setup_session_logging, setup_system_logging
+from src.cli.logging_config import (
+    SessionConsole,
+    setup_session_logging,
+    setup_system_logging,
+    write_session_header,
+)
 from src.cli.session_state import SessionStats
 from src.config import ExchangeConfig, PersonaConfig, Settings, load_settings, load_trader_config
 from src.integrations.exchange.okx import OKXExchange
@@ -1082,7 +1087,7 @@ async def run(
     config_dir = project_root / "config"
     model_manager = ModelManager(config_path=config_dir / "models.json")
 
-    result, session_id = await select_or_create_session(
+    result, session_id, is_new = await select_or_create_session(
         engine=engine,
         settings=settings,
         trader_config=trader_config,
@@ -1094,6 +1099,17 @@ async def run(
 
     # ── Phase 4: Session logging ──
     sc = setup_session_logging(session_id, log_dir)
+    write_session_header(
+        sc,
+        name=result.session_name,
+        session_id=session_id,
+        symbol=result.symbol,
+        mode=result.exchange_type,
+        timeframe=result.timeframe,
+        interval_min=result.scheduler_interval_min,
+        is_new=is_new,
+        started_at=datetime.now(timezone.utc),
+    )
 
     # ── Phase 5: Build services ──
     exchange, deps, agent, budget, stats = build_services(
