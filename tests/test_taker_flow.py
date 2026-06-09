@@ -132,6 +132,32 @@ def test_base_exchange_has_fetch_taker_flow_abstractmethod():
     assert sig.parameters["limit"].default == 6
 
 
+def test_fetch_taker_flow_period_literal_matches_anchor_single_source():
+    """F2/I-9: the hand-maintained `period: Literal[...]` on all three fetch_taker_flow
+    signatures (base contract + sim active path + okx live) must stay in lockstep with
+    the single source of truth. The fetchable set = tool periods (anchor keys) PLUS the
+    anchor up-tiers (anchor values) = {5m,15m,1h,4h,1d} ∪ {1h,4h,1d,1w}. Pins the
+    Literals into the same drift-guard net as the reject message — the exact stale-enum
+    bug this iter fixes can't recur."""
+    import inspect, sys, typing
+    from src.agent.tools_perception import _TAKER_FLOW_ANCHOR
+    from src.integrations.exchange.base import BaseExchange
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.okx import OKXExchange
+    expected = set(_TAKER_FLOW_ANCHOR) | set(_TAKER_FLOW_ANCHOR.values())
+    assert expected == {"5m", "15m", "1h", "4h", "1d", "1w"}  # explicit for the reader
+    for cls in (BaseExchange, SimulatedExchange, OKXExchange):
+        ann = inspect.signature(cls.fetch_taker_flow).parameters["period"].annotation
+        # PEP 563 (from __future__ import annotations) makes `ann` a string. eval ONLY
+        # the period annotation (not the whole signature -> avoids resolving the
+        # list["TakerFlowBar"] return forward-ref). Inject Literal defensively so this
+        # works regardless of whether the module imports it at top level.
+        ns = {**vars(sys.modules[cls.__module__]), "Literal": typing.Literal}
+        period_type = eval(ann, ns)
+        assert set(typing.get_args(period_type)) == expected, \
+            f"{cls.__name__}.fetch_taker_flow period Literal drift: {ann!r}"
+
+
 @pytest.mark.asyncio
 async def test_market_data_get_taker_flow_passthrough_uncached():
     from src.integrations.market_data import MarketDataService

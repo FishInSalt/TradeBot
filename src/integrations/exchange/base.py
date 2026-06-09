@@ -178,7 +178,7 @@ class BaseExchange(ABC):
     async def fetch_taker_flow(
         self,
         symbol: str,
-        period: Literal["5m", "1h", "4h", "1d", "1w"] = "5m",
+        period: Literal["5m", "15m", "1h", "4h", "1d", "1w"] = "5m",
         limit: int = 6,
     ) -> list["TakerFlowBar"]:
         """Taker buy/sell volume bars (USD notional) from rubik taker-volume.
