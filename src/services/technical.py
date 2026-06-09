@@ -84,12 +84,17 @@ class TechnicalAnalysisService:
         macd = indicators.get("macd")
         signal = indicators.get("macd_signal")
         hist = indicators.get("macd_histogram")
+        # MACD complex shares one (12,26,9) period tuple: 12/26 define the MACD
+        # line, 9 the Signal line (EMA of MACD line); Histogram = MACD − Signal
+        # has no period of its own. Per the BB(20,2) → Upper/Middle/Lower
+        # convention, the tuple lives on the leading label; Signal/Histogram stay
+        # bare. (议题2, 2026-06-09 GMD audit)
         if all(v is not None for v in (macd, signal, hist)):
             lines.append(
-                f"MACD: {macd:.2f} | Signal: {signal:.2f} | Histogram: {hist:.2f}"
+                f"MACD(12,26,9): {macd:.2f} | Signal: {signal:.2f} | Histogram: {hist:.2f}"
             )
         else:
-            lines.append(f"MACD: {_fmt(macd)} | Signal: {_fmt(signal)} | Histogram: {_fmt(hist)}")
+            lines.append(f"MACD(12,26,9): {_fmt(macd)} | Signal: {_fmt(signal)} | Histogram: {_fmt(hist)}")
 
         # Bollinger Bands (F-O2 per spec §6.3): full-word labels, explicit
         # (20, 2) periods, explicit 0%=Lower / 100%=Upper anchor.

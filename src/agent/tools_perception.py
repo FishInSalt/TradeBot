@@ -121,7 +121,7 @@ async def get_market_data(
     # === Technical Indicators ===
     if not df_closed.empty:
         ti_ts = _fmt_candle_time(_to_pd_timestamp_utc(df_closed["timestamp"].iloc[-1]), timeframe)
-        ti_header = f"=== Technical Indicators ({timeframe}, values as of last closed {ti_ts}) ==="
+        ti_header = f"=== Technical Indicators ({timeframe}, values as of last closed candle: open {ti_ts}) ==="
     else:
         ti_header = f"=== Technical Indicators ({timeframe}) ==="
     sections.append(f"{ti_header}\n{indicators_text}")

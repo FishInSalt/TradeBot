@@ -270,7 +270,7 @@ class TestGMDGolden:
         deps = _build_deps(fake_ticker_81870, {"5m": df_5m_130bars})
         out = await get_market_data(deps)
         assert re.search(
-            r"=== Technical Indicators \(5m, values as of last closed \d{2}:\d{2}\) ===",
+            r"=== Technical Indicators \(5m, values as of last closed candle: open \d{2}:\d{2}\) ===",
             out,
         ), f"Technical Indicators header missing closed-bar anchor; out={out[:400]}"
 
@@ -295,7 +295,7 @@ class TestGMDGolden:
             if l.startswith("=== Technical Indicators")
         )
         # Anchor is the last CLOSED bar's open time ...
-        assert f"last closed {expected_closed_hhmm}" in ti_line, ti_line
+        assert f"last closed candle: open {expected_closed_hhmm}" in ti_line, ti_line
         # ... and NOT the in-progress bar (off-by-one guard).
         assert expected_in_progress_hhmm not in ti_line, ti_line
 

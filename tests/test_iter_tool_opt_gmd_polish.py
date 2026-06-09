@@ -483,9 +483,9 @@ class TestDocstringRewrite:
         tool = agent._function_toolset.tools["get_market_data"]
         desc = tool.tool_def.description
 
-        m_closed = re.search(r"values as of last closed (\d{2}:\d{2})", desc)
+        m_closed = re.search(r"values as of last closed candle: open (\d{2}:\d{2})", desc)
         m_ip = re.search(r"=== In-progress Candle \(\w+\): (\d{2}:\d{2}) open", desc)
-        assert m_closed, f"Example 缺 'values as of last closed HH:MM': {desc!r}"
+        assert m_closed, f"Example 缺 'values as of last closed candle: open HH:MM': {desc!r}"
         assert m_ip, f"Example 缺 In-progress Candle open 时点: {desc!r}"
         assert m_closed.group(1) != m_ip.group(1), (
             f"Example 自相矛盾: last closed {m_closed.group(1)} == in-progress open "
