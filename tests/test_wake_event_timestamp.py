@@ -178,6 +178,15 @@ async def test_render_event_block_scheduled_none_context_is_empty():
     assert out == ""
 
 
+async def test_render_event_block_scheduled_empty_context_is_empty():
+    """Empty-string reasoning must not render a dangling 'WAKE CONTEXT: ' line
+    (truthy guard, spec 2026-06-11 Minor-2)."""
+    from src.cli.app import _render_event_block
+    now = datetime(2026, 6, 11, 13, 0, tzinfo=timezone.utc)
+    out = await _render_event_block(None, "scheduled", "", now)
+    assert out == ""
+
+
 # ---------------------------------------------------- _wake_header_line
 
 def test_wake_header_line_single_scheduled_has_suffix():

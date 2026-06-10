@@ -420,10 +420,11 @@ async def _render_event_block(deps, trigger_type: str, context, cycle_started_at
     Async + IO: the full-close fill branch awaits `deps.exchange.get_contract_size` and
     reads `deps.fee_rate` (symbol from `context.symbol`). scheduled / context-None → "".
 
-    scheduled + non-None context: echo the agent's set_next_wake reasoning verbatim
-    (spec 2026-06-11). context here is a plain str, not a dataclass.
+    scheduled + non-empty context: echo the agent's set_next_wake reasoning verbatim
+    (spec 2026-06-11). context here is a plain str, not a dataclass. Empty-string
+    reasoning renders nothing (truthy guard — no dangling label).
     """
-    if trigger_type == "scheduled" and context is not None:
+    if trigger_type == "scheduled" and context:
         return f"\n\nWAKE CONTEXT (set last cycle): {context}"
     if trigger_type == "conditional" and context is not None:
         msg = (
