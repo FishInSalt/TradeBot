@@ -437,8 +437,9 @@ def create_trader_agent(
         cumulative net taker volume across the shown window only, so do NOT compare
         CVD across separate calls (the window's oldest bar — its zero point — rolls
         forward each call). RVol is the bar's taker total vs a fixed 20-closed-bar
-        average. A coarser-tier context-anchor line shows the larger bar's
-        current direction. period one of 5m/15m/1h/4h/1d; limit 1..36 bars.
+        average. A coarser-tier context-anchor line shows the larger bar's open
+        time, how far it has formed, and its current taker direction. period one
+        of 5m/15m/1h/4h/1d; limit 1..36 bars.
 
         Args:
             period: bar size, one of "5m", "15m", "1h", "4h", "1d" (default "5m").
@@ -453,7 +454,7 @@ def create_trader_agent(
               Time     Buy%   Net($M)   RVol(×20-bar)   CVD($M)   Close
               04:30     52%     +1.2    1.0×     +8.4    73531
               ... (older bars) ...
-            1h-scale anchor (current 1h, 35min formed):  53% buy · net +62$M
+            1h-scale anchor (04:00 bar, 35/60min formed):  53% buy · net +62.0$M
         """
         from src.agent.tools_perception import get_taker_flow as _impl
 

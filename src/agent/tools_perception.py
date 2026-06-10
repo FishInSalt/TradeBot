@@ -1259,10 +1259,19 @@ def _render_taker_flow(
     if anchor is not None:
         up_label, up_bar = anchor
         up_ms = _TAKER_FLOW_PERIOD_MS[up_label]
+        up_period_min = up_ms / 60_000
         up_in_prog = up_bar.ts + up_ms > now_ms
         up_elapsed = max(0.0, (now_ms - up_bar.ts) / 60_000)
-        up_formed = (f"current {up_label}, {up_elapsed:.0f}min formed"
-                     if up_in_prog else f"current {up_label}, closed")
+        # Window metadata (when this bar's taker tally started + how far it has formed).
+        # Open time uses the CALL period's granularity (not the anchor tier's) so it
+        # renders identically to the per-bar table above: bare HH:MM when that table is
+        # bare (5m/15m calls), dated when it is dated (1h/4h calls -> "MM-DD HH:MM",
+        # 1d -> date). This avoids a within-output mismatch and stops a post-midnight
+        # "prev-day 20:00" bucket from reading as today's clock time. Denominator
+        # (/{period}min) mirrors the Now line so maturity reads the same on both.
+        up_open = _fmt_candle_time(_to_pd_timestamp_utc(up_bar.ts), period)
+        up_formed = (f"{up_open} bar, {up_elapsed:.0f}/{up_period_min:g}min formed"
+                     if up_in_prog else f"{up_open} bar, closed")
         up_total = up_bar.sell_usd + up_bar.buy_usd
         up_buy = (up_bar.buy_usd / up_total * 100) if up_total > 0 else 0.0
         up_net = up_bar.buy_usd - up_bar.sell_usd

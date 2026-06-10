@@ -342,10 +342,64 @@ def test_render_taker_flow_anchor_line_when_provided_and_absent_when_none():
     anchor_bar = TakerFlowBar(ts=now - 34 * 60_000, sell_usd=4_700_000.0, buy_usd=5_300_000.0)
     out = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00",
                              anchor=("1h", anchor_bar))
-    assert "1h-scale anchor (current 1h, 34min formed):" in out
+    # anchor carries window metadata: open time (HH:MM, when the tally started) +
+    # elapsed/total formed (denominator mirrors the Now line). ts = now - 34min ->
+    # 2001-09-09 01:12:40 UTC -> "01:12"; up_period_min(1h)=60.
+    assert "1h-scale anchor (01:12 bar, 34/60min formed):" in out
     assert "53% buy" in out  # 5.3M / (5.3M+4.7M) = 53.0% exactly (off the .5 round-half-even boundary)
     out2 = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00")
     assert "anchor" not in out2.lower()
+
+
+def test_render_taker_flow_anchor_closed_shows_open_time_no_denominator():
+    """Closed up-tier bar: open time + 'closed' (no elapsed/total — bar is done)."""
+    from src.agent.tools_perception import _render_taker_flow
+    from src.integrations.exchange.base import TakerFlowBar
+    period_ms = 300_000
+    now = 1_000_000_000_000  # 2001-09-09 01:46:40 UTC
+    bars = _bars(21, period_ms, base_open=now - 60_000 - 20 * period_ms)
+    # opened 90min ago -> 00:16:40; closed 30min ago (ts + 1h <= now)
+    closed_bar = TakerFlowBar(ts=now - 90 * 60_000, sell_usd=4_700_000.0, buy_usd=5_300_000.0)
+    out = _render_taker_flow(bars, "5m", 6, now_ms=now, symbol="X", fetch_ts="00:00",
+                             anchor=("1h", closed_bar))
+    assert "1h-scale anchor (00:16 bar, closed):" in out
+
+
+def test_render_taker_flow_anchor_day_tier_shows_date_not_time():
+    """Day+ anchors (1w for a 1d call) render the date, not a misleading 00:00 time."""
+    from src.agent.tools_perception import _render_taker_flow
+    from src.integrations.exchange.base import TakerFlowBar
+    period_ms = 86_400_000  # 1d
+    now = 1_000_000_000_000  # 2001-09-09
+    bars = _bars(21, period_ms, base_open=now - 3_600_000 - 20 * period_ms)
+    wk_bar = TakerFlowBar(ts=now - 2 * 86_400_000, sell_usd=4_700_000.0, buy_usd=5_300_000.0)
+    out = _render_taker_flow(bars, "1d", 3, now_ms=now, symbol="X", fetch_ts="00:00",
+                             close_note="Close: n/a", anchor=("1w", wk_bar))
+    line = [ln for ln in out.splitlines() if "-scale anchor" in ln][0]
+    assert "1w-scale anchor (2001-09-07 bar," in line  # date form, no HH:MM clock
+
+
+def test_render_taker_flow_anchor_open_matches_dated_perbar_table_for_1h_call():
+    """A 1h call's per-bar table is dated (MM-DD HH:MM), so the 4h anchor's open time
+    must be dated too — it is formatted at the CALL period, not the anchor tier — so a
+    post-midnight 'prev-day 20:00' bucket can't be misread as today's clock time."""
+    from datetime import datetime, timezone
+    from src.agent.tools_perception import _render_taker_flow
+    from src.integrations.exchange.base import TakerFlowBar
+
+    def _ms(*a):
+        return int(datetime(*a, tzinfo=timezone.utc).timestamp() * 1000)
+    now = _ms(2026, 9, 9, 0, 2)  # just past midnight UTC
+    ph = 3_600_000
+    bars = [TakerFlowBar(ts=now - 60_000 - (20 - i) * ph, sell_usd=1e6, buy_usd=1e6)
+            for i in range(21)]
+    # 4h anchor opened 09-08 20:00 (prev day) -> closed at 00:00 (now 00:02 > close)
+    anc = TakerFlowBar(ts=_ms(2026, 9, 8, 20, 0), sell_usd=5e6, buy_usd=5e6)
+    out = _render_taker_flow(bars, "1h", 4, now_ms=now, symbol="X", fetch_ts="00:02:10",
+                             closes={b.ts: 60000.0 for b in bars}, anchor=("4h", anc))
+    # dated open, identical granularity to the 1h per-bar rows (no within-output mismatch)
+    assert "4h-scale anchor (09-08 20:00 bar, closed):" in out
+    assert "09-08 20:00" in [ln for ln in out.splitlines() if "-scale anchor" in ln][0]
 
 
 def test_render_taker_flow_anchor_always_carries_usd_scale_suffix():
