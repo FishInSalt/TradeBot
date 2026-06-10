@@ -419,7 +419,12 @@ async def _render_event_block(deps, trigger_type: str, context, cycle_started_at
 
     Async + IO: the full-close fill branch awaits `deps.exchange.get_contract_size` and
     reads `deps.fee_rate` (symbol from `context.symbol`). scheduled / context-None → "".
+
+    scheduled + non-None context: echo the agent's set_next_wake reasoning verbatim
+    (spec 2026-06-11). context here is a plain str, not a dataclass.
     """
+    if trigger_type == "scheduled" and context is not None:
+        return f"\n\nWAKE CONTEXT (set last cycle): {context}"
     if trigger_type == "conditional" and context is not None:
         msg = (
             f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
@@ -1163,7 +1168,7 @@ async def run(
     scheduler = Scheduler(interval_seconds=interval, callback=on_tick)
 
     # R4: dynamic wake fn binds scheduler (wake bounds assembled in build_services)
-    deps.set_next_wake_fn = lambda minutes: scheduler.set_next_interval(minutes * 60)
+    deps.set_next_wake_fn = lambda minutes, ctx: scheduler.set_next_interval(minutes * 60, ctx)
 
     def _create_fill_handler(sched, eng, sid):
         async def handler(event: FillEvent):

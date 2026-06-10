@@ -614,7 +614,7 @@ async def set_next_wake(
             f"exceeds wake_max={deps.wake_max_minutes} min for this session."
         )
 
-    deps.set_next_wake_fn(minutes)
+    deps.set_next_wake_fn(minutes, reasoning)
     await _record_action(
         deps, action="set_next_wake",
         reasoning=f"interval={minutes}min | {reasoning}",
@@ -666,7 +666,7 @@ async def set_next_wake_at(
         )
 
     # 4. Success
-    deps.set_next_wake_fn(delta_minutes)
+    deps.set_next_wake_fn(delta_minutes, reasoning)
     await _record_action(
         deps, action="set_next_wake_at",
         reasoning=(

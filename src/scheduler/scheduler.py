@@ -45,10 +45,18 @@ class Scheduler:
         self._sequence_counter = 0
         self._wake_event = asyncio.Event()
         self._next_interval: float | None = None
+        self._next_wake_context: str | None = None
 
-    def set_next_interval(self, seconds: float) -> None:
-        """Set a one-shot interval override for the next sleep."""
+    def set_next_interval(self, seconds: float, context: str | None = None) -> None:
+        """Set a one-shot interval override for the next sleep.
+
+        `context` (the agent's set_next_wake reasoning) rides the same one-shot
+        lifecycle as the interval: it is carried into the timer-driven scheduled
+        fire and consumed-and-cleared each cycle, so a preempted wake never leaks
+        its context into a later fire (spec 2026-06-11).
+        """
         self._next_interval = seconds
+        self._next_wake_context = context
 
     async def trigger(self, trigger_type: str, context: Any | None = None) -> None:
         priority = _PRIORITY_MAP.get(trigger_type, 1)
@@ -68,6 +76,8 @@ class Scheduler:
         while self._running:
             interval = self._next_interval if self._next_interval is not None else self._interval
             self._next_interval = None
+            wake_ctx = self._next_wake_context   # consume-and-clear, symmetric with _next_interval
+            self._next_wake_context = None
             await self._interruptible_sleep(interval)
             if not self._running:
                 break
@@ -85,7 +95,7 @@ class Scheduler:
                     )
                 await self._run_cycle(events)                  # ONE cycle consumes the batch
             else:
-                await self._run_cycle([("scheduled", None)])
+                await self._run_cycle([("scheduled", wake_ctx)])
 
     def stop(self) -> None:
         self._running = False

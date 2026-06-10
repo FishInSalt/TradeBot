@@ -408,3 +408,97 @@ async def test_set_next_interval_not_set_uses_default():
     assert scheduler._next_interval is None
     interval = scheduler._next_interval if scheduler._next_interval is not None else scheduler._interval
     assert interval == 42
+
+
+# -------------------------------------------------- wake-context flow (spec 2026-06-11)
+
+async def test_set_next_interval_carries_context_to_scheduled_fire():
+    """set_next_interval(seconds, context) → the timer-driven scheduled fire
+    carries that context as ("scheduled", context)."""
+    from src.scheduler.scheduler import Scheduler
+
+    calls = []
+
+    async def callback(events):
+        calls.append(list(events))
+
+    scheduler = Scheduler(interval_seconds=10, callback=callback)
+    scheduler.set_next_interval(0.05, "check 12:00 1H close below 62467")
+
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.2)
+    scheduler.stop()
+    await task
+
+    assert [("scheduled", "check 12:00 1H close below 62467")] in calls
+
+
+async def test_set_next_interval_without_context_fires_none():
+    """Override interval without a context → scheduled fire stays ("scheduled", None)
+    (back-compat: default arg)."""
+    from src.scheduler.scheduler import Scheduler
+
+    calls = []
+
+    async def callback(events):
+        calls.append(list(events))
+
+    scheduler = Scheduler(interval_seconds=10, callback=callback)
+    scheduler.set_next_interval(0.05)  # no context arg
+
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.2)
+    scheduler.stop()
+    await task
+
+    # every scheduled fire is None-context; no stray non-None context
+    assert all(ctx is None for batch in calls for tt, ctx in batch if tt == "scheduled")
+
+
+async def test_wake_context_not_leaked_after_preemption():
+    """A wake context set before a preempting event must NOT surface on a later
+    default scheduled fire — consume-and-clear semantics."""
+    from src.scheduler.scheduler import Scheduler
+
+    calls = []
+
+    async def callback(events):
+        calls.append(list(events))
+
+    scheduler = Scheduler(interval_seconds=0.1, callback=callback)
+    scheduler.set_next_interval(0.3, "stale_ctx")  # would fire at 0.3 if not preempted
+
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.05)
+    await scheduler.trigger("alert", "alert_ctx")  # preempts the 0.3 wake
+    await asyncio.sleep(0.35)
+    scheduler.stop()
+    await task
+
+    flat = [ev for batch in calls for ev in batch]
+    assert ("alert", "alert_ctx") in flat                 # preemption happened
+    assert ("scheduled", "stale_ctx") not in flat         # context never leaked
+    assert ("scheduled", None) in flat                    # a clean default fire occurred after
+
+
+async def test_set_next_interval_last_context_wins():
+    """Multiple set_next_interval in one window → last context (and interval) win."""
+    from src.scheduler.scheduler import Scheduler
+
+    calls = []
+
+    async def callback(events):
+        calls.append(list(events))
+
+    scheduler = Scheduler(interval_seconds=10, callback=callback)
+    scheduler.set_next_interval(10, "first")
+    scheduler.set_next_interval(0.05, "second")
+
+    task = asyncio.create_task(scheduler.start())
+    await asyncio.sleep(0.2)
+    scheduler.stop()
+    await task
+
+    flat = [ev for batch in calls for ev in batch]
+    assert ("scheduled", "second") in flat
+    assert ("scheduled", "first") not in flat

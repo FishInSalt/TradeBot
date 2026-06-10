@@ -121,6 +121,21 @@ async def test_scheduled_prompt_has_fired_just_now():
     assert "(just now)" in prompt
 
 
+async def test_scheduled_wake_context_reaches_prompt():
+    """End-to-end through run_agent_cycle: a scheduled fire carrying a wake context
+    renders the WAKE CONTEXT line into the agent's prompt (spec 2026-06-11). The
+    events-tuple context must survive unpacking + full prompt assembly."""
+    prompt = await _run("scheduled", "check 12:00 1H close below 62467")
+    assert "WAKE CONTEXT (set last cycle): check 12:00 1H close below 62467" in prompt
+    assert "woken up by a scheduled trigger" in prompt   # header still present
+
+
+async def test_scheduled_no_context_has_no_wake_context_line():
+    """A plain scheduled tick (no dynamic wake set) must not emit a WAKE CONTEXT line."""
+    prompt = await _run("scheduled")
+    assert "WAKE CONTEXT" not in prompt
+
+
 async def test_fill_prompt_has_filled_suffix_and_no_double_triggered():
     from tests._fixtures import make_fill_event
     ts = int((datetime.now(timezone.utc) - timedelta(minutes=4, seconds=30)).timestamp() * 1000)
@@ -143,6 +158,24 @@ async def test_percentage_alert_prompt_has_fired_suffix():
     assert "PRICE ALERT:" in prompt
     assert " — fired " in prompt
     assert "(4 min ago)" in prompt
+
+
+# ---------------------------------------------------- _render_event_block scheduled wake-context (spec 2026-06-11)
+
+async def test_render_event_block_scheduled_echoes_wake_context():
+    from src.cli.app import _render_event_block
+    now = datetime(2026, 6, 11, 13, 0, tzinfo=timezone.utc)
+    out = await _render_event_block(
+        None, "scheduled", "check 12:00 1H close below 62467", now,
+    )
+    assert "WAKE CONTEXT (set last cycle): check 12:00 1H close below 62467" in out
+
+
+async def test_render_event_block_scheduled_none_context_is_empty():
+    from src.cli.app import _render_event_block
+    now = datetime(2026, 6, 11, 13, 0, tzinfo=timezone.utc)
+    out = await _render_event_block(None, "scheduled", None, now)
+    assert out == ""
 
 
 # ---------------------------------------------------- _wake_header_line

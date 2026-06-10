@@ -1,7 +1,7 @@
 import pytest
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 import pandas as pd
 import numpy as np
 from src.integrations.exchange.base import Ticker, Balance, Position, Order
@@ -493,8 +493,19 @@ async def test_set_next_wake_success(deps):
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake(deps, 10, reasoning="checking position")
-    deps.set_next_wake_fn.assert_called_once_with(10)
+    deps.set_next_wake_fn.assert_called_once_with(10, ANY)
     assert "10 min" in result
+
+
+async def test_set_next_wake_forwards_reasoning_to_setter(deps):
+    """set_next_wake forwards reasoning to set_next_wake_fn so the scheduler can
+    echo it on the next scheduled fire (spec 2026-06-11)."""
+    from src.agent.tools_execution import set_next_wake
+    deps.wake_min_minutes = 1
+    deps.wake_max_minutes = 60
+    deps.set_next_wake_fn = MagicMock()
+    await set_next_wake(deps, 10, reasoning="check 12:00 1H close below 62467")
+    deps.set_next_wake_fn.assert_called_once_with(10, "check 12:00 1H close below 62467")
 
 
 async def test_set_next_wake_rejects_above_max(deps):
@@ -548,7 +559,7 @@ async def test_set_next_wake_boundary_60_ok(deps):
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake(deps, 60, reasoning="boundary test")
-    deps.set_next_wake_fn.assert_called_once_with(60)
+    deps.set_next_wake_fn.assert_called_once_with(60, ANY)
     assert "Next wake set to 60 min" in result
 
 
@@ -582,7 +593,7 @@ async def test_set_next_wake_at_happy_path(deps, monkeypatch):
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake_at(deps, "10:37", reasoning="align 1h close")
-    deps.set_next_wake_fn.assert_called_once_with(14)
+    deps.set_next_wake_fn.assert_called_once_with(14, ANY)
     assert "Next wake set for 2026-05-12 10:37 UTC" in result
     assert "in 14 min" in result
 
@@ -595,7 +606,7 @@ async def test_set_next_wake_at_cross_day(deps, monkeypatch):
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake_at(deps, "00:37", reasoning="cross-day test")
-    deps.set_next_wake_fn.assert_called_once_with(47)
+    deps.set_next_wake_fn.assert_called_once_with(47, ANY)
     assert "Next wake set for 2026-05-13 00:37 UTC" in result
     assert "in 47 min" in result
 
@@ -623,7 +634,7 @@ async def test_set_next_wake_at_ceil_boundary_ok(deps, monkeypatch):
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake_at(deps, "10:24", reasoning="ceil edge")
-    deps.set_next_wake_fn.assert_called_once_with(1)
+    deps.set_next_wake_fn.assert_called_once_with(1, ANY)
     assert "in 1 min" in result
 
 
@@ -696,7 +707,7 @@ async def test_set_next_wake_at_format_edge_ok(deps, monkeypatch, good_input, no
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake_at(deps, good_input, reasoning="edge test")
-    deps.set_next_wake_fn.assert_called_once_with(expected_delta)
+    deps.set_next_wake_fn.assert_called_once_with(expected_delta, ANY)
 
 
 async def test_set_next_wake_at_ceil_drift_guard_59s(deps, monkeypatch):
@@ -707,7 +718,7 @@ async def test_set_next_wake_at_ceil_drift_guard_59s(deps, monkeypatch):
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake_at(deps, "10:24", reasoning="drift")
-    deps.set_next_wake_fn.assert_called_once_with(1)
+    deps.set_next_wake_fn.assert_called_once_with(1, ANY)
 
 
 async def test_set_next_wake_at_ceil_drift_guard_120s(deps, monkeypatch):
@@ -718,7 +729,7 @@ async def test_set_next_wake_at_ceil_drift_guard_120s(deps, monkeypatch):
     deps.wake_max_minutes = 60
     deps.set_next_wake_fn = MagicMock()
     result = await set_next_wake_at(deps, "10:25", reasoning="120s boundary")
-    deps.set_next_wake_fn.assert_called_once_with(2)
+    deps.set_next_wake_fn.assert_called_once_with(2, ANY)
 
 
 async def test_set_next_wake_at_below_wake_min_custom(deps, monkeypatch):

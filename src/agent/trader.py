@@ -42,7 +42,7 @@ class TradingDeps:
     approval_enabled: bool = True
     wake_min_minutes: int = 1
     wake_max_minutes: int = 60
-    set_next_wake_fn: Callable[[int], None] | None = None
+    set_next_wake_fn: Callable[[int, str], None] | None = None
     initial_balance: float = 10000.0
     fee_rate: float = DEFAULT_TAKER_FEE_RATE
     """Session-level taker fee rate (decimal). Mirror of RuntimeConfig.taker_fee_rate;
