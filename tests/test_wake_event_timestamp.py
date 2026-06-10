@@ -126,7 +126,7 @@ async def test_scheduled_wake_context_reaches_prompt():
     renders the WAKE CONTEXT line into the agent's prompt (spec 2026-06-11). The
     events-tuple context must survive unpacking + full prompt assembly."""
     prompt = await _run("scheduled", "check 12:00 1H close below 62467")
-    assert "WAKE CONTEXT (set last cycle): check 12:00 1H close below 62467" in prompt
+    assert "SCHEDULED WAKE CONTEXT (you set last cycle): check 12:00 1H close below 62467" in prompt
     assert "woken up by a scheduled trigger" in prompt   # header still present
 
 
@@ -168,7 +168,7 @@ async def test_render_event_block_scheduled_echoes_wake_context():
     out = await _render_event_block(
         None, "scheduled", "check 12:00 1H close below 62467", now,
     )
-    assert "WAKE CONTEXT (set last cycle): check 12:00 1H close below 62467" in out
+    assert "SCHEDULED WAKE CONTEXT (you set last cycle): check 12:00 1H close below 62467" in out
 
 
 async def test_render_event_block_scheduled_none_context_is_empty():

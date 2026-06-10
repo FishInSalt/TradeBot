@@ -62,8 +62,8 @@
 新增 scheduled 分支（当前 scheduled 落到末尾 `return ""`）：
 
 ```
-if trigger_type == "scheduled" and context is not None:
-    return f"\n\nWAKE CONTEXT (set last cycle): {context}"
+if trigger_type == "scheduled" and context:   # truthy: 空串 reasoning 不渲悬空 label
+    return f"\n\nSCHEDULED WAKE CONTEXT (you set last cycle): {context}"
 ```
 
 渲染样例（与 header 合并后）：
@@ -71,13 +71,14 @@ if trigger_type == "scheduled" and context is not None:
 ```
 You have been woken up by a scheduled trigger (fired just now)
 
-WAKE CONTEXT (set last cycle): 12:00 1H candle closes at 13:00 UTC. This is a
+SCHEDULED WAKE CONTEXT (you set last cycle): 12:00 1H candle closes at 13:00 UTC. This is a
 decision-grade candle — MA50 rejection at 62880 high + support test at 62400 low.
 The close location determines whether breakdown continues.
 ```
 
-- 仅 `trigger_type=="scheduled" and context is not None` 出。默认 interval tick（agent 未设 dynamic wake）→ `context is None` → 返回 `""`，行为不变。
-- fact-only（原则 1）：label `WAKE CONTEXT (set last cycle):` 陈述事实"你上轮设的"；正文是 agent 自己的原话，逐字回显，不加 imperative。
+- 仅 `trigger_type=="scheduled" and context`（truthy）出。默认 interval tick（agent 未设 dynamic wake）→ `context is None` → 返回 `""`；空串 reasoning 同样不渲（truthy 守卫，Minor-2）。
+- 结构一致：与 `IMPORTANT EVENT` / `PRICE ALERT` / `PRICE LEVEL` 同为 "Assess..." 之后的 CAPS-label 块。
+- fact-only（原则 1）：label `SCHEDULED WAKE CONTEXT (you set last cycle):` 陈述事实"你上轮设的"；正文是 agent 自己的原话，逐字回显，不加 imperative。
 - multi-event（N>1）路径：本设计只处理单一 `("scheduled", ctx)`；scheduled 不与其他 trigger 在同一 drain 内混合产生（scheduled 仅在 `_pending_events` 为空时 fire），故无需改 `_wake_header_line` 的 N>1 分支。
 - echo 对 agent 自由文本 **verbatim、不截断**（`reasoning` 无长度 cap）；docstring 已引导 `brief`，实务足够，长文本会逐字回显——已知行为，本设计不引入截断。
 
@@ -97,7 +98,7 @@ The close location determines whether breakdown continues.
    - `set_next_interval(s)`（无 ctx）/ 默认 interval fire → `[("scheduled", None)]`。
    - 设 wake 后被 `trigger("alert", ...)` 抢占 → 本 cycle events 为 alert（不含 scheduled context）；后续默认 fire 不泄漏前次 wake context（== `None`）。
    - 一轮多调 `set_next_interval` → 末次 context win。
-2. **`_render_event_block` 单测**：scheduled + 非空 context → 渲染 `WAKE CONTEXT (set last cycle): ...` 行；scheduled + `None` → `""`；不影响 conditional / alert 分支既有断言。
+2. **`_render_event_block` 单测**：scheduled + 非空 context → 渲染 `SCHEDULED WAKE CONTEXT (you set last cycle): ...` 行；scheduled + `None` → `""`；不影响 conditional / alert 分支既有断言。
 3. **集成**：dynamic wake（带 reasoning）→ 下一个 scheduled cycle 的 prompt snapshot 含该 reasoning 原文。
 4. **既有断言更新（签名涟漪，必做）**：`tests/test_tools.py` 共 **8 处** `set_next_wake_fn.assert_called_once_with(N)` 因 mock 多收一个 `reasoning` 实参而失败——行 `496/551/585/598/626/710/721` + `699` 的 `assert_called_once_with(expected_delta)`；改为带第二参（如 `assert_called_once_with(10, "<reasoning>")` 或 `unittest.mock.ANY`，需补 `ANY` import）。
 5. **回归**：现有 scheduler / event-render / N>1 multi-event 测试全绿。已核验其余 `("scheduled", None)` 测试引用（`test_scheduler` 的 bootstrap 断言与 `b != [("scheduled", None)]` filter、`test_cycle_log`、`test_p4_cycle_capture`、`test_wake_event_timestamp`）**均不破**——默认/bootstrap fire 仍为 `None`，仅"已设 context"路径变非空 `str`。
