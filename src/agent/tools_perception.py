@@ -2474,6 +2474,10 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     symbol = deps.symbol
+    # No agent-facing timeframe arg here (unlike get_market_data / MTS), so no
+    # Layer-3 normalize: main_tf reads deps.timeframe, which is already canonical
+    # lowercase from the source-fix (config validator + WizardResult.__post_init__);
+    # prior-period TFs below are hardcoded canonical (1d/1w/1M).
     main_tf = deps.timeframe
 
     try:
