@@ -368,16 +368,18 @@ class TestInProgressSection:
         assert f"closes {_fmt_candle_time(ip_close, '1d')}" in out
 
     @pytest.mark.asyncio
-    async def test_in_progress_unknown_tf_degraded_open_only(
+    async def test_unsupported_tf_rejected_gracefully_not_raised(
         self, fake_ticker_81870, df_5m_130bars,
     ):
-        """议题1 降级: 未知 tf → header 只显 open（无 closes/elapsed），不 raise。"""
+        """未支持 tf（如 "7m"，不在 TF_OFFSETS / SUPPORTED_TIMEFRAMES）→ 上游
+        normalize_timeframe 拦截，返回 fact-only Error 字符串而非 raise，绝不让坏
+        timeframe 逃逸成杀 cycle 的异常（2026-06-09 sim #17 根因修复取代旧降级渲染）。"""
         from src.agent.tools_perception import get_market_data
         deps = _build_gmd_deps(fake_ticker_81870, {"7m": df_5m_130bars}, tf="7m")
         out = await get_market_data(deps, timeframe="7m")
-        assert "=== In-progress Candle (7m):" in out
-        assert "open ===" in out          # 降级头以 ` open ===` 收尾
-        assert "elapsed" not in out.split("=== In-progress Candle")[1].split("\n")[0]
+        assert out.startswith("Error:")
+        assert "7m" in out                 # 报错点名违例取值，便于 agent 自纠
+        deps.market_data.get_ohlcv_dataframe.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_recent_table_renamed_no_suffix(

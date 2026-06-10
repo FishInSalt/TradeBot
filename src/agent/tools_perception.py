@@ -84,9 +84,17 @@ async def get_market_data(
         _live_price, _closed_bars, _atr_series,
         _to_pd_timestamp_utc, _fmt_candle_time, TF_OFFSETS,
     )
+    from src.utils.timeframe import normalize_timeframe
 
     symbol = symbol or deps.symbol
     timeframe = timeframe or deps.timeframe
+    # Fold uppercase-unit timeframes (1H → 1h) and reject unsupported values with
+    # a fact-only Error string — a bad timeframe must never escape as a raw
+    # exception that crashes the whole cycle (2026-06-09 sim #17 root cause).
+    try:
+        timeframe = normalize_timeframe(timeframe)
+    except ValueError as e:
+        return f"Error: {e}"
     candle_count = max(10, min(candle_count, 80))
 
     ticker = await deps.market_data.get_ticker(symbol)
@@ -2173,6 +2181,7 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
     import pandas as pd
     from datetime import datetime, timezone
     from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+    from src.utils.timeframe import normalize_timeframe
 
     symbol = deps.symbol
     if tfs is None:
@@ -2188,6 +2197,13 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
+        # Fold uppercase-unit tfs (1H → 1h) so an agent-supplied "1H" is fetched
+        # as "1h" rather than surfacing as a misleading "temporarily unavailable"
+        # (a permanent casing error misreported as a transient fetch failure).
+        try:
+            tf = normalize_timeframe(tf)
+        except ValueError as e:
+            return tf, e
         try:
             df = await deps.market_data.get_ohlcv_dataframe(
                 symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250),
@@ -2467,6 +2483,10 @@ async def get_price_pivots(deps: TradingDeps) -> str:
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     symbol = deps.symbol
+    # No agent-facing timeframe arg here (unlike get_market_data / MTS), so no
+    # Layer-3 normalize: main_tf reads deps.timeframe, which is already canonical
+    # lowercase from the source-fix (config validator + WizardResult.__post_init__);
+    # prior-period TFs below are hardcoded canonical (1d/1w/1M).
     main_tf = deps.timeframe
 
     try:

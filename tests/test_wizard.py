@@ -169,12 +169,12 @@ def test_step_exchange_sandbox_ignores_live_saved_creds(mock_prompt, mock_float,
 
 # --- Step 2: Trading Pair ---
 
-@patch("src.cli.wizard.Prompt.ask", side_effect=["ETH/USDT:USDT", "1H"])
+@patch("src.cli.wizard.Prompt.ask", side_effect=["ETH/USDT:USDT", "1h"])
 def test_step_trading_pair_custom(mock_prompt):
     from src.cli.wizard import _step_trading_pair
     result = _step_trading_pair(Settings(), Console())
     assert result["symbol"] == "ETH/USDT:USDT"
-    assert result["timeframe"] == "1H"
+    assert result["timeframe"] == "1h"
 
 
 # --- Step 3: Model ---
