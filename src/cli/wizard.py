@@ -157,7 +157,7 @@ def _step_trading_pair(defaults: Settings, console: Console) -> dict:
     symbol = Prompt.ask("  Symbol", default=defaults.trading.symbol, console=console)
     timeframe = Prompt.ask(
         "  Timeframe",
-        choices=["1m", "5m", "15m", "1H", "4H"],
+        choices=["1m", "5m", "15m", "1h", "4h"],  # lowercase ccxt units (Rich is case-sensitive)
         default=defaults.trading.timeframe,
         console=console,
     )

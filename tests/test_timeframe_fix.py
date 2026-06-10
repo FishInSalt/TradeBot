@@ -111,6 +111,51 @@ class TestShippedConfigTimeframeIsCanonical:
         )
 
 
+# === I-1: the interactive wizard must offer lowercase timeframe choices ===
+
+class TestWizardOffersLowercaseTimeframes:
+    """The wizard's Prompt.ask choices were the most direct operator-facing
+    "uppercase is a valid option" source (sim #17's actual entry point) — fixing
+    only the YAML comment left this untouched. Choices must be all-lowercase so
+    an operator is never forced to pick "1H" (Rich is case-sensitive)."""
+
+    def test_step_trading_pair_choices_are_all_lowercase(self):
+        from unittest.mock import patch
+        from rich.console import Console
+        from src.cli.wizard import _step_trading_pair
+        from src.config import Settings
+        with patch("src.cli.wizard.Prompt.ask", return_value="1h") as mock_ask:
+            _step_trading_pair(Settings(), Console())
+        tf_calls = [c for c in mock_ask.call_args_list if c.kwargs.get("choices")]
+        assert tf_calls, "timeframe prompt must offer an explicit choices list"
+        choices = tf_calls[0].kwargs["choices"]
+        assert all(c == c.lower() for c in choices), \
+            f"wizard still offers uppercase timeframe choice(s): {choices}"
+
+
+# === I-3: get_multi_timeframe_snapshot also normalizes free-form tfs ===
+
+class TestMultiTFSnapshotTimeframeNormalization:
+    """MTS accepts free-form tfs; an uppercase "1H" previously fell through to
+    ccxt and got rendered as "temporarily unavailable" — misreporting a
+    permanent casing error as a transient fetch failure. It must normalize
+    instead, consistent with get_market_data."""
+
+    @pytest.mark.asyncio
+    async def test_uppercase_tf_normalized_not_misreported_unavailable(
+        self, fake_ticker_81870, df_1h_250bars,
+    ):
+        from src.agent.tools_perception import get_multi_timeframe_snapshot
+        deps = _build_gmd_deps(fake_ticker_81870, {"1h": df_1h_250bars})
+        out = await get_multi_timeframe_snapshot(deps, tfs=["1H"])
+        assert "[1h]" in out, f"expected a canonical [1h] row, got:\n{out}"
+        assert "Temporarily unavailable" not in out
+        called_tfs = [
+            c.args[1] for c in deps.market_data.get_ohlcv_dataframe.await_args_list
+        ]
+        assert "1h" in called_tfs and "1H" not in called_tfs
+
+
 class TestGetMarketDataTimeframeNormalization:
     @pytest.mark.asyncio
     async def test_uppercase_1H_is_normalized_and_fetches_1h(

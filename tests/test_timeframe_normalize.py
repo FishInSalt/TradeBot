@@ -61,6 +61,17 @@ class TestUnsupportedRaises:
             normalize_timeframe("1hr")
 
 
+class TestNonStringInputRaisesValueError:
+    """Contract: normalize_timeframe raises ValueError (not TypeError) for any
+    bad input — a TypeError leaking from an unhashable arg would be the same
+    class of raw-exception-escape this module exists to prevent."""
+
+    @pytest.mark.parametrize("bad", [["1h"], {"1h"}, {"a": 1}, 5, None, 1.5])
+    def test_non_string_raises_valueerror_not_typeerror(self, bad):
+        with pytest.raises(ValueError):
+            normalize_timeframe(bad)
+
+
 class TestSupportedSetDriftGuard:
     """SUPPORTED_TIMEFRAMES must stay in lockstep with ohlcv_utils.TF_OFFSETS —
     they are two views of the same canonical set; drift would let one accept a

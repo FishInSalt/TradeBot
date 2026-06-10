@@ -2172,6 +2172,7 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
     import pandas as pd
     from datetime import datetime, timezone
     from src.utils.ohlcv_utils import _live_price, _closed_bars, _atr_series
+    from src.utils.timeframe import normalize_timeframe
 
     symbol = deps.symbol
     if tfs is None:
@@ -2187,6 +2188,13 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
     async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame | Exception]:
+        # Fold uppercase-unit tfs (1H → 1h) so an agent-supplied "1H" is fetched
+        # as "1h" rather than surfacing as a misleading "temporarily unavailable"
+        # (a permanent casing error misreported as a transient fetch failure).
+        try:
+            tf = normalize_timeframe(tf)
+        except ValueError as e:
+            return tf, e
         try:
             df = await deps.market_data.get_ohlcv_dataframe(
                 symbol, tf, limit=MULTI_TF_OHLCV_LIMIT.get(tf, 250),

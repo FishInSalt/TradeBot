@@ -26,10 +26,11 @@ SUPPORTED_TIMEFRAMES: frozenset[str] = frozenset({
     "1d", "3d", "1w", "1M",
 })
 
-# Unambiguous unit letters that may be case-folded to canonical lowercase.
-# 'm'/'M' is DELIBERATELY excluded: lowercase m = minute, uppercase M = month —
-# folding would silently change the timeframe's meaning.
-_UNAMBIGUOUS_UNIT_FOLD = {"H": "h", "D": "d", "W": "w", "Y": "y", "S": "s"}
+# Unambiguous unit letters that may be case-folded to canonical lowercase. Only
+# the units that actually appear (uppercase) in SUPPORTED_TIMEFRAMES are listed
+# (hour/day/week). 'm'/'M' is DELIBERATELY excluded: lowercase m = minute,
+# uppercase M = month — folding would silently change the timeframe's meaning.
+_UNAMBIGUOUS_UNIT_FOLD = {"H": "h", "D": "d", "W": "w"}
 
 _TF_RE = re.compile(r"^(\d+)([a-zA-Z])$")
 
@@ -39,13 +40,16 @@ def normalize_timeframe(tf: str) -> str:
 
     Folds unambiguous uppercase units (H/D/W → h/d/w) but preserves the
     minute/month distinction (lowercase m vs uppercase M). Raises ValueError
-    for any value not in SUPPORTED_TIMEFRAMES after folding.
+    for any value not in SUPPORTED_TIMEFRAMES after folding (including non-str
+    input — never lets a raw TypeError escape).
     """
-    s = tf.strip() if isinstance(tf, str) else tf
+    if not isinstance(tf, str):
+        raise ValueError(f"Unsupported timeframe {tf!r}: expected a string.")
+    s = tf.strip()
     if s in SUPPORTED_TIMEFRAMES:
         return s
 
-    match = _TF_RE.match(s) if isinstance(s, str) else None
+    match = _TF_RE.match(s)
     if match is not None:
         amount, unit = match.group(1), match.group(2)
         folded_unit = _UNAMBIGUOUS_UNIT_FOLD.get(unit, unit)
