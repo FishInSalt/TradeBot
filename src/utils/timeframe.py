@@ -2,13 +2,13 @@
 
 The project convention (see src/integrations/exchange/base.py) exposes
 timeframes lowercase across all abstractions, matching ccxt's case-sensitive
-`parse_timeframe` which only accepts lowercase h/m/d/w/s units (and uppercase M
-for month, Y for year). An uppercase hour/day/week — e.g. "1H", "4H", "1D" — is
-a natural notation (TradingView convention) but ccxt rejects it with
+`parse_timeframe` which accepts lowercase m/h/d/w units plus uppercase M for
+month. An uppercase hour/day/week — e.g. "1H", "4H", "1D" — is a natural
+notation (TradingView convention) but ccxt rejects it with
 "timeframe unit H is not supported".
 
-`normalize_timeframe` folds the unambiguous unit letters (H/D/W/Y → h/d/w/y) to
-the canonical lowercase form while preserving the minute (lowercase m) vs month
+`normalize_timeframe` folds the unambiguous unit letters (H/D/W → h/d/w) to the
+canonical lowercase form while preserving the minute (lowercase m) vs month
 (uppercase M) distinction, and raises ValueError for anything not in the
 project's supported set. It is the single normalization point shared by config
 loading, session creation, and the agent-facing market-data tools.
