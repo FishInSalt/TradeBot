@@ -6,7 +6,9 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from src.utils.timeframe import normalize_timeframe
 
 
 class ExchangeConfig(BaseModel):
@@ -22,6 +24,13 @@ class TradingConfig(BaseModel):
     symbol: str = "BTC/USDT:USDT"
     timeframe: str = "15m"
     initial_balance_usdt: float = 100.0
+
+    @field_validator("timeframe")
+    @classmethod
+    def _canonicalize_timeframe(cls, v: str) -> str:
+        # Fold agent/operator-friendly uppercase units (1H → 1h) to the ccxt
+        # lowercase convention; reject unsupported. See src.utils.timeframe.
+        return normalize_timeframe(v)
 
 
 class ModelRouting(BaseModel):

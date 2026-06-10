@@ -10,7 +10,7 @@ exchange:
 # === Trading Parameters ===
 trading:
   symbol: BTC/USDT:USDT        # Trading pair (ccxt unified symbol for USDT perpetual)
-  timeframe: 15m               # Candlestick interval for technical analysis (1m/5m/15m/1H/4H)
+  timeframe: 15m               # Candlestick interval for technical analysis (1m/5m/15m/1h/4h — lowercase units)
   initial_balance_usdt: 100.0  # Starting capital in USDT (used for metrics calculation)
 
 # === Scheduler Configuration ===

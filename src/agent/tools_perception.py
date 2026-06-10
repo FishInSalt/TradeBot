@@ -84,9 +84,17 @@ async def get_market_data(
         _live_price, _closed_bars, _atr_series,
         _to_pd_timestamp_utc, _fmt_candle_time, TF_OFFSETS,
     )
+    from src.utils.timeframe import normalize_timeframe
 
     symbol = symbol or deps.symbol
     timeframe = timeframe or deps.timeframe
+    # Fold uppercase-unit timeframes (1H → 1h) and reject unsupported values with
+    # a fact-only Error string — a bad timeframe must never escape as a raw
+    # exception that crashes the whole cycle (2026-06-09 sim #17 root cause).
+    try:
+        timeframe = normalize_timeframe(timeframe)
+    except ValueError as e:
+        return f"Error: {e}"
     candle_count = max(10, min(candle_count, 80))
 
     ticker = await deps.market_data.get_ticker(symbol)

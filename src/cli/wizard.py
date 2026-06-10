@@ -40,6 +40,13 @@ class WizardResult:
     # Session
     session_name: str
 
+    def __post_init__(self):
+        # Canonicalize timeframe at the session-creation carrier — the single
+        # source feeding both deps.timeframe (→ wake-up prompt) and the Session
+        # DB record. Covers the interactive wizard and config-derived paths.
+        from src.utils.timeframe import normalize_timeframe
+        self.timeframe = normalize_timeframe(self.timeframe)
+
 
 def _load_credentials(config_dir: Path) -> dict:
     path = config_dir / _CREDENTIALS_FILE

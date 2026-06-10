@@ -93,7 +93,9 @@ async def test_restore_session_builds_wizard_result(tmp_path):
     assert result is not None
     assert result.exchange_type == "simulated"
     assert result.symbol == "BTC/USDT:USDT"
-    assert result.timeframe == "1H"
+    # Legacy session stored uppercase "1H"; WizardResult.__post_init__ self-heals
+    # it to the canonical "1h" on restore (2026-06-09 sim #17 root-cause fix).
+    assert result.timeframe == "1h"
     assert result.scheduler_interval_min == 30
     assert result.approval_enabled is False
     assert result.fee_rate == 0.0005
@@ -225,7 +227,9 @@ async def test_create_session_from_wizard_result(tmp_path):
 
     assert s.name == "ETH sim #1"
     assert s.exchange_type == "simulated"
-    assert s.timeframe == "1H"
+    # Uppercase "1H" supplied to WizardResult is canonicalized to "1h" by
+    # __post_init__ before it ever reaches the DB / deps.timeframe / wake prompt.
+    assert s.timeframe == "1h"
     assert s.scheduler_interval_min == 30
     assert s.approval_enabled is False
     assert s.fee_rate == 0.001
