@@ -85,7 +85,7 @@ def _format_event_breakdown(events: list[tuple[str, Any]]) -> str:
     """Breakdown 拼接唯一权威来源（spec §3）：`1 fill` / `2 alerts` / `1 fill, 2 alerts`，
     fill 在前（匹配堆优先级 conditional < alert）；无已知类型 → `N events` fallback。
 
-    自 _wake_header_line N>1 分支（app.py:405-414）提取；wake header 与 §4 注入
+    自 app.py _wake_header_line N>1 分支提取；wake header 与 §4 注入
     header 共用，零漂移面。
     """
     n_fill = sum(1 for tt, _ in events if tt == "conditional")
