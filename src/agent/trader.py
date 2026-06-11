@@ -581,9 +581,11 @@ def create_trader_agent(
     ) -> str:
         """Set the price volatility alert (singleton). Creates if none is
         configured; otherwise replaces the existing one — replacing resets the
-        rolling tick window, so the next trigger requires re-accumulating ticks
-        across the full window from scratch. Use cancel_price_volatility_alert
-        to remove without setting a new one.
+        rolling tick window. After firing the alert is NOT consumed: it stays
+        active and re-arms automatically once the rolling window rebuilds (the
+        window clears on each fire, requiring ticks to re-accumulate from
+        scratch), so it keeps waking you on every threshold breach until
+        cancel_price_volatility_alert removes it.
 
         Related: get_active_alerts (current volatility + price-level alert state).
 
