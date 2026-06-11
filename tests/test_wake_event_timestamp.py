@@ -13,35 +13,35 @@ from datetime import datetime, timedelta, timezone
 # ---------------------------------------------------------------- _format_event_age
 
 def test_format_event_age_future_returns_none():
-    from src.cli.app import _format_event_age
+    from src.services.event_render import _format_event_age
     now = datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc)
     then = now + timedelta(seconds=5)   # event timestamp ahead of now (clock skew)
     assert _format_event_age(now, then) is None
 
 
 def test_format_event_age_under_2s_just_now():
-    from src.cli.app import _format_event_age
+    from src.services.event_render import _format_event_age
     now = datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc)
     then = now - timedelta(seconds=1)
     assert _format_event_age(now, then) == "just now"
 
 
 def test_format_event_age_exactly_2s_delegates_to_seconds():
-    from src.cli.app import _format_event_age
+    from src.services.event_render import _format_event_age
     now = datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc)
     then = now - timedelta(seconds=2)
     assert _format_event_age(now, then) == "2 sec ago"
 
 
 def test_format_event_age_sub_minute_delegates():
-    from src.cli.app import _format_event_age
+    from src.services.event_render import _format_event_age
     now = datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc)
     then = now - timedelta(seconds=42)
     assert _format_event_age(now, then) == "42 sec ago"
 
 
 def test_format_event_age_minutes_delegates():
-    from src.cli.app import _format_event_age
+    from src.services.event_render import _format_event_age
     now = datetime(2026, 6, 1, 14, 0, 0, tzinfo=timezone.utc)
     then = now - timedelta(minutes=4, seconds=37)
     assert _format_event_age(now, then) == "4 min ago"
@@ -54,28 +54,28 @@ def _ms(dt: datetime) -> int:
 
 
 def test_wake_time_suffix_with_age():
-    from src.cli.app import _wake_time_suffix
+    from src.services.event_render import _wake_time_suffix
     then = datetime(2026, 6, 1, 14, 34, 0, tzinfo=timezone.utc)
     now = then + timedelta(minutes=4)
     assert _wake_time_suffix("filled", _ms(then), now) == " — filled 2026-06-01 14:34 UTC (4 min ago)"
 
 
 def test_wake_time_suffix_just_now():
-    from src.cli.app import _wake_time_suffix
+    from src.services.event_render import _wake_time_suffix
     then = datetime(2026, 6, 1, 14, 38, 22, tzinfo=timezone.utc)
     now = then  # scheduled: trigger time ≡ cycle_started_at
     assert _wake_time_suffix("fired", _ms(then), now) == " — fired 2026-06-01 14:38 UTC (just now)"
 
 
 def test_wake_time_suffix_future_drops_parenthetical():
-    from src.cli.app import _wake_time_suffix
+    from src.services.event_render import _wake_time_suffix
     then = datetime(2026, 6, 1, 14, 38, 0, tzinfo=timezone.utc)
     now = then - timedelta(seconds=10)   # event ts ahead of now (skew)
     assert _wake_time_suffix("fired", _ms(then), now) == " — fired 2026-06-01 14:38 UTC"
 
 
 def test_wake_time_suffix_verb_is_used():
-    from src.cli.app import _wake_time_suffix
+    from src.services.event_render import _wake_time_suffix
     then = datetime(2026, 6, 1, 14, 34, 0, tzinfo=timezone.utc)
     now = then + timedelta(minutes=4)
     assert _wake_time_suffix("fired", _ms(then), now).startswith(" — fired ")
@@ -84,7 +84,7 @@ def test_wake_time_suffix_verb_is_used():
 # ---------------------------------------------------- _format_price_level_alert_trigger
 
 def test_price_level_alert_trigger_appends_fired_suffix():
-    from src.cli.app import _format_price_level_alert_trigger
+    from src.services.event_render import _format_price_level_alert_trigger
     from src.integrations.exchange.base import PriceLevelAlertInfo
 
     then = datetime(2026, 6, 1, 14, 34, 0, tzinfo=timezone.utc)
@@ -163,7 +163,7 @@ async def test_percentage_alert_prompt_has_fired_suffix():
 # ---------------------------------------------------- _render_event_block scheduled wake-context (spec 2026-06-11)
 
 async def test_render_event_block_scheduled_echoes_wake_context():
-    from src.cli.app import _render_event_block
+    from src.services.event_render import _render_event_block
     now = datetime(2026, 6, 11, 13, 0, tzinfo=timezone.utc)
     out = await _render_event_block(
         None, "scheduled", "check 12:00 1H close below 62467", now,
@@ -172,7 +172,7 @@ async def test_render_event_block_scheduled_echoes_wake_context():
 
 
 async def test_render_event_block_scheduled_none_context_is_empty():
-    from src.cli.app import _render_event_block
+    from src.services.event_render import _render_event_block
     now = datetime(2026, 6, 11, 13, 0, tzinfo=timezone.utc)
     out = await _render_event_block(None, "scheduled", None, now)
     assert out == ""
@@ -181,7 +181,7 @@ async def test_render_event_block_scheduled_none_context_is_empty():
 async def test_render_event_block_scheduled_empty_context_is_empty():
     """Empty-string reasoning must not render a dangling 'WAKE CONTEXT: ' line
     (truthy guard, spec 2026-06-11 Minor-2)."""
-    from src.cli.app import _render_event_block
+    from src.services.event_render import _render_event_block
     now = datetime(2026, 6, 11, 13, 0, tzinfo=timezone.utc)
     out = await _render_event_block(None, "scheduled", "", now)
     assert out == ""
@@ -215,36 +215,36 @@ def test_wake_header_line_multi_breakdown():
 
 async def test_render_event_block_percentage_alert():
     from datetime import datetime, timezone
-    from src.cli.app import _render_event_block
+    from src.services.event_render import _render_event_block
     from src.services.price_alert import AlertInfo
     now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
     alert = AlertInfo(
         symbol="BTC/USDT:USDT", current_price=79170.0, reference_price=78000.0,
         change_pct=1.5, window_minutes=15, timestamp=int(now.timestamp() * 1000),
     )
-    block = await _render_event_block(deps=None, trigger_type="alert", context=alert, cycle_started_at=now)
+    block = await _render_event_block(deps=None, trigger_type="alert", context=alert, now=now)
     assert block.startswith("\n\nPRICE VOLATILITY ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)")
     assert "fired 2026-06-01 14:38 UTC" in block
 
 
 async def test_render_event_block_scheduled_empty():
     from datetime import datetime, timezone
-    from src.cli.app import _render_event_block
+    from src.services.event_render import _render_event_block
     now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
-    assert await _render_event_block(deps=None, trigger_type="scheduled", context=None, cycle_started_at=now) == ""
+    assert await _render_event_block(deps=None, trigger_type="scheduled", context=None, now=now) == ""
 
 
 async def test_render_event_block_open_fill_fee_only():
     from datetime import datetime, timezone
     from types import SimpleNamespace
-    from src.cli.app import _render_event_block
+    from src.services.event_render import _render_event_block
     now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
     ctx = SimpleNamespace(
         trigger_reason="market", symbol="BTC/USDT:USDT", amount=1.0, fill_price=80000.0,
         pnl=None, fee=1.0, is_full_close=False, entry_price=None,
         timestamp=int(now.timestamp() * 1000),
     )
-    block = await _render_event_block(deps=None, trigger_type="conditional", context=ctx, cycle_started_at=now)
+    block = await _render_event_block(deps=None, trigger_type="conditional", context=ctx, now=now)
     assert block.startswith("\n\nIMPORTANT EVENT: market triggered — BTC/USDT:USDT 1.0 @ 80000.0")
     assert ", Fee: -1.00 USDT" in block
     assert "filled 2026-06-01 14:38 UTC" in block
@@ -253,7 +253,7 @@ async def test_render_event_block_open_fill_fee_only():
 async def test_render_event_block_full_close_round_trip_net():
     from datetime import datetime, timezone
     from types import SimpleNamespace
-    from src.cli.app import _render_event_block
+    from src.services.event_render import _render_event_block
     now = datetime(2026, 6, 1, 14, 38, tzinfo=timezone.utc)
 
     async def _get_cs(symbol):
@@ -265,7 +265,7 @@ async def test_render_event_block_full_close_round_trip_net():
         pnl=10.0, fee=0.405, is_full_close=True, entry_price=80000.0,
         timestamp=int(now.timestamp() * 1000),
     )
-    block = await _render_event_block(deps=deps, trigger_type="conditional", context=ctx, cycle_started_at=now)
+    block = await _render_event_block(deps=deps, trigger_type="conditional", context=ctx, now=now)
     assert "PnL: +10.00 USDT (gross)" in block
     assert "(this fill, equiv-round-trip)" in block
     # round_trip_net = -(80000.0 * 1.0 * 0.01 * 0.0005) + 10.0 - 0.405 = -0.4 + 10.0 - 0.405 = 9.195 → +9.20
