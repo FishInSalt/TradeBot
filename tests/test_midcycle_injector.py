@@ -255,6 +255,33 @@ async def test_render_failure_requeues_batch_and_returns_original():
     assert deps.injected_events_log == [], "失败批次不得留取证残留（不变量：注入成功 ⇔ 有记录）"
 
 
+async def test_cancelled_between_drain_and_requeue_requeues_then_propagates():
+    """BaseException（如 CancelledError）落在 drain 后：requeue 再传播——never-drop
+    不变量无条件成立（quality review I-1：pydantic-ai 并行工具失败 cancel 兄弟 task，
+    取消若吞批则事件永失且无兜底唤醒）。"""
+    import asyncio
+    from unittest.mock import patch
+
+    from src.services.midcycle_injector import MidCycleEventInjector
+
+    deps, state = wired_deps([("conditional", make_fill())])
+
+    async def handler(args):
+        return "result"
+
+    with patch(
+        "src.services.midcycle_injector._render_injection_block",
+        side_effect=asyncio.CancelledError,
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            await MidCycleEventInjector().wrap_tool_execute(
+                make_ctx(deps), call=make_call(), tool_def=MagicMock(), args={}, handler=handler,
+            )
+
+    assert len(state["requeued"]) == 1, "取消窗口内的批必须回滚到堆"
+    assert deps.injected_events_log == [], "无取证残留"
+
+
 def test_registration_order_injector_outermost():
     """注册序锁定（spec §2 框架交互 2）：[Injector, Recorder] → combined.py reversed()
     链式包裹下 Injector 在最外层，注入发生在 Recorder 计时闭合之后，duration_ms

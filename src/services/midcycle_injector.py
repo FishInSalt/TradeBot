@@ -118,6 +118,12 @@ class MidCycleEventInjector(AbstractCapability["TradingDeps"]):
             )
             deps.requeue_events_fn(events)
             return result
+        except BaseException:
+            # CancelledError 等 BaseException：requeue 后再传播——drain 与 requeue 之间
+            # 的取消窗口不得吞批（spec §2 never-drop 不变量须无条件成立，不依赖渲染器
+            # 当前 await 拓扑；pydantic-ai 并行工具失败会 cancel 兄弟 task）。
+            deps.requeue_events_fn(events)
+            raise
 
         deps.injected_events_log.extend(records)   # 记录先于交付（spec §2 步骤 4/5）
         return result + block
