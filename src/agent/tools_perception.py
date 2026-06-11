@@ -404,8 +404,9 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
 
     base_ccy = extract_base_currency(symbol)
     risk_lines = ["=== Risk Exposure ==="]
-    # {:g} 渲染 contracts/contract_size：BTC sim 量级（O(0.001–10)）安全；
-    # OKX live ≥1e6 张会切科学计数法（1e+06）——实盘准备期（Tier 3）再处理。
+    # {:g} 渲染 contracts/contract_size：BTC sim 量级（O(0.01–~100) 张）安全（6 位有效
+    # 数字、≤2 位小数零损失，实测无一触发科学计数法）；OKX live ≥1e6 张才切科学计数法
+    # （1e+06）——实盘准备期（Tier 3）再处理。
     risk_lines.append(
         f"Notional value: {notional:,.2f} USDT = {p.contracts:g} contracts × "
         f"{contract_size:g} {base_ccy} × entry {p.entry_price:,.2f} "

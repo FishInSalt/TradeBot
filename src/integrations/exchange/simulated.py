@@ -1293,8 +1293,10 @@ class SimulatedExchange(BaseExchange):
 
         Resolution order: in-memory cache → sessions.contract_size (DB, no
         network) → ccxt load_markets + market lookup (persists to DB).
-        Raises RuntimeError when contractSize cannot be resolved — never
-        silently falls back to 1.0 (spec §3.6 hard constraint 1).
+        Raises RuntimeError when contractSize is missing or non-positive —
+        never silently falls back to 1.0 nor accepts a degenerate 0.0
+        (spec §3.6 hard constraint 1; both ends reject non-positive so a dirty
+        cached 0.0 falls through to network re-resolution, not silent notional=0).
         """
         if self._market_meta_ready:
             return self._contract_size
@@ -1307,7 +1309,7 @@ class SimulatedExchange(BaseExchange):
                     select(SessionModel.contract_size).where(SessionModel.id == self._session_id)
                 )
                 cached = result.scalar_one_or_none()
-            if cached is not None:
+            if cached is not None and cached > 0:  # 非正脏值落回网络重解析，不静默接受 0.0
                 self._contract_size = float(cached)
                 self._market_meta_ready = True
                 return self._contract_size
@@ -1316,9 +1318,10 @@ class SimulatedExchange(BaseExchange):
             self._ccxt = ccxtpro.okx()
         await self._load_markets_with_retry()
         raw = self._ccxt.market(self._symbol).get("contractSize")
-        if raw is None:
+        if raw is None or raw <= 0:
             raise RuntimeError(
-                f"contractSize missing for {self._symbol} — cannot initialize market metadata"
+                f"contractSize missing or non-positive ({raw!r}) for {self._symbol} "
+                "— cannot initialize market metadata"
             )
         self._contract_size = float(raw)
         self._market_meta_ready = True

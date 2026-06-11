@@ -51,6 +51,16 @@ async def test_fetch_path_raises_on_missing_contract_size():
     assert ex._market_meta_ready is False
 
 
+async def test_fetch_path_raises_on_nonpositive_contract_size():
+    """contractSize 为 0.0/负数同样 fail-loud：非正值是退化值（notional 会归零），
+    与 None 缺键对称（spec §3.6 硬约束 1 精神 never silently use a wrong value；PR#73 I-1）。"""
+    ex = _make_exchange()
+    ex._ccxt = _FakeCcxt(0.0)
+    with pytest.raises(RuntimeError, match="contractSize"):
+        await ex.init_market_meta()
+    assert ex._market_meta_ready is False
+
+
 async def test_db_cache_hit_skips_network_entirely():
     """sessions.contract_size 命中 → 不创建 ccxt client、不走网络。"""
     engine = create_async_engine("sqlite+aiosqlite://")
@@ -69,6 +79,29 @@ async def test_db_cache_hit_skips_network_entirely():
     cs = await ex.init_market_meta()
     assert cs == 0.01
     assert getattr(ex, "_ccxt", None) is None  # 没碰网络客户端（_ccxt 属性 pre-start 不存在，勿直接访问）
+    await engine.dispose()
+
+
+async def test_db_cache_nonpositive_falls_through_to_network():
+    """sessions.contract_size 持久为脏值 0.0 → DB-cache 拒收 → 落回网络重解析（自愈），
+    不把 0.0 当合法值静默接受（PR#73 I-1：两端拒非正值，避免 DB 单边硬化制造不对称）。"""
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with get_session(engine) as session:
+        session.add(SessionModel(
+            id="imm-test", name="imm", symbol="BTC/USDT:USDT",
+            initial_balance=10_000.0, status="active",
+            exchange_type="simulated", timeframe="15m",
+            scheduler_interval_min=15, approval_enabled=False,
+            token_budget=1_000_000, contract_size=0.0,
+        ))
+        await session.commit()
+    ex = _make_exchange(db_engine=engine)
+    ex._ccxt = _FakeCcxt(0.01)  # 网络分支重解析得真实值
+    cs = await ex.init_market_meta()
+    assert cs == 0.01  # 脏 0.0 被拒、落回网络自愈，而非静默 notional=0
+    assert ex._market_meta_ready is True
     await engine.dispose()
 
 
@@ -119,6 +152,16 @@ async def test_okx_init_market_meta_raises_on_missing_contract_size_key():
     ex._preload_markets = AsyncMock()
     ex._client = MagicMock()
     ex._client.markets = {"BTC/USDT:USDT": {}}
+    with pytest.raises(RuntimeError, match="contractSize"):
+        await ex.init_market_meta()
+
+
+async def test_okx_init_market_meta_raises_on_nonpositive_contract_size():
+    """contractSize 为 0.0/负数同样 raise（三端 fail-loud 对称；PR#73 I-1）。"""
+    ex = _make_okx()
+    ex._preload_markets = AsyncMock()
+    ex._client = MagicMock()
+    ex._client.markets = {"BTC/USDT:USDT": {"contractSize": 0.0}}
     with pytest.raises(RuntimeError, match="contractSize"):
         await ex.init_market_meta()
 
