@@ -103,6 +103,7 @@ def create_trader_agent(
 ) -> Agent[TradingDeps, str]:
     # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
     # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
+    from src.services.midcycle_injector import MidCycleEventInjector
     from src.services.tool_call_recorder import ToolCallRecorder
     from src.services.model_manager import get_optimal_settings
 
@@ -117,7 +118,9 @@ def create_trader_agent(
         deps_type=TradingDeps,
         output_type=str,
         instructions=system_prompt,
-        capabilities=[ToolCallRecorder()],
+        # 顺序契约（spec §2）：combined.py reversed() 链式包裹 → 首注册在最外层。
+        # Injector 必须最外层：注入发生在 Recorder 计时闭合之后，duration_ms 不含注入耗时。
+        capabilities=[MidCycleEventInjector(), ToolCallRecorder()],
         model_settings=get_optimal_settings(model_name),
     )
 
