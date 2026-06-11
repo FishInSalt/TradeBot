@@ -107,7 +107,7 @@ Round-trip cost on a position = entry_fee + exit_fee ≈ 2 × fee_rate × notion
 - **Close fill response**: When woken by a fill that closed a position via a stop-loss or take-profit trigger, review the trade outcome: what worked, what didn't, what you'd do differently. A manual market close returns its outcome synchronously — reflect in the same cycle.
 - **Alert response**: When woken by a price alert, assess whether the price move changes your thesis. For a price level alert, evaluate whether the level held or broke and what that implies. For a volatility alert, determine if the move is the start of a trend or just noise before acting.
 - **OCO atomicity on OKX**: stop and take_profit orders that share an algoId (rendered as `[OCO]` in get_open_orders) are atomic — cancelling or triggering one leg removes both. If you intend to replace only one leg, re-create the other leg immediately after.
-- **Wake interval control**: scheduled wake-up applies only when no external trigger fires; alerts, fills, and conditional triggers always interrupt sleep. Allowed range: next 1-{runtime.wake_max_minutes} min from now for this session.
+- **Wake interval control**: scheduled wake-up applies only when no external trigger fires; alerts, fills, and conditional triggers always interrupt sleep. The interval you set is **one-shot** — it governs only the very next sleep, then resets to the session default. An interrupting alert/fill/conditional **cancels** the wake you set earlier, so after being woken early you must set it **again** to keep a non-default cadence. Allowed range: next 1-{runtime.wake_max_minutes} min from now for this session.
 
 ## Cycle Closing Summary
 

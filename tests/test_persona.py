@@ -276,6 +276,32 @@ def test_layer1_cross_tool_bullet_count():
     assert bullet_count == 6, f"Expected 6 Layer 1 bullets, got {bullet_count}"
 
 
+def test_wake_interval_control_states_one_shot_and_rearm():
+    """Drift guard: Wake interval control bullet teaches one-shot + re-arm.
+
+    sim #17 wake-forget root cause (spec 2026-06-11-wake-rearm-persona):
+    the agent treated wake as a persistent commitment (listed `Wake: HH:MM`
+    under Active commitments, reasoned "already set") and skipped re-arming on
+    early alert/conditional wakes, silently reverting to the session default.
+    The bullet must state the interval is one-shot and that an interrupting
+    trigger CANCELS the pending wake, so the agent re-arms each cycle.
+    'cancels' (not 'consumes') is load-bearing — 'consumes' wrongly implies
+    the wake already fired, the exact wrong inference on an early wake.
+    """
+    from src.agent.persona import generate_system_prompt
+    prompt = generate_system_prompt(PersonaConfig())
+    layer1 = prompt.split("## How to Think")[0]
+    wake_bullet = next(
+        b for b in layer1.split("\n- **") if b.startswith("Wake interval control")
+    )
+    assert "one-shot" in wake_bullet
+    assert "cancels" in wake_bullet
+    assert "consumes" not in wake_bullet
+    assert "again" in wake_bullet
+    # wake_max interpolation must remain intact (no leaked placeholder)
+    assert "{runtime" not in prompt
+
+
 def test_layer1_no_tool_invocation_descriptions():
     """After Iter 4, Layer 1 should not contain tool-name invocation patterns —
     tool descriptions belong in docstrings (DRY). The 6 retained bullets describe
