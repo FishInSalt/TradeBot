@@ -77,7 +77,7 @@ def _make_result() -> WizardResult:
     )
 
 
-async def test_build_services_all_n3_enabled():
+async def test_build_services_all_n3_enabled(stub_market_meta):
     from src.cli.app import build_services
     from src.integrations.crypto_etf.service import CryptoEtfService
     from src.integrations.macro.service import MacroService
@@ -85,7 +85,7 @@ async def test_build_services_all_n3_enabled():
 
     settings = _make_settings(True, True, True)
     result = _make_result()
-    exchange, deps, agent, budget, _stats = build_services(
+    exchange, deps, agent, budget, _stats = await build_services(
         result, MagicMock(), "sid", MagicMock(), settings,
     )
     try:
@@ -100,11 +100,11 @@ async def test_build_services_all_n3_enabled():
         await deps.onchain.close()
 
 
-async def test_build_services_macro_disabled():
+async def test_build_services_macro_disabled(stub_market_meta):
     from src.cli.app import build_services
 
     settings = _make_settings(macro_enabled=False)
-    exchange, deps, agent, budget, _stats = build_services(
+    exchange, deps, agent, budget, _stats = await build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     try:
@@ -117,11 +117,11 @@ async def test_build_services_macro_disabled():
         await deps.onchain.close()
 
 
-async def test_build_services_all_n3_disabled():
+async def test_build_services_all_n3_disabled(stub_market_meta):
     from src.cli.app import build_services
 
     settings = _make_settings(False, False, False)
-    exchange, deps, agent, budget, _stats = build_services(
+    exchange, deps, agent, budget, _stats = await build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     assert deps.macro is None
@@ -129,12 +129,12 @@ async def test_build_services_all_n3_disabled():
     assert deps.onchain is None
 
 
-async def test_build_services_crypto_etf_disabled_leaves_others_on():
+async def test_build_services_crypto_etf_disabled_leaves_others_on(stub_market_meta):
     from src.cli.app import build_services
 
     settings = _make_settings(macro_enabled=True, etf_enabled=False,
                               onchain_enabled=True)
-    exchange, deps, agent, budget, _stats = build_services(
+    exchange, deps, agent, budget, _stats = await build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     try:
@@ -146,12 +146,12 @@ async def test_build_services_crypto_etf_disabled_leaves_others_on():
         await deps.onchain.close()
 
 
-async def test_build_services_onchain_disabled_leaves_others_on():
+async def test_build_services_onchain_disabled_leaves_others_on(stub_market_meta):
     from src.cli.app import build_services
 
     settings = _make_settings(macro_enabled=True, etf_enabled=True,
                               onchain_enabled=False)
-    exchange, deps, agent, budget, _stats = build_services(
+    exchange, deps, agent, budget, _stats = await build_services(
         _make_result(), MagicMock(), "sid", MagicMock(), settings,
     )
     try:

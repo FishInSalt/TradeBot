@@ -149,9 +149,10 @@ def create_trader_agent(
         both entry and last price). Liquidation distance is computed against
         mark price.
 
-        Output also includes Fee & Breakeven section: entry_fee paid (= entry × contracts × contract_size × rate)
-        and breakeven price = entry × (1 ± 2 × fee_rate) — the fill price at which the
-        position is exactly flat on a taker round-trip.
+        Output also includes Fee & Breakeven section: entry_fee paid
+        (= notional × fee_rate, rendered with the session's actual values)
+        and breakeven price = entry × (1 ± 2 × fee_rate) — the fill price at
+        which the position is exactly flat on a taker round-trip.
 
         Args:
             symbol: trading symbol (defaults to session symbol).
@@ -502,10 +503,16 @@ def create_trader_agent(
         until you do.
 
         Entry incurs taker fee = notional × fee_rate; the return reports the actual fee.
+        For example, a fill of 12.02 contracts @ 62,383.70 returns
+        'Entry fee: -7.50 USDT (notional 7,498.52)' (rate is session-specific;
+        this example uses 0.1%).
+
+        position_pct is the percent of free balance to use as margin (0-100);
+        resulting notional = margin × leverage.
 
         Args:
             side: 'long' or 'short'.
-            position_pct: percent of free balance to allocate (0-100).
+            position_pct: percent of free balance to use as margin (0-100); resulting notional = margin × leverage.
             leverage: leverage multiplier (cannot be changed while holding position).
             reasoning: brief description of your decision logic.
         """
@@ -760,10 +767,13 @@ def create_trader_agent(
 
         Limit fill incurs maker or taker fee depending on fill condition.
 
+        position_pct is the percent of free balance to use as margin (0-100);
+        resulting notional = margin × leverage.
+
         Args:
             side: 'long' or 'short'.
             price: limit price.
-            position_pct: percent of free balance to allocate (0-100).
+            position_pct: percent of free balance to use as margin (0-100); resulting notional = margin × leverage.
             leverage: leverage multiplier.
             reasoning: brief description of your decision logic.
         """

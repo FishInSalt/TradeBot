@@ -81,7 +81,8 @@ class SimulatedExchange(BaseExchange):
         self._pending_orders: list[_PendingOrder] = []
         self._leverage: dict[str, int] = {}
         self._latest_ticker: Ticker | None = None
-        self._contract_size: float = 1.0   # _init_contract_size() overwrites with real market contractSize
+        self._contract_size: float = 1.0   # internal default; real value via init_market_meta()
+        self._market_meta_ready: bool = False  # sentinel: distinguishes "uninitialized" from a legit 1.0
         self._running = False
         self._lock = asyncio.Lock()
         self._error_count = 0
@@ -1116,8 +1117,10 @@ class SimulatedExchange(BaseExchange):
             await self._init_state(trading_session.initial_balance)
             await self._persist_state()
 
-        self._ccxt = ccxtpro.okx()
-        await self._init_contract_size()
+        await self.init_market_meta()   # idempotent — no-op when a prior caller already ran it
+        if getattr(self, "_ccxt", None) is None:
+            self._ccxt = ccxtpro.okx()  # DB-cache path skips client creation; ticker seeding needs it
+            await self._load_markets_with_retry()  # 还原旧 start() 的显式 load_markets 保证（resume/DB-cache 路径下 init_market_meta 未触网）
         seed_ticker = None
         for attempt in range(3):
             try:
@@ -1172,8 +1175,9 @@ class SimulatedExchange(BaseExchange):
     async def _seed_mark_price(self) -> float:
         """Seed mark via fetch_mark_price; 3-attempt backoff; fail-fast on all.
 
-        MUST be called after _init_contract_size() (load_markets) so ccxt can
-        resolve instId. Mirrors seed_ticker retry semantics.
+        MUST be called after markets are loaded (init_market_meta network path,
+        or the explicit _load_markets_with_retry in start()'s cache path) so
+        ccxt can resolve instId. Mirrors seed_ticker retry semantics.
         """
         for attempt in range(3):
             try:
@@ -1284,12 +1288,46 @@ class SimulatedExchange(BaseExchange):
                 else:
                     raise RuntimeError(f"Failed to load_markets after 3 attempts: {e}") from e
 
-    async def _init_contract_size(self) -> None:
-        """load_markets(retry) → cache real contractSize from market() → persist to DB (if db_engine set)."""
+    async def init_market_meta(self) -> float:
+        """Resolve and cache contractSize for the bound symbol. Idempotent.
+
+        Resolution order: in-memory cache → sessions.contract_size (DB, no
+        network) → ccxt load_markets + market lookup (persists to DB).
+        Raises RuntimeError when contractSize is missing or non-positive —
+        never silently falls back to 1.0 nor accepts a degenerate 0.0
+        (spec §3.6 hard constraint 1; both ends reject non-positive so a dirty
+        cached 0.0 falls through to network re-resolution, not silent notional=0).
+        """
+        if self._market_meta_ready:
+            return self._contract_size
+        if self._db_engine is not None:
+            from sqlalchemy import select
+            from src.storage.database import get_session
+            from src.storage.models import Session as SessionModel
+            async with get_session(self._db_engine) as session:
+                result = await session.execute(
+                    select(SessionModel.contract_size).where(SessionModel.id == self._session_id)
+                )
+                cached = result.scalar_one_or_none()
+            if cached is not None and cached > 0:  # 非正脏值落回网络重解析，不静默接受 0.0
+                self._contract_size = float(cached)
+                self._market_meta_ready = True
+                return self._contract_size
+        if getattr(self, "_ccxt", None) is None:
+            import ccxt.pro as ccxtpro
+            self._ccxt = ccxtpro.okx()
         await self._load_markets_with_retry()
-        self._contract_size = float(self._ccxt.market(self._symbol).get("contractSize") or 1.0)
-        if self._db_engine:
+        raw = self._ccxt.market(self._symbol).get("contractSize")
+        if raw is None or raw <= 0:
+            raise RuntimeError(
+                f"contractSize missing or non-positive ({raw!r}) for {self._symbol} "
+                "— cannot initialize market metadata"
+            )
+        self._contract_size = float(raw)
+        self._market_meta_ready = True
+        if self._db_engine is not None:
             await self._persist_contract_size()
+        return self._contract_size
 
     async def _persist_contract_size(self) -> None:
         """Persist cached contract_size to sessions.contract_size column (Task 1)."""

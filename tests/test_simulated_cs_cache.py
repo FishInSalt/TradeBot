@@ -45,13 +45,13 @@ async def test_load_markets_failfast_after_3(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_init_contract_size_caches_real_cs():
-    # 成功 → 从 market() 缓存真实 cs（db_engine=None → 不 persist）
+async def test_init_market_meta_caches_real_cs():
+    # 成功 → 从 market() 缓存真实 cs（db_engine=None → 跳过 DB-cache、不 persist、走 ccxt path）
     ex = _bare()
     ex._ccxt = MagicMock()
     ex._ccxt.load_markets = AsyncMock()
     ex._ccxt.market = MagicMock(return_value={"contractSize": 0.01})
-    await ex._init_contract_size()
+    await ex.init_market_meta()
     assert ex._contract_size == 0.01
     ex._ccxt.market.assert_called_once_with("BTC/USDT:USDT")
 
@@ -62,7 +62,8 @@ async def test_persist_contract_size_writes_to_db(tmp_path):
     # sessions row — ensures the WHERE clause and column name are correct.
     engine = await init_db(f"sqlite+aiosqlite:///{tmp_path}/cs_persist.db")
 
-    # Insert a session row with contract_size initially NULL.
+    # Insert a session row with contract_size initially NULL → DB-cache misses,
+    # init_market_meta falls through to the ccxt path (which then persists).
     async with get_session(engine) as s:
         s.add(SessionModel(
             id="sess-cs", name="test", symbol="BTC/USDT:USDT",
@@ -76,13 +77,13 @@ async def test_persist_contract_size_writes_to_db(tmp_path):
     ex = SimulatedExchange(config=cfg, db_engine=engine, session_id="sess-cs",
                            symbol="BTC/USDT:USDT")
 
-    # Mock _ccxt so _init_contract_size() succeeds without real network calls.
+    # Mock _ccxt so init_market_meta() succeeds without real network calls.
     ex._ccxt = MagicMock()
     ex._ccxt.load_markets = AsyncMock()
     ex._ccxt.market = MagicMock(return_value={"contractSize": 0.01})
 
-    # db_engine is set → should call _persist_contract_size() after caching.
-    await ex._init_contract_size()
+    # db_engine set + sessions.contract_size NULL → ccxt path runs and persists.
+    await ex.init_market_meta()
 
     # Re-query the DB and confirm the value was persisted.
     async with get_session(engine) as s:

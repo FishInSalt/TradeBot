@@ -190,6 +190,27 @@ class OKXExchange(BaseExchange):
         """load_markets wrapper — @_retry 保护启动时的 transient network glitch."""
         await self._client.load_markets()
 
+    async def init_market_meta(self) -> float:
+        """Resolve contractSize for the bound symbol via load_markets.
+
+        Raises RuntimeError when the market or contractSize is unavailable or
+        non-positive — no silent 1.0 fallback, no degenerate 0.0 (spec §3.6
+        hard constraint 1, three-end symmetric with sim; the lazy
+        get_contract_size() fallback below is NOT used on this init path —
+        its own removal is an OKX-runtime change deferred to Tier 3).
+        """
+        # Non-idempotent by design: relies on ccxt's load_markets(reload=False)
+        # cache to make a repeat call a near-no-op; OKX wiring is Tier-3 deferred.
+        await self._preload_markets()
+        market = self._client.markets.get(self._symbol)
+        cs = market.get("contractSize") if market else None
+        if cs is None or cs <= 0:
+            raise RuntimeError(
+                f"contractSize unavailable or non-positive ({cs!r}) for {self._symbol} on OKX "
+                "— cannot initialize market metadata"
+            )
+        return float(cs)
+
     @_retry()
     async def _fetch_account_config(self) -> dict:
         """private_get_account_config wrapper — @_retry 保护启动时的 transient network glitch."""

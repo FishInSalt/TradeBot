@@ -26,6 +26,11 @@ DEFAULT_TAKER_FEE_RATE = 0.0005
 default + RuntimeConfig/TradingDeps test defaults. Production paths MUST
 override via wizard-injected sessions.fee_rate."""
 
+DEFAULT_CONTRACT_SIZE = 0.01
+"""OKX BTC/USDT:USDT perp contractSize (ctVal) in base currency. Test-only
+default — production paths MUST inject via build_services
+(exchange.init_market_meta()), mirroring DEFAULT_TAKER_FEE_RATE discipline."""
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -66,6 +71,16 @@ class RuntimeConfig:
     If a production code path silently relies on the default, that is a bug —
     flag and route through cli wiring."""
 
+    contract_size: float = DEFAULT_CONTRACT_SIZE
+    """Base-currency amount per contract. Injected from
+    exchange.init_market_meta() via build_services. Default is for tests /
+    temp call sites only — production paths MUST set explicitly."""
+
+    base_ccy: str = "BTC"
+    """Base currency label for the contract-size line (parsed from the
+    session symbol via extract_base_currency in build_services). Default is
+    for tests only."""
+
 
 def generate_system_prompt(
     persona: PersonaConfig,
@@ -99,6 +114,7 @@ You trade USDT-margined perpetual futures (no expiry date). The exchange uses on
 
 Fee: taker {fee_pct:.3f}% per side (set at session start).
 Round-trip cost on a position = entry_fee + exit_fee ≈ 2 × fee_rate × notional.
+Contract size: 1 contract = {runtime.contract_size:g} {runtime.base_ccy}. Notional (USDT) = contracts × contract_size × price.
 
 ## Cross-Tool Behavior
 
@@ -144,7 +160,7 @@ What is the dominant trend across timeframes? Is the market trending or ranging?
 Are technical indicators showing confluence? Does price action confirm the signal? Is volume supporting the move, or diverging? Are there any warning signs (divergences, exhaustion candles)?
 
 **Risk-Reward**
-What is the risk-to-reward ratio of this potential trade? Where is the logical stop loss? Is the potential reward worth the risk? Would a better entry improve the ratio?
+What is the risk-to-reward ratio of this potential trade? Where is the logical stop loss? Is the potential reward worth the risk? Would a better entry improve the ratio? Does the expected move clear the round-trip fee cost — where is breakeven (entry ± 2 × fee_rate) relative to your stop and target?
 
 **Position Management**
 How much capital is currently at risk? Is there a reason to scale in or scale out? Should stops be trailed as the trade develops? Is the position sized appropriately for the conviction level?

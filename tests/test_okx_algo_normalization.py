@@ -32,11 +32,11 @@ def test_okx_init_stores_sandbox_as_instance_field():
         assert ex._sandbox is True
 
 
-def test_build_services_passes_sandbox_from_settings_to_okx_exchange():
+async def test_build_services_passes_sandbox_from_settings_to_okx_exchange():
     """Call-site wiring 回归: app.build_services 必须从 settings.exchange.sandbox
     透传到 OKXExchange 构造; 漏传 = demo credentials 打 live endpoint (spec §2.1.2 footgun).
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     result = MagicMock()
     result.exchange_type = "okx"
@@ -64,10 +64,15 @@ def test_build_services_passes_sandbox_from_settings_to_okx_exchange():
          patch("src.cli.app.create_trader_agent"), \
          patch("src.cli.app.SessionStats"):
         mock_okx_cls.return_value = MagicMock()
+        # class patched in app namespace → set async surface explicitly.
+        # 不用 stub_market_meta fixture: 它 monkeypatch 真实 OKXExchange, 而这里整类
+        # 被 patch 成 MagicMock, fixture 对其无效 — load-bearing 的是下面的显式 AsyncMock.
+        mock_okx_cls.return_value.init_market_meta = AsyncMock(return_value=0.01)
+        mock_okx_cls.return_value.close = AsyncMock()
         from src.cli.app import build_services
         try:
-            build_services(result, engine=MagicMock(), session_id="s1",
-                           sc=sc, settings=settings)
+            await build_services(result, engine=MagicMock(), session_id="s1",
+                                 sc=sc, settings=settings)
         except Exception:
             # MetricsService / NewsService 等后续构造可能因 Settings 空值 raise;
             # OKXExchange 是 build_services 里第一个真实构造调用 (app.py:261),

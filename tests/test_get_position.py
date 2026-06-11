@@ -85,10 +85,19 @@ async def test_renders_fee_breakeven_section_long():
     out = await get_position(deps, "BTC/USDT:USDT")
 
     assert "=== Fee & Breakeven ===" in out
-    assert "Entry fee paid: ~-40.00 USDT (= entry × contracts × contract_size × rate)" in out
+    assert "Entry fee paid: ~-40.00 USDT (= notional 40,000.00 × 0.100%)" in out
     assert "Breakeven: 80,160.00" in out
     assert "[current 80,200.00, +40 pts]" in out
-    assert "= 80,000.00 × (1 + 2 × fee_rate) [long round-trip taker]" in out
+    assert "= 80,000.00 × (1 + 2 × 0.100%) [long round-trip taker]" in out
+    # Notional line full-string lock: notional = 0.5 × 1 × 80,000 = 40,000.00;
+    # exp_pct = notional/equity×100 = 40,000/10,500×100 = 381.0% (equity =
+    # balance.total_usdt = 10,500.00); base_ccy = "BTC"; contracts/contract_size
+    # via {:g} (0.5 / 1), notional/entry/equity via {:,.2f}. Guards against wrong
+    # base_ccy, dropped factor, or lost thousands separator silently passing.
+    assert (
+        "Notional value: 40,000.00 USDT = 0.5 contracts × 1 BTC × "
+        "entry 80,000.00 (381.0% of equity 10,500.00)"
+    ) in out
 
 
 @pytest.mark.asyncio
@@ -106,15 +115,18 @@ async def test_renders_fee_breakeven_section_short():
 
     assert "Breakeven: 79,840.00" in out
     # Unicode minus sign U+2212, not hyphen
-    assert "= 80,000.00 × (1 − 2 × fee_rate) [short round-trip taker]" in out
+    assert "= 80,000.00 × (1 − 2 × 0.100%) [short round-trip taker]" in out
 
 
 @pytest.mark.asyncio
-async def test_fee_breakeven_section_does_not_render_fee_rate_number():
-    """Drift guard: rate digits only in system prompt (single-source principle).
+async def test_fee_breakeven_section_renders_session_fee_rate():
+    """Fee & Breakeven section renders the session fee rate as a number.
 
-    Fee & Breakeven section MUST NOT print fee_rate as a number — only entry_fee
-    + breakeven + formula caption with `fee_rate` symbol.
+    Inverts the prior "rate digits only in system prompt" drift guard: the
+    iter-tool-opt-contract-fee-visibility design adopts a "rule layer (persona /
+    docstring carry symbolic formulas) + instance layer (tool output substitutes
+    numbers)" architecture (spec §3.2). get_position therefore instantiates the
+    session fee rate into both the Entry fee factor and the breakeven caption.
     """
     from src.agent.tools_perception import get_position
 
@@ -128,10 +140,13 @@ async def test_fee_breakeven_section_does_not_render_fee_rate_number():
     fb_end = out.index("===", search_from)
     fb_segment = out[fb_start:fb_end]
 
-    assert "0.001" not in fb_segment
-    assert "0.05%" not in fb_segment
-    assert "0.10%" not in fb_segment
-    assert "0.20%" not in fb_segment
+    # Instance layer: the session fee rate (0.001 → 0.100%) is rendered, no
+    # longer kept symbolic / single-sourced to the system prompt.
+    assert "0.100%" in fb_segment  # 保留：session 费率被渲染
+    # 强化：docstring 说费率实例化进 Entry fee 因式 + breakeven caption 两处；
+    # 分别断这两行的特征片段，否则单一 "0.100%" 断不出某一行漏代入。
+    assert "× 0.100%)" in fb_segment              # Entry fee 行 (= notional N × 0.100%)
+    assert "2 × 0.100%)" in fb_segment            # breakeven caption (1 + 2 × 0.100%)
 
 
 @pytest.mark.asyncio
@@ -198,6 +213,8 @@ async def test_fee_breakeven_section_uses_contract_size_factor():
     assert "Entry fee paid: ~-8.00 USDT" in out, (
         f"contract_size factor missing — got:\n{out}"
     )
+    # notional = 10 contracts × 0.01 × 80,000 = 8,000; instance-layer factor form
+    assert "Entry fee paid: ~-8.00 USDT (= notional 8,000.00 × 0.100%)" in out
 
 
 @pytest.mark.asyncio

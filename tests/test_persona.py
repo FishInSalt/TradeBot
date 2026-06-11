@@ -703,3 +703,32 @@ def test_persona_market_sync_replaces_separate_trigger():
     # 旧冲突措辞absent
     assert "do not attempt in the same cycle" not in low
     assert "separate trigger" not in low
+
+
+def test_layer1_contract_size_line_renders_runtime_values():
+    """Layer 1 渲染 contract size 行 + notional 换算规则（spec §3.1）。"""
+    runtime = RuntimeConfig(taker_fee_rate=0.001, contract_size=0.01, base_ccy="BTC")
+    text = generate_system_prompt(PersonaConfig(), runtime)
+    assert ("Contract size: 1 contract = 0.01 BTC. "
+            "Notional (USDT) = contracts × contract_size × price.") in text
+
+
+def test_layer1_contract_size_line_follows_fee_lines():
+    """contract size 行紧随 Fee/Round-trip 两行之后、仍在 Market Context 段内（spec §3.1）。"""
+    runtime = RuntimeConfig(taker_fee_rate=0.001, contract_size=0.01, base_ccy="BTC")
+    text = generate_system_prompt(PersonaConfig(), runtime)
+    fee_idx = text.index("Fee: taker")
+    roundtrip_idx = text.index("≈ 2 × fee_rate × notional.")  # Round-trip 行稳定子串
+    cs_idx = text.index("Contract size: 1 contract")
+    # 三行严格顺序：Fee → Round-trip → Contract size
+    assert fee_idx < roundtrip_idx < cs_idx
+    # contract size 行仍在 Market Context 段内（下一个 ## 段头 "## Cross-Tool Behavior" 之前）
+    next_header_idx = text.index("## ", cs_idx)
+    assert cs_idx < next_header_idx
+
+
+def test_layer2_risk_reward_breakeven_question():
+    """Layer 2 Risk-Reward 维度含 breakeven 疑问句（spec §3.4）。"""
+    text = generate_system_prompt(PersonaConfig())
+    assert ("Does the expected move clear the round-trip fee cost — "
+            "where is breakeven (entry ± 2 × fee_rate) relative to your stop and target?") in text

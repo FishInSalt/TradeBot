@@ -203,6 +203,20 @@ class BaseExchange(ABC):
         """启动 WebSocket 等后台任务。默认空实现。"""
         pass
 
+    async def init_market_meta(self) -> float:
+        """Resolve and cache market metadata (contract size) for the bound
+        symbol. Idempotent where applicable. MUST raise on failure — never
+        return a silent 1.0 fallback.
+
+        Concrete default (deliberately NOT @abstractmethod): tests/ has 10+
+        concrete BaseExchange doubles (DummyExchange / _TestExchange) that
+        would fail instantiation under a new abstractmethod. Default stays
+        loud if ever invoked on an exchange without a real implementation.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement init_market_meta"
+        )
+
     def on_fill(self, callback: Callable[['FillEvent'], Awaitable[None]]) -> None:
         """注册 fill 回调。"""
         self._fill_callback = callback
