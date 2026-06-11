@@ -85,3 +85,39 @@ async def test_close_tolerates_pre_start_state():
     """__init__ 后立即 close 不抛（spec §3.6 硬约束 2 的清理路径前提）。"""
     ex = _make_exchange()
     await ex.close()  # _ccxt is None → 不应 await None.close()
+
+
+def _make_okx() -> "OKXExchange":
+    from unittest.mock import patch
+    from src.integrations.exchange.okx import OKXExchange
+    with patch("src.integrations.exchange.okx.ccxt"):  # 既有 idiom（test_okx_algo_normalization.py:8），构造期不碰真实 ccxt
+        return OKXExchange(api_key="k", secret="s", password="p",
+                           symbol="BTC/USDT:USDT", sandbox=True)
+
+
+async def test_okx_init_market_meta_returns_contract_size():
+    ex = _make_okx()
+    ex._preload_markets = AsyncMock()
+    ex._client = MagicMock()
+    ex._client.markets = {"BTC/USDT:USDT": {"contractSize": 0.01}}
+    assert await ex.init_market_meta() == 0.01
+
+
+async def test_okx_init_market_meta_raises_on_missing_market():
+    """覆盖 okx.py 惰性 get_contract_size 的 1.0 兜底盲区（spec §3.6 硬约束 1 细则）。"""
+    ex = _make_okx()
+    ex._preload_markets = AsyncMock()
+    ex._client = MagicMock()
+    ex._client.markets = {}
+    with pytest.raises(RuntimeError, match="contractSize"):
+        await ex.init_market_meta()
+
+
+async def test_okx_init_market_meta_raises_on_missing_contract_size_key():
+    """market 存在但无 contractSize 键 → 仍 raise（锁 `if market else None` 另一臂）。"""
+    ex = _make_okx()
+    ex._preload_markets = AsyncMock()
+    ex._client = MagicMock()
+    ex._client.markets = {"BTC/USDT:USDT": {}}
+    with pytest.raises(RuntimeError, match="contractSize"):
+        await ex.init_market_meta()
