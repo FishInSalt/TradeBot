@@ -471,6 +471,8 @@ async def run_agent_cycle(
     cycle_started_at = datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())[:8]
     deps.cycle_id = cycle_id   # propagate to ToolCallRecorder via ctx.deps (§3.4 of spec)
+    deps.cycle_started_at = cycle_started_at     # 注入 offset_ms 时间基准（spec §6）
+    deps.injected_events_log.clear()             # per-cycle 复位（spec §6）
 
     # R2-7 §6.7: capture trigger_context + state_snapshot 在 retry loop 之前
     # (一次, success / forensic 两路径复用同一对 *_var)
@@ -1063,6 +1065,10 @@ async def run(
 
     # R4: dynamic wake fn binds scheduler (wake bounds assembled in build_services)
     deps.set_next_wake_fn = lambda minutes, ctx: scheduler.set_next_interval(minutes * 60, ctx)
+
+    # iter-midcycle-event-injection §1: 注入弹堆/回滚句柄（两者须同时接线）
+    deps.drain_pending_events_fn = scheduler.drain_pending_events
+    deps.requeue_events_fn = scheduler.requeue_events
 
     def _create_fill_handler(sched, eng, sid):
         async def handler(event: FillEvent):
