@@ -23,6 +23,20 @@ def trader_config() -> TraderConfig:
 
 
 @pytest.fixture
+def stub_market_meta(monkeypatch):
+    """绕开 init_market_meta 的 DB/网络路径——build_services 单测专用。"""
+    from src.integrations.exchange.simulated import SimulatedExchange
+    from src.integrations.exchange.okx import OKXExchange
+
+    async def _fake(self):
+        return 0.01
+
+    monkeypatch.setattr(SimulatedExchange, "init_market_meta", _fake)
+    monkeypatch.setattr(OKXExchange, "init_market_meta", _fake)
+    return 0.01
+
+
+@pytest.fixture
 async def engine() -> AsyncEngine:
     """In-memory SQLite engine + schema (R2-4 共享 fixture，原在 test_tool_call_recorder.py)."""
     from src.storage.database import init_db

@@ -4,7 +4,7 @@ invariant) + Guard C (max_wake helper consistency) + Guard D (fee_rate wiring).
 import ast
 import dataclasses
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -187,7 +187,7 @@ def _build_services_patches():
     )
 
 
-def test_build_services_raises_on_none_fee_rate():
+async def test_build_services_raises_on_none_fee_rate():
     """Guard D-1: build_services fails-loud when WizardResult.fee_rate is None.
 
     Defense in depth — wizard sub-step (Task 15) is primary recovery; this is
@@ -199,7 +199,7 @@ def test_build_services_raises_on_none_fee_rate():
 
     result = _make_minimal_wizard_result(fee_rate=None)
     with pytest.raises(ValueError, match="fee_rate"):
-        build_services(
+        await build_services(
             result,
             _make_mock_engine(),
             "test-session-id",
@@ -208,7 +208,7 @@ def test_build_services_raises_on_none_fee_rate():
         )
 
 
-def test_build_services_drift_guard_runtime_vs_deps_fee_rate():
+async def test_build_services_drift_guard_runtime_vs_deps_fee_rate():
     """Guard D-2: TradingDeps.fee_rate == result.fee_rate after build_services.
 
     Confirms the fee_rate flows from WizardResult through into TradingDeps
@@ -222,8 +222,12 @@ def test_build_services_drift_guard_runtime_vs_deps_fee_rate():
     p_sim, p_mds, p_mem, p_agent, p_metrics = _build_services_patches()
     with p_sim as MockSim, p_mds, p_mem, p_agent as mock_agent, p_metrics:
         MockSim.return_value = MagicMock()
+        # stub_market_meta fixture monkeypatches the real class; this test patches
+        # the whole class with a MagicMock, so the async surface must be set here.
+        MockSim.return_value.init_market_meta = AsyncMock(return_value=0.01)
+        MockSim.return_value.close = AsyncMock()
         mock_agent.return_value = MagicMock()
-        _exchange, deps, _agent, _budget, _stats = build_services(
+        _exchange, deps, _agent, _budget, _stats = await build_services(
             result,
             _make_mock_engine(),
             "test-session-id",
@@ -255,6 +259,8 @@ def test_p4_runtime_config_matches_build_services_fee_rate():
 
     # Find all RuntimeConfig(...) Call nodes inside async def build_services
     # and async def run.
+    # scoping 假设：只枚举 build_services / run 两函数内的 RuntimeConfig 构造点。
+    # 若未来把 RuntimeConfig 构造抽到新 helper 函数，需把该函数名加进来，否则守卫会漏。
     found_sites: dict[str, list[ast.Call]] = {"build_services": [], "run": []}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in found_sites:
@@ -286,4 +292,15 @@ def test_p4_runtime_config_matches_build_services_fee_rate():
                 f"{site_name} RuntimeConfig at line {call.lineno} must pass "
                 f"taker_fee_rate=<obj>.fee_rate; missing or stale kwarg "
                 f"would let sessions.system_prompt drift to default fee_rate"
+            )
+
+    # iter-tool-opt-contract-fee-visibility: 两处构造点必须同时注入新字段
+    required = {"taker_fee_rate", "contract_size", "base_ccy"}
+    for name, calls in found_sites.items():
+        for call in calls:
+            kwarg_names = {kw.arg for kw in call.keywords}
+            missing = required - kwarg_names
+            assert not missing, (
+                f"RuntimeConfig in {name} missing kwargs {missing} — "
+                f"persona would render test-only defaults in production"
             )

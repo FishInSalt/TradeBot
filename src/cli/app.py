@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -918,7 +919,7 @@ async def _capture_session_system_prompt(
         logger.warning(f"P4 system_prompt capture failed: {e!r}")
 
 
-def build_services(
+async def build_services(
     result: WizardResult,
     engine,
     session_id: str,
@@ -955,6 +956,17 @@ def build_services(
         account_label = "demo (sandbox)" if settings.exchange.sandbox else "REAL (live)"
         sc.print(f"Exchange: okx — {account_label}")
 
+    # iter-tool-opt-contract-fee-visibility: 市场元数据前置（spec §3.6）。
+    # init_market_meta 失败发生在 run() 的 try/finally 之前 → 此处自行清理（硬约束 2）。
+    try:
+        contract_size = await exchange.init_market_meta()
+    except Exception:
+        # close() 自身抛错不得 mask init_market_meta 的原始异常（如 contractSize
+        # missing）——suppress 保证原始错误总是浮现，而非降级为 __context__。
+        with contextlib.suppress(Exception):
+            await exchange.close()
+        raise
+
     market_data = MarketDataService(exchange)
     technical = TechnicalAnalysisService()
     memory = MemoryService(engine, session_id=session_id)
@@ -966,10 +978,14 @@ def build_services(
     )
 
     # R2-5: session-fixed runtime config injected into system prompt
+    from src.integrations.news.models import extract_base_currency
+
     max_wake = _compute_max_wake(result.scheduler_interval_min)
     runtime_config = RuntimeConfig(
         wake_max_minutes=max_wake,
         taker_fee_rate=result.fee_rate,
+        contract_size=contract_size,
+        base_ccy=extract_base_currency(result.symbol),
     )
     agent = create_trader_agent(
         model=result.model,
@@ -1120,14 +1136,19 @@ async def run(
     )
 
     # ── Phase 5: Build services ──
-    exchange, deps, agent, budget, stats = build_services(
+    exchange, deps, agent, budget, stats = await build_services(
         result, engine, session_id, sc, settings,
     )
 
     # ── Phase 5b: P4 system_prompt capture ──
+    from src.integrations.news.models import extract_base_currency
+
     runtime_config_for_capture = RuntimeConfig(
         wake_max_minutes=_compute_max_wake(result.scheduler_interval_min),
         taker_fee_rate=result.fee_rate,
+        # 幂等返回已校验值；不走 get_contract_size（其含 1.0 静默兜底，与硬约束 1 口径相左）
+        contract_size=await exchange.init_market_meta(),
+        base_ccy=extract_base_currency(result.symbol),
     )
     await _capture_session_system_prompt(
         engine, session_id, result.persona, runtime_config_for_capture,

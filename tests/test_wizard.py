@@ -429,7 +429,7 @@ async def test_run_wizard_ctrl_c(tmp_path):
 
 # --- build_services smoke test ---
 
-def test_build_services_sim_path():
+async def test_build_services_sim_path(stub_market_meta):
     """Verify sim path returns correct types and wires deps correctly."""
     from unittest.mock import MagicMock, patch
     from src.cli.wizard import WizardResult
@@ -453,8 +453,12 @@ def test_build_services_sim_path():
          patch("src.cli.app.MemoryService"), \
          patch("src.cli.app.create_trader_agent") as mock_agent:
         MockSim.return_value = MagicMock()
+        # class is patched with a MagicMock → set async surface explicitly
+        # (stub_market_meta monkeypatches the real class, which is bypassed here)
+        MockSim.return_value.init_market_meta = AsyncMock(return_value=0.01)
+        MockSim.return_value.close = AsyncMock()
         mock_agent.return_value = MagicMock()
-        exchange, deps, agent, budget, _stats = build_services(
+        exchange, deps, agent, budget, _stats = await build_services(
             result, mock_engine, "sid", mock_sc, mock_settings,
         )
 
@@ -478,7 +482,7 @@ def _build_news_wiring_result():
     )
 
 
-def test_build_services_wires_news_when_enabled():
+async def test_build_services_wires_news_when_enabled(stub_market_meta):
     """settings.news.enabled=True → deps.news is a NewsService instance."""
     from src.cli.app import build_services
 
@@ -495,10 +499,12 @@ def test_build_services_wires_news_when_enabled():
          patch("src.cli.app.create_trader_agent") as mock_agent, \
          patch("src.integrations.news.service.NewsService") as MockNewsService:
         MockSim.return_value = MagicMock()
+        MockSim.return_value.init_market_meta = AsyncMock(return_value=0.01)
+        MockSim.return_value.close = AsyncMock()
         mock_agent.return_value = MagicMock()
         news_instance = MagicMock()
         MockNewsService.return_value = news_instance
-        _, deps, _, _, _stats = build_services(
+        _, deps, _, _, _stats = await build_services(
             result, mock_engine, "sid", mock_sc, mock_settings,
         )
 
@@ -506,7 +512,7 @@ def test_build_services_wires_news_when_enabled():
     assert deps.news is news_instance
 
 
-def test_build_services_omits_news_when_disabled():
+async def test_build_services_omits_news_when_disabled(stub_market_meta):
     """settings.news.enabled=False → deps.news is None and NewsService not constructed."""
     from src.cli.app import build_services
 
@@ -523,13 +529,80 @@ def test_build_services_omits_news_when_disabled():
          patch("src.cli.app.create_trader_agent") as mock_agent, \
          patch("src.integrations.news.service.NewsService") as MockNewsService:
         MockSim.return_value = MagicMock()
+        MockSim.return_value.init_market_meta = AsyncMock(return_value=0.01)
+        MockSim.return_value.close = AsyncMock()
         mock_agent.return_value = MagicMock()
-        _, deps, _, _, _stats = build_services(
+        _, deps, _, _, _stats = await build_services(
             result, mock_engine, "sid", mock_sc, mock_settings,
         )
 
     MockNewsService.assert_not_called()
     assert deps.news is None
+
+
+async def test_build_services_closes_exchange_on_market_meta_failure(monkeypatch):
+    """init_market_meta 失败发生在 run() try/finally 之前——build_services 必须自行清理（spec §3.6 硬约束 2）。"""
+    from src.cli.app import build_services
+    from src.cli.wizard import WizardResult
+    from src.integrations.exchange.simulated import SimulatedExchange
+
+    result = WizardResult(
+        exchange_type="simulated", fee_rate=0.0005, initial_balance=100.0,
+        api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
+        model_config=ModelConfig(id="t", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(), scheduler_interval_min=15, approval_enabled=False,
+        token_budget=500000, persona=PersonaConfig(),
+        session_name="test",
+    )
+    engine = MagicMock()
+    sc = MagicMock()
+    settings = MagicMock()
+    settings.approval.timeout_seconds = 300
+
+    closed = []
+
+    async def _boom(self):
+        raise RuntimeError("contractSize missing")
+
+    async def _close(self):
+        closed.append(True)
+
+    monkeypatch.setattr(SimulatedExchange, "init_market_meta", _boom)
+    monkeypatch.setattr(SimulatedExchange, "close", _close)
+    with pytest.raises(RuntimeError, match="contractSize"):
+        await build_services(result, engine, "sid", sc, settings)
+    assert closed, "exchange.close() not called on init_market_meta failure"
+
+
+async def test_build_services_preserves_original_error_when_close_fails(monkeypatch):
+    """close() 自身抛错不得 mask init_market_meta 的原始异常（contractSize 错误必须浮现）。"""
+    from src.cli.app import build_services
+    from src.cli.wizard import WizardResult
+    from src.integrations.exchange.simulated import SimulatedExchange
+
+    result = WizardResult(
+        exchange_type="simulated", fee_rate=0.0005, initial_balance=100.0,
+        api_credentials=None, symbol="BTC/USDT:USDT", timeframe="15m",
+        model_config=ModelConfig(id="t", provider="openai", model="gpt-4o", api_key="k", base_url=None),
+        model=MagicMock(), scheduler_interval_min=15, approval_enabled=False,
+        token_budget=500000, persona=PersonaConfig(),
+        session_name="test",
+    )
+    engine = MagicMock()
+    sc = MagicMock()
+    settings = MagicMock()
+    settings.approval.timeout_seconds = 300
+
+    async def _boom(self):
+        raise RuntimeError("contractSize missing")
+
+    async def _close_boom(self):
+        raise RuntimeError("close exploded")
+
+    monkeypatch.setattr(SimulatedExchange, "init_market_meta", _boom)
+    monkeypatch.setattr(SimulatedExchange, "close", _close_boom)
+    with pytest.raises(RuntimeError, match="contractSize"):  # 原始错误，不是 "close exploded"
+        await build_services(result, engine, "sid", sc, settings)
 
 
 @pytest.mark.asyncio
