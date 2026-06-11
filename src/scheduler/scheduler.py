@@ -67,6 +67,48 @@ class Scheduler:
         )
         self._wake_event.set()
 
+    def drain_pending_events(self) -> list[tuple[str, Any]]:
+        """Pop ALL pending events in heap priority order. Used by mid-cycle injection
+        (spec 2026-06-11 iter-midcycle-event-injection §1).
+
+        Sync by design: heap ops have no await point (same asyncio loop, no race
+        surface), and the injector's failure path must requeue without spawning a
+        coroutine. Does NOT touch _wake_event: after an injection drain the heap is
+        empty, so _interruptible_sleep's pending check won't fire and clear()
+        precedes wait() — a leftover set() never produces a spurious wake.
+
+        The >5 WARNING is a pure observation signal (slightly above sim #17's
+        observed mid-cycle batch peak of 3), not a tuning knob; distinct from the
+        main-loop drain cap-20 window (historical wake-batch peak 4).
+        """
+        events: list[tuple[str, Any]] = []
+        while self._pending_events:
+            ev = heapq.heappop(self._pending_events)
+            events.append((ev.trigger_type, ev.context))
+        if len(events) > 5:
+            logger.warning(
+                "mid-cycle drain: %d events in one injection batch (types=%s)",
+                len(events), _type_counts(events),
+            )
+        return events
+
+    def requeue_events(self, events: list[tuple[str, Any]]) -> None:
+        """Push events back onto the heap — injection-failure rollback handle
+        (spec §1/§2). Delivery degrades to the wake fallback channel, never drops.
+
+        Sequence numbers are re-assigned: same-batch relative order is preserved;
+        cross-batch global FIFO is not guaranteed (heap consumption is by priority
+        anyway). Sets _wake_event so a main loop already sleeping re-checks the heap.
+        """
+        for trigger_type, context in events:
+            priority = _PRIORITY_MAP.get(trigger_type, 1)
+            self._sequence_counter += 1
+            heapq.heappush(
+                self._pending_events,
+                _TriggerEvent(priority, self._sequence_counter, trigger_type, context),
+            )
+        self._wake_event.set()
+
     async def start(self) -> None:
         self._running = True
         logger.info(f"Scheduler started (interval={self._interval}s)")

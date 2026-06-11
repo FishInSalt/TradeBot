@@ -502,3 +502,72 @@ async def test_set_next_interval_last_context_wins():
     flat = [ev for batch in calls for ev in batch]
     assert ("scheduled", "second") in flat
     assert ("scheduled", "first") not in flat
+
+
+# === iter-midcycle-event-injection §1: drain / requeue ===
+
+async def test_drain_pending_events_priority_order():
+    """全弹且按堆优先级序：conditional > alert（入堆序相反也成立）。"""
+    from src.scheduler.scheduler import Scheduler
+
+    scheduler = Scheduler(interval_seconds=10, callback=None)
+    await scheduler.trigger("alert", context="a1")
+    await scheduler.trigger("conditional", context="f1")
+    await scheduler.trigger("alert", context="a2")
+
+    events = scheduler.drain_pending_events()
+    assert events == [("conditional", "f1"), ("alert", "a1"), ("alert", "a2")]
+    assert scheduler._pending_events == []
+
+
+async def test_drain_pending_events_empty():
+    from src.scheduler.scheduler import Scheduler
+    scheduler = Scheduler(interval_seconds=10, callback=None)
+    assert scheduler.drain_pending_events() == []
+
+
+async def test_drain_over_5_warns(caplog):
+    """一次弹出 >5 警告（信号不丢弃）——阈值 = 略高于 sim #17 mid-cycle 批峰值 3。"""
+    import logging
+    from src.scheduler.scheduler import Scheduler
+
+    scheduler = Scheduler(interval_seconds=10, callback=None)
+    for i in range(6):
+        await scheduler.trigger("alert", context=f"a{i}")
+    with caplog.at_level(logging.WARNING, logger="src.scheduler.scheduler"):
+        events = scheduler.drain_pending_events()
+    assert len(events) == 6
+    assert any("mid-cycle drain" in r.message for r in caplog.records)
+
+
+async def test_drain_then_sleep_no_spurious_wake():
+    """注入清堆后回主循环：_interruptible_sleep 正常睡满（spec §1 不碰 _wake_event）。
+
+    trigger 留下的 _wake_event set 残留被 sleep 入口 clear() 吸收（clear 在 wait 之前）。
+    """
+    import asyncio
+    import time
+    from src.scheduler.scheduler import Scheduler
+
+    scheduler = Scheduler(interval_seconds=10, callback=None)
+    await scheduler.trigger("alert", context="a1")
+    scheduler.drain_pending_events()
+
+    start = time.monotonic()
+    await scheduler._interruptible_sleep(0.3)
+    assert time.monotonic() - start >= 0.25, "drain 后睡眠被虚假唤醒"
+
+
+async def test_requeue_restores_same_batch_and_sets_wake():
+    """drain → requeue → 再 drain 同批等价（同批相对序保持）+ _wake_event 置位。"""
+    from src.scheduler.scheduler import Scheduler
+
+    scheduler = Scheduler(interval_seconds=10, callback=None)
+    await scheduler.trigger("conditional", context="f1")
+    await scheduler.trigger("alert", context="a1")
+    batch = scheduler.drain_pending_events()
+
+    scheduler._wake_event.clear()
+    scheduler.requeue_events(batch)
+    assert scheduler._wake_event.is_set(), "requeue 须置位 _wake_event（睡眠中的主循环要能接手）"
+    assert scheduler.drain_pending_events() == batch
