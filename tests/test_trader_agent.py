@@ -592,3 +592,37 @@ def test_close_position_docstring_sync_semantics():
     assert "same cycle" in desc
     assert "separate trigger" not in desc
 
+
+def test_open_position_docstring_inline_fee_example():
+    """spec §3.3-1：fee 事实数值化 inline 示例必达 LLM 通道（tool_def.description）。"""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    desc = agent._function_toolset.tools["open_position"].tool_def.description
+    assert "Entry fee: -7.50 USDT (notional 7,498.52)" in desc
+    assert "rate is session-specific" in desc
+
+
+def test_position_pct_margin_semantics_both_tools():
+    """spec §3.3-2：position_pct margin 语义两工具同款（log 19872/37672 消歧）。"""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    for tool_name in ("open_position", "place_limit_order"):
+        desc = agent._function_toolset.tools[tool_name].tool_def.description
+        assert "use as margin" in desc, tool_name
+        assert "notional = margin × leverage" in desc, tool_name
+
+
+def test_get_position_docstring_fee_formula_unified():
+    """spec §3.5 收尾 a：fee 公式统一 notional × fee_rate，旧四因子式不得残留。"""
+    from src.agent.trader import create_trader_agent
+    from src.config import PersonaConfig
+
+    agent = create_trader_agent(model="test", persona_config=PersonaConfig())
+    desc = agent._function_toolset.tools["get_position"].tool_def.description
+    assert "notional × fee_rate" in desc
+    assert "entry × contracts × contract_size × rate" not in desc
+
