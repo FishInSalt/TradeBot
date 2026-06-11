@@ -4,6 +4,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Literal
 
+from src.integrations.news.models import extract_base_currency
+
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
     from src.integrations.exchange.base import OpenInterestHistoryPoint, TakerFlowBar, Trade
@@ -351,7 +353,16 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     # established convention). Rendered post-gather since contract_size and
     # current_price are needed; ticker.last failure already short-circuits to
     # the degradation branch above.
-    entry_fee = p.entry_price * p.contracts * contract_size * deps.fee_rate
+    #
+    # Instance layer (spec §3.2): the symbolic formulas live in persona Layer 1 /
+    # docstring (rule layer); the tool output substitutes actual numbers. notional
+    # is computed once here and reused by Risk Exposure below. The Entry fee line
+    # uses the `notional × fee_rate` factor form (matches get_position /
+    # open_position docstring); the `contracts × contract_size × price`
+    # decomposition is rendered exactly once on the Notional line.
+    notional = p.contracts * contract_size * p.entry_price
+    entry_fee = notional * deps.fee_rate
+    fee_pct_str = f"{deps.fee_rate * 100:.3f}%"
     if p.side == "long":
         breakeven = p.entry_price * (1 + 2 * deps.fee_rate)
         sign_str = "+"
@@ -364,7 +375,7 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     fb_lines = ["=== Fee & Breakeven ==="]
     fb_lines.append(
         f"Entry fee paid: ~-{entry_fee:.2f} USDT "
-        f"(= entry × contracts × contract_size × rate)"
+        f"(= notional {notional:,.2f} × {fee_pct_str})"
     )
     if current_price > 0:
         if p.side == "long":
@@ -378,21 +389,28 @@ async def get_position(deps: TradingDeps, symbol: str | None = None) -> str:
     else:
         fb_lines.append(f"Breakeven: {breakeven:,.2f}")
     fb_lines.append(
-        f"  = {p.entry_price:,.2f} × (1 {sign_str} 2 × fee_rate) "
+        f"  = {p.entry_price:,.2f} × (1 {sign_str} 2 × {fee_pct_str}) "
         f"[{side_label} round-trip taker]"
     )
     sections.append("\n".join(fb_lines))
 
     # === Risk Exposure ===
-    notional = p.contracts * p.entry_price * contract_size
+    # notional reuses the value computed in Fee & Breakeven above (no recompute).
     equity = balance.total_usdt
     exp_pct = notional / equity * 100 if equity > 0 else 0.0
     margin_used = balance.used_usdt
     margin_pct = margin_used / equity * 100 if equity > 0 else 0.0
     atr_pct_1h = atr_1h / current_price * 100 if atr_1h is not None and current_price > 0 else None
 
+    base_ccy = extract_base_currency(symbol)
     risk_lines = ["=== Risk Exposure ==="]
-    risk_lines.append(f"Notional value: {notional:.2f} USDT ({exp_pct:.1f}% of equity {equity:.2f})")
+    # {:g} 渲染 contracts/contract_size：BTC sim 量级（O(0.001–10)）安全；
+    # OKX live ≥1e6 张会切科学计数法（1e+06）——实盘准备期（Tier 3）再处理。
+    risk_lines.append(
+        f"Notional value: {notional:,.2f} USDT = {p.contracts:g} contracts × "
+        f"{contract_size:g} {base_ccy} × entry {p.entry_price:,.2f} "
+        f"({exp_pct:.1f}% of equity {equity:,.2f})"
+    )
     risk_lines.append(f"Margin used: {margin_used:.2f} USDT ({margin_pct:.1f}% of equity, from balance.used_usdt)")
     # Risk Exposure: Mark + Liquidation
     if mark_price > 0:
@@ -895,8 +913,6 @@ async def get_market_news(
             f"=== News (@ {fetch_ts} UTC) ===\n"
             "Error: News service not configured."
         )
-
-    from src.integrations.news.models import extract_base_currency
 
     base = extract_base_currency(deps.symbol)
 
