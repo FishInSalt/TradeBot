@@ -931,6 +931,13 @@ _SUMMARIES_MARKER = "Your prior cycle summaries (most recent N=3, from this sess
 # conditional/alert 唤醒切片里的变量事件文本前缀，须与 app.py 三处生产端逐字一致：
 # IMPORTANT EVENT（conditional fill）/ PRICE LEVEL ALERT（_format_price_level_alert_trigger）
 # / PRICE VOLATILITY ALERT（percentage alert）。改任一端必同步另一端。
+# 向后兼容（wontfix, by-design）：改名只更新生产端 + 本切分端，已落库的旧
+# user_prompt_snapshot 冻结改名前字面量（如 PRICE ALERT / PRICE LEVEL）。CLI 回放
+# （_render_context）旧 conditional/alert session 时新前缀匹配不到 → event_lines 空
+# → Woke-by 事件行整段省略。接受此退化：forensic 主路径走 raw DB/log grep（旧字面量
+# 仍在原始数据、不受影响），仅 CLI display 回放改名前 alert session 受影响、属低频。
+# 与 _extract_scheduled_wake_suffix 的 legacy-clause 兼容做法有意不对称（scheduled 后缀
+# 缺失仍渲 label；alert 前缀不匹配则整行省略）。
 _EVENT_PREFIXES = ("IMPORTANT EVENT", "PRICE VOLATILITY ALERT", "PRICE LEVEL ALERT")
 
 # 字段 marker 的 4 种 cosmetic 写法（均行首）：**(N) Field / (N) **Field / (N) Field / ### (N) Field
