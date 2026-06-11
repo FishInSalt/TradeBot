@@ -291,9 +291,14 @@ def test_wake_interval_control_states_one_shot_and_rearm():
     from src.agent.persona import generate_system_prompt
     prompt = generate_system_prompt(PersonaConfig())
     layer1 = prompt.split("## How to Think")[0]
+    # Bound the slice to the bullet itself: "Wake interval control" is the last
+    # "- **" bullet in Layer 1, so the split element runs to the end of layer1
+    # (swallowing the "## Cycle Closing Summary" section) unless we cut at the
+    # bullet's trailing blank line. Without this, the "again"/"consumes" asserts
+    # would silently span the whole tail rather than the wake bullet.
     wake_bullet = next(
         b for b in layer1.split("\n- **") if b.startswith("Wake interval control")
-    )
+    ).split("\n\n")[0]
     assert "one-shot" in wake_bullet
     assert "cancels" in wake_bullet
     assert "consumes" not in wake_bullet
