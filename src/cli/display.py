@@ -928,7 +928,9 @@ def _render_reasoning(thinking_text: str, max_chars: int = 15000) -> str:
 # 与 app._render_recent_summaries 的 header_top 逐字一致（格式耦合，由 Task 9 round-trip drift-guard 兜底）
 _SUMMARIES_MARKER = "Your prior cycle summaries (most recent N=3, from this session):"
 
-# conditional/alert 唤醒切片里的变量事件文本前缀（app.py:489/524/528 三种）
+# conditional/alert 唤醒切片里的变量事件文本前缀，须与 app.py 三处生产端逐字一致：
+# IMPORTANT EVENT（conditional fill）/ PRICE LEVEL ALERT（_format_price_level_alert_trigger）
+# / PRICE VOLATILITY ALERT（percentage alert）。改任一端必同步另一端。
 _EVENT_PREFIXES = ("IMPORTANT EVENT", "PRICE VOLATILITY ALERT", "PRICE LEVEL ALERT")
 
 # 字段 marker 的 4 种 cosmetic 写法（均行首）：**(N) Field / (N) **Field / (N) Field / ### (N) Field
