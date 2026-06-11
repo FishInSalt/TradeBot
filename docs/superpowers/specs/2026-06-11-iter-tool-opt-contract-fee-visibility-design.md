@@ -147,9 +147,9 @@ Does the expected move clear the round-trip fee cost — where is breakeven
 
 **方案：把 contract_size 初始化从 start() 中拆出、单独前置；撮合循环启动位置不动。**
 
-`_init_contract_size()`（`simulated.py:1120`，load_markets + market lookup）与撮合/mark 循环拉起（`simulated.py:1146-1148`）在 `start()` 内本就是两个独立步骤。拆为独立的市场元数据初始化方法（如 `init_market_meta()`），在 build_services 内创建 exchange 后、`create_trader_agent` 前 await 调用（build_services 相应 async 化，caller `src/cli/app.py:1124` 同步改 await）；`start()` 退化为仅做 ticker seed + 循环拉起（幂等跳过已完成的元数据初始化），位置保持在 `src/cli/app.py:1199` 的 try 块内不动。
+`_init_contract_size()`（`simulated.py:1120`，load_markets + market lookup）与撮合/mark 循环拉起（`simulated.py:1146-1148`）在 `start()` 内本就是两个独立步骤。拆为独立的市场元数据初始化方法（如 `init_market_meta()`），在 build_services 内创建 exchange 后、`create_trader_agent` 前 await 调用（build_services 相应 async 化，caller `src/cli/app.py:1123` 同步改 await）；`start()` 退化为仅做 ticker seed + 循环拉起（幂等跳过已完成的元数据初始化），位置保持在 `src/cli/app.py:1199` 的 try 块内不动。
 
-**接口层归属：`init_market_meta()` 落 `BaseExchange` 接口、两端实现**——build_services 的 OKX 分支（`src/cli/app.py:949-956`）同样走到 `create_trader_agent`，fail-loud 硬门对两种 exchange 都生效；只在 SimulatedExchange 实现会让 OKX 路径要么缺方法、要么 build 时拿不到 contract_size 被 fail-loud 拦截，打破 Non-goals 的"OKX 路径保证测试通过"。实现：sim = load_markets + market lookup + persist；okx = `_preload_markets`（`okx.py:188-190`）包装 + market lookup。sentinel fail-loud 细则（硬约束 1）同时覆盖 `okx.py:946-948` 惰性 `get_contract_size` 的两处 `1.0` 静默兜底。
+**接口层归属：`init_market_meta()` 落 `BaseExchange` 接口、两端实现**——build_services 的 OKX 分支（`src/cli/app.py:949-956`）同样走到 `create_trader_agent`，fail-loud 硬门对两种 exchange 都生效；只在 SimulatedExchange 实现会让 OKX 路径要么缺方法、要么 build 时拿不到 contract_size 被 fail-loud 拦截，打破 Non-goals 的"OKX 路径保证测试通过"。实现：sim = load_markets + market lookup + persist；okx = `_preload_markets`（`okx.py:188-190`）包装 + market lookup。sentinel fail-loud 细则（硬约束 1）保证 init 路径不经过 `okx.py:946-948` 惰性 `get_contract_size` 的两处 `1.0` 静默兜底；该惰性兜底自身的清退属 OKX runtime 行为，sim-only 阶段不动，列实盘准备期（Tier 3）follow-up。
 
 否决的备选——"把 start() 整体提前到 agent 创建之前"：`start()` 立即拉起后台循环并可能触发 fill/alert 回调，而回调注册在 `src/cli/app.py:1187/1191`；回调为 None 时事件被**静默丢弃**（`base.py:355-356`、`simulated.py:683/687`）。整体前移会让 resume session（已恢复持仓/挂单/alert）在 "start → 回调注册" 窗口内的止损/强平/alert 被吞——正确性回归。方案 (b) 不启动循环，无此窗口，回归面也更小。
 
