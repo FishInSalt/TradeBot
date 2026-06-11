@@ -121,3 +121,43 @@ async def test_okx_init_market_meta_raises_on_missing_contract_size_key():
     ex._client.markets = {"BTC/USDT:USDT": {}}
     with pytest.raises(RuntimeError, match="contractSize"):
         await ex.init_market_meta()
+
+
+# ============ 回调时序回归（spec §3.6 硬约束 3）============
+# 注：BaseExchange._dispatch_fill_event 的 clear/skip/failure-isolation/no-callback
+# SRP 单测在 tests/test_alert_lifecycle.py（test_dispatch_fill_event_*）。此处不重复
+# 那些行为，仅守卫硬约束 3 特有的不变量：回调注册先于撮合循环启动时 fill 必达，
+# 以及 run() 内 on_fill/on_alert 注册的结构序早于 await exchange.start()。
+
+async def test_fill_dispatch_reaches_callback_registered_before_start():
+    """回调注册先于循环启动的相对序下，fill 事件必达回调（spec §3.6 硬约束 3）。
+
+    不真启动撮合循环（需网络）——直接驱动派发方法验证'注册后派发必达'；
+    窗口不存在性由 test_init_market_meta_does_not_start_matching_loops 守卫。
+    """
+    from tests._fixtures import make_fill_event
+
+    ex = _make_exchange()
+    received = []
+
+    async def _cb(fill):
+        received.append(fill)
+
+    ex.on_fill(_cb)
+    fill = make_fill_event(order_id="f1")
+    await ex._dispatch_fill_event(fill)
+    assert received and received[0].order_id == "f1"
+
+
+def test_app_registers_callbacks_before_exchange_start():
+    """结构守卫：run() 内 on_fill/on_alert 注册必须先于 await exchange.start()（spec §3.6 硬约束 3）。"""
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "src" / "cli" / "app.py").read_text()
+    assert "async def run(" in src, "app.py 不再含 'async def run(' 锚点——结构守卫需更新（spec §3.6 硬约束 3）"
+    run_body = src[src.index("async def run("):]
+    for anchor in ("exchange.on_fill(", "exchange.on_alert(", "await exchange.start()"):
+        assert anchor in run_body, f"run() 不再含 '{anchor}' 锚点——结构守卫需更新（spec §3.6 硬约束 3）"
+    start_idx = run_body.index("await exchange.start()")
+    assert run_body.index("exchange.on_fill(") < start_idx
+    assert run_body.index("exchange.on_alert(") < start_idx
