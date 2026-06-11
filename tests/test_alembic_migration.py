@@ -209,6 +209,8 @@ async def test_init_db_path_3_for_empty_db(tmp_path: Path) -> None:
         "reasoning_tokens", "cache_hit_rate",
         # P4 (Phase 3): full user_prompt sent to agent.run(); per-cycle
         "user_prompt_snapshot",
+        # iter-midcycle-event-injection §6: mid-cycle 注入事件取证
+        "injected_events",
         "created_at",
     }
     assert set(cols.keys()) == expected_cols, \
@@ -476,6 +478,8 @@ def test_t_mig_2_columns_renamed(tmp_path: Path, alembic_cfg_factory):
         "reasoning_tokens", "cache_hit_rate",
         # P4 (Phase 3): full user_prompt sent to agent.run(); per-cycle
         "user_prompt_snapshot",
+        # iter-midcycle-event-injection §6: mid-cycle 注入事件取证
+        "injected_events",
     }
     assert cols == expected, f"agent_cycles 列集合不匹配，差异={cols ^ expected}"
     conn.close()

@@ -809,6 +809,10 @@ async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mock
     deps.timeframe = "5m"
     deps.memory = mocker.Mock()
     deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+    # iter-midcycle-event-injection: 真实字段形态（list / None）——
+    # _rollback_injected_events 会迭代累积器，bare Mock attr 不可迭代会炸
+    deps.injected_events_log = []
+    deps.requeue_events_fn = None
 
     budget = TokenBudget(daily_max=1_000_000)
 
@@ -889,6 +893,10 @@ async def test_usage_limit_exceeded_writes_null_reasoning_unchanged(monkeypatch,
     deps.timeframe = "5m"
     deps.memory = mocker.Mock()
     deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+    # iter-midcycle-event-injection: 真实字段形态（list / None）——
+    # _rollback_injected_events 会迭代累积器，bare Mock attr 不可迭代会炸
+    deps.injected_events_log = []
+    deps.requeue_events_fn = None
 
     budget = TokenBudget(daily_max=1_000_000)
 

@@ -452,6 +452,19 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
         await session.commit()
 
 
+def _rollback_injected_events(deps: TradingDeps) -> None:
+    """被丢弃的 run ⇒ 注入回滚（spec §2）。
+
+    retry 重试前、usage_limit / retry_exhausted 终态 forensic 写库前调用：被该 run
+    消费的注入事件 requeue 回堆（经兜底通道重新送达——retry 场景通常被下一 attempt
+    的首次工具调用重新注入），累积器清空 → 被丢弃 run 的 injected_events 落 NULL。
+    不回滚则事件永远到不了任何存活决策（送达盲区换处藏身）。
+    """
+    if deps.injected_events_log and deps.requeue_events_fn is not None:
+        deps.requeue_events_fn([rec["raw"] for rec in deps.injected_events_log])
+    deps.injected_events_log.clear()
+
+
 async def run_agent_cycle(
     agent,
     deps: TradingDeps,
@@ -539,6 +552,7 @@ async def run_agent_cycle(
             # 注：ToolCallRecorder capability 已在 agent.run 内部独立 session 写完
             # 任何已成功 tool 调用的 tool_calls 行（不需要本路径协调 rollback）。
             logger.error(f"Cycle {cycle_id} hit usage limit: {e}")
+            _rollback_injected_events(deps)   # 被丢弃 run ⇒ 注入回滚（spec §2）
             async with get_session(engine) as session:
                 session.add(AgentCycle(
                     session_id=deps.session_id,
@@ -561,6 +575,7 @@ async def run_agent_cycle(
                     reasoning_tokens=None,
                     cache_hit_rate=None,
                     user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
+                    injected_events=None,   # 回滚后落 NULL（spec §2/§6）
                 ))
                 await session.commit()
             # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
@@ -581,6 +596,7 @@ async def run_agent_cycle(
             stats.record_cycle(0, cycle_ended_at)
             return None
         except Exception as e:
+            _rollback_injected_events(deps)   # 被丢弃 attempt ⇒ 注入回滚（spec §2，重试前 / 终态写库前）
             if attempt < 2:
                 delay = 2 ** attempt
                 logger.warning(f"LLM call attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
@@ -614,6 +630,7 @@ async def run_agent_cycle(
                         reasoning_tokens=None,
                         cache_hit_rate=None,
                         user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
+                        injected_events=None,   # 回滚后落 NULL（spec §2/§6）
                     ))
                     await session.commit()
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
@@ -722,6 +739,10 @@ async def run_agent_cycle(
                 reasoning_tokens=reasoning_tokens,
                 cache_hit_rate=hit_rate,
                 user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
+                injected_events=json.dumps(
+                    [{k: v for k, v in rec.items() if k != "raw"}
+                     for rec in deps.injected_events_log]
+                ) if deps.injected_events_log else None,   # raw 回滚句柄落库剥离（spec §6）
             )
         )
         await session.commit()
