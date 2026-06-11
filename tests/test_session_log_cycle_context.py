@@ -44,13 +44,13 @@ def test_split_wake_prompt_with_marker():
         "You have been woken up by a alert trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
         "Assess the situation and decide what to do.\n\n"
-        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934c above 73384.00 — x)\n\n"
+        "PRICE LEVEL ALERT: BTC/USDT:USDT reached 73384.00 (alert id=934c above 73384.00 — x)\n\n"
         "Your prior cycle summaries (most recent N=3, from this session):\n\n"
         "[cycle 00f7abcd · alert · 2026-05-31 07:27 UTC (8 min ago) · 96 words]\n"
         "body here"
     )
     wake, summaries = _split_wake_prompt(snapshot)
-    assert "PRICE LEVEL" in wake
+    assert "PRICE LEVEL ALERT" in wake
     assert "Your prior cycle summaries" not in wake
     assert "Your prior cycle summaries" not in summaries  # 标记行本身已丢弃
     assert "[cycle 00f7abcd" in summaries
@@ -80,12 +80,12 @@ def test_extract_event_lines_single():
         "You have been woken up by a alert trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 15m\n"
         "Assess the situation and decide what to do.\n\n"
-        "PRICE LEVEL: BTC/USDT:USDT reached 80050.00 (alert id=a1 above 80000.00 — r)"
+        "PRICE LEVEL ALERT: BTC/USDT:USDT reached 80050.00 (alert id=a1 above 80000.00 — r)"
         " — fired 2026-06-01 14:34 UTC (4 min ago)"
     )
     lines = _extract_event_lines(wake, "alert")
     assert len(lines) == 1
-    assert lines[0].startswith("PRICE LEVEL: BTC/USDT:USDT reached 80050.00")
+    assert lines[0].startswith("PRICE LEVEL ALERT: BTC/USDT:USDT reached 80050.00")
 
 
 def test_extract_event_lines_price_level_verbatim():
@@ -95,12 +95,12 @@ def test_extract_event_lines_price_level_verbatim():
         "You have been woken up by a alert trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
         "Assess the situation and decide what to do.\n\n"
-        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 "
+        "PRICE LEVEL ALERT: BTC/USDT:USDT reached 73384.00 "
         "(alert id=934cfd above 73384.00 — MA20 reclaim: bounce)"
     )
     lines = _extract_event_lines(wake, "alert")
     assert len(lines) == 1
-    assert lines[0].startswith("PRICE LEVEL:")
+    assert lines[0].startswith("PRICE LEVEL ALERT:")
     assert "alert id=934cfd" in lines[0]
     assert "MA20 reclaim: bounce" in lines[0]
     assert "You have been woken up" not in lines[0]  # scaffold 已剥离
@@ -137,29 +137,29 @@ def test_extract_event_lines_multi_splits_per_prefix():
         "Assess the situation and decide what to do.\n\n"
         "IMPORTANT EVENT: tp triggered — BTC/USDT:USDT 1.0 @ 80000, Fee: -1.00 USDT"
         " — filled 2026-06-01 14:34 UTC (1 min ago)\n\n"
-        "PRICE ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)"
+        "PRICE VOLATILITY ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)"
         " — fired 2026-06-01 14:34 UTC (2 min ago)"
     )
     lines = _extract_event_lines(wake, "conditional")
     assert len(lines) == 2
     assert lines[0].startswith("IMPORTANT EVENT: tp triggered")
-    assert lines[1].startswith("PRICE ALERT: BTC/USDT:USDT surged")
+    assert lines[1].startswith("PRICE VOLATILITY ALERT: BTC/USDT:USDT surged")
 
 
 def test_extract_event_lines_prefix_in_freetext_no_oversplit():
     from src.cli.display import _extract_event_lines
-    # A price-level alert whose reasoning literally contains "PRICE ALERT" must stay ONE bullet.
+    # A price-level alert whose reasoning literally contains "PRICE VOLATILITY ALERT" must stay ONE bullet.
     wake = (
         "You have been woken up by a alert trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 15m\n"
         "Assess the situation and decide what to do.\n\n"
-        "PRICE LEVEL: BTC/USDT:USDT reached 80050.00 (alert id=a1 above 80000.00 "
-        "— watch for PRICE ALERT confirmation) — fired 2026-06-01 14:34 UTC (4 min ago)"
+        "PRICE LEVEL ALERT: BTC/USDT:USDT reached 80050.00 (alert id=a1 above 80000.00 "
+        "— watch for PRICE VOLATILITY ALERT confirmation) — fired 2026-06-01 14:34 UTC (4 min ago)"
     )
     lines = _extract_event_lines(wake, "alert")
     assert len(lines) == 1
-    assert lines[0].startswith("PRICE LEVEL: BTC/USDT:USDT reached 80050.00")
-    assert "watch for PRICE ALERT confirmation" in lines[0]
+    assert lines[0].startswith("PRICE LEVEL ALERT: BTC/USDT:USDT reached 80050.00")
+    assert "watch for PRICE VOLATILITY ALERT confirmation" in lines[0]
 
 
 def test_clean_field_strips_bold_and_collapses_whitespace():
@@ -395,7 +395,7 @@ _ALERT_SNAPSHOT = (
     "You have been woken up by a alert trigger.\n"
     "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
     "Assess the situation and decide what to do.\n\n"
-    "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — MA20 reclaim)\n\n"
+    "PRICE LEVEL ALERT: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — MA20 reclaim)\n\n"
     "Your prior cycle summaries (most recent N=3, from this session):\n\n"
     "[cycle 824e2233 · conditional · 2026-05-31 07:00 UTC (35 min ago) · 91 words]\n"
     "**(1) Stance** — flat; cascade compressing.\n"
@@ -426,7 +426,7 @@ def test_render_context_section_present_between_header_and_reasoning():
     assert header_idx >= 0 and ctx_idx > header_idx, "Context 须在 Header 之后"
     assert reasoning_idx > ctx_idx, "Context 须在第一段 Reasoning 之前"
     # Woke by（alert 事件行）
-    assert "Woke by — PRICE LEVEL:" in out
+    assert "Woke by — PRICE LEVEL ALERT:" in out
     assert "alert id=934cfd" in out
     # Carried thesis newest-first：00f7 在 824e 之前
     assert out.find("00f7 · 8 min ago") < out.find("824e · 35 min ago")
@@ -449,7 +449,7 @@ def test_render_context_scheduled_renders_woke_by_label():
         "You have been woken up by a alert trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
         "Assess the situation and decide what to do.\n\n"
-        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — MA20 reclaim)\n\n",
+        "PRICE LEVEL ALERT: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — MA20 reclaim)\n\n",
         "You have been woken up by a scheduled trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
         "Assess the situation and decide what to do.\n\n",
@@ -538,11 +538,11 @@ def test_render_context_alert_first_cycle_woke_by_and_placeholder():
         "You have been woken up by a alert trigger.\n"
         "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
         "Assess the situation and decide what to do.\n\n"
-        "PRICE LEVEL: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — x)"
+        "PRICE LEVEL ALERT: BTC/USDT:USDT reached 73384.00 (alert id=934cfd above 73384.00 — x)"
     )
     msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
     out = format_cycle_output(_ctx("alert", snap, messages=msgs))  # default stats = 首 cycle
-    assert "Woke by — PRICE LEVEL:" in out
+    assert "Woke by — PRICE LEVEL ALERT:" in out
     assert "Carried thesis — none (first cycle in this session)" in out
 
 
@@ -556,14 +556,14 @@ def test_render_context_multi_event_batch_bullets():
         "Assess the situation and decide what to do.\n\n"
         "IMPORTANT EVENT: tp triggered — BTC/USDT:USDT 1.0 @ 80000, Fee: -1.00 USDT"
         " — filled 2026-06-01 14:34 UTC (1 min ago)\n\n"
-        "PRICE ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)"
+        "PRICE VOLATILITY ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)"
         " — fired 2026-06-01 14:34 UTC (2 min ago)"
     )
     msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
     out = format_cycle_output(_ctx("conditional", snap, messages=msgs))
     assert "Woke by — 2 events:" in out
     assert "• IMPORTANT EVENT: tp triggered" in out
-    assert "• PRICE ALERT: BTC/USDT:USDT surged" in out
+    assert "• PRICE VOLATILITY ALERT: BTC/USDT:USDT surged" in out
 
 
 def test_render_context_non_first_cycle_empty_blocks_no_false_placeholder():

@@ -283,10 +283,10 @@ async def test_subsequent_cycle_with_alert_trigger_injects_after_price_alert():
 
     prompt = captured["prompt"]
     # Volatility alert text rendered (the `else` sub-branch)
-    assert "PRICE ALERT: BTC/USDT:USDT dropped 2.5%" in prompt
+    assert "PRICE VOLATILITY ALERT: BTC/USDT:USDT dropped 2.5%" in prompt
     # Recent block injected after the alert content
     assert "Your prior cycle summaries (most recent N=3, from this session):" in prompt
-    pos_alert = prompt.index("PRICE ALERT")
+    pos_alert = prompt.index("PRICE VOLATILITY ALERT")
     pos_recent = prompt.index("Your prior cycle summaries")
     assert pos_alert < pos_recent, (
         f"Order broken: alert={pos_alert} recent={pos_recent}\nprompt:\n{prompt}"

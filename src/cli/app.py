@@ -371,12 +371,12 @@ def _render_recent_summaries(
 
 
 def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetime) -> str:
-    """Build the PRICE LEVEL trigger suffix exposing alert_id for lifecycle joins.
+    """Build the PRICE LEVEL ALERT trigger suffix exposing alert_id for lifecycle joins.
 
     `now` is the cycle-start anchor for the trailing event-age clause (spec 2026-06-08).
     """
     return (
-        f"\n\nPRICE LEVEL: {context.symbol} reached {context.current_price:.2f} "
+        f"\n\nPRICE LEVEL ALERT: {context.symbol} reached {context.current_price:.2f} "
         f"(alert id={context.alert_id} {context.direction} {context.target_price:.2f} "
         f"— {context.reasoning})"
         + _wake_time_suffix("fired", context.timestamp, now)
@@ -469,7 +469,7 @@ async def _render_event_block(deps, trigger_type: str, context, cycle_started_at
             return _format_price_level_alert_trigger(context, cycle_started_at)
         direction = "dropped" if context.change_pct < 0 else "surged"
         return (
-            f"\n\nPRICE ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
+            f"\n\nPRICE VOLATILITY ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
             f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
             + _wake_time_suffix("fired", context.timestamp, cycle_started_at)
         )

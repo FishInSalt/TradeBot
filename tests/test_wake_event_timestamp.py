@@ -95,7 +95,7 @@ def test_price_level_alert_trigger_appends_fired_suffix():
         timestamp=_ms(then),
     )
     out = _format_price_level_alert_trigger(context, now)
-    assert "PRICE LEVEL:" in out
+    assert "PRICE LEVEL ALERT:" in out
     assert out.endswith(" — fired 2026-06-01 14:34 UTC (4 min ago)")
 
 
@@ -155,7 +155,7 @@ async def test_percentage_alert_prompt_has_fired_suffix():
         change_pct=-0.5, window_minutes=15, timestamp=ts,
     )
     prompt = await _run("alert", context)
-    assert "PRICE ALERT:" in prompt
+    assert "PRICE VOLATILITY ALERT:" in prompt
     assert " — fired " in prompt
     assert "(4 min ago)" in prompt
 
@@ -223,7 +223,7 @@ async def test_render_event_block_percentage_alert():
         change_pct=1.5, window_minutes=15, timestamp=int(now.timestamp() * 1000),
     )
     block = await _render_event_block(deps=None, trigger_type="alert", context=alert, cycle_started_at=now)
-    assert block.startswith("\n\nPRICE ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)")
+    assert block.startswith("\n\nPRICE VOLATILITY ALERT: BTC/USDT:USDT surged 1.5% in 15min (78000.00 → 79170.00)")
     assert "fired 2026-06-01 14:38 UTC" in block
 
 
@@ -359,7 +359,7 @@ async def test_n1_price_level_alert_prompt_byte_identical(monkeypatch):
         [("alert", ctx)], monkeypatch, "sess-bi-pla",
     )
     expected = _expected_single("alert trigger") + (
-        "\n\nPRICE LEVEL: BTC/USDT:USDT reached 67193.70 "
+        "\n\nPRICE LEVEL ALERT: BTC/USDT:USDT reached 67193.70 "
         "(alert id=a1b2 below 67200.00 — breakdown)"
         " — fired 2026-06-01 14:33 UTC (4 min ago)"
     )
@@ -397,7 +397,7 @@ async def test_n_gt_1_multi_event_integration(monkeypatch):
     )
     # fill block appears before alert block
     fill_pos = prompt.index("IMPORTANT EVENT: market triggered")
-    alert_pos = prompt.index("PRICE ALERT: BTC/USDT:USDT dropped")
+    alert_pos = prompt.index("PRICE VOLATILITY ALERT: BTC/USDT:USDT dropped")
     assert fill_pos < alert_pos
     # each block carries its own age suffix
     assert "filled 2026-06-01 14:36 UTC (2 min ago)" in prompt

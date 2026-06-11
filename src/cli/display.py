@@ -929,7 +929,7 @@ def _render_reasoning(thinking_text: str, max_chars: int = 15000) -> str:
 _SUMMARIES_MARKER = "Your prior cycle summaries (most recent N=3, from this session):"
 
 # conditional/alert 唤醒切片里的变量事件文本前缀（app.py:489/524/528 三种）
-_EVENT_PREFIXES = ("IMPORTANT EVENT", "PRICE ALERT", "PRICE LEVEL")
+_EVENT_PREFIXES = ("IMPORTANT EVENT", "PRICE VOLATILITY ALERT", "PRICE LEVEL ALERT")
 
 # 字段 marker 的 4 种 cosmetic 写法（均行首）：**(N) Field / (N) **Field / (N) Field / ### (N) Field
 _FIELD_MARKER_RE = re.compile(r"(?m)^(?:#{1,6}\s*)?\**\s*\(([1-5])\)\s*")
@@ -984,7 +984,7 @@ def _extract_event_lines(wake_half: str, trigger_type: str) -> list[str]:
     """Extract the verbatim variable event text(s) from the wake prompt (spec 2026-06-08 §3).
 
     scheduled → [] (no variable event line; pure boilerplate). conditional/alert →
-    split `wake_half` at each known prefix (IMPORTANT EVENT / PRICE ALERT / PRICE LEVEL)
+    split `wake_half` at each known prefix (IMPORTANT EVENT / PRICE VOLATILITY ALERT / PRICE LEVEL ALERT)
     into one segment per event, preserving alert id / reasoning / fee / PnL / age clause,
     collapsing whitespace and truncating **each event individually** to `_CONTEXT_EVENT_CAP`.
     No prefix found → [].

@@ -358,7 +358,11 @@ async def set_price_volatility_alert(
 ) -> str:
     """Set the price volatility alert (singleton). Creates if none is
     configured; otherwise replaces the existing one — replacing resets the
-    rolling tick window. threshold_pct: 0.1-50, window_minutes: 1-240."""
+    rolling tick window. After firing the alert is NOT consumed: it stays
+    active and re-arms automatically once the rolling window rebuilds (the
+    window clears on each fire), so it keeps waking you on every threshold
+    breach until cancel_price_volatility_alert removes it.
+    threshold_pct: 0.1-50, window_minutes: 1-240."""
     # Parameter validation
     if not (0.1 <= threshold_pct <= 50.0):
         note_biz_error("invalid_threshold_range")

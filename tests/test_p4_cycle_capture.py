@@ -261,7 +261,7 @@ async def test_cycle_console_renders_context_section_happy():
     )
     out = buf.getvalue()
     assert "▾ Context (carried into this cycle)" in out
-    assert "Woke by — PRICE LEVEL:" in out
+    assert "Woke by — PRICE LEVEL ALERT:" in out
     assert "alert id=934cfd12" in out
 
 
@@ -294,4 +294,4 @@ async def test_cycle_console_renders_context_on_forensic():
     )
     out = buf.getvalue()
     assert "▾ Context (carried into this cycle)" in out
-    assert "Woke by — PRICE LEVEL:" in out
+    assert "Woke by — PRICE LEVEL ALERT:" in out
