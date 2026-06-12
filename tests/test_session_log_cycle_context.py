@@ -651,6 +651,30 @@ def test_roundtrip_render_recent_summaries_parses_correctly():
     assert f_forensic == {}
 
 
+def test_roundtrip_cross_hour_age_survives_block_header_parse():
+    """drift-guard：改动一新增的 'X hours Y min ago' 写入格式经 _BLOCK_HEADER_RE
+    回解析无损。round-trip 主测只跑 <1h（min 级），此处补一条跨小时 prior，把
+    写入 age 格式与 read-path 解析钉在一起——任一漂移 → 先红。"""
+    from datetime import datetime, timezone, timedelta
+    from src.cli.app import _render_recent_summaries, CycleSummary
+    from src.cli.display import _SUMMARIES_MARKER, _parse_injected_summaries
+
+    now = datetime(2026, 5, 31, 8, 0, 0, tzinfo=timezone.utc)
+    summaries = [
+        CycleSummary(
+            id=1, cycle_id="50045fa3aa", triggered_by="scheduled",
+            decision="**(1) Stance** — short.\n**(4) Thesis & invalidation** — bearish.",
+            execution_status="ok", created_at=now - timedelta(hours=1, minutes=42),
+        ),
+    ]
+    block = _render_recent_summaries(summaries, now=now)
+    summaries_half = block[len(_SUMMARIES_MARKER):]
+    blocks = _parse_injected_summaries(summaries_half)
+    assert len(blocks) == 1
+    assert blocks[0][0] == "5004"
+    assert blocks[0][1] == "1 hour 42 min ago"  # 跨小时多段 age 完整回解析
+
+
 def test_thesis_cap_truncates_pathological_long():
     """最近一条 Thesis 超 _CONTEXT_THESIS_CAP → ASCII ' ... [+N chars]' 截断。"""
     from src.cli.display import _render_carried_block, _CONTEXT_THESIS_CAP
@@ -674,3 +698,97 @@ def test_markdown_stars_stripped_in_render():
     body = "**(1) Stance** — **flat** near MA20.\n**(4) Thesis & invalidation** — bearish."
     text = "\n".join(_render_carried_block("00f7", "8 min ago", body, is_newest=True))
     assert "**" not in text
+
+
+# === sim #18: scheduled wake reason echoed in Context section ===
+# 注入端把 agent 上轮 set_next_wake_at 的 reasoning 作为
+# `SCHEDULED WAKE CONTEXT (you set last cycle): ...` 块注入 prompt，但 session log
+# 的 Context 段原先只渲 `Woke by — SCHEDULED — fired ...`，不回显该 reasoning —— 与
+# conditional/alert 回显触发详情不对称。现在 scheduled 也回显"上轮为何设这次唤醒"。
+
+
+def test_extract_scheduled_wake_context_present():
+    """wake_half 含 SCHEDULED WAKE CONTEXT 块 → 抽出 agent 上轮设的 reasoning（去尾部空行）。"""
+    from src.cli.display import _extract_scheduled_wake_context
+    wake = (
+        "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "SCHEDULED WAKE CONTEXT (you set last cycle): trail SL after MA reclaim\n\n"
+    )
+    assert _extract_scheduled_wake_context(wake) == "trail SL after MA reclaim"
+
+
+def test_extract_scheduled_wake_context_absent_returns_empty():
+    """无 SCHEDULED WAKE CONTEXT 块（agent 上轮没设 reasoning / legacy）→ ''。"""
+    from src.cli.display import _extract_scheduled_wake_context
+    wake = (
+        "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do."
+    )
+    assert _extract_scheduled_wake_context(wake) == ""
+
+
+def test_extract_scheduled_wake_context_collapses_internal_whitespace():
+    """agent free-text reasoning 含内部换行 / 多空格 → 折叠为单行（与 alert 事件行
+    _extract_event_lines 同款 re.sub），否则内部 \\n 会泄漏进单行 inline Woke-by 行破版式。
+    reasoning 自 set_next_wake 全程零清洗，故此处必须自洽折叠。"""
+    from src.cli.display import _extract_scheduled_wake_context
+    wake = (
+        "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "SCHEDULED WAKE CONTEXT (you set last cycle): watch 64k breakout\nthen   reassess SL\n\n"
+    )
+    assert _extract_scheduled_wake_context(wake) == "watch 64k breakout then reassess SL"
+
+
+_SCHEDULED_WAKE_CTX_SNAPSHOT = (
+    "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+    "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+    "Assess the situation and decide what to do.\n\n"
+    "SCHEDULED WAKE CONTEXT (you set last cycle): Catch the 05:00 1h candle close at 06:00"
+    " — rejection wick forming, want to reassess full bar\n\n"
+    "Your prior cycle summaries (most recent N=3, from this session):\n\n"
+    "[cycle 00f7abcd · scheduled · 2026-06-01 14:08 UTC (30 min ago) · 12 words]\n"
+    "**(1) Stance** — flat; watching.\n"
+    "**(4) Thesis & invalidation** — bearish; invalidation > 74,200."
+)
+
+
+def test_render_context_scheduled_echoes_wake_reason():
+    """scheduled + 上轮设了 wake reason → 'Woke by — SCHEDULED' 行内联回显该 reasoning
+    （仿 alert 的 inline 括号），时间子句续于括号之后。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(
+        _ctx("scheduled", _SCHEDULED_WAKE_CTX_SNAPSHOT, messages=msgs, stats=_stats_not_first())
+    )
+    assert (
+        "Woke by — SCHEDULED (reason: Catch the 05:00 1h candle close at 06:00"
+        in out
+    )
+    # 时间子句续于 reasoning 括号之后（inline，非子行）
+    assert ") — fired 2026-06-01 14:38 UTC (just now)" in out
+
+
+def test_render_context_scheduled_no_wake_reason_when_absent():
+    """scheduled 但上轮没设 reasoning → 不渲 wake reason 行（仍渲 Woke by 标签）。"""
+    from src.cli.display import format_cycle_output
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    snap = (
+        "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "Your prior cycle summaries (most recent N=3, from this session):\n\n"
+        "[cycle 00f7abcd · scheduled · 2026-06-01 14:08 UTC (30 min ago) · 6 words]\n"
+        "**(1) Stance** — flat.\n"
+        "**(4) Thesis & invalidation** — bearish."
+    )
+    msgs = build_cycle_messages(thinking_segments=["x."], tool_call_segments=[[]], final_text="Hold.")
+    out = format_cycle_output(_ctx("scheduled", snap, messages=msgs, stats=_stats_not_first()))
+    # 无 reasoning → SCHEDULED 后直接续时间子句，无 inline 括号
+    assert "Woke by — SCHEDULED — fired 2026-06-01 14:38 UTC (just now)" in out
+    assert "(reason:" not in out

@@ -1033,6 +1033,29 @@ def _extract_scheduled_wake_suffix(wake_half: str) -> str:
     return f" — {clause}" if clause else ""
 
 
+def _extract_scheduled_wake_context(wake_half: str) -> str:
+    """Pull the agent's set_next_wake reasoning off the SCHEDULED WAKE CONTEXT block.
+
+    event_render._render_event_block injects `\\n\\nSCHEDULED WAKE CONTEXT (you set last
+    cycle): {reasoning}` into the scheduled wake prompt (spec 2026-06-11). The Context
+    section echoes it inline on the Woke-by line (parenthetical before the time clause) so
+    the reader sees WHY this cycle woke now — symmetry with the alert event line, which
+    likewise embeds the agent's set-time reasoning inline.
+    The block is the last segment of wake_half (summaries already split off), so the
+    reasoning runs from the marker to the next blank line. Returns "" when the block is
+    absent (agent set no reasoning / legacy snapshot).
+    """
+    marker = "SCHEDULED WAKE CONTEXT (you set last cycle): "
+    idx = wake_half.find(marker)
+    if idx == -1:
+        return ""
+    rest = wake_half[idx + len(marker):]
+    # Collapse internal whitespace (incl. stray newlines in the agent's zero-cleaned
+    # free-text reasoning) so the inline Woke-by line stays single-line — same treatment
+    # as the alert event line (_extract_event_lines).
+    return re.sub(r"\s+", " ", rest.split("\n\n", 1)[0]).strip()
+
+
 def _clean_field(text: str) -> str:
     """Strip markdown bold + collapse internal whitespace（log 渲 plain text）。"""
     return re.sub(r"\s+", " ", text.replace("**", "")).strip()
@@ -1157,7 +1180,19 @@ def _render_context(
                 lines.append(f"    • {escape(el)}")
         elif trigger_type == "scheduled":
             # scheduled 无变量事件行；仍渲类型标签 + header 唤醒时间后缀，使 Context 段自包含。
-            lines.append(f"  Woke by — SCHEDULED{_extract_scheduled_wake_suffix(wake_half)}")
+            # 回显 agent 上轮 set_next_wake 的 reasoning（注入 prompt 却原先不上屏）—— inline
+            # 括号续于类型标签后、时间子句前，与 alert 的 inline reasoning 对齐，让"本轮为何
+            # 现在醒"在 Woke-by 行自解释。无 reasoning → SCHEDULED 后直接续时间子句。
+            wake_reason = _extract_scheduled_wake_context(wake_half)
+            reason_clause = (
+                " (reason: "
+                + escape(_truncate_with_marker(wake_reason, _CONTEXT_EVENT_CAP))
+                + ")"
+            ) if wake_reason else ""
+            lines.append(
+                f"  Woke by — SCHEDULED{reason_clause}"
+                f"{_extract_scheduled_wake_suffix(wake_half)}"
+            )
 
         if blocks:
             n = len(blocks)
