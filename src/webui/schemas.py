@@ -82,7 +82,7 @@ class CycleDetail(BaseModel):
 
 class EquityPoint(BaseModel):
     at: UtcDatetime
-    equity: float             # 账户盯市净值 state_snapshot.balance.total_usdt
+    equity: float             # 账户盯市净值 = free+used+frozen+未实现PnL（含浮盈浮亏，已扣 fee）
 
 
 class TradeRow(BaseModel):
@@ -96,18 +96,22 @@ class TradeRow(BaseModel):
 
 
 class Performance(BaseModel):
+    """口径警示：下方标量指标为「已实现」口径（FIFO roundtrip），与 equity_curve（逐 cycle
+    盯市、含未实现 PnL）**不同口径、不可逐点对账**。total_return_pct=gross 已实现/初始；
+    max_drawdown_pct=net 已实现 equity 模拟。前端同台展示时须分别标注，勿让用户把曲线回撤
+    与 max_drawdown_pct 数字对齐（设计 by-intent，见 spec §5.1 双口径）。"""
     initial_balance: float
     current_position: str
-    total_return_pct: float
-    net_pnl: float
+    total_return_pct: float             # 已实现：gross roundtrip PnL 之和 / 初始余额
+    net_pnl: float                      # 已实现：net（扣 fee）roundtrip PnL 之和
     net_win_rate: float
-    max_drawdown_pct: float
+    max_drawdown_pct: float             # 已实现：net equity 模拟 MDD（≠ 盯市曲线回撤）
     net_profit_factor: float | None
     total_trades: int
     net_winning_trades: int
     net_losing_trades: int
     total_fees: float
-    equity_curve: list[EquityPoint]    # 盯市，每 cycle
+    equity_curve: list[EquityPoint]    # 盯市（含未实现 PnL），每 cycle；≠ 上方已实现指标口径
     trades: list[TradeRow]
 
 

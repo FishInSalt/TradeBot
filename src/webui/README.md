@@ -47,7 +47,7 @@ python -m src.webui
 |------|------|------|
 | `GET` | `/api/sessions` | 会话列表（含 `cycle_count` + `total_return_pct`）|
 | `GET` | `/api/sessions/{sid}` | 单会话元信息 |
-| `GET` | `/api/sessions/{sid}/cycles` | 决策时间线 feed（id DESC keyset 分页，`limit` / `before_id` / `after_id`，上限 200）|
+| `GET` | `/api/sessions/{sid}/cycles` | 决策时间线 feed（id DESC keyset 分页，`limit` ∈ [1,200] 越界 422 / `before_id` 翻旧 / `after_id` 增量取新）|
 | `GET` | `/api/cycles/{pk}` | 单 cycle 完整细节（含 `tool_calls` 子列表）|
 | `GET` | `/api/sessions/{sid}/performance` | 表现概览（指标 + 盯市净值曲线 + 成交）|
 | `GET` | `/api/sessions/{sid}/live` | 实时状态卡（status + last_active_at + 持仓 / 挂单 / 活跃告警）|
@@ -61,6 +61,18 @@ python -m src.webui
 - 连接使用 `make_readonly_engine`，SQLite URI `mode=ro` + `PRAGMA query_only=ON`。
 - **不调 `init_db`、不跑 migration、绝不写库**。
 - 可安全读正在被 sim 进程写入的 live WAL 库（SQLite WAL 读写分离）。
+
+---
+
+## 表现概览口径说明（重要）
+
+`/api/sessions/{sid}/performance` 同时返回**两组不同口径**的数字，前端**不可逐点对账**：
+
+- `equity_curve`：逐 cycle **盯市**净值（`state_snapshot.balance.total_usdt` = free+used+frozen+**未实现 PnL**，含浮盈浮亏、已扣 fee）。
+- `total_return_pct`：**gross 已实现** roundtrip PnL 之和 / 初始余额（不含浮动、不含 fee）。
+- `max_drawdown_pct`：**net 已实现** equity 模拟的 MDD（不含浮动）。
+
+即：曲线可能明显回撤而 `max_drawdown_pct` 数字很小，曲线终点涨幅 ≠ `total_return_pct`——这是双口径 by-intent（spec §5.1），前端同台展示须分别打标签、勿引导用户对齐两者。
 
 ---
 
