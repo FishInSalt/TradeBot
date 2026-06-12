@@ -118,3 +118,47 @@ async def get_live_status(engine: AsyncEngine, session_id: str) -> schemas.LiveS
                                          registered_at=a["registered_at"],
                                          register_reasoning=a["register_reasoning"]) for a in alerts],
     )
+
+
+def _current_position_label(pos: SimPosition | None) -> str:
+    return pos.side if pos and pos.contracts else "none"
+
+
+async def get_performance(engine: AsyncEngine, session_id: str) -> schemas.Performance | None:
+    async with get_session(engine) as s:
+        sess = (await s.execute(
+            select(SessionModel).where(SessionModel.id == session_id)
+        )).scalar_one_or_none()
+        if sess is None:
+            return None
+        pos = (await s.execute(
+            select(SimPosition).where(SimPosition.session_id == session_id)
+        )).scalars().first()
+        eq_rows = list((await s.execute(
+            text("SELECT created_at AS at, "
+                 "json_extract(state_snapshot,'$.balance.total_usdt') AS eq "
+                 "FROM agent_cycles WHERE session_id=:sid ORDER BY id ASC"),
+            {"sid": session_id},
+        )).mappings().all())
+        trades = list((await s.execute(
+            select(TradeAction).where(TradeAction.session_id == session_id)
+            .where(TradeAction.action == "order_filled")
+            .order_by(TradeAction.id.asc())
+        )).scalars().all())
+
+    cur = _current_position_label(pos)
+    m = await MetricsService(engine, session_id, sess.initial_balance).compute(current_position=cur)
+    equity_curve = [
+        schemas.EquityPoint(at=r["at"], equity=float(r["eq"]))
+        for r in eq_rows if r["eq"] is not None
+    ]
+    return schemas.Performance(
+        initial_balance=sess.initial_balance, current_position=cur,
+        total_return_pct=m.total_return_pct, net_pnl=m.net_pnl, net_win_rate=m.net_win_rate,
+        max_drawdown_pct=m.max_drawdown_pct, net_profit_factor=m.net_profit_factor,
+        total_trades=m.total_trades, net_winning_trades=m.net_winning_trades,
+        net_losing_trades=m.net_losing_trades, total_fees=m.total_fees,
+        equity_curve=equity_curve,
+        trades=[schemas.TradeRow(at=t.created_at, action=t.action, side=t.side, price=t.price,
+                                 amount=t.amount, pnl=t.pnl, fee=t.fee) for t in trades],
+    )

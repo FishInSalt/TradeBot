@@ -92,3 +92,19 @@ async def test_get_live_status_assembles(engine):
     assert ls.position.side == "long" and ls.position.contracts == 1.0
     assert [o.order_id for o in ls.open_orders] == ["o1"]
     assert any(a.alert_id == "a1" for a in ls.active_alerts)
+
+
+@pytest.mark.asyncio
+async def test_get_performance_equity_skips_none_balance(engine):
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    await _add_cycle(engine, cycle_id="c1", created_at=base,
+                     snapshot='{"balance":{"total_usdt":10000.0}}')
+    await _add_cycle(engine, cycle_id="c2", created_at=base + timedelta(minutes=15),
+                     snapshot='{"balance":null}')          # 失败点 → 跳过
+    await _add_cycle(engine, cycle_id="c3", created_at=base + timedelta(minutes=30),
+                     snapshot='{"balance":{"total_usdt":10120.0}}')
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")
+    assert perf.initial_balance == 10000.0
+    assert [round(p.equity, 1) for p in perf.equity_curve] == [10000.0, 10120.0]   # null 被跳
