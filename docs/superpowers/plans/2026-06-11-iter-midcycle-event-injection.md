@@ -29,7 +29,7 @@
 - Modify: `src/cli/app.py`（删除被搬移函数 :100-150 / :374-384 / :417-477，改 `_wake_header_line` N>1 分支，加 import）
 - Modify: `tests/test_wake_event_timestamp.py` / `tests/test_iter_alert_trigger_id_unknown_tool_render.py` / `tests/test_cycle_summary_injection.py`（被搬移函数 import 路径 `src.cli.app` → `src.services.event_render`，断言零改动）
 
-- [ ] **Step 1.1: 写 `_format_event_breakdown` 失败测试**
+- [x] **Step 1.1: 写 `_format_event_breakdown` 失败测试**
 
 新建 `tests/test_event_render.py`：
 
@@ -68,12 +68,12 @@ def test_breakdown_unknown_types_fallback():
     assert _format_event_breakdown(events) == "2 events"
 ```
 
-- [ ] **Step 1.2: 跑测试确认失败**
+- [x] **Step 1.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_event_render.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'src.services.event_render'`
 
-- [ ] **Step 1.3: 创建 `src/services/event_render.py`**
+- [x] **Step 1.3: 创建 `src/services/event_render.py`**
 
 从 `src/cli/app.py` **逐字搬移**以下函数（行号基于 HEAD `85fa217`）：`_format_relative_time`（:100-120）、`_format_event_age`（:123-135）、`_wake_time_suffix`（:138-150）、`_format_price_level_alert_trigger`（:374-384）、`_render_event_block`（:417-477）。仅两处改动：① `_render_event_block` 形参 `cycle_started_at` 改 `now`——函数体内 **3 处**实参同步改（`:466` / `:475` 两处 `_wake_time_suffix(..., cycle_started_at)` + `:470` 一处 `_format_price_level_alert_trigger(context, cycle_started_at)`）；② 新增 `_format_event_breakdown`。模块骨架：
 
@@ -122,7 +122,7 @@ def _format_event_breakdown(events: list[tuple[str, Any]]) -> str:
 #   cycle_started_at, injection path passes the injection moment (spec §3).）
 ```
 
-- [ ] **Step 1.4: 改 `src/cli/app.py`**
+- [x] **Step 1.4: 改 `src/cli/app.py`**
 
 ① 删除五个被搬移函数定义；② import 区（:47 附近，与 `from src.services.cycle_capture import ...` 相邻）加：
 
@@ -147,7 +147,7 @@ from src.services.event_render import (
 
 ④ 检查 `PriceLevelAlertInfo` 在 app.py 是否仍有其他引用：`grep -n PriceLevelAlertInfo src/cli/app.py`——若仅剩 :51 import 行则从该行删除（`FillEvent` 保留，`_create_fill_handler` 用）。
 
-- [ ] **Step 1.5: 更新三个测试文件 import 路径 + 关键字调用点改名**
+- [x] **Step 1.5: 更新三个测试文件 import 路径 + 关键字调用点改名**
 
 ① `tests/test_wake_event_timestamp.py` / `tests/test_iter_alert_trigger_id_unknown_tool_render.py` / `tests/test_cycle_summary_injection.py` 中所有 `from src.cli.app import <被搬移函数>` 改为 `from src.services.event_render import <同名>`（用 grep 逐处确认；`_wake_header_line` 留在 app.py，其 import 不动）。
 
@@ -155,12 +155,12 @@ from src.services.event_render import (
 
 断言一行不改。
 
-- [ ] **Step 1.6: 跑测试**
+- [x] **Step 1.6: 跑测试**
 
 Run: `.venv/bin/python -m pytest tests/test_event_render.py tests/test_wake_event_timestamp.py tests/test_iter_alert_trigger_id_unknown_tool_render.py tests/test_cycle_summary_injection.py -v`
 Expected: 全 PASS（既有断言即 byte-identical 回归）
 
-- [ ] **Step 1.7: 全量回归 + commit**
+- [x] **Step 1.7: 全量回归 + commit**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: 2263+4 passed（新增 4 条 breakdown 测试）, 9 skipped
@@ -180,7 +180,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `src/scheduler/scheduler.py`（`trigger` 方法后插入两个同步方法）
 - Modify: `tests/test_scheduler.py`（追加 5 个测试）
 
-- [ ] **Step 2.1: 写失败测试**
+- [x] **Step 2.1: 写失败测试**
 
 追加到 `tests/test_scheduler.py` 末尾：
 
@@ -254,12 +254,12 @@ async def test_requeue_restores_same_batch_and_sets_wake():
     assert scheduler.drain_pending_events() == batch
 ```
 
-- [ ] **Step 2.2: 跑测试确认失败**
+- [x] **Step 2.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_scheduler.py -v -k "drain or requeue"`
 Expected: FAIL — `AttributeError: 'Scheduler' object has no attribute 'drain_pending_events'`
 
-- [ ] **Step 2.3: 实现两方法**
+- [x] **Step 2.3: 实现两方法**
 
 `src/scheduler/scheduler.py`，插在 `trigger`（:61-68）之后：
 
@@ -307,7 +307,7 @@ Expected: FAIL — `AttributeError: 'Scheduler' object has no attribute 'drain_p
         self._wake_event.set()
 ```
 
-- [ ] **Step 2.4: 跑测试 + commit**
+- [x] **Step 2.4: 跑测试 + commit**
 
 Run: `.venv/bin/python -m pytest tests/test_scheduler.py -v`
 Expected: 全 PASS（既有 21 条 + 新 5 条）
@@ -328,7 +328,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `src/cli/app.py`（:603 per-cycle 复位 + :1195 接线）
 - Create: `tests/test_midcycle_injector.py`（先放 deps 默认值测试，Task 4 续写）
 
-- [ ] **Step 3.1: 写失败测试**
+- [x] **Step 3.1: 写失败测试**
 
 新建 `tests/test_midcycle_injector.py`：
 
@@ -375,12 +375,12 @@ def test_trading_deps_log_not_shared_between_instances():
     assert d2.injected_events_log == []
 ```
 
-- [ ] **Step 3.2: 跑测试确认失败**
+- [x] **Step 3.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_midcycle_injector.py -v`
 Expected: FAIL — `TypeError`/`AttributeError`（TradingDeps 无 `drain_pending_events_fn`）
 
-- [ ] **Step 3.3: 改 `src/agent/trader.py`**
+- [x] **Step 3.3: 改 `src/agent/trader.py`**
 
 ① :4-5 imports：
 
@@ -404,7 +404,7 @@ from typing import Any, Literal
     cycle_started_at: datetime | None = None
 ```
 
-- [ ] **Step 3.4: 改 `src/cli/app.py` 两处**
+- [x] **Step 3.4: 改 `src/cli/app.py` 两处**
 
 ① `run_agent_cycle` :603 处：
 
@@ -422,7 +422,7 @@ from typing import Any, Literal
     deps.requeue_events_fn = scheduler.requeue_events
 ```
 
-- [ ] **Step 3.5: 跑测试 + commit**
+- [x] **Step 3.5: 跑测试 + commit**
 
 Run: `.venv/bin/python -m pytest tests/test_midcycle_injector.py tests/test_tool_call_recorder.py -v`
 Expected: 全 PASS
@@ -443,7 +443,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `src/agent/trader.py`（:96 懒加载 + :110 capabilities 注册）
 - Modify: `tests/test_midcycle_injector.py`（追加 capability 测试）
 
-- [ ] **Step 4.1: 写失败测试**
+- [x] **Step 4.1: 写失败测试**
 
 追加到 `tests/test_midcycle_injector.py`：
 
@@ -676,12 +676,12 @@ def test_registration_order_injector_outermost():
     assert [type(c).__name__ for c in caps] == ["MidCycleEventInjector", "ToolCallRecorder"]
 ```
 
-- [ ] **Step 4.2: 跑测试确认失败**
+- [x] **Step 4.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_midcycle_injector.py -v`
 Expected: 新增项 FAIL — `ModuleNotFoundError: No module named 'src.services.midcycle_injector'`
 
-- [ ] **Step 4.3: 创建 `src/services/midcycle_injector.py`**
+- [x] **Step 4.3: 创建 `src/services/midcycle_injector.py`**
 
 ```python
 """Mid-cycle event injection — pydantic_ai capability (spec 2026-06-11).
@@ -809,7 +809,7 @@ class MidCycleEventInjector(AbstractCapability["TradingDeps"]):
         return result + block
 ```
 
-- [ ] **Step 4.4: 注册到 `src/agent/trader.py`**
+- [x] **Step 4.4: 注册到 `src/agent/trader.py`**
 
 ① :96 懒加载处：
 
@@ -826,7 +826,7 @@ class MidCycleEventInjector(AbstractCapability["TradingDeps"]):
         capabilities=[MidCycleEventInjector(), ToolCallRecorder()],
 ```
 
-- [ ] **Step 4.5: 跑测试 + commit**
+- [x] **Step 4.5: 跑测试 + commit**
 
 Run: `.venv/bin/python -m pytest tests/test_midcycle_injector.py tests/test_tool_call_recorder.py tests/test_tool_call_instrumentation.py -v`
 Expected: 全 PASS（instrumentation e2e 验证双 capability 共存不破坏 recorder 链路）
@@ -848,7 +848,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `src/cli/app.py`（回滚 helper + 3 个 AgentCycle 写入点）
 - Create: `tests/test_midcycle_forensics.py`
 
-- [ ] **Step 5.1: 写失败测试**
+- [x] **Step 5.1: 写失败测试**
 
 新建 `tests/test_midcycle_forensics.py`：
 
@@ -1046,12 +1046,12 @@ async def test_retry_exhausted_rolls_back_and_nulls(deps_factory, db_engine, db_
     assert len(requeued) == 3, "每个被丢弃 attempt 的注入都回滚（3 attempt × 1 事件）"
 ```
 
-- [ ] **Step 5.2: 跑测试确认失败**
+- [x] **Step 5.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_midcycle_forensics.py -v`
 Expected: FAIL — `AgentCycle` 无 `injected_events` 参数 / `_rollback_injected_events` 不存在
 
-- [ ] **Step 5.3: 加 model 列 + migration**
+- [x] **Step 5.3: 加 model 列 + migration**
 
 ① `src/storage/models.py` :121 `user_prompt_snapshot` 之后：
 
@@ -1104,7 +1104,7 @@ def downgrade() -> None:
         batch_op.drop_column("injected_events")
 ```
 
-- [ ] **Step 5.4: app.py 回滚 helper + 三写入点**
+- [x] **Step 5.4: app.py 回滚 helper + 三写入点**
 
 ① helper（放 `run_agent_cycle` 定义之前）：
 
@@ -1151,7 +1151,7 @@ retry_exhausted 路径 AgentCycle(...) 同样加 `injected_events=None,`。
                 ) if deps.injected_events_log else None,   # raw 回滚句柄落库剥离（spec §6）
 ```
 
-- [ ] **Step 5.5: 跑测试 + commit**
+- [x] **Step 5.5: 跑测试 + commit**
 
 Run: `.venv/bin/python -m pytest tests/test_midcycle_forensics.py tests/test_run_agent_cycle_phase1.py tests/test_alembic_migration.py -v`
 Expected: 全 PASS（migration 链测试自动覆盖新 revision）
@@ -1173,7 +1173,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 view SQL 单源只改 `views.py`（fresh DB 生效）；不补 view 重建 migration——与 `cb7d7db` #71 先例一致，理由已写进 Task 5 migration docstring。
 
-- [ ] **Step 6.1: 写失败测试**
+- [x] **Step 6.1: 写失败测试**
 
 追加到 `tests/test_v_alert_lifecycle.py`：
 
@@ -1282,12 +1282,12 @@ async def test_dual_channel_each_delivered_once(db_session):
     ]
 ```
 
-- [ ] **Step 6.2: 跑测试确认失败**
+- [x] **Step 6.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_v_alert_lifecycle.py -v -k "injected or delivery or dual"`
 Expected: FAIL — `no such column: delivery`
 
-- [ ] **Step 6.3: 改 `src/storage/views.py` triggers CTE**
+- [x] **Step 6.3: 改 `src/storage/views.py` triggers CTE**
 
 `V_ALERT_LIFECYCLE_SQL` 的 triggers CTE（:106-128）改为双通道（现有 SELECT 加 `'wake' AS delivery`，UNION ALL 注入分支）：
 
@@ -1344,7 +1344,7 @@ triggers AS (
 
 （`cancel_attempts` CTE 等其余部分不动——spec §10 维持现状。）
 
-- [ ] **Step 6.4: 跑测试 + commit**
+- [x] **Step 6.4: 跑测试 + commit**
 
 Run: `.venv/bin/python -m pytest tests/test_v_alert_lifecycle.py tests/test_alert_lifecycle.py -v`
 Expected: 全 PASS（既有 8 条 wake/legacy 兼容测试零回归 + 新 3 条）
@@ -1364,7 +1364,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `src/agent/persona.py`（:122/:123/:124 通道中性化 + :126 bullet 末尾插入契约句）
 - Modify: `tests/test_persona.py`（追加 drift guard；如有切片锚定断言失效则适配）
 
-- [ ] **Step 7.1: 写失败测试**
+- [x] **Step 7.1: 写失败测试**
 
 追加到 `tests/test_persona.py`：
 
@@ -1392,12 +1392,12 @@ def test_persona_carries_injection_delivery_contract():
     assert "still arrives as a normal wake" in bullet
 ```
 
-- [ ] **Step 7.2: 跑测试确认失败**
+- [x] **Step 7.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_persona.py -v -k injection_delivery`
 Expected: FAIL — `INJECTION_HEADER_PREFIX` 计数 0
 
-- [ ] **Step 7.3: 改 `src/agent/persona.py` 四处**
+- [x] **Step 7.3: 改 `src/agent/persona.py` 四处**
 
 ①（:122 Open fill response，通道中性化）：
 
@@ -1442,12 +1442,12 @@ Expected: FAIL — `INJECTION_HEADER_PREFIX` 计数 0
 
 （:121 "you will be notified when they fill" / tools_descriptions.py:15/:31 / tools_execution.py:155/:248 均不动——spec §5 审计表，通道中性仍真。）
 
-- [ ] **Step 7.4: 跑 persona 全测试，适配可能失效的切片锚定**
+- [x] **Step 7.4: 跑 persona 全测试，适配可能失效的切片锚定**
 
 Run: `.venv/bin/python -m pytest tests/test_persona.py -v`
 Expected: 新测试 PASS；若既有 wake-bullet 切片断言（test_persona.py:280-303 `one-shot`/`cancels` drift guard）因 bullet 变长失效，仅调整切片提取方式、断言关键词不变（`one-shot` / `cancels` 仍必须在 bullet 内）。
 
-- [ ] **Step 7.5: commit**
+- [x] **Step 7.5: commit**
 
 ```bash
 git add src/agent/persona.py tests/test_persona.py
@@ -1464,7 +1464,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Modify: `src/cli/display.py`（:576 一行）
 - Modify: `tests/test_display_cycle.py`（追加 2 个测试）
 
-- [ ] **Step 8.1: 写失败测试**
+- [x] **Step 8.1: 写失败测试**
 
 追加到 `tests/test_display_cycle.py`（仿该文件既有 `_render_tool_body` 测试风格；import 形式与文件内既有用法一致）：
 
@@ -1496,12 +1496,12 @@ def test_plain_tool_return_with_injection_renders_as_section():
     assert "IMPORTANT EVENT: stop triggered" in out
 ```
 
-- [ ] **Step 8.2: 跑测试确认失败**
+- [x] **Step 8.2: 跑测试确认失败**
 
 Run: `.venv/bin/python -m pytest tests/test_display_cycle.py -v -k new_events`
 Expected: `test_new_events_section_is_full_keep` FAIL（prefix 未注册）；第二个可能已 PASS（by-content dispatch 既有能力）——保留作回归锁
 
-- [ ] **Step 8.3: 改 `src/cli/display.py` :576**
+- [x] **Step 8.3: 改 `src/cli/display.py` :576**
 
 ```python
 _FULL_KEEP_SECTION_PREFIXES: tuple[str, ...] = ("Taker Flow", "NEW EVENTS TRIGGERED")
@@ -1515,7 +1515,7 @@ _FULL_KEEP_SECTION_PREFIXES: tuple[str, ...] = ("Taker Flow", "NEW EVENTS TRIGGE
 # INJECTION_HEADER_PREFIX 逐字同源。
 ```
 
-- [ ] **Step 8.4: 跑测试 + commit**
+- [x] **Step 8.4: 跑测试 + commit**
 
 Run: `.venv/bin/python -m pytest tests/test_display_cycle.py -v`
 Expected: 全 PASS
@@ -1536,7 +1536,7 @@ retry 交互集成已在 Task 5（run_agent_cycle 层）覆盖；本任务补真
 **Files:**
 - Create: `tests/test_midcycle_injection_integration.py`
 
-- [ ] **Step 9.1: 写集成测试**
+- [x] **Step 9.1: 写集成测试**
 
 ```python
 """§9 集成：真实 agent.run（TestModel）+ 真实 Scheduler + SimulatedExchange。
@@ -1645,12 +1645,12 @@ async def test_sync_market_fill_no_self_injection(deps_factory):
     )
 ```
 
-- [ ] **Step 9.2: 跑测试**
+- [x] **Step 9.2: 跑测试**
 
 Run: `.venv/bin/python -m pytest tests/test_midcycle_injection_integration.py -v`
 Expected: 全 PASS。若 `close_position` 回执断言措辞不符，先 `grep -n "return" src/agent/tools_execution.py | sed -n '1,30p'` 核实实际回执前缀再调整断言字面量（断言意图不变：两次同步操作完成且 fill callback 零调用）。
 
-- [ ] **Step 9.3: commit**
+- [x] **Step 9.3: commit**
 
 ```bash
 git add tests/test_midcycle_injection_integration.py
@@ -1663,30 +1663,30 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 10: 全量回归 + 收尾
 
-- [ ] **Step 10.1: 全量测试**
+- [x] **Step 10.1: 全量测试**
 
 Run: `.venv/bin/python -m pytest -q`
 Expected: 2263 + ~30 新增 passed, 9 skipped, 0 failed
 
-- [ ] **Step 10.2: lint**
+- [x] **Step 10.2: lint**
 
 Run: `.venv/bin/python -m ruff check src/ tests/`（若项目配置存在 ruff；否则跳过）
 Expected: 无新增告警
 
-- [ ] **Step 10.3: 验收清单核对（对 spec §9）**
+- [x] **Step 10.3: 验收清单核对（对 spec §9）**
 
 逐项确认并在本文件勾选：
 
-- [ ] 单测：scheduler drain/requeue（Task 2）
-- [ ] 单测：capability 全失败语义 + 注册顺序锁（Task 4）
-- [ ] 单测：渲染器提取 byte-identical 回归（Task 1——既有断言文件即回归）
-- [ ] 单测：注入块格式（header / 排序 / 时间基准，Task 4）
-- [ ] 单测：persona drift guard（Task 7）
-- [ ] 单测：migration 两态 + view 双通道（Task 5/6）
-- [ ] 单测：display full-keep + plain 归一化回归（Task 8）
-- [ ] 集成：happy path / retry 交互（Task 5）/ 同步市价反向断言（Task 9）
+- [x] 单测：scheduler drain/requeue（Task 2）
+- [x] 单测：capability 全失败语义 + 注册顺序锁（Task 4）
+- [x] 单测：渲染器提取 byte-identical 回归（Task 1——既有断言文件即回归）
+- [x] 单测：注入块格式（header / 排序 / 时间基准，Task 4）
+- [x] 单测：persona drift guard（Task 7）
+- [x] 单测：migration 两态 + view 双通道（Task 5/6）
+- [x] 单测：display full-keep + plain 归一化回归（Task 8）
+- [x] 集成：happy path / retry 交互（Task 5）/ 同步市价反向断言（Task 9）
 
-- [ ] **Step 10.4: 勾选本计划全部 checkbox 后 commit 计划文件更新**
+- [x] **Step 10.4: 勾选本计划全部 checkbox 后 commit 计划文件更新**
 
 ```bash
 git add docs/superpowers/plans/2026-06-11-iter-midcycle-event-injection.md
