@@ -134,6 +134,9 @@ triggers AS (
   -- ELSE branch assumes legacy rows are valid JSON (written by json.dumps); a manually
   -- inserted malformed string would raise at query time — not guarded (never happens in practice).
   UNION ALL
+  -- injected_events is a new column — always a json.dumps array (models.py), no legacy
+  -- single-object CASE wrap needed. A best-effort capture failure persists
+  -- {"event": null, ...}: json_extract('$.event.type') yields NULL → filtered out below.
   SELECT ac.session_id,
          json_extract(e.value, '$.event.alert_id') AS alert_id,
          ac.created_at AS triggered_at,

@@ -321,3 +321,31 @@ async def test_dual_channel_each_delivered_once(db_session):
     assert [(r["alert_id"], r["delivery"]) for r in rows] == [
         ("dualinje", "injected"), ("dualwake", "wake"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_injected_null_event_capture_failure_skipped(db_session):
+    """capture best-effort 失败形态 {"event": null}：view 安全跳过零垃圾行。
+
+    writer（midcycle_injector）在 _capture_trigger_context 返 None 时合法产生该形态；
+    json_extract('$.event.type') 对 null event 得 NULL，被 type 过滤吸收——本测试把
+    该 SQLite json 语义钉成回归守护（Task 6 quality review Minor 2）。"""
+    db_session.add(TradeAction(
+        session_id="test-lc-null", cycle_id="cyc01",
+        action="add_price_level_alert", alert_id="nullcap1",
+        symbol="BTC/USDT:USDT", price=61634.0, reasoning="below 61634",
+    ))
+    db_session.add(AgentCycle(
+        session_id="test-lc-null", cycle_id="cyc02", triggered_by="scheduled",
+        injected_events=json.dumps([
+            {"event": None, "after_tool": "get_position", "offset_ms": 1},
+        ]),
+        state_snapshot=json.dumps({"position": None}), decision="noted",
+    ))
+    await db_session.commit()
+
+    row = (await db_session.execute(text(
+        "SELECT final_status, delivery FROM v_alert_lifecycle WHERE alert_id='nullcap1'"
+    ))).mappings().one()
+    assert row["final_status"] == "active", "null-event 记录不得让 alert 误判 triggered"
+    assert row["delivery"] is None
