@@ -57,3 +57,6 @@ async def test_api_endpoints(seeded):
     missing_cycles = c.get("/api/sessions/nope/cycles")
     assert missing_cycles.status_code == 200
     assert missing_cycles.json() == []
+    # limit 越界 → FastAPI 422（堵 limit=-1 → SQLite LIMIT -1 拉全量）
+    assert c.get("/api/sessions/s1/cycles?limit=-1").status_code == 422
+    assert c.get("/api/sessions/s1/cycles?limit=500").status_code == 422

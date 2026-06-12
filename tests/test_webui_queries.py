@@ -46,6 +46,21 @@ async def test_get_cycles_orders_desc_and_paginates(engine):
 
 
 @pytest.mark.asyncio
+async def test_get_cycles_after_id_no_gap_when_new_exceeds_limit(engine):
+    """after_id 增量轮询：新增数 > limit 时取紧邻游标的一批（不跳过中间 cycle）。"""
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    ids = [await _add_cycle(engine, cycle_id=f"g{i}", created_at=base + timedelta(minutes=i))
+           for i in range(5)]
+    from src.webui.queries import get_cycles
+    # 游标 ids[0] 之上有 4 条新增（ids[1..4]），limit=2：应取紧邻的 ids[1]/ids[2]，
+    # 而非最新的 ids[3]/ids[4]（DESC 旧实现会跳过 ids[1]/ids[2] → 空洞）。
+    rows = await get_cycles(engine, "s1", limit=2, after_id=ids[0])
+    assert [r.id for r in rows] == [ids[2], ids[1]]     # DESC 输出，但取的是紧邻游标那批
+    assert ids[1] in [r.id for r in rows]               # 紧邻游标的 cycle 不被跳过
+
+
+@pytest.mark.asyncio
 async def test_get_cycle_detail_joins_tool_calls_as_children(engine):
     await _seed_session(engine)
     pk = await _add_cycle(engine, cycle_id="d1",

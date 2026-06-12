@@ -36,9 +36,16 @@ async def get_cycles(
         stmt = stmt.where(AgentCycle.id < before_id)
     if after_id is not None:
         stmt = stmt.where(AgentCycle.id > after_id)
-    stmt = stmt.order_by(AgentCycle.id.desc()).limit(limit)
+    # after_id（取更新方向）须取紧邻游标的 n 条（ASC）再 reverse，否则 DESC+LIMIT 会返回
+    # 游标之上「最新」的 n 条、新增数 > limit 时静默跳过紧邻那批 → 时间线空洞。
+    if after_id is not None:
+        stmt = stmt.order_by(AgentCycle.id.asc()).limit(limit)
+    else:
+        stmt = stmt.order_by(AgentCycle.id.desc()).limit(limit)
     async with get_session(engine) as s:
         rows = list((await s.execute(stmt)).scalars().all())
+    if after_id is not None:
+        rows.reverse()          # 统一为 id DESC 输出（最新在前）
     return [
         schemas.CycleRow(
             id=c.id, cycle_label=c.cycle_id, triggered_by=c.triggered_by,

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -34,9 +34,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
         return d
 
     @app.get("/api/sessions/{sid}/cycles", response_model=list[schemas.CycleRow])
-    async def _cycles(sid: str, limit: int = 50, before_id: int | None = None,
-                      after_id: int | None = None, eng: AsyncEngine = Depends(get_engine)):
-        return await queries.get_cycles(eng, sid, limit=min(limit, 200),
+    async def _cycles(sid: str, limit: int = Query(50, ge=1, le=200),
+                      before_id: int | None = None, after_id: int | None = None,
+                      eng: AsyncEngine = Depends(get_engine)):
+        # limit 由 FastAPI 校验 [1,200]（越界 422）——堵住 limit=-1 → SQLite LIMIT -1 拉全量的口子
+        return await queries.get_cycles(eng, sid, limit=limit,
                                         before_id=before_id, after_id=after_id)
 
     @app.get("/api/cycles/{pk}", response_model=schemas.CycleDetail)
