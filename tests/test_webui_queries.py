@@ -43,3 +43,28 @@ async def test_get_cycles_orders_desc_and_paginates(engine):
     newer = await get_cycles(engine, "s1", after_id=ids[3])
     assert [r.id for r in newer] == [ids[4]]
     assert rows[0].decision_head and "line1" in rows[0].decision_head
+
+
+@pytest.mark.asyncio
+async def test_get_cycle_detail_joins_tool_calls_as_children(engine):
+    await _seed_session(engine)
+    pk = await _add_cycle(engine, cycle_id="d1",
+                          snapshot='{"balance":{"total_usdt":10050.0},"position":null}')
+    async with get_session(engine) as s:
+        for i, name in enumerate(["get_position", "get_market_data"]):
+            s.add(ToolCall(session_id="s1", cycle_id="d1", tool_name=name, status="ok",
+                           duration_ms=10 + i, args='{"symbol":"BTC/USDT:USDT"}'))
+        await s.commit()
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert d.cycle_label == "d1"
+    assert [t.tool_name for t in d.tool_calls] == ["get_position", "get_market_data"]
+    assert d.tool_calls[0].args == {"symbol": "BTC/USDT:USDT"}
+    assert d.state_snapshot["balance"]["total_usdt"] == 10050.0
+
+
+@pytest.mark.asyncio
+async def test_get_cycle_detail_missing_returns_none(engine):
+    await _seed_session(engine)
+    from src.webui.queries import get_cycle_detail
+    assert await get_cycle_detail(engine, 99999) is None
