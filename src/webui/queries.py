@@ -1,7 +1,5 @@
 """WebUI 只读查询。纯函数：输入 engine + 参数，输出 schemas 模型。不写库。
 
-模型/服务 import 一次性预置于此（Task 3 仅用 AgentCycle，其余 Task 4-7 才用上）——
-仓库无 ruff/pre-commit F401 gate，逐 Task commit 期的"暂未用 import"不阻塞。
 出站 datetime 的 UTC 归一化在 schemas 层（`UtcDatetime`），queries 不处理时区。"""
 from __future__ import annotations
 

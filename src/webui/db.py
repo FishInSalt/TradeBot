@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 
 def make_readonly_engine(db_path: str) -> AsyncEngine:
@@ -27,10 +25,3 @@ def make_readonly_engine(db_path: str) -> AsyncEngine:
         cur.close()
 
     return engine
-
-
-@asynccontextmanager
-async def readonly_session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
-        yield session

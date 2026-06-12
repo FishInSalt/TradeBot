@@ -67,9 +67,9 @@ class CycleDetail(BaseModel):
     created_at: UtcDatetime
     reasoning: str | None
     decision: str | None
-    trigger_context: dict | None
-    state_snapshot: dict | None
-    injected_events: dict | list | None
+    trigger_context: dict | str | None      # str = _loads 对损坏/截断行的原始回退（与 args 契约对齐）
+    state_snapshot: dict | str | None
+    injected_events: dict | list | str | None
     tool_calls: list[ToolCallRow]
     tokens_consumed: int
     input_tokens: int | None
