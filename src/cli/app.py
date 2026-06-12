@@ -45,10 +45,16 @@ from src.integrations.exchange.okx import OKXExchange
 from src.integrations.market_data import MarketDataService
 from src.scheduler.scheduler import Scheduler
 from src.services.cycle_capture import _capture_state_snapshot, _capture_trigger_contexts
+from src.services.event_render import (
+    _format_event_breakdown,
+    _format_relative_time,
+    _render_event_block,
+    _wake_time_suffix,
+)
 from src.services.technical import TechnicalAnalysisService
 from src.storage.database import get_session, init_db
 from src.storage.models import AgentCycle, Session, TradeAction
-from src.integrations.exchange.base import FillEvent, PriceLevelAlertInfo
+from src.integrations.exchange.base import FillEvent
 from src.cli.wizard import WizardResult
 
 logger = logging.getLogger(__name__)
@@ -95,59 +101,6 @@ def _count_words(text: str) -> int:
     toward concise output by penalizing formatting noise.
     """
     return len(_WORD_RE.findall(text))
-
-
-def _format_relative_time(now: datetime, then: datetime) -> str:
-    """Format a delta as '8 min ago' / '2 hours ago' / '1 day ago'.
-
-    SQLite returns naive datetime even when schema is DateTime(timezone=True);
-    normalize to UTC-aware before subtraction (same pattern as
-    session_manager.py:294-295).
-    """
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    delta = now - then
-    secs = int(delta.total_seconds())
-    if secs < 60:
-        return f"{secs} sec ago"
-    mins = secs // 60
-    if mins < 60:
-        return f"{mins} min ago"
-    hours = mins // 60
-    if hours < 24:
-        return f"{hours} hour{'s' if hours > 1 else ''} ago"
-    days = hours // 24
-    return f"{days} day{'s' if days > 1 else ''} ago"
-
-
-def _format_event_age(now: datetime, then: datetime) -> str | None:
-    """Age of a wake event for the prompt: None when the event timestamp is ahead of
-    `now` (clock skew / sleep artifact — caller renders UTC only), "just now" when <2s,
-    otherwise the existing second-granular ladder.
-
-    `then` is always tz-aware on the wake-event path (built from an int-ms epoch), so no
-    tz-naive normalization is exercised here — see spec 2026-06-08.
-    """
-    if then > now:
-        return None
-    if (now - then).total_seconds() < 2:
-        return "just now"
-    return _format_relative_time(now, then)
-
-
-def _wake_time_suffix(verb: str, event_ts_ms: int, now: datetime) -> str:
-    """Assemble the wake-event time clause ` — {verb} {abs-UTC} ({age})`.
-
-    Owns the int-ms→datetime conversion. When the event timestamp is ahead of `now`
-    (skew / sleep artifact) the relative age is dropped, leaving ` — {verb} {abs-UTC}`.
-    Pure + sync — `now` is the cycle-start anchor passed by the caller (spec 2026-06-08).
-    """
-    then = datetime.fromtimestamp(event_ts_ms / 1000, tz=timezone.utc)
-    abs_utc = then.strftime("%Y-%m-%d %H:%M UTC")
-    age = _format_event_age(now, then)
-    if age is None:
-        return f" — {verb} {abs_utc}"
-    return f" — {verb} {abs_utc} ({age})"
 
 
 def _truncate_decision(
@@ -371,19 +324,6 @@ def _render_recent_summaries(
     return f"{header_top}\n\n" + "\n\n".join(blocks)
 
 
-def _format_price_level_alert_trigger(context: PriceLevelAlertInfo, now: datetime) -> str:
-    """Build the PRICE LEVEL ALERT trigger suffix exposing alert_id for lifecycle joins.
-
-    `now` is the cycle-start anchor for the trailing event-age clause (spec 2026-06-08).
-    """
-    return (
-        f"\n\nPRICE LEVEL ALERT: {context.symbol} reached {context.current_price:.2f} "
-        f"(alert id={context.alert_id} {context.direction} {context.target_price:.2f} "
-        f"— {context.reasoning})"
-        + _wake_time_suffix("fired", context.timestamp, now)
-    )
-
-
 def _wake_header_line(events: list[tuple[str, Any]], cycle_started_at: datetime) -> str:
     """Build the wake-prompt header line (spec 2026-06-08 §2).
 
@@ -403,78 +343,8 @@ def _wake_header_line(events: list[tuple[str, Any]], cycle_started_at: datetime)
             )
         return line
     n = len(events)
-    n_fill = sum(1 for tt, _ in events if tt == "conditional")
-    n_alert = sum(1 for tt, _ in events if tt == "alert")
-    parts: list[str] = []
-    if n_fill:
-        parts.append(f"{n_fill} fill{'s' if n_fill > 1 else ''}")
-    if n_alert:
-        parts.append(f"{n_alert} alert{'s' if n_alert > 1 else ''}")
-    breakdown = ", ".join(parts) if parts else f"{n} events"
+    breakdown = _format_event_breakdown(events)
     return f"You have been woken up by {n} triggers ({breakdown}) since the last cycle"
-
-
-async def _render_event_block(deps, trigger_type: str, context, cycle_started_at: datetime) -> str:
-    """Render one event's prompt block (spec 2026-06-08 §2), verbatim with the prior
-    inline assembly so N==1 prompts are byte-identical.
-
-    Async + IO: the full-close fill branch awaits `deps.exchange.get_contract_size` and
-    reads `deps.fee_rate` (symbol from `context.symbol`). scheduled / context-None → "".
-
-    scheduled + non-empty context: echo the agent's set_next_wake reasoning verbatim
-    as a `SCHEDULED WAKE CONTEXT (you set last cycle):` block (spec 2026-06-11),
-    structurally consistent with the other event blocks. context here is a plain str,
-    not a dataclass. Empty-string reasoning renders nothing (truthy guard — no dangling
-    label).
-    """
-    if trigger_type == "scheduled" and context:
-        return f"\n\nSCHEDULED WAKE CONTEXT (you set last cycle): {context}"
-    if trigger_type == "conditional" and context is not None:
-        msg = (
-            f"\n\nIMPORTANT EVENT: {context.trigger_reason} triggered "
-            f"— {context.symbol} {context.amount} @ {context.fill_price}"
-        )
-        if context.pnl is None:
-            # Open fill — fee only
-            msg += f", Fee: {-context.fee:+.2f} USDT"
-        elif context.is_full_close and context.entry_price is not None:
-            # Full close fill — fee + gross + equiv-round-trip net.
-            # contract_size factor required for USDT-denominated entry_fee — matches
-            # tools_perception.py / tools_execution.py convention.
-            _contract_size = await deps.exchange.get_contract_size(context.symbol)
-            entry_fee_recompute = (
-                context.entry_price * context.amount * _contract_size * deps.fee_rate
-            )
-            round_trip_net = -entry_fee_recompute + context.pnl - context.fee
-            msg += (
-                f", Fee: {-context.fee:+.2f} USDT, "
-                f"PnL: {context.pnl:+.2f} USDT (gross) / "
-                f"{round_trip_net:+.2f} USDT (this fill, equiv-round-trip)"
-            )
-        else:
-            # Part close, OR full close with no entry_price (OKX cache miss —
-            # e.g., SL/TP placed in a prior process before restart). fact-provider
-            # principle: emit hint so agent knows why round-trip line is absent
-            # on full-close fills, distinguishing from part-close design.
-            base = (
-                f", Fee: {-context.fee:+.2f} USDT, "
-                f"PnL: {context.pnl:+.2f} USDT (gross)"
-            )
-            if context.is_full_close and context.entry_price is None:
-                base += " [round-trip net unavailable: entry_price not cached]"
-            msg += base
-        msg += _wake_time_suffix("filled", context.timestamp, cycle_started_at)
-        return msg
-    if trigger_type == "alert" and context is not None:
-        if isinstance(context, PriceLevelAlertInfo):
-            return _format_price_level_alert_trigger(context, cycle_started_at)
-        direction = "dropped" if context.change_pct < 0 else "surged"
-        return (
-            f"\n\nPRICE VOLATILITY ALERT: {context.symbol} {direction} {abs(context.change_pct):.1f}% "
-            f"in {context.window_minutes}min ({context.reference_price:.2f} → {context.current_price:.2f})"
-            + _wake_time_suffix("fired", context.timestamp, cycle_started_at)
-        )
-    return ""
 
 
 async def _build_recent_summaries_block(
@@ -582,6 +452,19 @@ async def _record_action_from_fill(engine, session_id, event: FillEvent):
         await session.commit()
 
 
+def _rollback_injected_events(deps: TradingDeps) -> None:
+    """被丢弃的 run ⇒ 注入回滚（spec §2）。
+
+    retry 重试前、usage_limit / retry_exhausted 终态 forensic 写库前调用：被该 run
+    消费的注入事件 requeue 回堆（经兜底通道重新送达——retry 场景通常被下一 attempt
+    的首次工具调用重新注入），累积器清空 → 被丢弃 run 的 injected_events 落 NULL。
+    不回滚则事件永远到不了任何存活决策（送达盲区换处藏身）。
+    """
+    if deps.injected_events_log and deps.requeue_events_fn is not None:
+        deps.requeue_events_fn([rec["raw"] for rec in deps.injected_events_log])
+    deps.injected_events_log.clear()
+
+
 async def run_agent_cycle(
     agent,
     deps: TradingDeps,
@@ -601,6 +484,8 @@ async def run_agent_cycle(
     cycle_started_at = datetime.now(timezone.utc)
     cycle_id = str(uuid.uuid4())[:8]
     deps.cycle_id = cycle_id   # propagate to ToolCallRecorder via ctx.deps (§3.4 of spec)
+    deps.cycle_started_at = cycle_started_at     # 注入 offset_ms 时间基准（spec §6）
+    deps.injected_events_log.clear()             # per-cycle 复位（spec §6）
 
     # R2-7 §6.7: capture trigger_context + state_snapshot 在 retry loop 之前
     # (一次, success / forensic 两路径复用同一对 *_var)
@@ -667,6 +552,7 @@ async def run_agent_cycle(
             # 注：ToolCallRecorder capability 已在 agent.run 内部独立 session 写完
             # 任何已成功 tool 调用的 tool_calls 行（不需要本路径协调 rollback）。
             logger.error(f"Cycle {cycle_id} hit usage limit: {e}")
+            _rollback_injected_events(deps)   # 被丢弃 run ⇒ 注入回滚（spec §2）
             async with get_session(engine) as session:
                 session.add(AgentCycle(
                     session_id=deps.session_id,
@@ -689,6 +575,7 @@ async def run_agent_cycle(
                     reasoning_tokens=None,
                     cache_hit_rate=None,
                     user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
+                    injected_events=None,   # 回滚后落 NULL（spec §2/§6）
                 ))
                 await session.commit()
             # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
@@ -709,6 +596,7 @@ async def run_agent_cycle(
             stats.record_cycle(0, cycle_ended_at)
             return None
         except Exception as e:
+            _rollback_injected_events(deps)   # 被丢弃 attempt ⇒ 注入回滚（spec §2，重试前 / 终态写库前）
             if attempt < 2:
                 delay = 2 ** attempt
                 logger.warning(f"LLM call attempt {attempt + 1}/3 failed: {e}, retrying in {delay}s")
@@ -742,6 +630,7 @@ async def run_agent_cycle(
                         reasoning_tokens=None,
                         cache_hit_rate=None,
                         user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
+                        injected_events=None,   # 回滚后落 NULL（spec §2/§6）
                     ))
                     await session.commit()
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
@@ -850,6 +739,10 @@ async def run_agent_cycle(
                 reasoning_tokens=reasoning_tokens,
                 cache_hit_rate=hit_rate,
                 user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
+                injected_events=json.dumps(
+                    [{k: v for k, v in rec.items() if k != "raw"}
+                     for rec in deps.injected_events_log]
+                ) if deps.injected_events_log else None,   # raw 回滚句柄落库剥离（spec §6）
             )
         )
         await session.commit()
@@ -1193,6 +1086,10 @@ async def run(
 
     # R4: dynamic wake fn binds scheduler (wake bounds assembled in build_services)
     deps.set_next_wake_fn = lambda minutes, ctx: scheduler.set_next_interval(minutes * 60, ctx)
+
+    # iter-midcycle-event-injection §1: 注入弹堆/回滚句柄（两者须同时接线）
+    deps.drain_pending_events_fn = scheduler.drain_pending_events
+    deps.requeue_events_fn = scheduler.requeue_events
 
     def _create_fill_handler(sched, eng, sid):
         async def handler(event: FillEvent):

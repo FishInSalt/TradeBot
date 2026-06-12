@@ -110,10 +110,18 @@ triggers AS (
   -- result. Drop the old `triggered_by='alert'` clause: a price-level alert batched with a
   -- fill has triggered_by='conditional', so that clause would silently drop it; filter
   -- per-element on '$.type' instead. ALL per-element reads come from json_each.value.
+  --
+  -- iter-midcycle-event-injection §7: two delivery channels, mutually exclusive per
+  -- event (injection == consumption) → UNION ALL is dup-safe.
+  --   'wake'     — alert consumed at cycle boundary (trigger_context element)
+  --   'injected' — alert consumed mid-cycle at a tool boundary (injected_events
+  --                element {"event": {...}, "after_tool", "offset_ms"} → '$.event.*');
+  --                triggered_at uses cycle created_at, same granularity as wake.
   SELECT ac.session_id,
          json_extract(e.value, '$.alert_id') AS alert_id,
          ac.created_at AS triggered_at,
-         CAST(json_extract(e.value, '$.current_price') AS REAL) AS triggered_price
+         CAST(json_extract(e.value, '$.current_price') AS REAL) AS triggered_price,
+         'wake' AS delivery
   FROM agent_cycles ac,
        json_each(
          CASE WHEN json_type(ac.trigger_context) = 'array'
@@ -125,6 +133,20 @@ triggers AS (
     AND json_extract(e.value, '$.alert_id') IS NOT NULL
   -- ELSE branch assumes legacy rows are valid JSON (written by json.dumps); a manually
   -- inserted malformed string would raise at query time — not guarded (never happens in practice).
+  UNION ALL
+  -- injected_events is a new column — always a json.dumps array (models.py), no legacy
+  -- single-object CASE wrap needed. A best-effort capture failure persists
+  -- {"event": null, ...}: json_extract('$.event.type') yields NULL → filtered out below.
+  SELECT ac.session_id,
+         json_extract(e.value, '$.event.alert_id') AS alert_id,
+         ac.created_at AS triggered_at,
+         CAST(json_extract(e.value, '$.event.current_price') AS REAL) AS triggered_price,
+         'injected' AS delivery
+  FROM agent_cycles ac,
+       json_each(ac.injected_events) e
+  WHERE ac.injected_events IS NOT NULL
+    AND json_extract(e.value, '$.event.type') = 'price_level_alert'
+    AND json_extract(e.value, '$.event.alert_id') IS NOT NULL
 ),
 cancels AS (
   SELECT session_id, alert_id,
@@ -154,6 +176,7 @@ SELECT
   r.register_reasoning,
   t.triggered_at,
   t.triggered_price,
+  t.delivery,
   c.cancelled_at,
   c.cancel_reasoning,
   COALESCE(ca.attempt_count, 0)    AS cancel_attempt_count,

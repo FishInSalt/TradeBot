@@ -42,7 +42,8 @@ def test_prompt_contains_layer1_identity():
     assert "one-way" in layer1 or "single direction" in layer1 or "close position first" in layer1
     # Fill bullets (L26 / L27 / L28) preserved
     assert "fill" in layer1
-    # Trigger response keyword: "woken" appears in L27/L28/L34 (trigger response bullets)
+    # Trigger response keyword: "woken" now lives in the Wake interval control bullet
+    # (response bullets went channel-neutral in iter-midcycle-event-injection §5)
     assert "woken" in layer1
 
 
@@ -732,3 +733,28 @@ def test_layer2_risk_reward_breakeven_question():
     text = generate_system_prompt(PersonaConfig())
     assert ("Does the expected move clear the round-trip fee cost — "
             "where is breakeven (entry ± 2 × fee_rate) relative to your stop and target?") in text
+
+
+def test_persona_carries_injection_delivery_contract():
+    """§5 drift guard：persona 文本与 injector header 常量逐字一致（防两处漂移）。
+
+    契约要素切片断言：① NEW EVENTS TRIGGERED 锚（≥2 处：wake bullet 契约句 +
+    fill/alert response 通道中性化）；② 注入不 cancel one-shot wake 的边界句；
+    ③ 末次工具调用后到达 → 正常唤醒的兜底分支。"""
+    from src.agent.persona import generate_system_prompt
+    from src.config import PersonaConfig
+    from src.services.midcycle_injector import INJECTION_HEADER_PREFIX
+
+    text = generate_system_prompt(PersonaConfig())
+    assert text.count(INJECTION_HEADER_PREFIX) >= 2
+
+    wake_bullet = [
+        b for b in text.split("\n- **") if b.startswith("Wake interval control")
+    ]
+    assert len(wake_bullet) == 1
+    # Wake bullet 是末位 bullet，split 切片会吞掉 prompt 尾部全部内容——截到段落边界
+    # 才真锚定在 bullet 内（同 test_wake_interval_control_states_one_shot_and_rearm）。
+    bullet = wake_bullet[0].split("\n\n")[0]
+    assert "delivered in your next tool result" in bullet
+    assert "does **not** cancel the next-wake interval" in bullet
+    assert "still arrives as a normal wake" in bullet

@@ -119,6 +119,10 @@ class AgentCycle(Base):
     cache_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     # P4 (obs roadmap Phase 3): full user_prompt sent to agent.run(); per-cycle
     user_prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # iter-midcycle-event-injection §6: mid-cycle 注入事件取证（JSON 数组；NULL = 无注入，
+    # 与 trigger_context 同形态）。元素 {"event": <单事件 capture>, "after_tool", "offset_ms"}；
+    # 内存累积器中的 raw 回滚句柄落库时剥离。被丢弃 run（retry / forensic 终态）回滚后落 NULL。
+    injected_events: Mapped[str | None] = mapped_column(Text, nullable=True)
     # === END Phase 1 ===
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

@@ -217,3 +217,135 @@ async def test_alert_lifecycle_filters_null_alert_id(db_session):
     ))).mappings().all()
 
     assert len(rows) == 0    # NULL alert_id 完全不进 view
+
+
+# === iter-midcycle-event-injection §7: injected 通道 + delivery 列 ===
+
+@pytest.mark.asyncio
+async def test_injected_channel_triggers_alert(db_session):
+    """注入消费的 alert 经 injected_events 通道可见：triggered + delivery='injected'。"""
+    db_session.add(TradeAction(
+        session_id="test-lc-inj", cycle_id="cyc01",
+        action="add_price_level_alert", alert_id="inj00001",
+        symbol="BTC/USDT:USDT", price=61634.0, reasoning="below 61634",
+    ))
+    db_session.add(AgentCycle(
+        session_id="test-lc-inj", cycle_id="cyc02", triggered_by="scheduled",
+        injected_events=json.dumps([{
+            "event": {
+                "type": "price_level_alert", "alert_id": "inj00001",
+                "symbol": "BTC/USDT:USDT", "current_price": 61630.5,
+                "target_price": 61634.0, "direction": "below",
+                "reasoning": "below 61634", "timestamp": 1765300000000,
+            },
+            "after_tool": "get_taker_flow", "offset_ms": 73000,
+        }]),
+        state_snapshot=json.dumps({"position": None}), decision="noted",
+    ))
+    await db_session.commit()
+
+    row = (await db_session.execute(text(
+        "SELECT final_status, triggered_at, triggered_price, delivery "
+        "FROM v_alert_lifecycle WHERE alert_id='inj00001'"
+    ))).mappings().one()
+    assert row["final_status"] == "triggered"
+    assert row["triggered_at"] is not None
+    assert row["triggered_price"] == 61630.5
+    assert row["delivery"] == "injected"
+
+
+@pytest.mark.asyncio
+async def test_wake_channel_delivery_label(db_session):
+    """既有 wake 通道行为不回归 + delivery='wake' 标注。"""
+    db_session.add(TradeAction(
+        session_id="test-lc-wake", cycle_id="cyc01",
+        action="add_price_level_alert", alert_id="wak00001",
+        symbol="BTC/USDT:USDT", price=80000.0, reasoning="above 80000",
+    ))
+    db_session.add(AgentCycle(
+        session_id="test-lc-wake", cycle_id="cyc02", triggered_by="alert",
+        trigger_context=json.dumps([{
+            "type": "price_level_alert", "alert_id": "wak00001",
+            "current_price": 80050.0, "target_price": 80000.0, "direction": "above",
+        }]),
+        state_snapshot=json.dumps({"position": None}), decision="hold",
+    ))
+    await db_session.commit()
+
+    row = (await db_session.execute(text(
+        "SELECT final_status, delivery FROM v_alert_lifecycle WHERE alert_id='wak00001'"
+    ))).mappings().one()
+    assert row["final_status"] == "triggered"
+    assert row["delivery"] == "wake"
+
+
+@pytest.mark.asyncio
+async def test_dual_channel_each_delivered_once(db_session):
+    """双通道并存不漏：同 session 一 wake 一 injected，各自恰好一行。
+
+    注：本测试覆盖的是"两个不同 alert 各走一通道"。"同一 alert 同时出现在
+    trigger_context 与 injected_events"的去重边界 view **刻意不守护**——
+    该互斥是注入语义（注入即消费）的运行期不变量，若真出现双行，本身就是
+    上游 bug 的取证信号，UNION ALL 不去重恰好让它可见。"""
+    db_session.add_all([
+        TradeAction(
+            session_id="test-lc-dual", cycle_id="cyc01",
+            action="add_price_level_alert", alert_id="dualwake",
+            symbol="BTC/USDT:USDT", price=80000.0, reasoning="above 80000",
+        ),
+        TradeAction(
+            session_id="test-lc-dual", cycle_id="cyc01",
+            action="add_price_level_alert", alert_id="dualinje",
+            symbol="BTC/USDT:USDT", price=61634.0, reasoning="below 61634",
+        ),
+        AgentCycle(
+            session_id="test-lc-dual", cycle_id="cyc02", triggered_by="alert",
+            trigger_context=json.dumps([{
+                "type": "price_level_alert", "alert_id": "dualwake",
+                "current_price": 80050.0,
+            }]),
+            injected_events=json.dumps([{
+                "event": {"type": "price_level_alert", "alert_id": "dualinje",
+                          "current_price": 61630.5},
+                "after_tool": "get_position", "offset_ms": 1000,
+            }]),
+            state_snapshot=json.dumps({"position": None}), decision="busy cycle",
+        ),
+    ])
+    await db_session.commit()
+
+    rows = (await db_session.execute(text(
+        "SELECT alert_id, delivery FROM v_alert_lifecycle "
+        "WHERE session_id='test-lc-dual' ORDER BY alert_id"
+    ))).mappings().all()
+    assert [(r["alert_id"], r["delivery"]) for r in rows] == [
+        ("dualinje", "injected"), ("dualwake", "wake"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_injected_null_event_capture_failure_skipped(db_session):
+    """capture best-effort 失败形态 {"event": null}：view 安全跳过零垃圾行。
+
+    writer（midcycle_injector）在 _capture_trigger_context 返 None 时合法产生该形态；
+    json_extract('$.event.type') 对 null event 得 NULL，被 type 过滤吸收——本测试把
+    该 SQLite json 语义钉成回归守护（Task 6 quality review Minor 2）。"""
+    db_session.add(TradeAction(
+        session_id="test-lc-null", cycle_id="cyc01",
+        action="add_price_level_alert", alert_id="nullcap1",
+        symbol="BTC/USDT:USDT", price=61634.0, reasoning="below 61634",
+    ))
+    db_session.add(AgentCycle(
+        session_id="test-lc-null", cycle_id="cyc02", triggered_by="scheduled",
+        injected_events=json.dumps([
+            {"event": None, "after_tool": "get_position", "offset_ms": 1},
+        ]),
+        state_snapshot=json.dumps({"position": None}), decision="noted",
+    ))
+    await db_session.commit()
+
+    row = (await db_session.execute(text(
+        "SELECT final_status, delivery FROM v_alert_lifecycle WHERE alert_id='nullcap1'"
+    ))).mappings().one()
+    assert row["final_status"] == "active", "null-event 记录不得让 alert 误判 triggered"
+    assert row["delivery"] is None

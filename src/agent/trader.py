@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal
 
 from pydantic_ai import Agent, RunContext
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -53,6 +54,15 @@ class TradingDeps:
     crypto_etf: CryptoEtfService | None = None
     onchain: OnchainService | None = None
     cycle_id: str | None = None  # Mutated by run_agent_cycle before agent.run(); see §3.3 of spec
+    # === iter-midcycle-event-injection（spec §1/§2/§6）===
+    # 两 fn 须同时非 None 才启用注入（防"可弹不可回滚"半态）；None = 注入不可用，
+    # capability 直通——单测/旧调用路径零侵入。app.py run() 接线（set_next_wake_fn 同模式）。
+    drain_pending_events_fn: Callable[[], list[tuple[str, Any]]] | None = None
+    requeue_events_fn: Callable[[list[tuple[str, Any]]], None] | None = None
+    # 本 cycle 注入取证累积器（spec §6）；run_agent_cycle 设 cycle_id 处同步 clear()。
+    injected_events_log: list[dict] = field(default_factory=list)
+    # 注入 offset_ms 的时间基准；run_agent_cycle 与 cycle_id 一并设置。
+    cycle_started_at: datetime | None = None
 
 
 def _create_dual_mode_tool(agent):
@@ -93,6 +103,7 @@ def create_trader_agent(
 ) -> Agent[TradingDeps, str]:
     # 函数级懒加载 — 与现有 26 个 tool 的懒加载风格一致（技术上非必需：
     # recorder 侧 TYPE_CHECKING + 字符串前向引用已足以破环）
+    from src.services.midcycle_injector import MidCycleEventInjector
     from src.services.tool_call_recorder import ToolCallRecorder
     from src.services.model_manager import get_optimal_settings
 
@@ -107,7 +118,9 @@ def create_trader_agent(
         deps_type=TradingDeps,
         output_type=str,
         instructions=system_prompt,
-        capabilities=[ToolCallRecorder()],
+        # 顺序契约（spec §2）：combined.py reversed() 链式包裹 → 首注册在最外层。
+        # Injector 必须最外层：注入发生在 Recorder 计时闭合之后，duration_ms 不含注入耗时。
+        capabilities=[MidCycleEventInjector(), ToolCallRecorder()],
         model_settings=get_optimal_settings(model_name),
     )
 

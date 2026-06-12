@@ -3790,3 +3790,35 @@ def test_summarize_sync_close():
     from src.cli.display import _summarize_close_position
     out = _summarize_close_position("Closed 2 position(s) | IDs: a, b")
     assert out == "Close 2 position(s)"
+
+
+# === iter-midcycle-event-injection §8: NEW EVENTS TRIGGERED full-keep ===
+
+def test_new_events_section_is_full_keep():
+    """注入小节免 _clip_body 裁剪（事件行不折叠）。"""
+    from src.cli.display import _is_full_keep_section
+    from src.services.midcycle_injector import INJECTION_HEADER_PREFIX
+
+    assert _is_full_keep_section("NEW EVENTS TRIGGERED (1 fill, 1 alert)")
+    assert _is_full_keep_section("NEW EVENTS TRIGGERED (2 alerts)")
+    # import 常量断言闭环同源：injector 改 header 时本测试随之红（字面量断言只锁
+    # _FULL_KEEP_SECTION_PREFIXES 自身，锁不住跨模块逐字同源契约）。
+    assert _is_full_keep_section(INJECTION_HEADER_PREFIX + " (1 fill)")
+    assert not _is_full_keep_section("Recent Closed Candles (30)")
+
+
+def test_plain_tool_return_with_injection_renders_as_section():
+    """无 section 标记的 plain 工具返回 + 注入块：原文本渲染不变、注入以独立小节追加
+    （_parse_sections 归一化路径——防未来渲染管道改动引入模式分叉，spec §9）。"""
+    from src.cli.display import _render_tool_body
+
+    content = (
+        "Position: short 59.67 contracts @ 61563.30"
+        "\n\n=== NEW EVENTS TRIGGERED (1 fill) ===\n"
+        "IMPORTANT EVENT: stop triggered — BTC/USDT:USDT 59.67 @ 61800.0,"
+        " Fee: -36.88 USDT, PnL: -65.70 USDT (gross) — filled 2026-06-09 22:14 UTC (23s ago)"
+    )
+    out = _render_tool_body("get_position", content, head_args="get_position()")
+    assert "Position: short 59.67 contracts" in out
+    assert "=== NEW EVENTS TRIGGERED (1 fill) ===" in out
+    assert "IMPORTANT EVENT: stop triggered" in out

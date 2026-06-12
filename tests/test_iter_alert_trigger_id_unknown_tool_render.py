@@ -30,7 +30,7 @@ from src.cli.display import _render_action
 
 def test_format_price_level_alert_trigger_includes_alert_id():
     """Fix A: helper output carries alert_id + direction + price + reasoning."""
-    from src.cli.app import _format_price_level_alert_trigger
+    from src.services.event_render import _format_price_level_alert_trigger
     from src.integrations.exchange.base import PriceLevelAlertInfo
 
     context = PriceLevelAlertInfo(
@@ -52,7 +52,7 @@ def test_format_price_level_alert_trigger_drops_pronoun():
     """Fix A cosmetic: drop 'your' pronoun (prompt context already implies ownership).
     Avoids double-possessive noise: was '(your alert: above ...)', now '(alert id=... above ...)'.
     """
-    from src.cli.app import _format_price_level_alert_trigger
+    from src.services.event_render import _format_price_level_alert_trigger
     from src.integrations.exchange.base import PriceLevelAlertInfo
 
     context = PriceLevelAlertInfo(

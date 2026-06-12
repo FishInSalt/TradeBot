@@ -19,7 +19,7 @@ import pytest
 
 def test_format_relative_time_seconds():
     """T2.7-pre: < 60 sec returns 'N sec ago'."""
-    from src.cli.app import _format_relative_time
+    from src.services.event_render import _format_relative_time
 
     now = datetime(2026, 5, 6, 12, 0, 30, tzinfo=timezone.utc)
     then = datetime(2026, 5, 6, 12, 0, 5, tzinfo=timezone.utc)
@@ -28,7 +28,7 @@ def test_format_relative_time_seconds():
 
 def test_format_relative_time_minutes():
     """< 60 min returns 'N min ago'."""
-    from src.cli.app import _format_relative_time
+    from src.services.event_render import _format_relative_time
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
     then = now - timedelta(minutes=8)
@@ -37,7 +37,7 @@ def test_format_relative_time_minutes():
 
 def test_format_relative_time_hours_singular_and_plural():
     """1 hour / 2+ hours pluralization."""
-    from src.cli.app import _format_relative_time
+    from src.services.event_render import _format_relative_time
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
     assert _format_relative_time(now, now - timedelta(hours=1, minutes=30)) == "1 hour ago"
@@ -46,7 +46,7 @@ def test_format_relative_time_hours_singular_and_plural():
 
 def test_format_relative_time_days_singular_and_plural():
     """1 day / 2+ days pluralization."""
-    from src.cli.app import _format_relative_time
+    from src.services.event_render import _format_relative_time
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
     assert _format_relative_time(now, now - timedelta(days=1, hours=2)) == "1 day ago"
@@ -58,7 +58,7 @@ def test_format_relative_time_handles_naive_datetime_from_sqlite():
     DateTime(timezone=True). _format_relative_time must normalize internally
     to avoid TypeError: can't subtract offset-naive and offset-aware datetimes.
     """
-    from src.cli.app import _format_relative_time
+    from src.services.event_render import _format_relative_time
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
     naive_then = datetime(2026, 5, 6, 11, 52, 0)  # tzinfo=None ← SQLite shape
@@ -809,6 +809,10 @@ async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mock
     deps.timeframe = "5m"
     deps.memory = mocker.Mock()
     deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+    # iter-midcycle-event-injection: 真实字段形态（list / None）——
+    # _rollback_injected_events 会迭代累积器，bare Mock attr 不可迭代会炸
+    deps.injected_events_log = []
+    deps.requeue_events_fn = None
 
     budget = TokenBudget(daily_max=1_000_000)
 
@@ -889,6 +893,10 @@ async def test_usage_limit_exceeded_writes_null_reasoning_unchanged(monkeypatch,
     deps.timeframe = "5m"
     deps.memory = mocker.Mock()
     deps.memory.format_for_prompt = AsyncMock(return_value="No relevant memories.")
+    # iter-midcycle-event-injection: 真实字段形态（list / None）——
+    # _rollback_injected_events 会迭代累积器，bare Mock attr 不可迭代会炸
+    deps.injected_events_log = []
+    deps.requeue_events_fn = None
 
     budget = TokenBudget(daily_max=1_000_000)
 

@@ -96,6 +96,8 @@ def test_g1_agent_cycle_field_sot_drift_guard():
         "reasoning_tokens", "cache_hit_rate",
         # P4 (Phase 3): full user_prompt sent to agent.run(); per-cycle
         "user_prompt_snapshot",
+        # iter-midcycle-event-injection §6: mid-cycle 注入事件取证
+        "injected_events",
         "created_at",
     }
 
