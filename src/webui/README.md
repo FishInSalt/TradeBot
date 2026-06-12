@@ -52,7 +52,7 @@ python -m src.webui
 | `GET` | `/api/sessions/{sid}/performance` | 表现概览（指标 + 盯市净值曲线 + 成交）|
 | `GET` | `/api/sessions/{sid}/live` | 实时状态卡（status + last_active_at + 持仓 / 挂单 / 活跃告警）|
 
-缺失资源统一返回 `404`。
+**缺失语义**：单资源端点（`/sessions/{sid}`、`/cycles/{pk}`、`/sessions/{sid}/performance`、`/sessions/{sid}/live`）在资源不存在时返回 `404`。集合端点 `/sessions/{sid}/cycles` 对未知或无 cycle 的 session 返回 `200` + 空数组 `[]`（集合语义，非 404）。
 
 ---
 

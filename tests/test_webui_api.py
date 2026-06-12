@@ -50,5 +50,10 @@ async def test_api_endpoints(seeded):
     assert live["status"] == "active"
     assert live["last_active_at"].endswith("Z")          # 出站时间戳带 Z（UTC 归一化）
     assert c.get("/api/cycles/999999").status_code == 404
-    assert c.get("/api/sessions/nope/performance").status_code == 404   # 缺失会话统一 404
+    assert c.get("/api/sessions/nope").status_code == 404               # 单资源缺失 → 404
+    assert c.get("/api/sessions/nope/performance").status_code == 404
     assert c.get("/api/sessions/nope/live").status_code == 404
+    # cycles 是集合端点：未知 session 返 200 + []（集合语义，非 404）
+    missing_cycles = c.get("/api/sessions/nope/cycles")
+    assert missing_cycles.status_code == 200
+    assert missing_cycles.json() == []
