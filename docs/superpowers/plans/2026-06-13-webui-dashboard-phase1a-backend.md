@@ -331,8 +331,8 @@ def make_readonly_engine(db_path: str) -> AsyncEngine:
     db_path: SQLite 文件绝对/相对路径（非 URL）。不调 init_db、不跑 migration。
     """
     abspath = os.path.abspath(db_path)
-    url = f"sqlite+aiosqlite:///file:{abspath}?mode=ro"
-    engine = create_async_engine(url, echo=False, connect_args={"uri": True})
+    url = f"sqlite+aiosqlite:///file:{abspath}?mode=ro&uri=true"
+    engine = create_async_engine(url, echo=False)
 
     @event.listens_for(engine.sync_engine, "connect")
     def _set_pragmas(dbapi_conn, _record):  # noqa: ANN001
