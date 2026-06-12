@@ -3797,8 +3797,13 @@ def test_summarize_sync_close():
 def test_new_events_section_is_full_keep():
     """注入小节免 _clip_body 裁剪（事件行不折叠）。"""
     from src.cli.display import _is_full_keep_section
+    from src.services.midcycle_injector import INJECTION_HEADER_PREFIX
+
     assert _is_full_keep_section("NEW EVENTS TRIGGERED (1 fill, 1 alert)")
     assert _is_full_keep_section("NEW EVENTS TRIGGERED (2 alerts)")
+    # import 常量断言闭环同源：injector 改 header 时本测试随之红（字面量断言只锁
+    # _FULL_KEEP_SECTION_PREFIXES 自身，锁不住跨模块逐字同源契约）。
+    assert _is_full_keep_section(INJECTION_HEADER_PREFIX + " (1 fill)")
     assert not _is_full_keep_section("Recent Closed Candles (30)")
 
 
