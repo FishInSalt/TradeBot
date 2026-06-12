@@ -1,6 +1,7 @@
 """Wake-event timestamp & relative age (spec 2026-06-08).
 
-Two pure helpers in src/cli/app.py:
+Two pure helpers in src/services/event_render.py (moved from src/cli/app.py,
+iter-midcycle-event-injection §3):
   - _format_event_age(now, then) -> str | None : age ladder (future→None, <2s→"just now",
     else delegate to _format_relative_time)
   - _wake_time_suffix(verb, event_ts_ms, now) -> str : int-ms→UTC + assembled suffix

@@ -42,7 +42,8 @@ def test_prompt_contains_layer1_identity():
     assert "one-way" in layer1 or "single direction" in layer1 or "close position first" in layer1
     # Fill bullets (L26 / L27 / L28) preserved
     assert "fill" in layer1
-    # Trigger response keyword: "woken" appears in L27/L28/L34 (trigger response bullets)
+    # Trigger response keyword: "woken" now lives in the Wake interval control bullet
+    # (response bullets went channel-neutral in iter-midcycle-event-injection §5)
     assert "woken" in layer1
 
 
