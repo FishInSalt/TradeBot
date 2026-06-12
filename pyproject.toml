@@ -24,6 +24,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-mock>=3.14",
 ]
+webui = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
