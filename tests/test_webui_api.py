@@ -1,16 +1,20 @@
+import pytest
+
+pytest.importorskip("fastapi")  # fastapi 仅在 [webui] extra；缺失时跳过本模块而非收集阶段 ImportError
+
+from datetime import datetime, timezone
+
+from fastapi.testclient import TestClient
+
+from src.storage.database import get_session
+from src.storage.models import Session as SessionModel, AgentCycle
+
+
 def test_schemas_importable():
     from src.webui import schemas
     s = schemas.LiveStatus(status="active", last_active_at=None, position=None,
                            open_orders=[], active_alerts=[])
     assert s.model_dump()["status"] == "active"
-
-
-import pytest
-from datetime import datetime, timezone
-from fastapi.testclient import TestClient
-
-from src.storage.database import get_session
-from src.storage.models import Session as SessionModel, AgentCycle
 
 UTC = timezone.utc
 
