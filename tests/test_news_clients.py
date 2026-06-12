@@ -155,6 +155,45 @@ async def test_coindesk_no_auth_header_when_key_empty():
     assert "authorization" not in captured_headers
 
 
+async def test_coindesk_strips_whitespace_from_key():
+    """Env-pasted keys often carry leading/trailing whitespace or a newline.
+    Strip them so the header is clean: a stray `\\n` would raise
+    LocalProtocolError on a real connection, trailing spaces yield a 401."""
+    from src.integrations.news.coindesk import CoinDeskNewsClient
+
+    captured_headers: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json={"Data": [], "Err": {}})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinDeskNewsClient(http, api_key="  secret-key-123\n")
+        await client.fetch_posts()
+
+    assert captured_headers["authorization"] == "Apikey secret-key-123"
+
+
+async def test_coindesk_whitespace_only_key_omits_header():
+    """A whitespace-only key is effectively unconfigured — it must NOT emit a
+    blank `Authorization: Apikey ` header (which the live API would 401)."""
+    from src.integrations.news.coindesk import CoinDeskNewsClient
+
+    captured_headers: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json={"Data": [], "Err": {}})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinDeskNewsClient(http, api_key="   ")
+        await client.fetch_posts()
+
+    assert "authorization" not in captured_headers
+
+
 # ===== Fear & Greed Index =====
 
 FGI_RESPONSE = {

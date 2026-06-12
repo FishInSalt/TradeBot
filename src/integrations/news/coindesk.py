@@ -27,7 +27,11 @@ class CoinDeskNewsClient:
 
     def __init__(self, http: httpx.AsyncClient, api_key: str = "") -> None:
         self._http = http
-        self._api_key = api_key
+        # Strip env/paste whitespace: a stray trailing newline would raise
+        # LocalProtocolError on the wire, and a whitespace-only key must read as
+        # unconfigured (not emit a blank `Apikey ` header). Empty after strip
+        # ⇒ the keyless path below sends no Authorization header.
+        self._api_key = api_key.strip()
 
     async def fetch_posts(self, news_filter: str | None = None) -> list[InformationEvent]:
         params: dict[str, str | int] = {"lang": "EN", "limit": 20}
