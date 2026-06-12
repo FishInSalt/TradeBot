@@ -83,3 +83,38 @@ async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleD
         cache_hit_rate=c.cache_hit_rate, wall_time_ms=c.wall_time_ms, llm_call_ms=c.llm_call_ms,
         model_id=c.model_id,
     )
+
+
+async def get_live_status(engine: AsyncEngine, session_id: str) -> schemas.LiveStatus | None:
+    async with get_session(engine) as s:
+        sess = (await s.execute(
+            select(SessionModel.status, SessionModel.last_active_at)
+            .where(SessionModel.id == session_id)
+        )).first()
+        if sess is None:
+            return None
+        pos = (await s.execute(
+            select(SimPosition).where(SimPosition.session_id == session_id)
+        )).scalars().first()
+        orders = list((await s.execute(
+            select(SimOrder).where(SimOrder.session_id == session_id, SimOrder.status == "open")
+            .order_by(SimOrder.created_at.asc())
+        )).scalars().all())
+        alerts = list((await s.execute(
+            text("SELECT alert_id, target_price, registered_at, register_reasoning "
+                 "FROM v_alert_lifecycle WHERE session_id=:sid AND final_status='active' "
+                 "ORDER BY registered_at ASC"),
+            {"sid": session_id},
+        )).mappings().all())
+    return schemas.LiveStatus(
+        status=sess.status,
+        last_active_at=sess.last_active_at,
+        position=(schemas.PositionInfo(symbol=pos.symbol, side=pos.side, contracts=pos.contracts,
+                                       entry_price=pos.entry_price, leverage=pos.leverage)
+                  if pos else None),
+        open_orders=[schemas.OrderInfo(order_id=o.order_id, side=o.side, order_type=o.order_type,
+                                       amount=o.amount, trigger_price=o.trigger_price) for o in orders],
+        active_alerts=[schemas.AlertInfo(alert_id=a["alert_id"], target_price=a["target_price"],
+                                         registered_at=a["registered_at"],
+                                         register_reasoning=a["register_reasoning"]) for a in alerts],
+    )

@@ -68,3 +68,27 @@ async def test_get_cycle_detail_missing_returns_none(engine):
     await _seed_session(engine)
     from src.webui.queries import get_cycle_detail
     assert await get_cycle_detail(engine, 99999) is None
+
+
+@pytest.mark.asyncio
+async def test_get_live_status_assembles(engine):
+    la = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    await _seed_session(engine, interval=15, last_active=la, status="active")
+    from src.storage.models import SimPosition, SimOrder, TradeAction
+    async with get_session(engine) as s:
+        s.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="long",
+                          contracts=1.0, entry_price=63000.0, leverage=5))
+        s.add(SimOrder(session_id="s1", order_id="o1", symbol="BTC/USDT:USDT", side="sell",
+                       position_side="long", order_type="stop", amount=1.0, trigger_price=62000.0,
+                       status="open", leverage=5))
+        # v_alert_lifecycle registers CTE 认 action='add_price_level_alert'（views.py:104）
+        s.add(TradeAction(session_id="s1", action="add_price_level_alert", alert_id="a1",
+                          symbol="BTC/USDT:USDT", price=64000.0, reasoning="breakout"))
+        await s.commit()
+    from src.webui.queries import get_live_status
+    ls = await get_live_status(engine, "s1")
+    assert ls.status == "active"
+    assert ls.last_active_at == la
+    assert ls.position.side == "long" and ls.position.contracts == 1.0
+    assert [o.order_id for o in ls.open_orders] == ["o1"]
+    assert any(a.alert_id == "a1" for a in ls.active_alerts)
