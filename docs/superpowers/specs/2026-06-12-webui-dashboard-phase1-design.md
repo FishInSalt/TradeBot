@@ -7,7 +7,7 @@
 **目标**：本机单人（localhost）通过浏览器观察——
 1. **决策时间线**：按时序看每个 cycle 的 触发 → 思考 → 工具调用(+入参) → 5 段决策叙事。
 2. **表现概览**：净值曲线 + 收益/胜率/回撤/盈亏比 + 成交列表。
-3. **实时状态卡**：运行中会话的当前持仓/挂单/活跃告警/下次唤醒。
+3. **实时状态卡**：会话的当前持仓/挂单/活跃告警 + 会话状态(`status`)/最后活跃(`last_active_at`)。
 4. **会话列表**：在 DB 中所有 session 间切换（含正在运行与历史）。
 
 **近实时**：sim worker 与观察台读写同一 SQLite 文件；前端轮询 live 端点（默认 5s），sim 写入新 cycle 后下次轮询即可见。无进程间通信。
@@ -68,7 +68,7 @@ frontend/
       SessionList.vue          # "/" 会话列表
       SessionDetail.vue        # "/session/:id" 主面板
     components/
-      LiveStatusCard.vue       # 顶部常驻：持仓/挂单/告警/下次唤醒
+      LiveStatusCard.vue       # 顶部常驻：持仓/挂单/告警/会话状态+最后活跃
       DecisionTimeline.vue     # cycle feed
       CycleCard.vue            # 单 cycle 展开：触发→思考→工具→5段决策
       PerformanceOverview.vue  # 指标 + 成交列表
@@ -88,7 +88,7 @@ frontend/
 | `list_cycles(id, limit, before_id)` | `agent_cycles` | 分页 feed 摘要行：cycle_id / triggered_by / created_at / decision 首段 / tokens_consumed / wall_time_ms |
 | `get_cycle_detail(pk)` | `agent_cycles` + JOIN `tool_calls`(同 cycle_id+session_id) | reasoning / decision(5 段) / trigger_context(JSON) / state_snapshot(JSON) / injected_events / 工具调用列表(名 + 入参 args + status + duration_ms + error_type) / token & timing 明细 |
 | `get_performance(id)` | `MetricsService.compute()` + 净值曲线 | 标量指标 + 成交列表 + equity series |
-| `get_live_status(id)` | `sim_positions` / `sim_orders`(status=`open`) / `v_alert_lifecycle`(`final_status='active'`) / 最近 `agent_cycles` | 当前持仓/挂单/活跃告警/下次唤醒 |
+| `get_live_status(id)` | `sim_positions` / `sim_orders`(status=`open`) / `v_alert_lifecycle`(`final_status='active'`) / `sessions` | 当前持仓/挂单/活跃告警 + 会话状态(`status`)/最后活跃(`last_active_at`)（§5.2：不重构唤醒/liveness） |
 
 **实现注意（数据源约束，已核对代码）**：
 
@@ -101,7 +101,7 @@ frontend/
 - **`get_performance` 须显式传 `current_position`**：`MetricsService.compute(current_position="none")`（`metrics.py:227`）用该形参填充输出"当前持仓"字段。只读台须先从 `sim_positions` 派生当前持仓再传入，否则成交概览里"当前持仓"恒为 `none`。
 - **`get_cycle_detail` 取数形态（非行放大 JOIN）**：`cycle_id` 是 String 软关联、不声明 DB FK（`models.py:209`）。`get_cycle_detail` 应**先按 int `id` 取唯一 cycle 行**，再按 `(cycle_id, session_id)` 取其 `tool_calls` 作 **1:N 子列表**（一个 cycle 多次工具调用）——不要把 `agent_cycles ⋈ tool_calls` 当 1:1 JOIN，否则 cycle 字段按工具调用数放大。前置假设：`cycle_id` 在单 `session_id` 内对 `agent_cycles` 唯一。
 
-## 5. 三个关键数据决定（已核对代码）
+## 5. 关键数据决定（已核对代码）
 
 ### 5.1 净值曲线（双口径，分别标注）
 
@@ -114,39 +114,19 @@ frontend/
 
 两者口径不同（盯市-per-cycle vs 已实现-per-roundtrip），曲线视觉回撤可能 ≠ MDD 指标值。前端对两者**显式打标签**："账户净值（盯市，每 cycle）" 与 "最大回撤（已实现净值，净/扣费后）"，避免同名不同义（对齐工具设计原则 7）。
 
-### 5.2 "下次唤醒"（best-effort 重构，scheduler 运行时状态不在 DB）
+### 5.2 会话状态展示（不做唤醒/liveness 重构）
 
-scheduler 的下次触发时刻不落 DB，须从 DB 现有信号**重构**为一个量 `expected_next_wake`（§5.3 判活也复用它）——且不能只看 `set_next_wake_at`：
+**v1 决定（复杂度不抵价值）**：状态卡直接显示 `Session.status`（active/paused）+ `last_active_at` 原始时间戳，**不重构"下次唤醒"、不派生精确 liveness**。本机单人观察自己启动的 sim，"哪个在跑 / 下次何时唤醒"价值不高，而其精确化要从只读 DB 反推 scheduler 运行时态（一次性语义 / HH:MM 跨日 / stale / 被告警抢占），复杂度远超 v1 收益。唤醒决策仍可在决策时间线的 cycle 详情里看到 `set_next_wake[_at]` 工具调用。
 
-1. **默认基线** = `last_active_at + scheduler_interval_min`（固定节奏）。这是**最常见情形**——agent 不调任何唤醒工具时即走此路（`cli/app.py` 默认 scheduler interval；`set_next_wake_at` adoption 仅 ~2%，见 memory `project_r2_next_h_w3_forensic`）。仅看唤醒工具会让 ~98% 的 cycle 显示不出/显示过期值。
-2. **覆盖基线** = **最近一个 cycle** 内的唤醒工具调用（**两个变体都看**），基准时刻 = **该 cycle 的执行时刻**（其 `last_active_at`），**不是 webui 查询时的 now**：
-   - `set_next_wake(minutes)`（相对分钟，走 `scheduler.set_next_interval`）→ `expected_next_wake = cycle 执行时刻 + minutes`（替代默认的 `+ interval`）。
-   - `set_next_wake_at(target_time)`（`trader.py:753`）→ 入参是 **'HH:MM' 字符串、非绝对时间戳**；须**复刻工具的日期补全**——相对 cycle 执行时刻，HH:MM 仍在前方取今天、否则取明天（`trader.py:759-761`）。基准用 cycle 执行时刻、**不是 webui 的 now**，否则跨午夜判断错。
-   - 二者均注册在册（`trader.py` 工具清单）；从该 cycle 的 `tool_calls.args` 取，覆盖默认基线。
-   - **为何只看"最近一个 cycle"是对的（一次性语义）**：`scheduler.set_next_interval` 是 **one-shot override**（`scheduler.py:51` docstring "one-shot...for the next sleep"，定义在 `:50`；`:119-122` 每次 sleep 前 consume-and-clear）。override 只支配紧接其后的那次 sleep（→ 下一 cycle），不跨 cycle 持久；旧 cycle 的设置在它那次 sleep 时已被消费，故不存在"漏掉旧 cycle 仍 pending 的 wake"。（memory `project_wake_rearm_discipline` 的"一次性 vs 持久承诺"错配正佐证其为一次性。）
-3. **显示 gate 在 liveness 上（P2）**：下次唤醒**仅对 live 会话显示**（live 定义见 §5.3）。`paused` / stale-active 会话的 scheduler 已停，即便 `last_active_at + interval` 仍在未来也是**伪未来**——这类会话显示"已停止，无计划唤醒"，不渲染该时刻。
-4. **stale 处理**：对 live 会话，若重构出的下次唤醒时刻 **< now**（已被提前触发 / 即将触发），UI 显示为"已过期/即将"，不渲染一个过去的"未来时刻"。
-5. **这是"下次*计划*唤醒"的估计，不是保证**：conditional / 价位告警 / mid-cycle 事件注入都可能把 agent **提前**唤醒（`scheduler.drain_pending_events` 路径）。
-
-UI 标签据此写为 **"下次计划唤醒（最早估计；告警/条件可能提前）"**，并标注来源（"调度器默认节奏" vs "来自最近决策的 set_next_wake[_at]"）。全程只读 DB，不引入 IPC。
-
-### 5.3 "live" 判定（复用 §5.2 的 expected_next_wake，不用固定窗口）
-
-**live ⟺ `status=='active'` AND `now < expected_next_wake + grace`**（`expected_next_wake` 见 §5.2）。
-
-**为何不用固定 "2× interval" 窗口**：agent 可经唤醒工具把单次 sleep 拉长到 `wake_max_minutes = clamp(4×interval, 60, 180)`（`cli/app.py:782`），普遍 ≥ 4× interval。固定 2× 窗口会把一个合法长 sleep（如 interval=15min + `set_next_wake(60)`）在第 31–60 分钟误判为 stale，并连锁触发 §5.2 step 3 隐藏其真实唤醒、错显"已停止"。复用 `expected_next_wake + grace` 作判活 deadline 即消除这套双重口径，§5.2/§5.3 自洽。
-
-`status` 不可单独当 liveness——实测写路径只产生两个值：
+**诚实性 caveat（为何配 `last_active_at`）**：`status` 不是可靠 liveness——实测写路径只产生两个值：
 
 - `'active'`：创建（`session_manager.py:231`）/ 恢复（`:182`）
-- `'paused'`：① 优雅退出（`app.py:1164`）；② **启动残留清理**——`select_or_create_session` 入口在 wizard 前调 `_fix_residual_active`（`session_manager.py:47-52`，调用点 `:336`），把所有 `active`→`paused`，清理上次非正常退出的残留
+- `'paused'`：① 优雅退出（`app.py:1164`）；② 启动残留清理——`select_or_create_session` 入口在 wizard 前调 `_fix_residual_active`（`session_manager.py:47-52`，调用点 `:336`）把所有 `active`→`paused`
 - `'stopped'`：**死值**（`models.py` 注释列了但写路径零出现）
 
-（注：`session_manager.py:284` 的 active/paused 是 CLI 列表**显示映射**，非状态写入。）
+崩溃 / kill -9 / 合盖睡死的会话无优雅退出钩子 → **永停 `'active'`**（直到下次 CLI 启动被清理）。故裸 `status='active'` 可能是已死会话。**对策不是重构 liveness，而是同时显示 `last_active_at` 原始戳**——"最后活跃：2 小时前" 让陈旧的 active 自证，用户一眼自判。UI 字段标"会话状态（来自 status 字段）"而非"运行中"，不替 status 做超出其语义的 liveness 断言。
 
-崩溃 / kill -9 / 合盖睡死的会话**无优雅退出钩子** → 停在 `'active'`，**直到下次 CLI 启动被 `_fix_residual_active` 翻成 `'paused'`**。所以任一时刻一个非 live 会话可能是 stale-`active`（崩溃后未重启）或 `'paused'`（已被重启清理）——两者都不能靠裸 `status` 区分。判活式据此：`status=='active'` 排除 paused，`expected_next_wake + grace` deadline 把 stale-active（已过期仍未唤醒）与真正 live 的长 sleep 会话区分开。
-
-UI 区分三态：`paused`=优雅退出；`active` 且 recency 内=live；`active` 但 recency 外=**stale-active（崩溃残留）**，按非 live 处理。不要把裸 `status` 当权威 liveness。
+（注：`session_manager.py:284` 的 active/paused 是 CLI 列表显示映射，非状态写入。精确"下次唤醒 / liveness"重构若未来需要，作为 defer 项重新立项——它服务的 UI 价值低、实现复杂，v1 不做。）
 
 ## 6. API 契约（v1，全部 GET，只读）
 
@@ -171,12 +151,12 @@ GET /api/sessions/{id}/live            → LiveStatus
 
 ## 7. 实时 / 轮询
 
-- 前端 `usePolling` 组合式：在 `SessionDetail` 挂载时，对**运行中**会话每 5s 重取 `/live` 与 `/cycles`（取最新，增量插入时间线顶部）；历史会话不轮询。
+- 前端 `usePolling` 组合式：在 `SessionDetail` 挂载时，对 `status=='active'` 的会话每 5s 重取 `/live` 与 `/cycles`（取最新，增量插入时间线顶部）；`paused` 会话不轮询。
 - 轮询间隔可配（默认 5s）。
 
 ## 8. 隔离与测试
 
-- **queries.py**：用 seeded 测试 DB 单元测试每个函数。边界：空数据 / 仅历史会话 / 含 open 持仓 / **`state_snapshot` 非空但 `balance` 为 None**（净值曲线跳点）/ 无唤醒工具调用走默认基线 vs 有 `set_next_wake`/`set_next_wake_at` 覆盖 / `initial_balance` 取自会话真实值。
+- **queries.py**：用 seeded 测试 DB 单元测试每个函数。边界：空数据 / 仅历史会话 / 含 open 持仓 / **`state_snapshot` 非空但 `balance` 为 None**（净值曲线跳点）/ `initial_balance` 取自会话真实值。
 - **API 层**：FastAPI `TestClient` 测端点契约（状态码 + schema 形状）。
 - **前端**：v1 不强制测试框架，靠 TS 类型 + 手动验收；如需，Vitest 备选。
 - **WAL**：SQLite WAL 已由跑 sim 的进程经 `init_db` 启用（`database.py` `PRAGMA journal_mode=WAL`，DB 级持久设置）；webui 只读侧无需再设，并发读不阻塞 sim 写入。
@@ -198,10 +178,7 @@ spec review（2026-06-12）已把以下原"待核对"项对照源码定论并折
 - ✅ `_collect_roundtrips_from_trade_actions(engine, session_id, contract_size)` 复用，`contract_size` 取自 `sessions` → §4
 - ✅ `MetricsService` 须显式传 `sessions.initial_balance`（默认值不匹配）→ §4
 - ✅ `tool_calls` 列已确认：`id/session_id/cycle_id/tool_name/status/duration_ms/error_type/created_at/args`，**无 output 列**；`get_cycle_detail` JOIN 键 = `cycle_id`+`session_id` → §4
-- ✅ `set_next_wake` 经 `scheduler.set_next_interval` 是 one-shot（consume-and-clear，`scheduler.py:50-59/119-122`）→ §5.2
 - ✅ **spike 实测（2026-06-12, SQLite 3.50.4/macOS）**：`mode=ro` 能读 live WAL 库的未 checkpoint 帧（live + 无 writer 副本 + 缺 `-shm` 均通过）；`immutable=1` 返回陈旧数据须禁用 → §3
-- ✅ `Session.status` 实测只写 `'active'`/`'paused'`，`'stopped'` 是死值；liveness 须靠 `last_active_at` recency → §5.3
+- ✅ `Session.status` 实测只写 `'active'`/`'paused'`，`'stopped'` 是死值；状态卡故配 `last_active_at` 原始戳让 stale-active 自证 → §5.2
 
-**仍留实现时核对（窄）**：
-
-1. `set_next_wake`（相对分钟）/ `set_next_wake_at`（`target_time` 'HH:MM'）在 `tool_calls.args`（JSON）中序列化的确切 key 名——重构规则已在 §5.2 写明（含 HH:MM 日期补全 + 基准用 cycle 执行时刻），仅余确认 args 里的字段名。
+**仍留实现时核对（窄）**：（本期无——精简掉唤醒/liveness 重构后无遗留项）

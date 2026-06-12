@@ -15,7 +15,7 @@
 | `SimulatedExchange` 按 session 实例化、内存态实例级 | `simulated.py` 构造函数收 `session_id`+`symbol` | 非全局单例；进程隔离可消除内存态串扰 |
 | `main.py` = `asyncio.run(run(model_id=…, debug=…))` 单进程单 session | `main.py:13` / `src/cli/app.py:run()` | 多会话并发 = 多进程，需要一个编排器 |
 | sim 仍用真实 ccxt 取 OHLCV/ticker + WS 取 mark | `simulated.py` `self._ccxt.fetch_ohlcv` / `watch_mark_price` | N 并发会话 = N× 外部 API 调用 + N WS 连接 → 限流/连接是 Phase 2 难点 |
-| 会话状态字段 + 活跃时间戳 | `sessions.status`(实测只写 active/paused；stopped 死值) + `last_active_at`(每 cycle 更新) | "哪个会话在跑"= `status=='active'` AND `last_active_at` recency（崩溃会话永停 active，status 非权威，见 Phase 1 §5.3） |
+| 会话状态字段 + 活跃时间戳 | `sessions.status`(实测只写 active/paused；stopped 死值) + `last_active_at`(每 cycle 更新) | 崩溃会话永停 active、status 非权威。Phase 1 只展示 `status`+`last_active_at` 不重构 liveness（见 Phase 1 §5.2）；Phase 2 编排器用子进程 PID + recency 判活 |
 | 性能指标已 FIFO 净值化 | `MetricsService.compute()`（PR #57） | 观察台直接复用，不重算 |
 
 ## 3. 目标三层架构
