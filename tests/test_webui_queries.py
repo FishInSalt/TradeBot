@@ -108,3 +108,19 @@ async def test_get_performance_equity_skips_none_balance(engine):
     perf = await get_performance(engine, "s1")
     assert perf.initial_balance == 10000.0
     assert [round(p.equity, 1) for p in perf.equity_curve] == [10000.0, 10120.0]   # null 被跳
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_summary(engine):
+    la = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    await _seed_session(engine, sid="s1", interval=15, last_active=la)
+    await _add_cycle(engine, sid="s1", cycle_id="c1", created_at=la)
+    await _add_cycle(engine, sid="s1", cycle_id="c2", created_at=la + timedelta(minutes=5))
+    from src.webui.queries import list_sessions, get_session_detail
+    rows = await list_sessions(engine)
+    assert len(rows) == 1
+    assert rows[0].cycle_count == 2
+    assert rows[0].status == "active"
+    detail = await get_session_detail(engine, "s1")
+    assert detail.scheduler_interval_min == 15
+    assert await get_session_detail(engine, "nope") is None

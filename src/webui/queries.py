@@ -162,3 +162,37 @@ async def get_performance(engine: AsyncEngine, session_id: str) -> schemas.Perfo
         trades=[schemas.TradeRow(at=t.created_at, action=t.action, side=t.side, price=t.price,
                                  amount=t.amount, pnl=t.pnl, fee=t.fee) for t in trades],
     )
+
+
+async def get_session_detail(engine: AsyncEngine, session_id: str) -> schemas.SessionDetail | None:
+    async with get_session(engine) as s:
+        sess = (await s.execute(
+            select(SessionModel).where(SessionModel.id == session_id)
+        )).scalar_one_or_none()
+    if sess is None:
+        return None
+    return schemas.SessionDetail(
+        id=sess.id, name=sess.name, symbol=sess.symbol, status=sess.status,
+        timeframe=sess.timeframe, scheduler_interval_min=sess.scheduler_interval_min,
+        initial_balance=sess.initial_balance, token_budget=sess.token_budget,
+        created_at=sess.created_at, last_active_at=sess.last_active_at,
+    )
+
+
+async def list_sessions(engine: AsyncEngine) -> list[schemas.SessionSummary]:
+    async with get_session(engine) as s:
+        sessions = list((await s.execute(
+            select(SessionModel).order_by(SessionModel.last_active_at.desc().nulls_last())
+        )).scalars().all())
+        counts = dict((await s.execute(
+            select(AgentCycle.session_id, func.count()).group_by(AgentCycle.session_id)
+        )).all())
+    out = []
+    for sess in sessions:
+        m = await MetricsService(engine, sess.id, sess.initial_balance).compute()
+        out.append(schemas.SessionSummary(
+            id=sess.id, name=sess.name, symbol=sess.symbol, status=sess.status,
+            created_at=sess.created_at, last_active_at=sess.last_active_at,
+            cycle_count=counts.get(sess.id, 0), total_return_pct=m.total_return_pct,
+        ))
+    return out
