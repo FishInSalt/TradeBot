@@ -573,7 +573,10 @@ def _flatten_groups(groups: list[tuple[str, list[str]]]) -> list[str]:
 # （契合本文件既有 by-content sectioned/plain dispatch 哲学），不靠 tool_name
 # frozenset。get_taker_flow header = "Taker Flow (BTC/USDT:USDT · 5m bars · @ …)"；
 # GMD K-line header = "Recent Closed Candles (…)" 前缀不匹配 → 不受影响、仍折叠。
-_FULL_KEEP_SECTION_PREFIXES: tuple[str, ...] = ("Taker Flow",)
+# "NEW EVENTS TRIGGERED" — mid-cycle 注入事件块（iter-midcycle-event-injection §8）：
+# 事件行 = forensic 主信号，折叠即失去复现价值；header 前缀与 midcycle_injector
+# INJECTION_HEADER_PREFIX 逐字同源。
+_FULL_KEEP_SECTION_PREFIXES: tuple[str, ...] = ("Taker Flow", "NEW EVENTS TRIGGERED")
 
 
 def _is_full_keep_section(header: str | None) -> bool:
