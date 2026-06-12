@@ -72,10 +72,14 @@ async def test_midcycle_fill_injected_at_next_tool_boundary(deps_factory, db_eng
     injected = [p for p in tool_returns
                 if "=== NEW EVENTS TRIGGERED (1 fill, 1 alert) ===" in str(p.content)]
     assert injected, "注入块必须进入 ToolReturnPart.content（LLM 可见通道）"
+    assert len(injected) == 1, "注入块只追加到一个工具返回（drain 即清堆，不得双重追加）"
     content = str(injected[0].content)
     assert "IMPORTANT EVENT: stop triggered" in content
+    assert "PRICE LEVEL ALERT:" in content
     # 跨契约：真 drain 堆优先级序 → fill 块先于 alert 块（入堆序相反）
     assert content.index("IMPORTANT EVENT:") < content.index("PRICE LEVEL ALERT:")
+    # 注入是追加不是替换：原工具输出在块之前
+    assert content.index("=== NEW EVENTS TRIGGERED") > 0
 
     # ② 注入即消费：堆空 → cycle 结束无 back-to-back conditional cycle
     assert scheduler.drain_pending_events() == []
