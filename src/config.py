@@ -66,6 +66,7 @@ class ApprovalConfig(BaseModel):
 
 class NewsConfig(BaseModel):
     enabled: bool = True
+    coindesk_api_key: str = ""           # env COINDESK_API_KEY
 
 
 class MacroConfig(BaseModel):
@@ -176,6 +177,12 @@ def load_settings(
     crypto_etf.setdefault("sosovalue_api_key",
                           env_overrides.get("SOSOVALUE_API_KEY", ""))
     data["crypto_etf"] = crypto_etf
+
+    # CoinDesk News became key-gated in 2026 (YAML value takes precedence)
+    news = data.get("news", {})
+    news.setdefault("coindesk_api_key",
+                    env_overrides.get("COINDESK_API_KEY", ""))
+    data["news"] = news
 
     return Settings(**data)
 

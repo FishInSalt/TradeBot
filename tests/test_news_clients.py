@@ -116,6 +116,45 @@ async def test_coindesk_429_raises_rate_limit():
             await client.fetch_posts()
 
 
+async def test_coindesk_sends_apikey_header_when_key_present():
+    """With an API key, requests carry `Authorization: Apikey <key>` (header,
+    not URL query — keeps the key out of logs). CoinDesk made the News API
+    require a key in 2026; the client was built keyless (PR #13)."""
+    from src.integrations.news.coindesk import CoinDeskNewsClient
+
+    captured_headers: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json={"Data": [], "Err": {}})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinDeskNewsClient(http, api_key="secret-key-123")
+        await client.fetch_posts()
+
+    assert captured_headers["authorization"] == "Apikey secret-key-123"
+
+
+async def test_coindesk_no_auth_header_when_key_empty():
+    """Empty key (the default) must not emit an Authorization header — preserves
+    the keyless code path / graceful degradation for unconfigured deployments."""
+    from src.integrations.news.coindesk import CoinDeskNewsClient
+
+    captured_headers: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json={"Data": [], "Err": {}})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = CoinDeskNewsClient(http)  # no api_key
+        await client.fetch_posts()
+
+    assert "authorization" not in captured_headers
+
+
 # ===== Fear & Greed Index =====
 
 FGI_RESPONSE = {

@@ -29,6 +29,7 @@ def _make_settings(
     etf_enabled: bool = True,
     onchain_enabled: bool = True,
     news_enabled: bool = False,
+    coindesk_key: str = "",
 ) -> Settings:
     return Settings(
         exchange=ExchangeConfig(),
@@ -38,7 +39,7 @@ def _make_settings(
         llm_budget=LLMBudgetConfig(),
         database=DatabaseConfig(),
         approval=ApprovalConfig(),
-        news=NewsConfig(enabled=news_enabled),
+        news=NewsConfig(enabled=news_enabled, coindesk_api_key=coindesk_key),
         macro=MacroConfig(
             enabled=macro_enabled, fred_api_key="k",
             alpha_vantage_api_key="k", coingecko_demo_api_key="k",
@@ -95,6 +96,25 @@ async def test_build_services_all_n3_enabled(stub_market_meta):
     finally:
         # build_services constructs owned httpx clients. Close them so the
         # test does not leak file descriptors between runs.
+        await deps.macro.close()
+        await deps.crypto_etf.close()
+        await deps.onchain.close()
+
+
+async def test_build_services_wires_coindesk_api_key(stub_market_meta):
+    """build_services forwards news.coindesk_api_key into the NewsService's
+    CoinDeskNewsClient, so live runs authenticate the (now key-gated) feed."""
+    from src.cli.app import build_services
+
+    settings = _make_settings(news_enabled=True, coindesk_key="ck-test")
+    exchange, deps, agent, budget, _stats = await build_services(
+        _make_result(), MagicMock(), "sid", MagicMock(), settings,
+    )
+    try:
+        assert deps.news is not None
+        assert deps.news._news._api_key == "ck-test"
+    finally:
+        await deps.news.close()
         await deps.macro.close()
         await deps.crypto_etf.close()
         await deps.onchain.close()

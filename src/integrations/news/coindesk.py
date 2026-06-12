@@ -18,12 +18,16 @@ _SENTIMENT_MAP = {
 class CoinDeskNewsClient:
     """CoinDesk Data News API client — crypto news headlines with sentiment.
 
-    No auth required. Response shape:
+    Requires an API key (CoinDesk made the News API key-gated in 2026); pass it
+    via `api_key` and it is sent as `Authorization: Apikey <key>` (header keeps
+    the key out of request URLs/logs). An empty key omits the header, preserving
+    the legacy keyless path for unconfigured deployments. Response shape:
       { "Data": [ {TITLE, PUBLISHED_ON, URL, SOURCE_DATA.NAME, CATEGORY_DATA[], SENTIMENT, ...}, ... ], "Err": {} }
     """
 
-    def __init__(self, http: httpx.AsyncClient) -> None:
+    def __init__(self, http: httpx.AsyncClient, api_key: str = "") -> None:
         self._http = http
+        self._api_key = api_key
 
     async def fetch_posts(self, news_filter: str | None = None) -> list[InformationEvent]:
         params: dict[str, str | int] = {"lang": "EN", "limit": 20}
@@ -32,7 +36,8 @@ class CoinDeskNewsClient:
             if mapped is not None:
                 params["sentiment"] = mapped
 
-        resp = await self._http.get(_COINDESK_URL, params=params)
+        headers = {"Authorization": f"Apikey {self._api_key}"} if self._api_key else None
+        resp = await self._http.get(_COINDESK_URL, params=params, headers=headers)
         if resp.status_code == 429:
             raise RateLimitHit("CoinDesk rate limited")
         resp.raise_for_status()

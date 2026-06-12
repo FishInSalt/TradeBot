@@ -25,22 +25,24 @@ _OKX_TTL = 600.0  # 10 min
 class NewsService:
     """Aggregates all news/alert data sources with caching.
 
-    All upstream sources are keyless (CoinDesk News, FGI, ForexFactory, OKX).
-    No quota tracking — if a source returns HTTP 429, TTLCache serves stale
-    data if present; otherwise the get_* method returns an empty result.
+    CoinDesk News requires an API key (passed via `api_key`); FGI, ForexFactory
+    and OKX remain keyless. No quota tracking — if a source returns HTTP 429,
+    TTLCache serves stale data if present; otherwise the get_* method returns an
+    empty result.
     """
 
     def __init__(
         self,
         http: httpx.AsyncClient | None = None,
+        api_key: str = "",
     ) -> None:
         # Accept injected http client for testability; default to real one otherwise.
         self._http = http if http is not None else httpx.AsyncClient(timeout=5.0)
         self._owns_http = http is None  # only close http if we created it
         self._cache = TTLCache()
 
-        # Clients (all keyless)
-        self._news = CoinDeskNewsClient(self._http)
+        # Clients (only CoinDesk News is key-gated; the rest are keyless)
+        self._news = CoinDeskNewsClient(self._http, api_key)
         self._fgi = FearGreedClient(self._http)
         self._calendar = ForexFactoryClient(self._http)
         self._announcements = OKXAnnouncementsClient(self._http)

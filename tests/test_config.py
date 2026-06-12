@@ -230,6 +230,43 @@ def test_load_settings_yaml_overrides_n3_keys_wins(tmp_path):
     assert settings.macro.fred_api_key == "yaml-fred"
 
 
+def test_load_settings_env_override_coindesk_key(tmp_path):
+    """COINDESK_API_KEY env var populates news.coindesk_api_key when YAML omits it.
+
+    CoinDesk made the News API key-gated in 2026; the key is wired through to
+    CoinDeskNewsClient's Authorization header."""
+    from src.config import load_settings
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text("trading:\n  symbol: 'BTC/USDT:USDT'\n")
+    settings = load_settings(
+        path=yaml_path, env_overrides={"COINDESK_API_KEY": "coindesk-test"}
+    )
+    assert settings.news.coindesk_api_key == "coindesk-test"
+
+
+def test_load_settings_yaml_coindesk_key_wins(tmp_path):
+    """YAML coindesk_api_key takes precedence over the env var."""
+    from src.config import load_settings
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text(
+        "news:\n"
+        "  coindesk_api_key: 'yaml-coindesk'\n"
+    )
+    settings = load_settings(
+        path=yaml_path, env_overrides={"COINDESK_API_KEY": "env-coindesk"}
+    )
+    assert settings.news.coindesk_api_key == "yaml-coindesk"
+
+
+def test_load_settings_coindesk_key_defaults_empty(tmp_path):
+    """Absent both YAML and env, coindesk_api_key defaults to "" (keyless path)."""
+    from src.config import load_settings
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text("trading:\n  symbol: 'BTC/USDT:USDT'\n")
+    settings = load_settings(path=yaml_path, env_overrides={})
+    assert settings.news.coindesk_api_key == ""
+
+
 # --- Iter 2b T1: sandbox + OKX_DEMO_* credentials split ---
 
 import tempfile

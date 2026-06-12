@@ -492,6 +492,7 @@ async def test_build_services_wires_news_when_enabled(stub_market_meta):
     mock_settings = MagicMock()
     mock_settings.approval.timeout_seconds = 300
     mock_settings.news.enabled = True
+    mock_settings.news.coindesk_api_key = "test-key"
 
     with patch("src.integrations.exchange.simulated.SimulatedExchange") as MockSim, \
          patch("src.cli.app.MarketDataService"), \
@@ -508,7 +509,7 @@ async def test_build_services_wires_news_when_enabled(stub_market_meta):
             result, mock_engine, "sid", mock_sc, mock_settings,
         )
 
-    MockNewsService.assert_called_once_with()
+    MockNewsService.assert_called_once_with(api_key="test-key")
     assert deps.news is news_instance
 
 

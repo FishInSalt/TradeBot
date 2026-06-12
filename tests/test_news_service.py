@@ -326,3 +326,24 @@ async def test_close_owned_http_closes():
     assert svc._owns_http is True  # should already be True from __init__
     await svc.close()
     mock_http.aclose.assert_called_once()
+
+
+async def test_news_service_forwards_api_key_to_coindesk():
+    """NewsService passes its api_key down to CoinDeskNewsClient so the upstream
+    fetch is authenticated. Behaviour-level: real service + client + mock
+    transport, asserting the Authorization header reaches the wire."""
+    import httpx
+    from src.integrations.news.service import NewsService
+
+    captured_headers: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_headers.update(dict(request.headers))
+        return httpx.Response(200, json={"Data": [], "Err": {}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        svc = NewsService(http=http, api_key="svc-key-9")
+        await svc.get_news("BTC/USDT:USDT")
+        await svc.close()
+
+    assert captured_headers["authorization"] == "Apikey svc-key-9"

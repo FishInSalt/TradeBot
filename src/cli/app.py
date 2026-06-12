@@ -893,11 +893,12 @@ async def build_services(
         initial_balance=result.initial_balance,
     )
 
-    # News service — all upstream sources are keyless (CoinDesk, FGI, ForexFactory, OKX).
+    # News service — CoinDesk News is key-gated (env COINDESK_API_KEY); FGI,
+    # ForexFactory and OKX remain keyless.
     news_service = None
     if settings.news.enabled:
         from src.integrations.news.service import NewsService
-        news_service = NewsService()
+        news_service = NewsService(api_key=settings.news.coindesk_api_key)
         sc.print("News: ON (CoinDesk News + FGI + alerts)")
     else:
         sc.print("News: OFF")
