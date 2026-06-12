@@ -751,7 +751,9 @@ def test_persona_carries_injection_delivery_contract():
         b for b in text.split("\n- **") if b.startswith("Wake interval control")
     ]
     assert len(wake_bullet) == 1
-    bullet = wake_bullet[0]
+    # Wake bullet 是末位 bullet，split 切片会吞掉 prompt 尾部全部内容——截到段落边界
+    # 才真锚定在 bullet 内（同 test_wake_interval_control_states_one_shot_and_rearm）。
+    bullet = wake_bullet[0].split("\n\n")[0]
     assert "delivered in your next tool result" in bullet
     assert "does **not** cancel the next-wake interval" in bullet
     assert "still arrives as a normal wake" in bullet
