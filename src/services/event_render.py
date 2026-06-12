@@ -16,7 +16,7 @@ from src.integrations.exchange.base import PriceLevelAlertInfo
 
 
 def _format_relative_time(now: datetime, then: datetime) -> str:
-    """Format a delta as '8 min ago' / '2 hours ago' / '1 day ago'.
+    """Format a delta as '8 min ago' / '2 hours 15 min ago' / '1 day ago'.
 
     SQLite returns naive datetime even when schema is DateTime(timezone=True);
     normalize to UTC-aware before subtraction (same pattern as
@@ -33,7 +33,12 @@ def _format_relative_time(now: datetime, then: datetime) -> str:
         return f"{mins} min ago"
     hours = mins // 60
     if hours < 24:
-        return f"{hours} hour{'s' if hours > 1 else ''} ago"
+        # Retain sub-hour minutes once age crosses 1h: with 30–60min cycle cadence,
+        # whole-hour truncation collapsed adjacent priors to the same '1 hour ago'
+        # (sim #18). Whole-hour ages drop the '0 min' tail.
+        h_label = f"{hours} hour{'s' if hours > 1 else ''}"
+        rem_min = mins % 60
+        return f"{h_label} {rem_min} min ago" if rem_min else f"{h_label} ago"
     days = hours // 24
     return f"{days} day{'s' if days > 1 else ''} ago"
 

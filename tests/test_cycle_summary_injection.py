@@ -36,11 +36,20 @@ def test_format_relative_time_minutes():
 
 
 def test_format_relative_time_hours_singular_and_plural():
-    """1 hour / 2+ hours pluralization."""
+    """≥1h: show hours AND remaining minutes; pluralize hours; drop zero-minute tail.
+
+    sim #18 ergonomics gap: with 30–60min cycle cadence, whole-hour truncation
+    collapsed two priors that were really 12 min apart into the same '1 hour ago'.
+    Minutes are now retained once age crosses the hour boundary.
+    """
     from src.services.event_render import _format_relative_time
 
     now = datetime(2026, 5, 6, 12, 0, 0, tzinfo=timezone.utc)
-    assert _format_relative_time(now, now - timedelta(hours=1, minutes=30)) == "1 hour ago"
+    assert _format_relative_time(now, now - timedelta(hours=1, minutes=30)) == "1 hour 30 min ago"
+    assert _format_relative_time(now, now - timedelta(hours=2, minutes=15)) == "2 hours 15 min ago"
+    assert _format_relative_time(now, now - timedelta(hours=1, minutes=1)) == "1 hour 1 min ago"
+    # whole-hour ages drop the '0 min' tail
+    assert _format_relative_time(now, now - timedelta(hours=1)) == "1 hour ago"
     assert _format_relative_time(now, now - timedelta(hours=5)) == "5 hours ago"
 
 
