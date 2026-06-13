@@ -44,7 +44,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
     <n-space class="chips" :size="6">
       <n-tag size="small">tokens {{ detail.tokens_consumed }}</n-tag>
       <n-tag v-if="detail.input_tokens != null" size="small">in {{ detail.input_tokens }} / out {{ detail.output_tokens }}</n-tag>
-      <n-tag v-if="detail.cache_hit_rate != null" size="small">cache {{ (detail.cache_hit_rate * 100).toFixed(0) }}%</n-tag>
+      <n-tag v-if="detail.cache_hit_rate != null" size="small">cache {{ detail.cache_hit_rate.toFixed(0) }}%</n-tag>
       <n-tag v-if="detail.wall_time_ms != null" size="small">wall {{ detail.wall_time_ms }}ms</n-tag>
       <n-tag v-if="detail.model_id" size="small">{{ detail.model_id }}</n-tag>
     </n-space>

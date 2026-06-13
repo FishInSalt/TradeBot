@@ -12,7 +12,7 @@ function detail(overrides = {}) {
     tool_calls: [
       { tool_name: "get_position", status: "ok", duration_ms: 12, error_type: null, args: { symbol: "BTC" }, result: null },
     ],
-    tokens_consumed: 9000, input_tokens: 8000, output_tokens: 1000, cache_hit_rate: 0.5,
+    tokens_consumed: 9000, input_tokens: 8000, output_tokens: 1000, cache_hit_rate: 92.76,
     wall_time_ms: 5000, llm_call_ms: 4000, model_id: "claude",
     ...overrides,
   };
@@ -46,5 +46,13 @@ describe("CycleDetailPanel", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     await w.find(".tools-toggle").trigger("click");
     expect(w.text()).toContain("结果未捕获");
+  });
+
+  it("cache 命中率按 0-100 口径直接显示，不再 ×100", () => {
+    // 后端 cache_hit_rate 是 0-100 百分数（见 display.py CycleContext docstring）；
+    // 前端曾误当 0-1 分数再 ×100，92.76 被显示成 9276%（实测 sim #20 cycle 1）。
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ cache_hit_rate: 92.76 }) as any } });
+    expect(w.text()).toContain("cache 93%");
+    expect(w.text()).not.toContain("9276");
   });
 });

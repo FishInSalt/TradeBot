@@ -75,7 +75,7 @@ class CycleDetail(BaseModel):
     tokens_consumed: int
     input_tokens: int | None
     output_tokens: int | None
-    cache_hit_rate: float | None
+    cache_hit_rate: float | None   # 0-100 百分数口径（非 0-1 分数），如 92.76 = 92.76%；见 cli/display.py CycleContext
     wall_time_ms: int | None
     llm_call_ms: int | None
     model_id: str | None
