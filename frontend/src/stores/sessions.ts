@@ -22,6 +22,8 @@ interface State {
   loading: boolean;
   error: string | null;
   pollFailCount: number;
+  selectSeq: number; // 单调序号：区分同一会话 id 的多次在途 selectSession 调用（A→B→A 重入）
+  polling: boolean; // pollTick 在途标志：慢响应下避免定时器重叠发起轮询
 }
 
 export const useSessionsStore = defineStore("sessions", {
@@ -37,6 +39,8 @@ export const useSessionsStore = defineStore("sessions", {
     loading: false,
     error: null,
     pollFailCount: 0,
+    selectSeq: 0,
+    polling: false,
   }),
 
   getters: {
@@ -54,6 +58,7 @@ export const useSessionsStore = defineStore("sessions", {
     },
 
     async selectSession(id: string) {
+      const seq = ++this.selectSeq; // 区分同一 id 的多次在途调用（A→B→A 重入）；currentId 守卫只防不同会话
       this.currentId = id;
       this.expandedCycleId = null;
       this.cycleDetails = new Map();
@@ -71,16 +76,16 @@ export const useSessionsStore = defineStore("sessions", {
           api.getPerformance(id),
           api.getCycles(id, { limit: 50 }),
         ]);
-        if (this.currentId !== id) return; // await 期间已切到别的会话：丢弃本次结果，防串档
+        if (this.currentId !== id || this.selectSeq !== seq) return; // 切走 / 同 id 重入取代 / 回 home：丢弃
         this.detail = detail;
         this.live = live;
         this.performance = performance;
         this.cycles = cycles; // 后端已 id DESC
       } catch (e) {
-        if (this.currentId !== id) return; // 已切走：勿用旧会话的错误覆盖新会话
+        if (this.currentId !== id || this.selectSeq !== seq) return; // 同上：勿覆盖更新的选择
         this.error = e instanceof ApiError ? e.message : String(e);
       } finally {
-        if (this.currentId === id) this.loading = false; // 仅当仍是本会话时收 loading
+        if (this.currentId === id && this.selectSeq === seq) this.loading = false; // 仅最新一次本会话收 loading
       }
     },
 
@@ -93,6 +98,8 @@ export const useSessionsStore = defineStore("sessions", {
     async pollTick() {
       const sid = this.currentId;
       if (!sid) return;
+      if (this.polling) return; // 上一拍未完成（慢响应）：跳过本拍，避免重叠请求 + pollFailCount 语义模糊
+      this.polling = true;
       try {
         const [live, performance] = await Promise.all([
           api.getLive(sid),
@@ -111,6 +118,8 @@ export const useSessionsStore = defineStore("sessions", {
         if (this.currentId !== sid) return; // 已切走：勿给新会话累加旧会话的失败数
         // 瞬态错误静默：不炸 UI，仅累加，由状态卡角标在 ≥3 次时提示
         this.pollFailCount += 1;
+      } finally {
+        this.polling = false;
       }
     },
 

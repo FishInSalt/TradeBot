@@ -177,4 +177,37 @@ describe("sessions store", () => {
     expect(s.cycles).toEqual([]);
     expect(s.expandedCycleId).toBeNull();
   });
+
+  it("selectSession 同会话快速重入（A→B→A）：旧批晚到不覆盖新批（selectSeq）", async () => {
+    let resolveFirst!: (v: unknown) => void;
+    const firstA = new Promise((r) => { resolveFirst = r; });
+    vi.spyOn(api, "getSession")
+      .mockReturnValueOnce(firstA as any) // 第一次 selectSession("A")：挂起
+      .mockResolvedValue({ id: "A2" } as any); // 后续调用：即时
+    vi.spyOn(api, "getLive").mockResolvedValue({ status: "active" } as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    const p1 = s.selectSession("A"); // seq=1，挂起在 firstA
+    await s.selectSession("A"); // seq=2，即时完成 → detail={id:"A2"}
+    resolveFirst({ id: "A1" }); // 第一批（旧 seq）晚到
+    await p1;
+    expect(s.detail).toMatchObject({ id: "A2" }); // 旧批被丢弃，保留新批（currentId 同为 A，仅 seq 能区分）
+  });
+
+  it("pollTick 上一拍在途时跳过重叠调用（in-flight guard）", async () => {
+    let resolveLive!: (v: unknown) => void;
+    const pendingLive = new Promise((r) => { resolveLive = r; });
+    const liveSpy = vi.spyOn(api, "getLive").mockReturnValue(pendingLive as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    const p1 = s.pollTick(); // polling=true，挂起在 getLive
+    await s.pollTick(); // 第二拍：polling 在途 → 立即 return，不发请求
+    expect(liveSpy).toHaveBeenCalledTimes(1);
+    resolveLive({ status: "active" });
+    await p1;
+    expect(s.polling).toBe(false); // 完成后复位
+  });
 });
