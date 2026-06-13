@@ -57,6 +57,10 @@ export const useSessionsStore = defineStore("sessions", {
       this.currentId = id;
       this.expandedCycleId = null;
       this.cycleDetails = new Map();
+      this.detail = null; // 进入即清旧会话数据，避免加载窗内沿用旧会话造成视觉闪烁
+      this.live = null;
+      this.performance = null;
+      this.cycles = [];
       this.pollFailCount = 0; // 切换会话清零失败计数，避免旧会话计数误触发新会话"轮询中断"角标
       this.loading = true;
       this.error = null;
@@ -97,9 +101,8 @@ export const useSessionsStore = defineStore("sessions", {
         if (this.currentId !== sid) return; // await 期间切走：丢弃旧会话数据，防串档
         this.live = live;
         this.performance = performance;
-        const maxId = this.cycles.length
-          ? Math.max(...this.cycles.map((c) => c.id))
-          : undefined;
+        // cycles 维护为 id DESC（mergeCycles 排序 + 后端 DESC），首元即最大 id，省去 spread
+        const maxId = this.cycles.length ? this.cycles[0].id : undefined;
         const fresh = await api.getCycles(sid, maxId != null ? { afterId: maxId } : {});
         if (this.currentId !== sid) return; // 同上：mergeCycles 前再校验会话身份
         this.mergeCycles(fresh);
@@ -126,8 +129,23 @@ export const useSessionsStore = defineStore("sessions", {
         } catch (e) {
           if (this.currentId !== sid) return; // 已切走：勿用旧会话错误覆盖
           this.error = e instanceof ApiError ? e.message : String(e);
+          // 失败收起当前项，避免永久卡在"加载详情…"；error 由横幅提示，再点表头即重试（缓存仍空）
+          if (this.expandedCycleId === id) this.expandedCycleId = null;
         }
       }
+    },
+
+    clearSelection() {
+      // 回到 home / 无选中会话：清空选中态。live=null → usePolling 门控早返，停止对旧会话的轮询
+      this.currentId = null;
+      this.detail = null;
+      this.live = null;
+      this.performance = null;
+      this.cycles = [];
+      this.cycleDetails = new Map();
+      this.expandedCycleId = null;
+      this.error = null;
+      this.pollFailCount = 0;
     },
   },
 });

@@ -48,4 +48,19 @@ describe("DashboardView", () => {
     await wrapper.vm.$nextTick();
     expect(store.selectSession).toHaveBeenCalledWith("sim19");
   });
+
+  it("store.error 时渲染错误横幅（错误不再静默）", async () => {
+    const router = makeRouter();
+    router.push("/sessions/bad");
+    await router.isReady();
+    const wrapper = mount(DashboardView, {
+      global: { plugins: [createTestingPinia({ createSpy: vi.fn, stubActions: true }), router] },
+      props: { id: "bad" },
+    });
+    const store = useSessionsStore();
+    store.error = "GET /api/sessions/bad → 404";
+    await wrapper.vm.$nextTick();
+    expect(wrapper.text()).toContain("加载出错");
+    expect(wrapper.text()).toContain("404");
+  });
 });

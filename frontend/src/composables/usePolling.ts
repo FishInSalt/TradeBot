@@ -28,8 +28,12 @@ export function usePolling(store: Store, intervalMs = 5000) {
     }
   }
   const onVisibility = () => {
-    if (document.hidden) stopTimer();
-    else startTimer();
+    if (document.hidden) {
+      stopTimer();
+    } else {
+      tick(); // 重新可见立即补一拍，消除重聚焦后的 5s 陈旧窗（仅 resume，不在 start() 首挂时，避免与 selectSession 首拉重复）
+      startTimer();
+    }
   };
 
   function start() {

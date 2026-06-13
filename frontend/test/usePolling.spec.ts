@@ -56,4 +56,17 @@ describe("usePolling", () => {
     p.tick();
     expect(store.pollTick).not.toHaveBeenCalled();
   });
+
+  it("tab 重新可见时立即补一拍 pollTick（不等下个 5s）", () => {
+    const store = { live: { status: "active" }, pollTick: vi.fn() };
+    const p = usePolling(store as any);
+    p.start(); // 首挂仅 startTimer，无立即 tick
+    store.pollTick.mockClear();
+    setHidden(true);
+    document.dispatchEvent(new Event("visibilitychange")); // 隐藏 → stop
+    setHidden(false);
+    document.dispatchEvent(new Event("visibilitychange")); // 可见 → 立即补一拍 + restart
+    expect(store.pollTick).toHaveBeenCalledTimes(1);
+    p.stop();
+  });
 });

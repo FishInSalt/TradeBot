@@ -130,4 +130,51 @@ describe("sessions store", () => {
     await p;
     expect(s.cycleDetails.has(7)).toBe(false); // 陈旧详情未写入
   });
+
+  it("selectSession 进入即清旧会话数据（消加载窗内闪烁）", async () => {
+    let resolveDetail!: (v: unknown) => void;
+    const pending = new Promise((r) => { resolveDetail = r; });
+    vi.spyOn(api, "getSession").mockReturnValue(pending as any);
+    vi.spyOn(api, "getLive").mockResolvedValue({ status: "active" } as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    s.detail = { id: "old" } as any; // 旧会话残留
+    s.cycles = [cyc(9)] as any;
+    const p = s.selectSession("new");
+    expect(s.detail).toBeNull(); // 进入即清，不沿用旧会话数据到加载窗
+    expect(s.cycles).toEqual([]);
+    resolveDetail({ id: "new" });
+    await p;
+    expect(s.detail).toMatchObject({ id: "new" });
+  });
+
+  it("expandCycle 拉取失败：收起当前项 + 设 error（不卡加载态，可重试）", async () => {
+    const spy = vi.spyOn(api, "getCycle").mockRejectedValue(new Error("boom"));
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    await s.expandCycle(5);
+    expect(s.expandedCycleId).toBeNull(); // 失败收起，不卡在"加载详情…"
+    expect(s.error).toContain("boom"); // error 有出口（DashboardView 横幅消费）
+    expect(s.cycleDetails.has(5)).toBe(false);
+    spy.mockResolvedValue({ id: 5 } as any);
+    await s.expandCycle(5); // 再点重试：缓存仍空 → 再拉
+    expect(s.cycleDetails.get(5)?.id).toBe(5);
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("clearSelection 清空选中态（回 home 停轮询）", () => {
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.detail = { id: "s1" } as any;
+    s.live = { status: "active" } as any;
+    s.cycles = [cyc(1)] as any;
+    s.expandedCycleId = 1;
+    s.clearSelection();
+    expect(s.currentId).toBeNull();
+    expect(s.detail).toBeNull();
+    expect(s.live).toBeNull();
+    expect(s.cycles).toEqual([]);
+    expect(s.expandedCycleId).toBeNull();
+  });
 });
