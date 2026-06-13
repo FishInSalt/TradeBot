@@ -98,6 +98,8 @@ def test_g1_agent_cycle_field_sot_drift_guard():
         "user_prompt_snapshot",
         # iter-midcycle-event-injection §6: mid-cycle 注入事件取证
         "injected_events",
+        # webui-cycle-react-timeline §4.1: ReAct 叙事骨架
+        "react_steps",
         "created_at",
     }
 

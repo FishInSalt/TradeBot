@@ -211,6 +211,8 @@ async def test_init_db_path_3_for_empty_db(tmp_path: Path) -> None:
         "user_prompt_snapshot",
         # iter-midcycle-event-injection §6: mid-cycle 注入事件取证
         "injected_events",
+        # webui-cycle-react-timeline §4.1: ReAct 叙事骨架
+        "react_steps",
         "created_at",
     }
     assert set(cols.keys()) == expected_cols, \
@@ -480,6 +482,8 @@ def test_t_mig_2_columns_renamed(tmp_path: Path, alembic_cfg_factory):
         "user_prompt_snapshot",
         # iter-midcycle-event-injection §6: mid-cycle 注入事件取证
         "injected_events",
+        # webui-cycle-react-timeline §4.1: ReAct 叙事骨架
+        "react_steps",
     }
     assert cols == expected, f"agent_cycles 列集合不匹配，差异={cols ^ expected}"
     conn.close()
