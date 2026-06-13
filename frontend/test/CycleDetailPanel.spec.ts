@@ -45,6 +45,6 @@ describe("CycleDetailPanel", () => {
   it("展开后工具 result 为 null 显示诚实空态文案", async () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     await w.find(".tools-toggle").trigger("click");
-    expect(w.text()).toContain("结果未持久化");
+    expect(w.text()).toContain("结果未捕获");
   });
 });

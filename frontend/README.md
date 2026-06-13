@@ -41,5 +41,5 @@ npm run test         # Vitest（逻辑层单测 + 组件冒烟）
 ## 已知限制
 
 - **会话 `paused→active` 翻转不自动恢复轮询**：轮询门控读 `live.status`（仅由轮询自身刷新），会话从 active 变 paused 后轮询停止、`live.status` 不再更新，故之后即便会话恢复 active，前端也不会自动重启轮询——需重新点选该会话刷新。观察工具场景可接受（本机单人自知哪个 sim 在跑）；真要自动探测翻转，需让轻量 `/live` 始终轮询、仅把 cycles/performance 拉取门控在 active（后续增量）。
-- 工具调用 `result` 暂未持久化（后端 `tool_calls` 无 result 列），UI 显「结果未持久化（待后端补全）」诚实空态；待后端 mini-iter 补列后自动点亮。
+- 工具调用 `result` 已持久化（后端 `tool_calls.result` 列 + 执行层捕获，原始文本 / 30000 char cap）。空态文案「结果未捕获」仅在 result 为空时出现——error 路径、工具返回 None、或迁移前的历史会话行。
 - 生产 bundle 为单包（Naive UI 较重，~788kB/gzip ~234kB），未做 code-split；本机同源工具可接受。
