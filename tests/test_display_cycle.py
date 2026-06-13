@@ -771,6 +771,75 @@ def test_render_action_missing_return_fallback():
     assert "get_market_data" in out
 
 
+# --- T-INJ: mid-cycle 注入块 render（iter-session-log-render-fidelity Issue 1）---
+
+
+def test_split_injection_block_no_injection():
+    """无注入锚点 → (content, None)，content 原样。"""
+    from src.cli.display import _split_injection_block
+    assert _split_injection_block("No positions to close.") == ("No positions to close.", None)
+
+
+def test_split_injection_block_splits_at_anchor():
+    """有注入锚点 → 切成 (tool_result, injection)；injection 以 header 起头、含事件行。"""
+    from src.cli.display import _split_injection_block
+    content = (
+        "No positions to close."
+        "\n\n=== NEW EVENTS TRIGGERED (1 fill) ===\n"
+        "IMPORTANT EVENT: stop triggered — BTC/USDT:USDT 15.73 @ 63614.4"
+    )
+    tool_result, injection = _split_injection_block(content)
+    assert tool_result == "No positions to close."
+    assert injection.startswith("=== NEW EVENTS TRIGGERED (1 fill) ===")
+    assert "IMPORTANT EVENT: stop triggered" in injection
+
+
+def test_render_action_injection_after_rejection_renders_full_section():
+    """Issue 1 核心：注入块追加在业务拒绝（close_position 'No positions to close.'）之后 →
+    渲染成独立多行 full-keep section，事件行完整、不被 _fallback_summary 折叠+80char 截断。
+    （sim #19 cycle 4a9e5c4e 真实失真：'... IMPORTANT EVENT: st...'）。"""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+    injection = (
+        "\n\n=== NEW EVENTS TRIGGERED (1 fill) ===\n"
+        "IMPORTANT EVENT: stop triggered — BTC/USDT:USDT 15.73 @ 63614.4, "
+        "Fee: -10.01 USDT, PnL: -8.70 USDT (gross) — filled 13:47 UTC (just now)"
+    )
+    calls = [ToolCallPart(tool_name="close_position",
+                          args={"reasoning": "thesis invalidated"}, tool_call_id="c1")]
+    returns = {"c1": ToolReturnPart(tool_name="close_position", tool_call_id="c1",
+                                    content="No positions to close." + injection)}
+    out = _render_action(calls, returns, cycle_id="9f57abcd")
+    # 业务拒绝仍单行 ✗，且拒绝文本不与注入块挤在同一行
+    assert "✗ close_position" in out
+    # 注入 section header 独立成行（buggy 路径里它被 'No positions to close.' 前缀挤在同一行）
+    assert any(line.strip() == "=== NEW EVENTS TRIGGERED (1 fill) ==="
+               for line in out.splitlines()), out
+    # 完整事件行存活（80char 截断下 'filled ... (just now)' / 'stop triggered' 必不可见）
+    assert "stop triggered" in out
+    assert "filled 13:47 UTC (just now)" in out
+
+
+def test_render_action_injection_after_happy_path_renders_section():
+    """回归 guard：注入块追加在 happy-path 工具（perception）返回之后 →
+    仍渲成独立 full-keep section（pre-split 不得破坏既有 happy-path 行为）。"""
+    from pydantic_ai.messages import ToolCallPart, ToolReturnPart
+    from src.cli.display import _render_action
+    injection = (
+        "\n\n=== NEW EVENTS TRIGGERED (1 fill) ===\n"
+        "IMPORTANT EVENT: stop triggered — BTC/USDT:USDT 13.46 @ 63915.6 — filled 18:53 UTC (just now)"
+    )
+    calls = [ToolCallPart(tool_name="get_position", args={}, tool_call_id="c1")]
+    returns = {"c1": ToolReturnPart(tool_name="get_position", tool_call_id="c1",
+                                    content="Position: Short 13.46 BTC @ 63500" + injection)}
+    out = _render_action(calls, returns, cycle_id="9f57abcd")
+    assert "⚙ get_position()" in out
+    assert "Position: Short 13.46 BTC @ 63500" in out
+    assert any(line.strip() == "=== NEW EVENTS TRIGGERED (1 fill) ==="
+               for line in out.splitlines()), out
+    assert "filled 18:53 UTC (just now)" in out
+
+
 # --- T-RD: _render_decision ---
 
 

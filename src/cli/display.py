@@ -21,6 +21,7 @@ from rich.panel import Panel
 
 from src.cli.session_state import SessionStats
 from src.services.metrics import PerformanceMetrics
+from src.services.midcycle_injector import INJECTION_HEADER_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -616,11 +617,23 @@ def _render_tool_body(
       ...
     """
     head = head_args if head_args is not None else f"{tool_name}()"
-    sections = _parse_sections(content)
     # escape head: when head_args is supplied by _render_action, it contains
     # LLM-written reasoning that may include Rich markup ([bold] / [red] etc.)
     lines = [f"  {head_icon} {escape(head)}"]
-    for i, section in enumerate(sections):
+    lines.extend(_render_sections(content))
+    return "\n".join(lines)
+
+
+def _render_sections(content: str) -> list[str]:
+    """Render parsed sections → indented display lines (spec §4.3 body render).
+
+    Shared by _render_tool_body (tool output) and _render_action's mid-cycle
+    injection append path so section-header / full-keep / clip / indent treatment is
+    single-sourced (iter-session-log-render-fidelity Issue 1). Blank line between
+    adjacent sections; full-keep sections (e.g. NEW EVENTS TRIGGERED) bypass _clip_body.
+    """
+    lines: list[str] = []
+    for i, section in enumerate(_parse_sections(content)):
         if i > 0:
             lines.append("")
         if section.header is not None:
@@ -631,11 +644,26 @@ def _render_tool_body(
             else _clip_body(section.body)
         )
         for row in clipped:
-            if row == "":
-                lines.append("")
-            else:
-                lines.append(f"    {escape(row)}")
-    return "\n".join(lines)
+            lines.append("" if row == "" else f"    {escape(row)}")
+    return lines
+
+
+def _split_injection_block(content: str) -> tuple[str, str | None]:
+    """Split a tool return into (tool_result, mid-cycle injection block | None).
+
+    MidCycleEventInjector appends `\\n\\n=== {INJECTION_HEADER_PREFIX} (...) ===\\n...`
+    to the tool return (midcycle_injector.py:53). Splitting it off before _render_action's
+    branch dispatch lets the tool result render on its normal path (error single-line OR
+    happy multi-line) while the injection always renders as its own full-keep section —
+    decoupling injection render from the tool's success/error branch, which was the root
+    cause of the error-path collapse (iter-session-log-render-fidelity Issue 1). No anchor
+    → (content, None), behaviourally identical to the pre-iter pass-through.
+    """
+    anchor = "\n\n=== " + INJECTION_HEADER_PREFIX
+    idx = content.find(anchor)
+    if idx == -1:
+        return content, None
+    return content[:idx], content[idx:].lstrip("\n")
 
 
 # === R2-8c: dispatch sets (spec §4.4) ===
@@ -1050,10 +1078,14 @@ def _extract_scheduled_wake_context(wake_half: str) -> str:
     if idx == -1:
         return ""
     rest = wake_half[idx + len(marker):]
-    # Collapse internal whitespace (incl. stray newlines in the agent's zero-cleaned
-    # free-text reasoning) so the inline Woke-by line stays single-line — same treatment
-    # as the alert event line (_extract_event_lines).
-    return re.sub(r"\s+", " ", rest.split("\n\n", 1)[0]).strip()
+    # Take the whole remainder. The SCHEDULED WAKE CONTEXT block is always the LAST
+    # segment of wake_half (summaries already split off by _split_wake_prompt), so a
+    # `\n\n` here is an internal blank line of the agent's multi-paragraph reasoning, not
+    # a section boundary — the prior `.split("\n\n", 1)[0]` truncated multi-paragraph
+    # reasons (iter-session-log-render-fidelity Issue 2). Collapse internal whitespace
+    # (incl. stray newlines in the agent's zero-cleaned free-text) so the inline Woke-by
+    # line stays single-line — same treatment as the alert event line (_extract_event_lines).
+    return re.sub(r"\s+", " ", rest).strip()
 
 
 def _clean_field(text: str) -> str:
@@ -1282,36 +1314,44 @@ def _render_action(
         args = tcp.args_as_dict()
         args_call = _format_args_as_call(tcp.tool_name, args)
 
-        # Branch 2: L1 error single-line + ✗
+        # Split off any mid-cycle injection block (iter-session-log-render-fidelity
+        # Issue 1) so it renders as its own full-keep section after whichever branch
+        # renders the tool result. injection is None for the common no-injection case
+        # → behaviour identical to the pre-iter pass-through.
+        tool_result, injection = _split_injection_block(content_str)
+
+        # Branch 2: L1 error single-line + ✗. Classify on tool_result — the injection
+        # is appended AFTER the result, so it never affects the success-prefix / outcome
+        # check; passing the pre-split result also keeps it out of the collapsed summary.
         # escape args_call: reasoning is LLM-written, may contain Rich markup
         # like [bold] / [red] — must not be parsed as markup.
-        if is_tool_error(tcp.tool_name, content_str, outcome):
-            lines.append(
-                f"  ✗ {escape(args_call)} {escape(_fallback_summary(content_str))}"
-            )
-            continue
-
-        # Drift guard: warn for tools not in any registered frozenset
-        # (per spec §3.1 — frozenset is guard only, doesn't drive render).
-        if (
-            tcp.tool_name != "save_memory"
-            and tcp.tool_name not in _EXECUTION_TOOL_NAMES
-            and tcp.tool_name not in _PERCEPTION_TOOL_NAMES
-        ):
-            logger.warning(
-                "tool_name %s not in any registered frozenset "
-                "(perception / execution / save_memory) — drift signal",
-                tcp.tool_name,
-            )
-
-        # Unified head + body for all happy-path tools
-        icon = "✎" if tcp.tool_name == "save_memory" else "⚙"
-        lines.append(
-            _render_tool_body(
-                tcp.tool_name, content_str,
+        if is_tool_error(tcp.tool_name, tool_result, outcome):
+            rendered = f"  ✗ {escape(args_call)} {escape(_fallback_summary(tool_result))}"
+        else:
+            # Drift guard: warn for tools not in any registered frozenset
+            # (per spec §3.1 — frozenset is guard only, doesn't drive render).
+            if (
+                tcp.tool_name != "save_memory"
+                and tcp.tool_name not in _EXECUTION_TOOL_NAMES
+                and tcp.tool_name not in _PERCEPTION_TOOL_NAMES
+            ):
+                logger.warning(
+                    "tool_name %s not in any registered frozenset "
+                    "(perception / execution / save_memory) — drift signal",
+                    tcp.tool_name,
+                )
+            # Unified head + body for all happy-path tools
+            icon = "✎" if tcp.tool_name == "save_memory" else "⚙"
+            rendered = _render_tool_body(
+                tcp.tool_name, tool_result,
                 head_icon=icon, head_args=args_call,
             )
-        )
+
+        # Mid-cycle injection: append as its own full-keep section (single-sourced via
+        # _render_sections) so it survives the error single-line path intact.
+        if injection:
+            rendered += "\n\n" + "\n".join(_render_sections(injection))
+        lines.append(rendered)
 
     return "\n".join(lines)
 

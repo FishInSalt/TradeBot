@@ -744,6 +744,24 @@ def test_extract_scheduled_wake_context_collapses_internal_whitespace():
     assert _extract_scheduled_wake_context(wake) == "watch 64k breakout then reassess SL"
 
 
+def test_extract_scheduled_wake_context_preserves_internal_blank_line():
+    """iter-session-log-render-fidelity Issue 2：agent 多段落 reasoning（内含空行 \\n\\n）→
+    完整保留，不在首个 \\n\\n 处截断。SCHEDULED WAKE CONTEXT block 恒为 wake_half 末尾段
+    （summaries 已被 _split_wake_prompt 切走），故取整段 rest 再折叠空白。"""
+    from src.cli.display import _extract_scheduled_wake_context
+    wake = (
+        "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
+        "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
+        "Assess the situation and decide what to do.\n\n"
+        "SCHEDULED WAKE CONTEXT (you set last cycle): para one rationale.\n\n"
+        "para two adds the SL plan.\n\n"
+    )
+    assert (
+        _extract_scheduled_wake_context(wake)
+        == "para one rationale. para two adds the SL plan."
+    )
+
+
 _SCHEDULED_WAKE_CTX_SNAPSHOT = (
     "You have been woken up by a scheduled trigger — fired 2026-06-01 14:38 UTC (just now).\n"
     "Trading pair: BTC/USDT:USDT | Timeframe: 5m\n"
