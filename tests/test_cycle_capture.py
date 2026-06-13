@@ -375,3 +375,36 @@ def test_extract_thinking_no_truncation():
     msgs = [ModelResponse(parts=[ThinkingPart(content=long_text)])]
     text = _extract_thinking_text(msgs)
     assert len(text) == 5000
+
+
+# === webui-cycle-react-timeline: _safe_build_react_steps ===
+
+def test_safe_build_react_steps_serializes():
+    from src.cli.app import _safe_build_react_steps
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    import json
+    msgs = build_cycle_messages(
+        thinking_segments=["t1"],
+        tool_call_segments=[[("get_position", {}, "flat")]],
+        final_text="decision",
+    )
+    raw = _safe_build_react_steps(msgs)
+    assert raw is not None
+    parsed = json.loads(raw)
+    assert parsed[0]["tools"][0]["tool_name"] == "get_position"
+
+
+def test_safe_build_react_steps_none_on_empty():
+    from src.cli.app import _safe_build_react_steps
+    assert _safe_build_react_steps([]) is None     # 空骨架 → None（不存 "[]"）
+
+
+def test_safe_build_react_steps_isolates_exception(monkeypatch):
+    """build 抛异常 → None（fail-isolated，绝不阻断 AgentCycle 写入，§5.3）。"""
+    import src.cli.app as app_mod
+    from src.cli.app import _safe_build_react_steps
+
+    def boom(messages):
+        raise RuntimeError("parts schema changed")
+    monkeypatch.setattr(app_mod, "build_react_steps", boom)
+    assert _safe_build_react_steps(["anything"]) is None
