@@ -282,6 +282,27 @@ async def test_cancelled_between_drain_and_requeue_requeues_then_propagates():
     assert deps.injected_events_log == [], "无取证残留"
 
 
+async def test_injected_record_has_after_tool_call_id():
+    """注入取证记录含 after_tool_call_id（= 注入发生时那次 call.tool_call_id，§5.2）。"""
+    from src.services.midcycle_injector import MidCycleEventInjector
+
+    deps, _ = wired_deps([("conditional", make_fill())])
+
+    call = make_call("get_position")
+    call.tool_call_id = "call_xyz789"
+
+    async def handler(args):
+        return "position: flat"
+
+    await MidCycleEventInjector().wrap_tool_execute(
+        make_ctx(deps), call=call, tool_def=MagicMock(), args={}, handler=handler,
+    )
+    assert len(deps.injected_events_log) == 1
+    rec = deps.injected_events_log[0]
+    assert rec["after_tool"] == "get_position"
+    assert rec["after_tool_call_id"] == "call_xyz789"
+
+
 def test_registration_order_injector_outermost():
     """注册序锁定（spec §2 框架交互 2）：[Injector, Recorder] → combined.py reversed()
     链式包裹下 Injector 在最外层，注入发生在 Recorder 计时闭合之后，duration_ms

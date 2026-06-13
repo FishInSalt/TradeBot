@@ -105,6 +105,7 @@ class MidCycleEventInjector(AbstractCapability["TradingDeps"]):
                     "event": _capture_trigger_context(deps.cycle_id or "", tt, evt_ctx),
                     "raw": (tt, evt_ctx),
                     "after_tool": call.tool_name,
+                    "after_tool_call_id": call.tool_call_id,  # webui-react-timeline §5.2: 时间线锚点
                     "offset_ms": offset_ms,
                 }
                 for tt, evt_ctx in events
