@@ -134,10 +134,15 @@ async def test_head_has_tool_calls_result(head_db):
 
 
 async def test_downgrade_drops_result_keeps_views(head_db):
-    """downgrade -1（head → 7244c7b7185d）删 result 列、且 3 个 view 仍在
-    （downgrade 的 DROP VIEW → drop_column → 重建 view 舞蹈正确性）。"""
+    """downgrade tool_call_result (8c48305247c3 → 7244c7b7185d) 删 result 列、且 3 个
+    view 仍在（downgrade 的 DROP VIEW → drop_column → 重建 view 舞蹈正确性）。
+
+    显式降到 7244c7b7185d（8c48305247c3 的 down_revision）而非相对 `-1`：后续迁移会叠在
+    head 上（如 b43e33764d90 v_alert_lifecycle rebuild），`-1` 只撤最顶层那个、停在
+    8c48305247c3，result 列仍在 → 误判失败。锚到显式 rev 钉死 tool_call_result downgrade
+    （同 test_alembic_net_pnl_metrics.py PRE_ITER_REV 先例）。"""
     db, env = head_db
-    subprocess.run(["alembic", "downgrade", "-1"], check=True, env=env, capture_output=True)
+    subprocess.run(["alembic", "downgrade", "7244c7b7185d"], check=True, env=env, capture_output=True)
     conn = sqlite3.connect(db)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
     assert "result" not in cols
