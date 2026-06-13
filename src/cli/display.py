@@ -772,6 +772,38 @@ class CycleRenderContext:
 # === R2-8a: Cycle log narrative render helpers (spec §4) ===
 
 
+def _walk_react_responses(messages: list) -> list[tuple[list, list]]:
+    """共享遍历（spec §5.3）：按序返回每个 ModelResponse 的 (ThinkingParts, ToolCallParts)。
+
+    format_cycle_output 渲染与 build_react_steps 落库**同消费此函数**，杜绝双遍历漂移
+    （pydantic-ai 升级改 parts 结构时，web 回放序与 CLI session log 交错序不会分裂）。
+    两个消费者仅在 thinking 聚合上分叉：CLI 取首个 part、web 拼接全部。
+    """
+    out: list[tuple[list, list]] = []
+    for msg in messages:
+        if isinstance(msg, ModelResponse):
+            thinking_parts = [p for p in msg.parts if isinstance(p, ThinkingPart)]
+            tool_calls = [p for p in msg.parts if isinstance(p, ToolCallPart)]
+            out.append((thinking_parts, tool_calls))
+    return out
+
+
+def _first_thinking_content(thinking_parts: list) -> str | None:
+    """渲染层 thinking SoT：每 Response 仅取首个 ThinkingPart content（与 smoke baseline 一致）。
+
+    >1 ThinkingPart → drift warning（spec §4.2.4 / R2-8c）；renderer 仍只取 parts[0]。
+    """
+    if not thinking_parts:
+        return None
+    if len(thinking_parts) > 1:
+        logger.warning(
+            "ModelResponse has %d ThinkingParts (smoke baseline = 1); "
+            "renderer takes only parts[0] — see spec §4.2.4 / R2-8c",
+            len(thinking_parts),
+        )
+    return thinking_parts[0].content
+
+
 def _extract_reasoning_per_response(messages: list) -> list[str | None]:
     """每个 ModelResponse 仅取首个 ThinkingPart 的 content（与 pre-impl smoke baseline 一致）。
 
@@ -781,26 +813,11 @@ def _extract_reasoning_per_response(messages: list) -> list[str | None]:
     - DB 写入层（_extract_thinking_text）保持全收集 — agent_cycles.reasoning 列写入
     spec §4.2.3 drift guard T-DG-1 兜底两 helper 在 smoke baseline 行为等价。
 
-    Placement note: spec §5.3 列在 app.py，本 plan 改放 display.py（消费者所在层）
-    避免 display→app 循环 import；helper 唯一使用方是 format_cycle_output。
+    Placement note: 重构后（webui-react-timeline §5.3）format_cycle_output 直接消费
+    _walk_react_responses + _first_thinking_content；本函数唯一调用方为 T-DG-1 drift guard
+    测试（与 app._extract_thinking_text 比对 smoke baseline 等价）。
     """
-    out: list[str | None] = []
-    for msg in messages:
-        if isinstance(msg, ModelResponse):
-            thinking_parts = [p for p in msg.parts if isinstance(p, ThinkingPart)]
-            if thinking_parts:
-                if len(thinking_parts) > 1:
-                    # spec §6.3 T-RE-6 + spec §4.2.4: smoke baseline 是每 Response 1 ThinkingPart;
-                    # 多 ThinkingPart per Response 出现 → drift signal (R2-8c / N12 议题接管)
-                    logger.warning(
-                        "ModelResponse has %d ThinkingParts (smoke baseline = 1); "
-                        "renderer takes only parts[0] — see spec §4.2.4 / R2-8c",
-                        len(thinking_parts),
-                    )
-                out.append(thinking_parts[0].content)
-            else:
-                out.append(None)
-    return out
+    return [_first_thinking_content(tp) for tp, _ in _walk_react_responses(messages)]
 
 
 _TRIGGER_LINE_PREFIX = "  Trigger    "
@@ -1457,14 +1474,9 @@ def format_cycle_output(ctx: CycleRenderContext) -> str:
                     retry_lookup[part.tool_call_id] = part
 
     # === ②③ 时序段 ===
-    response_msgs = [m for m in ctx.messages if isinstance(m, ModelResponse)]
-
-    # spec §4.2.3: 渲染层 thinking 提取 SoT 由 _extract_reasoning_per_response 集中
-    reasoning_per_response = _extract_reasoning_per_response(ctx.messages)
-
-    for i, mr in enumerate(response_msgs):
-        thinking = reasoning_per_response[i]
-        tool_calls = [p for p in mr.parts if isinstance(p, ToolCallPart)]
+    # spec §5.3: 与 build_react_steps 共消费 _walk_react_responses，防双遍历漂移
+    for thinking_parts, tool_calls in _walk_react_responses(ctx.messages):
+        thinking = _first_thinking_content(thinking_parts)
 
         if thinking:
             lines.append(_render_reasoning(thinking))
