@@ -3891,3 +3891,94 @@ def test_plain_tool_return_with_injection_renders_as_section():
     assert "Position: short 59.67 contracts" in out
     assert "=== NEW EVENTS TRIGGERED (1 fill) ===" in out
     assert "IMPORTANT EVENT: stop triggered" in out
+
+
+# === webui-cycle-react-timeline: build_react_steps ===
+
+def test_build_react_steps_interleave_order():
+    """多 response 交错：每步 thinking + 该步发起的 tool（保留发起顺序）。"""
+    from src.cli.display import build_react_steps
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["think A", "think B", "final think"],
+        tool_call_segments=[
+            [("get_market_data", {"sym": "BTC"}, "px 63000"),
+             ("get_position", {}, "flat")],
+            [("open_position", {"side": "long"}, "ok")],
+            [],   # 末轮纯决策
+        ],
+        final_text="(1) Stance: long",
+    )
+    steps = build_react_steps(msgs)
+    assert [s["thinking"] for s in steps] == ["think A", "think B", "final think"]
+    assert [t["tool_name"] for t in steps[0]["tools"]] == ["get_market_data", "get_position"]
+    assert [t["tool_name"] for t in steps[1]["tools"]] == ["open_position"]
+    assert steps[2]["tools"] == []            # 末轮无 tools，只留 thinking
+    # tool_call_id 非空（指针落点）
+    assert all(t["tool_call_id"] for s in steps for t in s["tools"])
+
+
+def test_build_react_steps_skips_empty_response():
+    """末轮纯 TextPart（无 thinking 无 tools）→ 跳过，不产生空元素（§4.1）。"""
+    from src.cli.display import build_react_steps
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    msgs = build_cycle_messages(
+        thinking_segments=["only think", None],
+        tool_call_segments=[[("get_position", {}, "flat")], []],
+        final_text="decision only",
+    )
+    steps = build_react_steps(msgs)
+    assert len(steps) == 1                     # 第二个 response 空 → 跳过
+    assert steps[0]["thinking"] == "only think"
+
+
+def test_build_react_steps_joins_multi_thinking_parts():
+    """单 response 多 ThinkingPart → '\\n\\n' 拼接（与 _extract_thinking_text 同口径）。"""
+    from pydantic_ai.messages import ModelResponse, ThinkingPart, TextPart
+    from src.cli.display import build_react_steps
+    msgs = [ModelResponse(parts=[
+        ThinkingPart(content="part1"),
+        ThinkingPart(content="part2"),
+        TextPart(content="done"),
+    ])]
+    steps = build_react_steps(msgs)
+    # 该 response 无 tools 但有 thinking → 不跳过
+    assert len(steps) == 1
+    assert steps[0]["thinking"] == "part1\n\npart2"
+
+
+def test_build_react_steps_empty_messages():
+    from src.cli.display import build_react_steps
+    assert build_react_steps([]) == []
+
+
+def test_react_steps_order_matches_render_order():
+    """一致性（§11）：build_react_steps 工具顺序 == format_cycle_output 渲染顺序。"""
+    from src.cli.display import build_react_steps, format_cycle_output, CycleRenderContext
+    from src.cli.session_state import SessionStats  # 既有 dataclass，无参可构造（test_display_cycle.py:558）
+    from tests.fixtures.cycle_fixtures import build_cycle_messages
+    from datetime import datetime, timezone
+    msgs = build_cycle_messages(
+        thinking_segments=["t1", "t2"],
+        tool_call_segments=[
+            [("get_market_data", {}, "px"), ("get_position", {}, "flat")],
+            [("open_position", {}, "ok")],
+        ],
+        final_text="(1) Stance: long",
+    )
+    steps = build_react_steps(msgs)
+    names_from_steps = [t["tool_name"] for s in steps for t in s["tools"]]
+    assert names_from_steps == ["get_market_data", "get_position", "open_position"]
+
+    ctx = CycleRenderContext(
+        cycle_id="c1", trigger_type="scheduled", trigger_context=None, state_snapshot=None,
+        messages=msgs, final_text="(1) Stance: long", cycle_tokens=100,
+        stats=SessionStats(), cache_hit_rate=50.0,
+        cycle_started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        cycle_ended_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        forensic_reason=None,
+    )
+    text = format_cycle_output(ctx)
+    # 渲染文本中工具名出现顺序须与骨架一致（锁双遍历不漂移）
+    i0, i1, i2 = text.index("get_market_data"), text.index("get_position"), text.index("open_position")
+    assert i0 < i1 < i2

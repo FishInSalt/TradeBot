@@ -804,6 +804,29 @@ def _first_thinking_content(thinking_parts: list) -> str | None:
     return thinking_parts[0].content
 
 
+def build_react_steps(messages: list) -> list[dict]:
+    """从 cycle 收尾的 result.new_messages() 重建 ReAct 骨架（spec §4.1）。
+
+    与 format_cycle_output 共消费 _walk_react_responses（防双遍历漂移，§5.3）；仅 thinking
+    聚合分叉：此处拼接该 response 全部 ThinkingPart（CLI 取首个）。
+
+    返回按 ModelResponse 顺序的数组，每元素:
+        {"thinking": str|None, "tools": [{"tool_call_id", "tool_name"}, ...]}
+    - thinking: 该 response 全部 ThinkingPart content '\\n\\n' 拼接（无 → None），与
+      app._extract_thinking_text 同口径。
+    - tools: 该 response ToolCallParts，保留发起顺序；带 tool_name（§10 orphan 兜底所需）。
+    - 既无 thinking 又无 tools 的空 response 跳过（末轮纯决策 TextPart 不进骨架；decision 列单源）。
+    """
+    steps: list[dict] = []
+    for thinking_parts, tool_calls in _walk_react_responses(messages):
+        thinking = "\n\n".join(p.content for p in thinking_parts) if thinking_parts else None
+        tools = [{"tool_call_id": p.tool_call_id, "tool_name": p.tool_name} for p in tool_calls]
+        if thinking is None and not tools:
+            continue
+        steps.append({"thinking": thinking, "tools": tools})
+    return steps
+
+
 def _extract_reasoning_per_response(messages: list) -> list[str | None]:
     """每个 ModelResponse 仅取首个 ThinkingPart 的 content（与 pre-impl smoke baseline 一致）。
 
