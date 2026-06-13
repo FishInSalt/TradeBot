@@ -169,6 +169,17 @@ export interface components {
             llm_call_ms: number | null;
             /** Model Id */
             model_id: string | null;
+            /** React Steps */
+            react_steps?: unknown[] | {
+                [key: string]: unknown;
+            } | string | null;
+            /** User Prompt Snapshot */
+            user_prompt_snapshot?: string | null;
+            /**
+             * Execution Status
+             * @default ok
+             */
+            execution_status: string;
         };
         /** CycleRow */
         CycleRow: {
@@ -346,6 +357,8 @@ export interface components {
             result?: {
                 [key: string]: unknown;
             } | unknown[] | string | null;
+            /** Tool Call Id */
+            tool_call_id?: string | null;
         };
         /** TradeRow */
         TradeRow: {
