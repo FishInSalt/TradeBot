@@ -105,6 +105,7 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
         token = _biz_error_type.set(None)
         status, error_type = "ok", None
         skip_record = False
+        result = None   # try 前初始化：异常路径不绑定，finally 序列化需可达
         try:
             result = await handler(args)
         except _CONTROL_FLOW_EXCEPTIONS:
@@ -144,6 +145,14 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                         # JSON 不完整，是预期而非 bug。需要严格 JSON 一致性的下游应在 4000 边界另存 partial=true 标记。
                         args_serialized = args_serialized[:4000]
 
+                    # result 捕获（spec §捕获语义）：str 直存，30000 char cap + 截断标记。
+                    # 不进 agent context、不耗 token；cap 仅防病态巨行。error 路径 result=None。
+                    result_serialized = None
+                    if result is not None:
+                        result_serialized = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                        if len(result_serialized) > 30000:
+                            result_serialized = result_serialized[:30000] + "\n…[truncated]"
+
                     insert_start = time.monotonic()
                     async with get_session(ctx.deps.db_engine) as session:
                         session.add(ToolCall(
@@ -154,6 +163,7 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                             duration_ms=duration_ms,
                             error_type=error_type,
                             args=args_serialized,            # ← 新增 (Iter 3 §G2)
+                            result=result_serialized,        # ← 新增：工具返回值（观察期）
                         ))
                         await session.commit()
                     insert_ms = (time.monotonic() - insert_start) * 1000
