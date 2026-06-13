@@ -57,7 +57,8 @@ class ToolCallRow(BaseModel):
     status: str
     duration_ms: int
     error_type: str | None
-    args: dict | str | None   # 解析后的 JSON；截断 outlier 行解析失败时回退原始 str
+    args: dict | list | str | None   # 解析后的 JSON（_loads 可返回 dict/list）；截断 outlier 行解析失败时回退原始 str
+    result: dict | list | str | None = None  # 预留：DB tool_calls 当前无 result 列，恒为 None；后端持久化工具返回值后由 queries 填充
 
 
 class CycleDetail(BaseModel):
@@ -67,8 +68,8 @@ class CycleDetail(BaseModel):
     created_at: UtcDatetime
     reasoning: str | None
     decision: str | None
-    trigger_context: dict | str | None      # str = _loads 对损坏/截断行的原始回退（与 args 契约对齐）
-    state_snapshot: dict | str | None
+    trigger_context: dict | list | str | None   # _loads 可返回 list（live capture 多触发堆，如 [{"type":"scheduled_tick"}]）/dict；str = 损坏行回退
+    state_snapshot: dict | list | str | None     # 同上：_loads 可返回任意 JSON 形态，统一放宽防整类 500
     injected_events: dict | list | str | None
     tool_calls: list[ToolCallRow]
     tokens_consumed: int

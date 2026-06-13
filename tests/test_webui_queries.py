@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from datetime import datetime, timezone, timedelta
 
@@ -16,12 +18,17 @@ async def _seed_session(engine, sid="s1", interval=15, last_active=None, status=
 
 
 async def _add_cycle(engine, sid="s1", cycle_id="aaaa", triggered_by="scheduled",
-                     decision="line1\nline2", created_at=None, **kw):
+                     decision="line1\nline2", created_at=None, trigger_context=None, **kw):
+    # live capture 把 trigger_context 落库为 JSON list（多触发堆）——稳态主流形态，
+    # 默认即用 list，避免 fixture 恒 NULL 漏掉 list→CycleDetail 的真实路径（PR#75 500 教训）。
+    if trigger_context is None:
+        trigger_context = [{"type": "scheduled_tick"}]
     async with get_session(engine) as s:
         c = AgentCycle(session_id=sid, cycle_id=cycle_id, triggered_by=triggered_by,
                        decision=decision, tokens_consumed=kw.get("tokens", 100),
                        wall_time_ms=kw.get("wall", 5000), execution_status="ok",
                        created_at=created_at or datetime.now(UTC),
+                       trigger_context=json.dumps(trigger_context),
                        state_snapshot=kw.get("snapshot"))
         s.add(c)
         await s.commit()
@@ -83,6 +90,34 @@ async def test_get_cycle_detail_missing_returns_none(engine):
     await _seed_session(engine)
     from src.webui.queries import get_cycle_detail
     assert await get_cycle_detail(engine, 99999) is None
+
+
+@pytest.mark.asyncio
+async def test_get_cycle_detail_accepts_list_trigger_context(engine):
+    """live capture 把 trigger_context 写成 JSON list（多触发堆）；CycleDetail 须接受 list 不 500（PR#75 回归）。"""
+    await _seed_session(engine)
+    pk = await _add_cycle(engine, cycle_id="lc1",
+                          trigger_context=[{"type": "scheduled_tick"},
+                                           {"type": "alert", "alert_id": "a1"}])
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert isinstance(d.trigger_context, list)
+    assert d.trigger_context[0]["type"] == "scheduled_tick"
+    assert d.trigger_context[1]["alert_id"] == "a1"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_result_is_reserved_none(engine):
+    """result 是预留字段：DB tool_calls 无 result 列，产出的工具行 result 恒 None（seam，待后端补全）。"""
+    await _seed_session(engine)
+    pk = await _add_cycle(engine, cycle_id="tr1")
+    async with get_session(engine) as s:
+        s.add(ToolCall(session_id="s1", cycle_id="tr1", tool_name="get_position",
+                       status="ok", duration_ms=5, args=None))
+        await s.commit()
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert d.tool_calls[0].result is None
 
 
 @pytest.mark.asyncio

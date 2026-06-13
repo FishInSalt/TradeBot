@@ -2,6 +2,7 @@ import pytest
 
 pytest.importorskip("fastapi")  # fastapi 仅在 [webui] extra；缺失时跳过本模块而非收集阶段 ImportError
 
+import json
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -27,6 +28,7 @@ async def seeded(engine):
                            status="active", scheduler_interval_min=15, last_active_at=la))
         s.add(AgentCycle(session_id="s1", cycle_id="c1", triggered_by="scheduled",
                          decision="d1", tokens_consumed=100, execution_status="ok",
+                         trigger_context=json.dumps([{"type": "scheduled_tick"}]),  # 稳态 list 形态
                          state_snapshot='{"balance":{"total_usdt":10000.0}}', created_at=la))
         await s.commit()
     return engine
@@ -48,7 +50,10 @@ async def test_api_endpoints(seeded):
     cyc = c.get("/api/sessions/s1/cycles").json()
     assert cyc[0]["cycle_label"] == "c1"
     pk = cyc[0]["id"]
-    assert c.get(f"/api/cycles/{pk}").json()["decision"] == "d1"
+    cd = c.get(f"/api/cycles/{pk}")
+    assert cd.status_code == 200                                    # list trigger_context 不再 500（PR#75 回归）
+    assert cd.json()["decision"] == "d1"
+    assert cd.json()["trigger_context"] == [{"type": "scheduled_tick"}]
     assert c.get("/api/sessions/s1/performance").json()["initial_balance"] == 10000.0
     live = c.get("/api/sessions/s1/live").json()
     assert live["status"] == "active"
