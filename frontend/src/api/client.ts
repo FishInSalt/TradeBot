@@ -40,16 +40,16 @@ export interface CyclesQuery {
 
 export const api = {
   listSessions: () => get<SessionSummary[]>("/sessions"),
-  getSession: (sid: string) => get<SessionDetail>(`/sessions/${sid}`),
+  getSession: (sid: string) => get<SessionDetail>(`/sessions/${encodeURIComponent(sid)}`),
   getCycles: (sid: string, q: CyclesQuery = {}) => {
     const p = new URLSearchParams();
     if (q.limit != null) p.set("limit", String(q.limit));
     if (q.afterId != null) p.set("after_id", String(q.afterId));
     if (q.beforeId != null) p.set("before_id", String(q.beforeId));
     const qs = p.toString();
-    return get<CycleRow[]>(`/sessions/${sid}/cycles${qs ? `?${qs}` : ""}`);
+    return get<CycleRow[]>(`/sessions/${encodeURIComponent(sid)}/cycles${qs ? `?${qs}` : ""}`);
   },
   getCycle: (pk: number) => get<CycleDetail>(`/cycles/${pk}`),
-  getPerformance: (sid: string) => get<Performance>(`/sessions/${sid}/performance`),
-  getLive: (sid: string) => get<LiveStatus>(`/sessions/${sid}/live`),
+  getPerformance: (sid: string) => get<Performance>(`/sessions/${encodeURIComponent(sid)}/performance`),
+  getLive: (sid: string) => get<LiveStatus>(`/sessions/${encodeURIComponent(sid)}/live`),
 };

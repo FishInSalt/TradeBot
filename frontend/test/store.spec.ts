@@ -117,4 +117,17 @@ describe("sessions store", () => {
     await s.selectSession("s1");
     expect(s.pollFailCount).toBe(0);
   });
+
+  it("expandCycle await 期间被切换会话时丢弃陈旧详情", async () => {
+    let resolveCycle!: (v: unknown) => void;
+    const pendingCycle = new Promise((r) => { resolveCycle = r; });
+    vi.spyOn(api, "getCycle").mockReturnValue(pendingCycle as any);
+    const s = useSessionsStore();
+    s.currentId = "A";
+    const p = s.expandCycle(7); // sid=A，挂起在 getCycle(7)
+    s.currentId = "B"; // await 期间切走
+    resolveCycle({ id: 7 });
+    await p;
+    expect(s.cycleDetails.has(7)).toBe(false); // 陈旧详情未写入
+  });
 });

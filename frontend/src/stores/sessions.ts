@@ -118,10 +118,13 @@ export const useSessionsStore = defineStore("sessions", {
       }
       this.expandedCycleId = id;
       if (!this.cycleDetails.has(id)) {
+        const sid = this.currentId; // 与 selectSession/pollTick 一致：await 后校验会话身份
         try {
           const d = await api.getCycle(id);
+          if (this.currentId !== sid) return; // 已切走：勿写陈旧详情
           this.cycleDetails.set(id, d);
         } catch (e) {
+          if (this.currentId !== sid) return; // 已切走：勿用旧会话错误覆盖
           this.error = e instanceof ApiError ? e.message : String(e);
         }
       }
