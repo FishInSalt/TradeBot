@@ -107,17 +107,32 @@ async def test_get_cycle_detail_accepts_list_trigger_context(engine):
 
 
 @pytest.mark.asyncio
-async def test_tool_call_result_is_reserved_none(engine):
-    """result 是预留字段：DB tool_calls 无 result 列，产出的工具行 result 恒 None（seam，待后端补全）。"""
+async def test_tool_call_result_none_when_not_captured(engine):
+    """未捕获 result 的行（NULL）→ ToolCallRow.result is None。"""
     await _seed_session(engine)
     pk = await _add_cycle(engine, cycle_id="tr1")
     async with get_session(engine) as s:
         s.add(ToolCall(session_id="s1", cycle_id="tr1", tool_name="get_position",
-                       status="ok", duration_ms=5, args=None))
+                       status="ok", duration_ms=5, args=None, result=None))
         await s.commit()
     from src.webui.queries import get_cycle_detail
     d = await get_cycle_detail(engine, pk)
     assert d.tool_calls[0].result is None
+
+
+@pytest.mark.asyncio
+async def test_tool_call_result_passthrough_raw_str(engine):
+    """捕获的 result（文本表格，非 JSON）→ 直传 raw str（不走 _loads）。"""
+    await _seed_session(engine)
+    pk = await _add_cycle(engine, cycle_id="tr2")
+    async with get_session(engine) as s:
+        s.add(ToolCall(session_id="s1", cycle_id="tr2", tool_name="get_market_data",
+                       status="ok", duration_ms=8, args=None,
+                       result="=== Ticker ===\nlast 63000"))
+        await s.commit()
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert d.tool_calls[0].result == "=== Ticker ===\nlast 63000"   # raw str，原样
 
 
 @pytest.mark.asyncio

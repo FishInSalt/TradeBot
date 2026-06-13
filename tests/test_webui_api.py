@@ -69,3 +69,25 @@ async def test_api_endpoints(seeded):
     # limit 越界 → FastAPI 422（堵 limit=-1 → SQLite LIMIT -1 拉全量）
     assert c.get("/api/sessions/s1/cycles?limit=-1").status_code == 422
     assert c.get("/api/sessions/s1/cycles?limit=500").status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_api_cycle_detail_includes_tool_result(engine):
+    from src.storage.models import ToolCall as TC
+    la = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SessionModel(id="s1", name="n1", symbol="BTC/USDT:USDT", initial_balance=10000.0,
+                           status="active", scheduler_interval_min=15, last_active_at=la))
+        s.add(AgentCycle(session_id="s1", cycle_id="c1", triggered_by="scheduled",
+                         decision="d1", tokens_consumed=100, execution_status="ok",
+                         trigger_context=json.dumps([{"type": "scheduled_tick"}]),
+                         state_snapshot='{"balance":{"total_usdt":10000.0}}', created_at=la))
+        s.add(TC(session_id="s1", cycle_id="c1", tool_name="get_market_data",
+                 status="ok", duration_ms=8, args=None, result="=== Ticker ===\nlast 63000"))
+        await s.commit()
+    c = _client(engine)
+    cyc = c.get("/api/sessions/s1/cycles").json()
+    cd = c.get(f"/api/cycles/{cyc[0]['id']}")
+    assert cd.status_code == 200
+    tcs = cd.json()["tool_calls"]
+    assert tcs[0]["result"] == "=== Ticker ===\nlast 63000"

@@ -82,7 +82,8 @@ async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleD
         injected_events=_loads(c.injected_events),
         tool_calls=[
             schemas.ToolCallRow(tool_name=t.tool_name, status=t.status, duration_ms=t.duration_ms,
-                                error_type=t.error_type, args=_loads(t.args)) for t in tcs
+                                error_type=t.error_type, args=_loads(t.args),
+                                result=t.result) for t in tcs    # raw str 直传，不走 _loads（截断行永非合法 JSON）
         ],
         tokens_consumed=c.tokens_consumed, input_tokens=c.input_tokens, output_tokens=c.output_tokens,
         cache_hit_rate=c.cache_hit_rate, wall_time_ms=c.wall_time_ms, llm_call_ms=c.llm_call_ms,
