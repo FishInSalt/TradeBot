@@ -9,8 +9,13 @@ function detail(overrides = {}) {
     trigger_context: [{ type: "scheduled_tick" }],
     state_snapshot: { balance: { total_usdt: 10000 } },
     injected_events: null,
+    react_steps: [
+      { thinking: "评估趋势", tools: [{ tool_call_id: "call_1", tool_name: "get_position" }] },
+    ],
+    user_prompt_snapshot: "Woke by scheduled tick at 10:00",
+    execution_status: "ok",
     tool_calls: [
-      { tool_name: "get_position", status: "ok", duration_ms: 12, error_type: null, args: { symbol: "BTC" }, result: null },
+      { tool_name: "get_position", status: "ok", duration_ms: 12, error_type: null, args: { symbol: "BTC" }, result: "flat", tool_call_id: "call_1" },
     ],
     tokens_consumed: 9000, input_tokens: 8000, output_tokens: 1000, cache_hit_rate: 92.76,
     wall_time_ms: 5000, llm_call_ms: 4000, model_id: "claude",
@@ -19,38 +24,41 @@ function detail(overrides = {}) {
 }
 
 describe("CycleDetailPanel", () => {
-  it("渲染推理与决策全文", () => {
+  it("渲染 ReAct 时间线（thinking + 工具名）与决策", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
-    expect(w.text()).toContain("thinking text");
+    expect(w.text()).toContain("评估趋势");
+    expect(w.text()).toContain("get_position");
     expect(w.text()).toContain("(1) Stance: hold");
   });
 
-  it("injected_events 为 null 时不渲染该分区", () => {
-    const w = mount(CycleDetailPanel, { props: { detail: detail({ injected_events: null }) as any } });
-    expect(w.text()).not.toContain("中途注入事件");
+  it("渲染唤醒上下文原文（user_prompt_snapshot）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    expect(w.text()).toContain("Woke by scheduled tick at 10:00");
   });
 
-  it("injected_events 非空时渲染该分区", () => {
-    const w = mount(CycleDetailPanel, { props: { detail: detail({ injected_events: [{ kind: "alert" }] }) as any } });
+  it("user_prompt_snapshot 为 null（legacy）时不渲染 Context 块", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ user_prompt_snapshot: null }) as any } });
+    expect(w.text()).not.toContain("唤醒上下文");
+  });
+
+  it("react_steps 为 null（legacy/forensic）→ 回退扁平视图 + 说明", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null }) as any } });
+    expect(w.text()).toContain("无交错时间线");
+    expect(w.text()).toContain("thinking text");   // 回退渲 reasoning 整块
+  });
+
+  it("回退分支：react_steps=null 但 injected_events 非空时仍渲染注入事件（防丢失）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null, injected_events: [{ event: { type: "fill" } }] }) as any } });
     expect(w.text()).toContain("中途注入事件");
   });
 
-  it("展开工具表后显示 tool_name 与 duration", async () => {
+  it("chips 含 llm 与 execution_status", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
-    await w.find(".tools-toggle").trigger("click");
-    expect(w.text()).toContain("get_position");
-    expect(w.text()).toContain("12");
-  });
-
-  it("展开后工具 result 为 null 显示诚实空态文案", async () => {
-    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
-    await w.find(".tools-toggle").trigger("click");
-    expect(w.text()).toContain("结果未捕获");
+    expect(w.text()).toContain("llm");
+    expect(w.text()).toContain("ok");
   });
 
   it("cache 命中率按 0-100 口径直接显示，不再 ×100", () => {
-    // 后端 cache_hit_rate 是 0-100 百分数（见 display.py CycleContext docstring）；
-    // 前端曾误当 0-1 分数再 ×100，92.76 被显示成 9276%（实测 sim #20 cycle 1）。
     const w = mount(CycleDetailPanel, { props: { detail: detail({ cache_hit_rate: 92.76 }) as any } });
     expect(w.text()).toContain("cache 93%");
     expect(w.text()).not.toContain("9276");
