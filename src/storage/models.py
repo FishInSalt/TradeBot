@@ -216,3 +216,5 @@ class ToolCall(Base):
     error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     args: Mapped[str | None] = mapped_column(Text, nullable=True)                  # Iter 3: §G2 — JSON dict of tool args, 4000 char cap, reasoning key stripped
+    # 工具返回值（观察期可观测性）；str 文本（非 JSON），30000 char cap + 截断标记，见 tool_call_recorder
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
