@@ -47,6 +47,7 @@ async def _record_and_get(engine, deps, handler):
     recorder = ToolCallRecorder()
     call = MagicMock()
     call.tool_name = "test_tool"
+    call.tool_call_id = None
     call.args_as_dict = MagicMock(return_value={})
     ctx = MagicMock()
     ctx.deps = deps
