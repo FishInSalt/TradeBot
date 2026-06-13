@@ -123,3 +123,23 @@ async def test_upgrade_idempotent_after_downgrade(head_db):
 
     views = _query_views(db)
     assert EXPECTED_VIEWS.issubset(views), f"views not restored: {EXPECTED_VIEWS - views}"
+
+
+async def test_head_has_tool_calls_result(head_db):
+    """init_db Path 3 后 tool_calls 含 result 列。"""
+    db, _ = head_db
+    conn = sqlite3.connect(db)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
+    assert "result" in cols
+
+
+async def test_downgrade_drops_result_keeps_views(head_db):
+    """downgrade -1（head → 7244c7b7185d）删 result 列、且 3 个 view 仍在
+    （downgrade 的 DROP VIEW → drop_column → 重建 view 舞蹈正确性）。"""
+    db, env = head_db
+    subprocess.run(["alembic", "downgrade", "-1"], check=True, env=env, capture_output=True)
+    conn = sqlite3.connect(db)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_calls)")}
+    assert "result" not in cols
+    views = _query_views(db)
+    assert EXPECTED_VIEWS.issubset(views), f"views not restored by downgrade: {EXPECTED_VIEWS - views}"

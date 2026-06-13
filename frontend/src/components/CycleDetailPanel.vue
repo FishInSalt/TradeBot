@@ -33,7 +33,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
   {
     title: "结果",
     key: "result",
-    render: (r) => (r.result == null ? h("span", { class: "seam" }, "结果未持久化（待后端补全）") : h(JsonBlock, { value: r.result })),
+    render: (r) => (r.result == null ? h("span", { class: "seam" }, "结果未捕获") : h(JsonBlock, { value: r.result })),
   },
 ];
 </script>

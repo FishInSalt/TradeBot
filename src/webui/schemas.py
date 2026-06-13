@@ -58,7 +58,7 @@ class ToolCallRow(BaseModel):
     duration_ms: int
     error_type: str | None
     args: dict | list | str | None   # 解析后的 JSON（_loads 可返回 dict/list）；截断 outlier 行解析失败时回退原始 str
-    result: dict | list | str | None = None  # 预留：DB tool_calls 当前无 result 列，恒为 None；后端持久化工具返回值后由 queries 填充
+    result: dict | list | str | None = None  # 工具返回值原始文本（非 JSON，queries 直传不走 _loads）；未捕获时为 None
 
 
 class CycleDetail(BaseModel):
