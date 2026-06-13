@@ -1,6 +1,6 @@
 import type { useSessionsStore } from "@/stores/sessions";
 
-type Store = Pick<ReturnType<typeof useSessionsStore>, "currentSession" | "pollTick">;
+type Store = Pick<ReturnType<typeof useSessionsStore>, "live" | "pollTick">;
 
 /**
  * 5s active-only 增量轮询。document.hidden（标签页不可见）暂停、可见恢复——省后端读。
@@ -11,7 +11,9 @@ export function usePolling(store: Store, intervalMs = 5000) {
 
   const tick = () => {
     if (typeof document !== "undefined" && document.hidden) return;
-    if (store.currentSession?.status !== "active") return;
+    // 读 live.status（每 tick 由 pollTick 刷新），而非由 loadSessions 一次性填充、此后不刷新的
+    // 列表行状态——否则会话运行中 active→paused 后门控仍读到 active，轮询永不自停。
+    if (store.live?.status !== "active") return;
     void store.pollTick();
   };
 

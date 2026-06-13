@@ -75,4 +75,46 @@ describe("sessions store", () => {
     s.currentId = "s2";
     expect(s.currentSession?.status).toBe("paused");
   });
+
+  it("selectSession await 期间被切换抢占时丢弃旧会话结果（防串档）", async () => {
+    let resolveA!: (v: unknown) => void;
+    const pendingDetail = new Promise((r) => { resolveA = r; });
+    vi.spyOn(api, "getSession").mockReturnValue(pendingDetail as any);
+    vi.spyOn(api, "getLive").mockResolvedValue({ status: "active" } as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    const p = s.selectSession("A"); // currentId=A，挂起在 getSession(A)
+    s.currentId = "B"; // 模拟用户切到别的会话
+    resolveA({ id: "A" });
+    await p;
+    expect(s.detail).toBeNull(); // A 的结果未写入（已切走）
+  });
+
+  it("pollTick await 期间被切换抢占时丢弃旧会话数据", async () => {
+    let resolveLive!: (v: unknown) => void;
+    const pendingLive = new Promise((r) => { resolveLive = r; });
+    vi.spyOn(api, "getLive").mockReturnValue(pendingLive as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({ initial_balance: 999 } as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    s.currentId = "A";
+    const p = s.pollTick(); // sid=A，挂起在 getLive(A)
+    s.currentId = "B"; // await 期间切走
+    resolveLive({ status: "paused" });
+    await p;
+    expect(s.live).toBeNull(); // 旧会话 live/performance 未写入
+    expect(s.performance).toBeNull();
+  });
+
+  it("selectSession 重置 pollFailCount", async () => {
+    vi.spyOn(api, "getSession").mockResolvedValue({ id: "s1" } as any);
+    vi.spyOn(api, "getLive").mockResolvedValue({ status: "active" } as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    s.pollFailCount = 2;
+    await s.selectSession("s1");
+    expect(s.pollFailCount).toBe(0);
+  });
 });

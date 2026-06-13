@@ -57,6 +57,7 @@ export const useSessionsStore = defineStore("sessions", {
       this.currentId = id;
       this.expandedCycleId = null;
       this.cycleDetails = new Map();
+      this.pollFailCount = 0; // 切换会话清零失败计数，避免旧会话计数误触发新会话"轮询中断"角标
       this.loading = true;
       this.error = null;
       try {
@@ -66,14 +67,16 @@ export const useSessionsStore = defineStore("sessions", {
           api.getPerformance(id),
           api.getCycles(id, { limit: 50 }),
         ]);
+        if (this.currentId !== id) return; // await 期间已切到别的会话：丢弃本次结果，防串档
         this.detail = detail;
         this.live = live;
         this.performance = performance;
         this.cycles = cycles; // 后端已 id DESC
       } catch (e) {
+        if (this.currentId !== id) return; // 已切走：勿用旧会话的错误覆盖新会话
         this.error = e instanceof ApiError ? e.message : String(e);
       } finally {
-        this.loading = false;
+        if (this.currentId === id) this.loading = false; // 仅当仍是本会话时收 loading
       }
     },
 
@@ -91,15 +94,18 @@ export const useSessionsStore = defineStore("sessions", {
           api.getLive(sid),
           api.getPerformance(sid),
         ]);
+        if (this.currentId !== sid) return; // await 期间切走：丢弃旧会话数据，防串档
         this.live = live;
         this.performance = performance;
         const maxId = this.cycles.length
           ? Math.max(...this.cycles.map((c) => c.id))
           : undefined;
         const fresh = await api.getCycles(sid, maxId != null ? { afterId: maxId } : {});
+        if (this.currentId !== sid) return; // 同上：mergeCycles 前再校验会话身份
         this.mergeCycles(fresh);
         this.pollFailCount = 0;
       } catch {
+        if (this.currentId !== sid) return; // 已切走：勿给新会话累加旧会话的失败数
         // 瞬态错误静默：不炸 UI，仅累加，由状态卡角标在 ≥3 次时提示
         this.pollFailCount += 1;
       }

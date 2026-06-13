@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe("usePolling", () => {
   it("active 会话每 5s 调一次 pollTick", () => {
-    const store = { currentSession: { status: "active" }, pollTick: vi.fn() };
+    const store = { live: { status: "active" }, pollTick: vi.fn() };
     const p = usePolling(store as any);
     p.start();
     vi.advanceTimersByTime(15000);
@@ -25,7 +25,7 @@ describe("usePolling", () => {
   });
 
   it("paused 会话不调 pollTick", () => {
-    const store = { currentSession: { status: "paused" }, pollTick: vi.fn() };
+    const store = { live: { status: "paused" }, pollTick: vi.fn() };
     const p = usePolling(store as any);
     p.start();
     vi.advanceTimersByTime(15000);
@@ -35,14 +35,14 @@ describe("usePolling", () => {
 
   it("document.hidden 时 tick 不调 pollTick", () => {
     setHidden(true);
-    const store = { currentSession: { status: "active" }, pollTick: vi.fn() };
+    const store = { live: { status: "active" }, pollTick: vi.fn() };
     const p = usePolling(store as any);
     p.tick();
     expect(store.pollTick).not.toHaveBeenCalled();
   });
 
   it("stop 后清理定时器", () => {
-    const store = { currentSession: { status: "active" }, pollTick: vi.fn() };
+    const store = { live: { status: "active" }, pollTick: vi.fn() };
     const p = usePolling(store as any);
     p.start();
     p.stop();
@@ -50,8 +50,8 @@ describe("usePolling", () => {
     expect(store.pollTick).not.toHaveBeenCalled();
   });
 
-  it("无 currentSession 时 tick 不调 pollTick", () => {
-    const store = { currentSession: undefined, pollTick: vi.fn() };
+  it("无 live 时 tick 不调 pollTick", () => {
+    const store = { live: null, pollTick: vi.fn() };
     const p = usePolling(store as any);
     p.tick();
     expect(store.pollTick).not.toHaveBeenCalled();
