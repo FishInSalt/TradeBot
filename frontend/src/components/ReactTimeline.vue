@@ -56,6 +56,23 @@ const injectionBuckets = computed(() => {
 
 // 每张工具卡的展开态：key = tool_call_id（无 id 用合成 key）
 const openCards = ref<Set<string>>(new Set());
+
+// 思考块折叠态（议题 2）
+const THINKING_FOLD_CHARS = 600;   // 超此字符数默认折叠
+const THINKING_HEAD_CHARS = 360;   // 折叠态预览长度（≈前 6 行）
+const openThinking = ref<Set<number>>(new Set());
+function thinkingFolds(text: string) {
+  return text.length > THINKING_FOLD_CHARS;
+}
+function thinkingShown(text: string, si: number) {
+  if (!thinkingFolds(text) || openThinking.value.has(si)) return text;
+  return text.slice(0, THINKING_HEAD_CHARS) + "…";
+}
+function toggleThinking(si: number) {
+  const s = new Set(openThinking.value);
+  s.has(si) ? s.delete(si) : s.add(si);
+  openThinking.value = s;
+}
 function cardKey(t: ReactTool, si: number, ti: number) {
   return t.tool_call_id ?? `orphan-${si}-${ti}`;
 }
@@ -80,10 +97,15 @@ function statusType(s: string) {
 <template>
   <div class="react-timeline">
     <div v-for="(step, si) in steps" :key="si" class="react-step">
-      <!-- 思考块 -->
+      <!-- 思考块（超长默认折叠，议题 2） -->
       <div v-if="step.thinking" class="thinking">
         <span class="step-icon">🧠</span>
-        <pre class="thinking-text">{{ step.thinking }}</pre>
+        <div class="thinking-body">
+          <pre class="thinking-text">{{ thinkingShown(step.thinking, si) }}</pre>
+          <span v-if="thinkingFolds(step.thinking)" class="thinking-toggle clickable" @click="toggleThinking(si)">
+            {{ openThinking.has(si) ? "收起 ▴" : "展开全文 ▾" }}
+          </span>
+        </div>
       </div>
 
       <!-- 工具卡 + 锚定注入卡 -->
@@ -148,4 +170,6 @@ function statusType(s: string) {
 .orphan { font-style: italic; }
 .seam { font-size: 12px; opacity: 0.5; font-style: italic; }
 .clickable { cursor: pointer; }
+.thinking-body { flex: 1; }
+.thinking-toggle { font-size: 11px; opacity: 0.6; }
 </style>
