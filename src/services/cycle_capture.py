@@ -216,10 +216,13 @@ async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
         logger.warning("state_snapshot capture: cycle_id=%s %s", cycle_id, msg)
 
     # 6. volatility alert (singleton) — get_alert_params 返回 (threshold_pct, window_minutes)|None
+    # 形状守卫：仅当返回是 2 元 tuple/list 才解构；非契约返回 fail-safe 成 None，
+    # 守住本函数「永不返非 json-serializable 值」契约（与 async 段 await-raise 自保等价）。
     try:
         vol = deps.exchange.get_alert_params()
         snapshot["volatility_alert"] = (
-            {"threshold_pct": vol[0], "window_minutes": vol[1]} if vol else None
+            {"threshold_pct": vol[0], "window_minutes": vol[1]}
+            if isinstance(vol, (tuple, list)) and len(vol) == 2 else None
         )
     except Exception as e:
         msg = f"volatility_alert_read_failed: {type(e).__name__}"
