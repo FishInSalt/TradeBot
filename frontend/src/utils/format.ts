@@ -23,3 +23,36 @@ export function fmtArgs(args: unknown): string {
     .map(([k, v]) => `${k}=${typeof v === "object" && v !== null ? JSON.stringify(v) : v}`)
     .join(", ");
 }
+
+/** 工具头函数式参数截断阈值（单一定义，spec §6）。 */
+export const HEAD_ARGS_MAX = 60;
+
+/** 工具头 `name(参数)` 用。空/无参 → text=''（头渲 name()）；超阈值截断 + clipped=true。 */
+export function clipArgs(args: unknown): { text: string; clipped: boolean } {
+  if (args == null) return { text: "", clipped: false };
+  let s: string;
+  if (typeof args !== "object" || Array.isArray(args)) {
+    s = JSON.stringify(args);
+  } else {
+    const entries = Object.entries(args as Record<string, unknown>);
+    if (!entries.length) return { text: "", clipped: false };
+    s = entries
+      .map(([k, v]) => `${k}=${typeof v === "object" && v !== null ? JSON.stringify(v) : v}`)
+      .join(", ");
+  }
+  if (s.length > HEAD_ARGS_MAX) return { text: s.slice(0, HEAD_ARGS_MAX) + "…", clipped: true };
+  return { text: s, clipped: false };
+}
+
+/** 千分位数值，null → —（spec §8）。 */
+export function fmtNum(n: number | null | undefined, maxFrac = 2): string {
+  if (n == null) return "—";
+  return n.toLocaleString("en-US", { maximumFractionDigits: maxFrac });
+}
+
+/** 带正负号数值（U+2212 − 匹配 spec 示例），null → —。 */
+export function fmtSigned(n: number | null | undefined, maxFrac = 2): string {
+  if (n == null) return "—";
+  const s = Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: maxFrac });
+  return n < 0 ? `−${s}` : `+${s}`;
+}

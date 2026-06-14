@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmtTokens, fmtDuration, fmtArgs } from "@/utils/format";
+import { fmtTokens, fmtDuration, fmtArgs, clipArgs, fmtNum, fmtSigned, HEAD_ARGS_MAX } from "@/utils/format";
 
 describe("fmtTokens", () => {
   it("千分位", () => {
@@ -43,4 +43,37 @@ describe("fmtArgs", () => {
     expect(fmtArgs("broken")).toBe('"broken"');
     expect(fmtArgs([1, 2])).toBe("[1,2]");
   });
+});
+
+describe("clipArgs", () => {
+  it("空/无参 → text='' clipped=false（头渲 name()）", () => {
+    expect(clipArgs(null)).toEqual({ text: "", clipped: false });
+    expect(clipArgs({})).toEqual({ text: "", clipped: false });
+  });
+  it("短参 → 原串 clipped=false", () => {
+    expect(clipArgs({ timeframe: "1h", candle_count: 30 })).toEqual({
+      text: "timeframe=1h, candle_count=30", clipped: false,
+    });
+  });
+  it("长参 → 截断到 HEAD_ARGS_MAX + … clipped=true", () => {
+    const r = clipArgs({ content: "x".repeat(100) });
+    expect(r.clipped).toBe(true);
+    expect(r.text.endsWith("…")).toBe(true);
+    expect(r.text.length).toBe(HEAD_ARGS_MAX + 1); // 60 + '…'
+  });
+  it("嵌套值回退 JSON 串", () => {
+    expect(clipArgs({ a: { b: 1 } })).toEqual({ text: 'a={"b":1}', clipped: false });
+  });
+});
+
+describe("fmtNum", () => {
+  it("千分位", () => expect(fmtNum(63896)).toBe("63,896"));
+  it("小数位裁剪", () => expect(fmtNum(17.999, 2)).toBe("18"));
+  it("null → —", () => expect(fmtNum(null)).toBe("—"));
+});
+
+describe("fmtSigned", () => {
+  it("负值带 − 号", () => expect(fmtSigned(-42.5)).toBe("−42.5"));
+  it("正值带 + 号", () => expect(fmtSigned(120)).toBe("+120"));
+  it("null → —", () => expect(fmtSigned(null)).toBe("—"));
 });
