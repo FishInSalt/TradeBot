@@ -18,7 +18,8 @@ async def _seed_session(engine, sid="s1", interval=15, last_active=None, status=
 
 
 async def _add_cycle(engine, sid="s1", cycle_id="aaaa", triggered_by="scheduled",
-                     decision="line1\nline2", created_at=None, trigger_context=None, **kw):
+                     decision="line1\nline2", created_at=None, trigger_context=None,
+                     injected_events=None, **kw):
     # live capture 把 trigger_context 落库为 JSON list（多触发堆）——稳态主流形态，
     # 默认即用 list，避免 fixture 恒 NULL 漏掉 list→CycleDetail 的真实路径（PR#75 500 教训）。
     if trigger_context is None:
@@ -29,6 +30,8 @@ async def _add_cycle(engine, sid="s1", cycle_id="aaaa", triggered_by="scheduled"
                        wall_time_ms=kw.get("wall", 5000), execution_status="ok",
                        created_at=created_at or datetime.now(UTC),
                        trigger_context=json.dumps(trigger_context),
+                       injected_events=(json.dumps(injected_events)
+                                        if injected_events is not None else None),
                        state_snapshot=kw.get("snapshot"))
         s.add(c)
         await s.commit()
@@ -417,3 +420,87 @@ async def test_get_cycle_detail_seq_matches_session_position(engine):
     from src.webui.queries import get_cycle_detail
     assert (await get_cycle_detail(engine, ids[0])).seq == 1
     assert (await get_cycle_detail(engine, ids[2])).seq == 3
+
+
+def _ms(dt):
+    return int(dt.timestamp() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_get_cycle_detail_enriches_injected_events(engine):
+    """注入事件富化：triggered_ago（英文 ladder）+ kind_label（复用 _classify_fill）。
+    必经真实 SQLite 往返——created_at 读回为 naive，验证 P0 tz 补全；
+    手构造 aware fixture 会让 tz-naive→500 假绿。"""
+    await _seed_session(engine)
+    created = datetime(2026, 6, 12, 10, 5, 0, tzinfo=UTC)        # cycle 结束时刻
+    wall = 60_000                                               # 1min → 开始 = 10:04:00
+    base_start = created - timedelta(milliseconds=wall)
+    # 注入于开始后 30s = 10:04:30；事件戳 = 注入时刻 − 90s → age "1 min ago"
+    event_ts_ms = _ms(base_start + timedelta(seconds=30) - timedelta(seconds=90))
+    injected = [{
+        "event": {"type": "fill", "trigger_reason": "stop", "position_side": "long",
+                  "pnl": -50.0, "is_full_close": True, "timestamp": event_ts_ms},
+        "after_tool": "get_position", "after_tool_call_id": "call_2", "offset_ms": 30_000,
+    }]
+    pk = await _add_cycle(engine, cycle_id="inj1", created_at=created, wall=wall,
+                          injected_events=injected)
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    rec = d.injected_events[0]
+    assert rec["kind_label"] == "止损平仓"           # _classify_fill: stop + full close
+    assert rec["triggered_ago"] == "1 min ago"
+    assert rec["offset_ms"] == 30_000                # 原字段透传不变
+
+
+@pytest.mark.asyncio
+async def test_injected_events_triggered_ago_none_guards(engine):
+    """event None / 缺 timestamp / 未来时点 → triggered_ago=None，且不抛。"""
+    await _seed_session(engine)
+    created = datetime(2026, 6, 12, 10, 5, 0, tzinfo=UTC)
+    future_ms = _ms(created + timedelta(hours=1))
+    injected = [
+        {"event": None, "after_tool": "t", "after_tool_call_id": None, "offset_ms": 0},
+        {"event": {"type": "fill"}, "after_tool": "t", "after_tool_call_id": None, "offset_ms": 0},
+        {"event": {"type": "percentage_alert", "timestamp": future_ms},
+         "after_tool": "t", "after_tool_call_id": None, "offset_ms": 0},
+    ]
+    pk = await _add_cycle(engine, cycle_id="inj2", created_at=created, wall=60_000,
+                          injected_events=injected)
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert d.injected_events[0]["triggered_ago"] is None     # event None
+    assert d.injected_events[0]["kind_label"] == "事件"       # event None → 泛标题（不抛）
+    assert d.injected_events[1]["triggered_ago"] is None     # 缺 timestamp
+    assert d.injected_events[2]["triggered_ago"] is None     # 未来时点
+    assert d.injected_events[2]["kind_label"] == "波动告警触发"
+
+
+@pytest.mark.asyncio
+async def test_injected_event_enrichment_degrades_per_event_no_500(engine):
+    """单条富化抛错 → 该条降级裸 event、其余正常、整体不 500（get_cycle_detail 无外层 try/except）。"""
+    await _seed_session(engine)
+    created = datetime(2026, 6, 12, 10, 5, 0, tzinfo=UTC)
+    good_ts = _ms(created - timedelta(seconds=90))
+    injected = [
+        {"event": {"type": "fill", "trigger_reason": "take_profit", "position_side": "short",
+                   "pnl": 80.0, "is_full_close": True, "timestamp": good_ts},
+         "after_tool": "t", "after_tool_call_id": None, "offset_ms": 0},
+        {"event": {"type": "percentage_alert", "timestamp": "not-a-number"},   # 富化中抛 TypeError
+         "after_tool": "t", "after_tool_call_id": None, "offset_ms": 0},
+    ]
+    pk = await _add_cycle(engine, cycle_id="inj3", created_at=created, wall=0,
+                          injected_events=injected)
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)            # 不抛
+    assert d.injected_events[0]["kind_label"] == "止盈平仓"      # 正常富化
+    assert "kind_label" not in d.injected_events[1]            # 降级为裸 event
+
+
+@pytest.mark.asyncio
+async def test_injected_events_non_list_passthrough(engine):
+    """injected_events 非 list 形态（dict / str / None）原样返回，不富化。"""
+    await _seed_session(engine)
+    pk = await _add_cycle(engine, cycle_id="inj4")     # 无 injected_events → 列 NULL → None
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert d.injected_events is None

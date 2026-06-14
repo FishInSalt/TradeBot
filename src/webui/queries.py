@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -15,6 +16,7 @@ from src.storage.models import (
 )
 from src.services.metrics import MetricsService
 from src.webui import schemas
+from src.services.event_render import _format_event_age
 
 
 async def get_cycles(
@@ -114,6 +116,65 @@ def _classify_fill(fill: dict) -> schemas.KeyEvent | None:
     return schemas.KeyEvent(kind="fill_partial", label="部分平仓", direction=side)
 
 
+def _injection_kind_label(event) -> str:
+    """注入事件人读标题。fill 复用 _classify_fill（单一权威来源、消除前端 fill 词汇漂移）；
+    _classify_fill 对 trigger_reason=='market' 回 None → 泛标题「成交」（禁直接 .label，
+    否则 None.label AttributeError）。其余静态标题在此一处定义；未知类型 → 泛标题「事件」。"""
+    if not isinstance(event, dict):
+        return "事件"
+    etype = event.get("type")
+    if etype == "fill":
+        kl = _classify_fill(event)
+        return kl.label if kl else "成交"
+    if etype == "percentage_alert":
+        return "波动告警触发"
+    if etype == "price_level_alert":
+        return "价格告警触发"
+    return "事件"
+
+
+def _injection_age(base_aware: datetime, rec: dict) -> str | None:
+    """注入事件 age（英文 ladder，复用 event_render._format_event_age）。
+    base_aware = aware UTC 的 cycle 开始时刻；injection_moment = base + offset_ms。
+    event None / 缺 timestamp → None；未来时点（skew）→ None（_format_event_age 既有语义）。"""
+    event = rec.get("event")
+    if not isinstance(event, dict) or event.get("timestamp") is None:
+        return None
+    injection_moment = base_aware + timedelta(milliseconds=rec.get("offset_ms") or 0)
+    event_ts = datetime.fromtimestamp(event["timestamp"] / 1000, tz=timezone.utc)   # aware
+    return _format_event_age(injection_moment, event_ts)
+
+
+def _enrich_injected_events(raw, created_at, wall_time_ms):
+    """富化 injected_events 供 WebUI 注入卡：每条加 triggered_ago + kind_label。
+    仅处理 list[dict-with-'event'] 形态；其他形态（dict/str/None）原样返回。
+
+    逐条 try/except 降级裸 event —— get_cycle_detail 无外层 try/except，任一事件富化
+    异常绝不冒泡成 500（spec §6 / P0）。
+
+    ⚠ P0：c.created_at 经 ORM 从 SQLite 读回是 naive；不补 aware UTC 则 _format_event_age
+    首行 `then > now`（aware event_ts vs naive now）抛 TypeError → 500，且只在有注入事件的
+    cycle 触发。补 tz 与 _ensure_utc 同模式。created_at 是 cycle 结束时刻；开始 ≈ created_at − wall_time_ms。"""
+    if not isinstance(raw, list):
+        return raw
+    base = created_at if wall_time_ms is None else created_at - timedelta(milliseconds=wall_time_ms)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    out = []
+    for rec in raw:
+        if not isinstance(rec, dict) or "event" not in rec:
+            out.append(rec)
+            continue
+        try:
+            enriched = dict(rec)
+            enriched["triggered_ago"] = _injection_age(base, rec)
+            enriched["kind_label"] = _injection_kind_label(rec.get("event"))
+            out.append(enriched)
+        except Exception:
+            out.append(rec)        # 降级裸 event（不附富化字段）
+    return out
+
+
 def _classify_action(tool_name: str, args, prev_side: str | None) -> schemas.KeyEvent | None:
     """本轮单个 tool_call → KeyEvent。prev_side = 操作前持仓方向（state_snapshot.position）。
     非交易工具 → None。args 非 dict（截断回退）→ 当空 dict 处理。"""
@@ -188,7 +249,7 @@ async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleD
         id=c.id, seq=seq, cycle_label=c.cycle_id, triggered_by=c.triggered_by, created_at=c.created_at,
         reasoning=c.reasoning, decision=c.decision,
         trigger_context=_loads(c.trigger_context), state_snapshot=_loads(c.state_snapshot),
-        injected_events=_loads(c.injected_events),
+        injected_events=_enrich_injected_events(_loads(c.injected_events), c.created_at, c.wall_time_ms),
         tool_calls=[
             schemas.ToolCallRow(tool_name=t.tool_name, status=t.status, duration_ms=t.duration_ms,
                                 error_type=t.error_type, args=_loads(t.args),
