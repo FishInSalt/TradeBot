@@ -81,6 +81,28 @@ def _classify_fill(fill: dict) -> schemas.KeyEvent | None:
     return schemas.KeyEvent(kind="fill_partial", label="部分平仓", direction=side)
 
 
+def _classify_action(tool_name: str, args, prev_side: str | None) -> schemas.KeyEvent | None:
+    """本轮单个 tool_call → KeyEvent。prev_side = 操作前持仓方向（state_snapshot.position）。
+    非交易工具 → None。args 非 dict（截断回退）→ 当空 dict 处理。"""
+    a = args if isinstance(args, dict) else {}
+    if tool_name == "open_position":
+        side = a.get("side")
+        d = "多" if side == "long" else "空" if side == "short" else "?"
+        if prev_side is None:
+            return schemas.KeyEvent(kind="open", label=f"开{d}", direction=side)
+        if prev_side == side:
+            return schemas.KeyEvent(kind="add", label="加仓", direction=side)
+        return schemas.KeyEvent(kind="flip", label=f"反手→{d}", direction=side)
+    if tool_name == "close_position":
+        d = "多" if prev_side == "long" else "空" if prev_side == "short" else ""
+        return schemas.KeyEvent(kind="close", label=f"平{d}" if d else "平仓", direction=prev_side)
+    if tool_name == "place_limit_order":
+        side = a.get("side")
+        d = "多" if side == "long" else "空" if side == "short" else "?"
+        return schemas.KeyEvent(kind="limit_order", label=f"挂限价单·{d}", direction=side)
+    return None
+
+
 async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleDetail | None:
     async with get_session(engine) as s:
         c = (await s.execute(

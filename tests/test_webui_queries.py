@@ -264,3 +264,26 @@ def test_classify_fill_branches():
     # market 回声 → 跳过（去重）
     assert _classify_fill(_fill("market", pnl=None)) is None
     assert _classify_fill(_fill("market", pnl=50.0, full=True)) is None
+
+
+def test_classify_action_branches():
+    from src.webui.queries import _classify_action
+    # open_position：前 flat → open；前同向 → add；前反向 → flip
+    e = _classify_action("open_position", {"side": "long"}, None)
+    assert (e.kind, e.label, e.direction) == ("open", "开多", "long")
+    assert _classify_action("open_position", {"side": "short"}, None).label == "开空"
+    assert _classify_action("open_position", {"side": "long"}, "long").kind == "add"
+    e = _classify_action("open_position", {"side": "short"}, "long")
+    assert (e.kind, e.label) == ("flip", "反手→空")
+    # close_position：无 side，方向取 prev
+    e = _classify_action("close_position", {}, "long")
+    assert (e.kind, e.label, e.direction) == ("close", "平多", "long")
+    assert _classify_action("close_position", {}, "short").label == "平空"
+    assert _classify_action("close_position", {}, None).label == "平仓"   # prev 缺失兜底
+    # place_limit_order
+    e = _classify_action("place_limit_order", {"side": "long"}, None)
+    assert (e.kind, e.label, e.direction) == ("limit_order", "挂限价单·多", "long")
+    # 非交易工具 → None
+    assert _classify_action("get_market_data", {}, None) is None
+    # args 非 dict（截断回退 str）→ 不抛、side 缺失走 '?'
+    assert _classify_action("open_position", "broken", None).kind == "open"
