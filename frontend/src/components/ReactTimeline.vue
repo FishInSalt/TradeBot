@@ -173,10 +173,13 @@ function statusType(s: string) {
 .inj-title { font-weight: 600; }
 .step-icon { flex: 0 0 auto; }
 .muted { color: var(--ob-text-muted); }
+/* 注入卡 warn-soft 琥珀底上 muted(#6b7280) 仅 4.34 → 用更深 warn 达 AA（review）。
+   scoped (0,2,0) 按特异性胜 .muted (0,1,0)，全局 muted/工具耗时仍白卡 4.83 不受影响。 */
+.injection-card .muted { color: var(--ob-warn); }
 .orphan { font-style: italic; }
 .seam { font-size: 12px; color: var(--ob-text-muted); font-style: italic; }
 .clickable { cursor: pointer; }
 .thinking-body { flex: 1; }
-.thinking-toggle { font-size: 11px; opacity: 0.6; }
+.thinking-toggle { font-size: 11px; color: var(--ob-text-muted); }
 .args-compact { font-size: 12px; word-break: break-word; }
 </style>
