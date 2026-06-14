@@ -103,22 +103,29 @@ describe("ReactTimeline", () => {
     expect(w.findAll(".injection-card").length).toBe(1);
   });
 
-  it("§议题2 超长 thinking 默认折叠 + 可展开全文", async () => {
-    const long = "x".repeat(700);
-    const p = { ...baseProps(), steps: [{ thinking: long, tools: [] }] };
+  it("§A1 多行 thinking 默认折叠（只显首行预览）+ 点击展开全文", async () => {
+    const full = "第一行预览\n第二行隐藏内容\n第三行也隐藏";
+    const p = { ...baseProps(), steps: [{ thinking: full, tools: [] }] };
     const w = mount(ReactTimeline, { props: p as any });
-    expect(w.text()).toContain("展开全文");
-    expect(w.text()).not.toContain(long);               // 折叠态不渲染全文
-    await w.find(".thinking-toggle").trigger("click");
-    expect(w.text()).toContain(long);                   // 展开后渲染全文
-    expect(w.find(".thinking-toggle").text()).toContain("收起");   // 切换文案
+    expect(w.text()).toContain("第一行预览");           // 首行预览可见
+    expect(w.text()).not.toContain("第二行隐藏内容");    // 折叠态：后续行不渲染（pre v-if）
+    await w.find(".thinking-head").trigger("click");
+    expect(w.text()).toContain("第二行隐藏内容");         // 展开后全文
   });
 
-  it("§议题2 短 thinking 不折叠（无展开按钮）", () => {
+  it("§A1 短单行 thinking 不折叠（无折叠 affordance、常显全文）", () => {
     const p = { ...baseProps(), steps: [{ thinking: "短推理", tools: [] }] };
     const w = mount(ReactTimeline, { props: p as any });
     expect(w.text()).toContain("短推理");
-    expect(w.text()).not.toContain("展开全文");
+    expect(w.find(".thinking-head").exists()).toBe(false);   // 无折叠头
+  });
+
+  it("§A2 思考块用 💭 图标 + 「思考」标签", () => {
+    const p = { ...baseProps(), steps: [{ thinking: "短推理", tools: [] }] };
+    const w = mount(ReactTimeline, { props: p as any });
+    expect(w.text()).toContain("💭");
+    expect(w.text()).toContain("思考");
+    expect(w.text()).not.toContain("🧠");
   });
 
   it("§④ 工具头函数式：短参 name(k=v) + 展开体只给结果（不重复入参）", async () => {

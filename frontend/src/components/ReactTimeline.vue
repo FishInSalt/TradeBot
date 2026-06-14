@@ -58,16 +58,15 @@ const injectionBuckets = computed(() => {
 // 每张工具卡的展开态：key = tool_call_id（无 id 用合成 key）
 const openCards = ref<Set<string>>(new Set());
 
-// 思考块折叠态（议题 2）
-const THINKING_FOLD_CHARS = 600;   // 超此字符数默认折叠
-const THINKING_HEAD_CHARS = 360;   // 折叠态预览长度（≈前 6 行）
+// 思考块整块折叠（A1）：默认折叠（openThinking 初始空集），按需整块展开。
+// needsFold：有换行 或 超单行容量 → 给折叠 affordance 并默认折叠；只有真·单行短句豁免常显。
+const THINKING_INLINE_MAX = 100;   // 单行容量小值（非旧的 600）
 const openThinking = ref<Set<number>>(new Set());
-function thinkingFolds(text: string) {
-  return text.length > THINKING_FOLD_CHARS;
+function needsFold(text: string) {
+  return text.includes("\n") || text.length > THINKING_INLINE_MAX;
 }
-function thinkingShown(text: string, si: number) {
-  if (!thinkingFolds(text) || openThinking.value.has(si)) return text;
-  return text.slice(0, THINKING_HEAD_CHARS) + "…";
+function previewLine(text: string) {
+  return text.split("\n")[0];      // 折叠态预览取首行（CSS 再做 ellipsis）
 }
 function toggleThinking(si: number) {
   const s = new Set(openThinking.value);
@@ -102,14 +101,21 @@ function statusType(s: string) {
 <template>
   <div class="react-timeline">
     <div v-for="(step, si) in steps" :key="si" class="react-step">
-      <!-- 思考块（超长默认折叠，议题 2） -->
+      <!-- 思考块（💭 思考，整块折叠默认收起 A1/A2；单行短句豁免常显） -->
       <div v-if="step.thinking" class="thinking">
-        <span class="step-icon">🧠</span>
+        <span class="step-icon">💭</span>
         <div class="thinking-body">
-          <pre class="thinking-text">{{ thinkingShown(step.thinking, si) }}</pre>
-          <span v-if="thinkingFolds(step.thinking)" class="thinking-toggle clickable" @click="toggleThinking(si)">
-            {{ openThinking.has(si) ? "收起 ▴" : "展开全文 ▾" }}
-          </span>
+          <template v-if="needsFold(step.thinking)">
+            <div class="thinking-head clickable" @click="toggleThinking(si)">
+              <span class="tk-lbl">思考</span>
+              <span class="tk-caret">{{ openThinking.has(si) ? "▾" : "▸" }}</span>
+              <span v-if="!openThinking.has(si)" class="tk-preview">{{ previewLine(step.thinking) }}</span>
+            </div>
+            <pre v-if="openThinking.has(si)" class="thinking-text">{{ step.thinking }}</pre>
+          </template>
+          <template v-else>
+            <span class="tk-lbl">思考</span> <span class="tk-inline">{{ step.thinking }}</span>
+          </template>
         </div>
       </div>
 
@@ -179,7 +185,11 @@ function statusType(s: string) {
 .orphan { font-style: italic; }
 .seam { font-size: 12px; color: var(--ob-text-muted); font-style: italic; }
 .clickable { cursor: pointer; }
-.thinking-body { flex: 1; }
-.thinking-toggle { font-size: 11px; color: var(--ob-text-muted); }
+.thinking-body { flex: 1; min-width: 0; }
+.thinking-head { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.tk-lbl { color: var(--ob-text-muted); font-weight: 600; }
+.tk-caret { color: var(--ob-text-muted); }
+.tk-preview { color: var(--ob-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.tk-inline { font-size: 12px; }
 .args-compact { font-size: 12px; word-break: break-word; }
 </style>
