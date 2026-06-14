@@ -7,6 +7,7 @@ import json
 
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.orm import aliased
 
 from src.storage.database import get_session
 from src.storage.models import (
@@ -20,21 +21,29 @@ async def get_cycles(
     engine: AsyncEngine, session_id: str, *,
     limit: int = 50, before_id: int | None = None, after_id: int | None = None,
 ) -> list[schemas.CycleRow]:
-    stmt = select(AgentCycle).where(AgentCycle.session_id == session_id)
+    # seq = 会话内 1-based 绝对序号：row_number 须在【游标过滤之前】对全量 session 子集开窗
+    # （子查询），外层再套游标 + 方向排序 + limit；否则 after_id 翻页会从游标处重启序号。
+    inner = (
+        select(AgentCycle, func.row_number().over(order_by=AgentCycle.id.asc()).label("seq"))
+        .where(AgentCycle.session_id == session_id)
+        .subquery()
+    )
+    ac = aliased(AgentCycle, inner)
+    stmt = select(ac, inner.c.seq)
     if before_id is not None:
-        stmt = stmt.where(AgentCycle.id < before_id)
+        stmt = stmt.where(inner.c.id < before_id)
     if after_id is not None:
-        stmt = stmt.where(AgentCycle.id > after_id)
+        stmt = stmt.where(inner.c.id > after_id)
     # after_id（取更新方向）须取紧邻游标的 n 条（ASC）再 reverse，否则 DESC+LIMIT 会返回
     # 游标之上「最新」的 n 条、新增数 > limit 时静默跳过紧邻那批 → 时间线空洞。
     if after_id is not None:
-        stmt = stmt.order_by(AgentCycle.id.asc()).limit(limit)
+        stmt = stmt.order_by(inner.c.id.asc()).limit(limit)
     else:
-        stmt = stmt.order_by(AgentCycle.id.desc()).limit(limit)
+        stmt = stmt.order_by(inner.c.id.desc()).limit(limit)
     async with get_session(engine) as s:
-        rows = list((await s.execute(stmt)).scalars().all())
+        result = list((await s.execute(stmt)).all())     # [(AgentCycle, seq), ...]
         # 批量 join tool_calls（一次查整批 cycle，feed limit≤200）；按 cycle_id 分组、保留执行序
-        cycle_ids = [c.cycle_id for c in rows]
+        cycle_ids = [c.cycle_id for c, _ in result]
         tool_rows = []
         if cycle_ids:
             tool_rows = list((await s.execute(
@@ -43,18 +52,18 @@ async def get_cycles(
                 .order_by(ToolCall.id.asc())
             )).all())
     if after_id is not None:
-        rows.reverse()          # 统一为 id DESC 输出（最新在前）
+        result.reverse()          # 统一为 id DESC 输出（最新在前），rows/seq 同步 reverse
     tools_by_cycle: dict[str, list[tuple[str, object]]] = {}
     for cid, tname, targs in tool_rows:
         tools_by_cycle.setdefault(cid, []).append((tname, _loads(targs)))
     return [
         schemas.CycleRow(
-            id=c.id, cycle_label=c.cycle_id, triggered_by=c.triggered_by,
+            id=c.id, seq=seq, cycle_label=c.cycle_id, triggered_by=c.triggered_by,
             created_at=c.created_at, tokens_consumed=c.tokens_consumed,
             wall_time_ms=c.wall_time_ms, execution_status=c.execution_status,
             position=_safe(lambda c=c: _derive_position(_loads(c.state_snapshot))),
             key_events=_derive_key_events(c, tools_by_cycle.get(c.cycle_id, [])),
-        ) for c in rows
+        ) for c, seq in result
     ]
 
 

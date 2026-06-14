@@ -374,6 +374,22 @@ async def test_get_cycles_key_events_passive_fills_and_dedup(engine):
 
 
 @pytest.mark.asyncio
+async def test_get_cycles_seq_is_session_absolute_and_stable(engine):
+    """seq = 会话内 1-based 绝对序号（按 id 升序）；desc 列表与 before/after 翻页都不重启。"""
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    ids = [await _add_cycle(engine, cycle_id=f"sq{i}", created_at=base + timedelta(minutes=i))
+           for i in range(5)]                       # seq 应为 1..5
+    from src.webui.queries import get_cycles
+    rows = await get_cycles(engine, "s1")            # 全量 desc：最新在前，seq 递减
+    assert [(r.id, r.seq) for r in rows] == [(ids[4], 5), (ids[3], 4), (ids[2], 3), (ids[1], 2), (ids[0], 1)]
+    older = await get_cycles(engine, "s1", limit=2, before_id=ids[3])   # 更旧方向
+    assert [(r.id, r.seq) for r in older] == [(ids[2], 3), (ids[1], 2)]
+    newer = await get_cycles(engine, "s1", limit=2, after_id=ids[0])    # 更新方向（紧邻游标那批）
+    assert [(r.id, r.seq) for r in newer] == [(ids[2], 3), (ids[1], 2)]
+
+
+@pytest.mark.asyncio
 async def test_get_cycles_derivation_fail_isolated(engine):
     """派生真异常被 _safe 兜住、不阻断 feed（区别于"被类型守卫提前挡成 None"——那不验证 _safe）：
     - position.contracts 非数 → PositionBrief(contracts: float) 构造 ValidationError；
