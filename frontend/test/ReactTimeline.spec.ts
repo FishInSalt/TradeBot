@@ -74,4 +74,41 @@ describe("ReactTimeline", () => {
     const w = mount(ReactTimeline, { props: p as any });
     expect(w.findAll(".injection-card").length).toBe(2);
   });
+
+  // === spec §10 注入锚点无法解析的兜底（name-based best-effort → 末尾归组） ===
+
+  it("§10 兜底：after_tool_call_id 为 null 但 after_tool 名匹配骨架 → best-effort 锚到该工具", () => {
+    const p = baseProps();
+    p.injectedEvents = [
+      { event: { type: "fill" }, after_tool: "get_position", offset_ms: 5, after_tool_call_id: null },
+    ];
+    const w = mount(ReactTimeline, { props: p as any });
+    const txt = w.text();
+    expect(txt).toContain("触发事件注入");
+    // 按名锚到 get_position：出现在 get_position 之后、open_position 之前
+    const iInj = txt.indexOf("触发事件注入");
+    expect(iInj).toBeGreaterThan(txt.indexOf("get_position"));
+    expect(iInj).toBeLessThan(txt.indexOf("open_position"));
+  });
+
+  it("§10 兜底：既不匹配 id 也不匹配名 → 时间线末尾归组 + 未能锚定标注", () => {
+    const p = baseProps();
+    p.injectedEvents = [
+      { event: { type: "fill" }, after_tool: "ghost_tool", offset_ms: 9, after_tool_call_id: "call_ghost" },
+    ];
+    const w = mount(ReactTimeline, { props: p as any });
+    const txt = w.text();
+    expect(txt).toContain("未能锚定");
+    expect(txt.indexOf("未能锚定")).toBeGreaterThan(txt.indexOf("open_position"));
+    expect(w.findAll(".injection-card").length).toBe(1);
+  });
+
+  it("orphan 工具卡 .tool-head 不带 clickable（无遥测则点击无意义）", () => {
+    const p = baseProps();
+    p.steps[1].tools[0].tool_call_id = "call_missing";   // open_position 变 orphan
+    const w = mount(ReactTimeline, { props: p as any });
+    const heads = w.findAll(".tool-head");
+    expect(heads[0].classes()).toContain("clickable");                  // 正常卡可点
+    expect(heads[heads.length - 1].classes()).not.toContain("clickable"); // orphan 卡不可点
+  });
 });

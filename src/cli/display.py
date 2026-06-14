@@ -812,8 +812,9 @@ def build_react_steps(messages: list) -> list[dict]:
 
     返回按 ModelResponse 顺序的数组，每元素:
         {"thinking": str|None, "tools": [{"tool_call_id", "tool_name"}, ...]}
-    - thinking: 该 response 全部 ThinkingPart content '\\n\\n' 拼接（无 → None），与
-      app._extract_thinking_text 同口径。
+    - thinking: 该 response 全部 ThinkingPart content '\\n\\n' 拼接（无 → None）——按 response
+      切段，非全局。各段**并集**（按序 '\\n\\n' 相连）等于 app._extract_thinking_text 落在
+      reasoning 列的全文（同分隔符、跨全部 response 展平）；逐元素不等于该全文。
     - tools: 该 response ToolCallParts，保留发起顺序；带 tool_name（§10 orphan 兜底所需）。
     - 既无 thinking 又无 tools 的空 response 跳过（末轮纯决策 TextPart 不进骨架；decision 列单源）。
     """

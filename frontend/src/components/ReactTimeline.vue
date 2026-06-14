@@ -25,14 +25,33 @@ const toolMap = computed(() => {
   return m;
 });
 
-const injectionsByToolId = computed(() => {
-  const m = new Map<string, InjectedEvent[]>();
+// 注入锚定（spec §10）：优先 after_tool_call_id 命中骨架工具；否则按 after_tool 名 best-effort
+// 锚到该名最后一次出现的工具；再不行则归到时间线末尾「未能锚定」组。byKey 以 cardKey 为键。
+const injectionBuckets = computed(() => {
+  const idToKey = new Map<string, string>();        // 骨架 tool_call_id → cardKey
+  const nameToLastKey = new Map<string, string>();  // tool_name → 最后一次出现的 cardKey
+  props.steps.forEach((step, si) => {
+    step.tools.forEach((t, ti) => {
+      const key = cardKey(t, si, ti);
+      if (t.tool_call_id) idToKey.set(t.tool_call_id, key);
+      nameToLastKey.set(t.tool_name, key);
+    });
+  });
+  const byKey = new Map<string, InjectedEvent[]>();
+  const orphan: InjectedEvent[] = [];
+  const push = (key: string, e: InjectedEvent) => {
+    const arr = byKey.get(key);
+    if (arr) arr.push(e);
+    else byKey.set(key, [e]);
+  };
   for (const e of props.injectedEvents ?? []) {
-    const k = e.after_tool_call_id;
-    if (!k) continue;
-    (m.get(k) ?? m.set(k, []).get(k)!).push(e);
+    const byId = e.after_tool_call_id ? idToKey.get(e.after_tool_call_id) : undefined;
+    if (byId) { push(byId, e); continue; }
+    const byName = e.after_tool ? nameToLastKey.get(e.after_tool) : undefined;
+    if (byName) { push(byName, e); continue; }   // §10：id 未命中 → 按 after_tool 名 best-effort
+    orphan.push(e);                              // §10：名也未命中 → 时间线末尾归组
   }
-  return m;
+  return { byKey, orphan };
 });
 
 // 每张工具卡的展开态：key = tool_call_id（无 id 用合成 key）
@@ -49,9 +68,10 @@ function toggle(key: string) {
 function rowFor(t: ReactTool): ToolCallRow | undefined {
   return t.tool_call_id ? toolMap.value.get(t.tool_call_id) : undefined;
 }
-function injectionsFor(t: ReactTool): InjectedEvent[] {
-  return t.tool_call_id ? injectionsByToolId.value.get(t.tool_call_id) ?? [] : [];
+function injectionsFor(t: ReactTool, si: number, ti: number): InjectedEvent[] {
+  return injectionBuckets.value.byKey.get(cardKey(t, si, ti)) ?? [];
 }
+const orphanInjections = computed(() => injectionBuckets.value.orphan);
 function statusType(s: string) {
   return s === "ok" ? "success" : s === "biz_error" ? "warning" : "error";
 }
@@ -69,7 +89,7 @@ function statusType(s: string) {
       <!-- 工具卡 + 锚定注入卡 -->
       <template v-for="(t, ti) in step.tools" :key="cardKey(t, si, ti)">
         <div class="tool-card">
-          <div class="tool-head clickable" @click="toggle(cardKey(t, si, ti))">
+          <div class="tool-head" :class="{ clickable: rowFor(t) }" @click="rowFor(t) && toggle(cardKey(t, si, ti))">
             <span class="step-icon">⚙</span>
             <span class="tool-name">{{ t.tool_name }}</span>
             <template v-if="rowFor(t)">
@@ -90,13 +110,23 @@ function statusType(s: string) {
         </div>
 
         <!-- 该工具后锚定的注入事件（批量并排） -->
-        <div v-for="(inj, ii) in injectionsFor(t)" :key="`inj-${si}-${ti}-${ii}`" class="injection-card">
+        <div v-for="(inj, ii) in injectionsFor(t, si, ti)" :key="`inj-${si}-${ti}-${ii}`" class="injection-card">
           <span class="step-icon">⚡</span>
           <span class="inj-title">触发事件注入</span>
           <span v-if="inj.offset_ms != null" class="muted">+{{ inj.offset_ms }}ms</span>
           <JsonBlock :value="inj.event" />
         </div>
       </template>
+    </div>
+
+    <!-- §10：未能按 id/名锚定的注入 → 时间线末尾归组 -->
+    <div v-if="orphanInjections.length" class="orphan-injections">
+      <div v-for="(inj, oi) in orphanInjections" :key="`orphan-inj-${oi}`" class="injection-card">
+        <span class="step-icon">⚡</span>
+        <span class="inj-title">触发事件注入（未能锚定）</span>
+        <span v-if="inj.offset_ms != null" class="muted">+{{ inj.offset_ms }}ms</span>
+        <JsonBlock :value="inj.event" />
+      </div>
     </div>
   </div>
 </template>
