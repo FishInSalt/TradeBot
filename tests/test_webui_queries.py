@@ -176,6 +176,39 @@ async def test_get_performance_equity_skips_none_balance(engine):
 
 
 @pytest.mark.asyncio
+async def test_get_cycle_detail_returns_react_fields(engine):
+    """get_cycle_detail 透传 react_steps / user_prompt_snapshot / execution_status / tool_call_id。"""
+    import sqlalchemy
+    await _seed_session(engine)
+    react = json.dumps([{"thinking": "t1", "tools": [
+        {"tool_call_id": "call_1", "tool_name": "get_position"}]}])
+    async with get_session(engine) as s:
+        c = AgentCycle(
+            session_id="s1", cycle_id="react1", triggered_by="scheduled",
+            execution_status="ok", decision="(1) Stance: hold",
+            user_prompt_snapshot="Woke by scheduled tick",
+            react_steps=react,
+        )
+        s.add(c)
+        await s.commit()
+        pk = (await s.execute(
+            sqlalchemy.select(AgentCycle.id).where(AgentCycle.cycle_id == "react1")
+        )).scalar_one()
+        s.add(ToolCall(
+            session_id="s1", cycle_id="react1", tool_name="get_position",
+            status="ok", duration_ms=12, tool_call_id="call_1", result="flat",
+        ))
+        await s.commit()
+
+    from src.webui.queries import get_cycle_detail
+    detail = await get_cycle_detail(engine, pk)
+    assert detail.execution_status == "ok"
+    assert detail.user_prompt_snapshot == "Woke by scheduled tick"
+    assert detail.react_steps[0]["tools"][0]["tool_call_id"] == "call_1"
+    assert detail.tool_calls[0].tool_call_id == "call_1"
+
+
+@pytest.mark.asyncio
 async def test_list_sessions_summary(engine):
     la = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
     await _seed_session(engine, sid="s1", interval=15, last_active=la)

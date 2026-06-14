@@ -59,6 +59,7 @@ class ToolCallRow(BaseModel):
     error_type: str | None
     args: dict | list | str | None   # 解析后的 JSON（_loads 可返回 dict/list）；截断 outlier 行解析失败时回退原始 str
     result: dict | list | str | None = None  # 工具返回值原始文本（非 JSON，queries 直传不走 _loads）；未捕获时为 None
+    tool_call_id: str | None = None  # react_steps 指针 JOIN 键（§8）；历史行为 None
 
 
 class CycleDetail(BaseModel):
@@ -79,6 +80,9 @@ class CycleDetail(BaseModel):
     wall_time_ms: int | None
     llm_call_ms: int | None
     model_id: str | None
+    react_steps: list | dict | str | None = None   # ReAct 骨架（_loads 解析；放宽形态同 trigger_context，防损坏行整类 500）
+    user_prompt_snapshot: str | None = None         # 唤醒上下文原文（§8 暴露 #1）
+    execution_status: str = "ok"                    # forensic 兜底视图据此说明"为何无时间线"
 
 
 class EquityPoint(BaseModel):

@@ -30,7 +30,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 from src.cli.display import (
-    display_metrics, format_cycle_output,
+    display_metrics, format_cycle_output, build_react_steps,
     is_tool_error, resolve_tool_display,
 )
 from src.cli.logging_config import (
@@ -83,6 +83,20 @@ def _extract_thinking_text(messages) -> str | None:
                 if isinstance(part, ThinkingPart):
                     parts.append(part.content)
     return "\n\n".join(parts) if parts else None
+
+
+def _safe_build_react_steps(messages) -> str | None:
+    """收尾构建 ReAct 骨架并序列化为 JSON（spec §5.3）。
+
+    fail-isolated：构建 + 序列化任一步异常 → None + logger.warning，绝不阻断关键的
+    AgentCycle 写入（与现有 render 失败降级同策略）。空骨架 → None（不存 "[]"）。
+    """
+    try:
+        steps = build_react_steps(messages)
+        return json.dumps(steps, ensure_ascii=False) if steps else None
+    except Exception:
+        logger.warning("build_react_steps failed; react_steps=None", exc_info=True)
+        return None
 
 
 _WORD_RE = re.compile(r'\S+')
@@ -576,6 +590,7 @@ async def run_agent_cycle(
                     cache_hit_rate=None,
                     user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
                     injected_events=None,   # 回滚后落 NULL（spec §2/§6）
+                    react_steps=None,       # webui-react-timeline §5.3: forensic 无骨架
                 ))
                 await session.commit()
             # capture cycle_ended_at AFTER DB commit — 与正常路径时序对齐：
@@ -631,6 +646,7 @@ async def run_agent_cycle(
                         cache_hit_rate=None,
                         user_prompt_snapshot=user_prompt_snapshot_var,  # P4 (obs roadmap Phase 3)
                         injected_events=None,   # 回滚后落 NULL（spec §2/§6）
+                        react_steps=None,       # webui-react-timeline §5.3: forensic 无骨架
                     ))
                     await session.commit()
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
@@ -743,6 +759,7 @@ async def run_agent_cycle(
                     [{k: v for k, v in rec.items() if k != "raw"}
                      for rec in deps.injected_events_log]
                 ) if deps.injected_events_log else None,   # raw 回滚句柄落库剥离（spec §6）
+                react_steps=_safe_build_react_steps(result.new_messages()),  # webui-react-timeline §5.3
             )
         )
         await session.commit()

@@ -164,6 +164,7 @@ class ToolCallRecorder(AbstractCapability["TradingDeps"]):  # 字符串前向引
                             error_type=error_type,
                             args=args_serialized,            # ← 新增 (Iter 3 §G2)
                             result=result_serialized,        # ← 新增：工具返回值（观察期）
+                            tool_call_id=call.tool_call_id,  # ← webui-react-timeline §5.1: react_steps 指针落点
                         ))
                         await session.commit()
                     insert_ms = (time.monotonic() - insert_start) * 1000

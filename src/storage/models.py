@@ -124,6 +124,10 @@ class AgentCycle(Base):
     # 内存累积器中的 raw 回滚句柄落库时剥离。被丢弃 run（retry / forensic 终态）回滚后落 NULL。
     injected_events: Mapped[str | None] = mapped_column(Text, nullable=True)
     # === END Phase 1 ===
+    # webui-cycle-react-timeline §4.1: ReAct 叙事骨架（JSON 数组 as Text；NULL = legacy/forensic 无骨架）。
+    # 每元素对应一个 ModelResponse: {"thinking": str|None, "tools": [{"tool_call_id", "tool_name"}, ...]}。
+    # 工具遥测仍只在 tool_calls 一份，骨架按 tool_call_id JOIN 取 args/result（§3）。
+    react_steps: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -218,3 +222,6 @@ class ToolCall(Base):
     args: Mapped[str | None] = mapped_column(Text, nullable=True)                  # Iter 3: §G2 — JSON dict of tool args, 4000 char cap, reasoning key stripped
     # 工具返回值（观察期可观测性）；str 文本（非 JSON），30000 char cap + 截断标记，见 tool_call_recorder
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # webui-cycle-react-timeline §4.2: pydantic-ai ToolCallPart.tool_call_id；react_steps 指针落点。
+    # nullable: 历史行为 NULL（不回填，§7）。同名工具一轮多调靠此唯一区分（§10）。
+    tool_call_id: Mapped[str | None] = mapped_column(String(100), nullable=True)

@@ -31,6 +31,7 @@ async def _run_recorder(engine, deps, call_args: Any) -> str | None:
     recorder = ToolCallRecorder()
     call = MagicMock()
     call.tool_name = "test_tool"
+    call.tool_call_id = None
     call.args = call_args
     call.args_as_dict = MagicMock(return_value=dict(call_args) if isinstance(call_args, dict) else json.loads(call_args) if isinstance(call_args, str) else {})
 
@@ -129,6 +130,7 @@ async def test_args_does_not_mutate_caller_dict(engine, deps):
     recorder = ToolCallRecorder()
     call = MagicMock()
     call.tool_name = "test_tool"
+    call.tool_call_id = None
     call.args = original_args
     call.args_as_dict = MagicMock(return_value=original_args)   # same ref, NOT a copy
 

@@ -42,6 +42,7 @@ def make_call(tool_name: str = "get_market_data"):
     """Fake pydantic_ai ToolCallPart."""
     call = MagicMock()
     call.tool_name = tool_name
+    call.tool_call_id = "call_test"  # webui-react-timeline §5.1: recorder 现绑定此列，mock 须可序列化
     call.args_as_dict = MagicMock(return_value={})
     return call
 
