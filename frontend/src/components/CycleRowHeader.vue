@@ -42,18 +42,18 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
     <n-tag size="small" :type="cycle.execution_status === 'ok' ? 'default' : 'error'" :bordered="false">
       {{ cycle.execution_status }}
     </n-tag>
-    <span class="tele">{{ fmtTokens(cycle.tokens_consumed) }}tok · {{ fmtDuration(cycle.wall_time_ms) }}</span>
+    <span class="tele">{{ fmtTokens(cycle.tokens_consumed) }} tok · {{ fmtDuration(cycle.wall_time_ms) }}</span>
   </div>
 </template>
 
 <style scoped>
 .cycle-head { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 13px; padding-left: 6px; border-left: 3px solid transparent; }
-.cycle-head.keyrow { border-left-color: #60a5fa; }   /* 关键事件锚点高亮 */
+.cycle-head.keyrow { border-left-color: var(--ob-accent); }   /* 关键事件锚点高亮 */
 .time { opacity: 0.7; white-space: nowrap; }
 .seg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; }
-.seg-label { opacity: 0.5; font-size: 11px; }
+.seg-label { color: var(--ob-text-muted); font-size: 11px; }
 .head-pos { min-width: 120px; }
 .end-events { flex: 1; flex-wrap: wrap; }
-.tele { font-size: 11px; opacity: 0.5; white-space: nowrap; }
-.muted { opacity: 0.45; }
+.tele { font-size: 11px; color: var(--ob-text-muted); white-space: nowrap; }
+.muted { color: var(--ob-text-muted); }
 </style>
