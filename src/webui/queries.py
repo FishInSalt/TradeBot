@@ -15,15 +15,6 @@ from src.storage.models import (
 from src.services.metrics import MetricsService
 from src.webui import schemas
 
-_DECISION_HEAD_CHARS = 280
-
-
-def _head(text_val: str | None) -> str | None:
-    if not text_val:
-        return None
-    first = text_val.strip().split("\n", 1)[0]
-    return first[:_DECISION_HEAD_CHARS]
-
 
 async def get_cycles(
     engine: AsyncEngine, session_id: str, *,
@@ -42,16 +33,49 @@ async def get_cycles(
         stmt = stmt.order_by(AgentCycle.id.desc()).limit(limit)
     async with get_session(engine) as s:
         rows = list((await s.execute(stmt)).scalars().all())
+        # 批量 join tool_calls（一次查整批 cycle，feed limit≤200）；按 cycle_id 分组、保留执行序
+        cycle_ids = [c.cycle_id for c in rows]
+        tool_rows = []
+        if cycle_ids:
+            tool_rows = list((await s.execute(
+                select(ToolCall.cycle_id, ToolCall.tool_name, ToolCall.args)
+                .where(ToolCall.session_id == session_id, ToolCall.cycle_id.in_(cycle_ids))
+                .order_by(ToolCall.id.asc())
+            )).all())
     if after_id is not None:
         rows.reverse()          # 统一为 id DESC 输出（最新在前）
+    tools_by_cycle: dict[str, list[tuple[str, object]]] = {}
+    for cid, tname, targs in tool_rows:
+        tools_by_cycle.setdefault(cid, []).append((tname, _loads(targs)))
     return [
         schemas.CycleRow(
             id=c.id, cycle_label=c.cycle_id, triggered_by=c.triggered_by,
-            created_at=c.created_at, decision_head=_head(c.decision),
-            tokens_consumed=c.tokens_consumed, wall_time_ms=c.wall_time_ms,
-            execution_status=c.execution_status,
+            created_at=c.created_at, tokens_consumed=c.tokens_consumed,
+            wall_time_ms=c.wall_time_ms, execution_status=c.execution_status,
+            position=_safe(lambda c=c: _derive_position(_loads(c.state_snapshot))),
+            key_events=_derive_key_events(c, tools_by_cycle.get(c.cycle_id, [])),
         ) for c in rows
     ]
+
+
+def _derive_key_events(c, tools: list[tuple[str, object]]) -> list[schemas.KeyEvent]:
+    """组装本轮 key_events：被动 fill（trigger_context，在前）+ 主动动作（tool_calls，在后）。
+    每事件 _safe 包裹——单事件异常跳过、不阻断 feed。"""
+    prev_side = None
+    pos = _safe(lambda: _derive_position(_loads(c.state_snapshot)))
+    if pos is not None:
+        prev_side = pos.side
+    events: list[schemas.KeyEvent] = []
+    for item in _normalize_to_list(_loads(c.trigger_context)):
+        if item.get("type") == "fill":
+            ev = _safe(lambda item=item: _classify_fill(item))
+            if ev is not None:
+                events.append(ev)
+    for tname, targs in tools:
+        ev = _safe(lambda tname=tname, targs=targs: _classify_action(tname, targs, prev_side))
+        if ev is not None:
+            events.append(ev)
+    return events
 
 
 def _loads(raw: str | None):
@@ -61,6 +85,78 @@ def _loads(raw: str | None):
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return raw          # 截断的 outlier 行：回退原始字符串（spec 契约）
+
+
+def _classify_fill(fill: dict) -> schemas.KeyEvent | None:
+    """trigger_context 里单个 fill dict → KeyEvent。
+    market 回声 = 历史会话旧派发产物（spec §2），跳过去重 → None。
+    pnl is None → 开仓型；pnl≠None 且 is_full_close → 全平；否则部分平。"""
+    reason = fill.get("trigger_reason")
+    if reason == "market":
+        return None
+    side = fill.get("position_side")
+    d = "多" if side == "long" else "空" if side == "short" else "?"
+    if fill.get("pnl") is None:
+        return schemas.KeyEvent(kind="fill_open", label=f"限价开{d}", direction=side)
+    if fill.get("is_full_close"):
+        label = {"stop": "止损平仓", "take_profit": "止盈平仓",
+                 "liquidation": "强平", "limit": "限价平仓"}.get(reason, "平仓")
+        return schemas.KeyEvent(kind="fill_close", label=label, direction=side)
+    return schemas.KeyEvent(kind="fill_partial", label="部分平仓", direction=side)
+
+
+def _classify_action(tool_name: str, args, prev_side: str | None) -> schemas.KeyEvent | None:
+    """本轮单个 tool_call → KeyEvent。prev_side = 操作前持仓方向（state_snapshot.position）。
+    非交易工具 → None。args 非 dict（截断回退）→ 当空 dict 处理。"""
+    a = args if isinstance(args, dict) else {}
+    if tool_name == "open_position":
+        side = a.get("side")
+        d = "多" if side == "long" else "空" if side == "short" else "?"
+        if prev_side is None:
+            return schemas.KeyEvent(kind="open", label=f"开{d}", direction=side)
+        if prev_side == side:
+            return schemas.KeyEvent(kind="add", label="加仓", direction=side)
+        return schemas.KeyEvent(kind="flip", label=f"反手→{d}", direction=side)
+    if tool_name == "close_position":
+        d = "多" if prev_side == "long" else "空" if prev_side == "short" else ""
+        return schemas.KeyEvent(kind="close", label=f"平{d}" if d else "平仓", direction=prev_side)
+    if tool_name == "place_limit_order":
+        side = a.get("side")
+        d = "多" if side == "long" else "空" if side == "short" else "?"
+        return schemas.KeyEvent(kind="limit_order", label=f"挂限价单·{d}", direction=side)
+    return None
+
+
+def _derive_position(snapshot) -> schemas.PositionBrief | None:
+    """state_snapshot.position → PositionBrief。flat（position=None / contracts=0）
+    或异常形态（snapshot 非 dict）→ None。"""
+    if not isinstance(snapshot, dict):
+        return None
+    pos = snapshot.get("position")
+    if not isinstance(pos, dict):
+        return None
+    side, contracts = pos.get("side"), pos.get("contracts")
+    if not side or not contracts:
+        return None
+    return schemas.PositionBrief(side=side, contracts=contracts, entry_price=pos.get("entry_price"))
+
+
+def _normalize_to_list(raw) -> list:
+    """trigger_context 形态归一（schemas.py:72 已放宽为 dict|list|str|None）：
+    list → 仅保留 dict 元素；dict → 单元素 list；其他 → []。"""
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
+
+
+def _safe(fn):
+    """派生 fail-isolate：单事件解析异常 → None（沿用 #78 _safe_* 风格），不阻断 feed。"""
+    try:
+        return fn()
+    except Exception:
+        return None
 
 
 async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleDetail | None:
@@ -185,6 +281,7 @@ async def get_session_detail(engine: AsyncEngine, session_id: str) -> schemas.Se
         timeframe=sess.timeframe, scheduler_interval_min=sess.scheduler_interval_min,
         initial_balance=sess.initial_balance, token_budget=sess.token_budget,
         created_at=sess.created_at, last_active_at=sess.last_active_at,
+        system_prompt=sess.system_prompt,
     )
 
 

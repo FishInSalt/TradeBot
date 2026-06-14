@@ -39,6 +39,21 @@ class SessionDetail(BaseModel):
     token_budget: int
     created_at: UtcDatetime
     last_active_at: UtcDatetime | None
+    system_prompt: str | None = None    # 会话固定 persona（建会话时渲染，models.py:54-55）
+
+
+class PositionBrief(BaseModel):
+    """feed head：本轮开始态持仓精简（state_snapshot.position）。flat → None（不构造本模型）。"""
+    side: str                # 'long' | 'short'
+    contracts: float
+    entry_price: float | None
+
+
+class KeyEvent(BaseModel):
+    """feed end：本轮单个关键事件。被动 fill（fill_*）+ 主动动作（open/add/close/flip/limit_order）。"""
+    kind: str                # open|add|close|flip|limit_order | fill_open|fill_close|fill_partial
+    label: str               # 开多 / 加仓 / 平多 / 反手→空 / 挂限价单·多 / 限价开多 / 止损平仓 / 强平 …
+    direction: str | None    # 'long'|'short'，前端据此着色
 
 
 class CycleRow(BaseModel):
@@ -46,10 +61,11 @@ class CycleRow(BaseModel):
     cycle_label: str          # agent_cycles.cycle_id 字符串，仅显示
     triggered_by: str
     created_at: UtcDatetime
-    decision_head: str | None # decision 首段（截断）
     tokens_consumed: int
     wall_time_ms: int | None
     execution_status: str
+    position: PositionBrief | None    # head：本轮开始态持仓（state_snapshot.position）；flat → None
+    key_events: list[KeyEvent]        # end：本轮关键动作（被动 fill 在前、主动在后）；无 → []
 
 
 class ToolCallRow(BaseModel):

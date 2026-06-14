@@ -7,7 +7,14 @@ function detail(overrides = {}) {
     id: 5, cycle_label: "c5", triggered_by: "scheduled", created_at: "2026-06-12T10:00:00Z",
     reasoning: "thinking text", decision: "(1) Stance: hold",
     trigger_context: [{ type: "scheduled_tick" }],
-    state_snapshot: { balance: { total_usdt: 10000 } },
+    state_snapshot: {
+      position: { side: "short", contracts: 17.99, entry_price: 63896.0, unrealized_pnl: -12.5, leverage: 5 },
+      balance: { total_usdt: 10000, free_usdt: 9000, used_usdt: 1000 },
+      market: { ticker_last: 63900, fetched_at: "2026-06-12T10:00:00Z" },
+      pending_orders: [{ id: "o1", order_type: "stop", side: "sell", trigger_price: 62000, amount: 1 }],
+      active_alerts: [{ id: "a1", direction: "above", price: 64000, reasoning: "breakout" }],
+      _errors: [], _cycle_id: "c5",
+    },
     injected_events: null,
     react_steps: [
       { thinking: "评估趋势", tools: [{ tool_call_id: "call_1", tool_name: "get_position" }] },
@@ -52,6 +59,13 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("中途注入事件");
   });
 
+  it("§议题5 flat 回退路径耗时走 fmtDuration（与主路径一致，不再裸 ms）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null,
+      tool_calls: [{ tool_name: "get_position", status: "ok", duration_ms: 1500, error_type: null, args: null, result: "ok", tool_call_id: "c1" }] }) as any } });
+    expect(w.text()).toContain("最慢 1.5s");
+    expect(w.text()).not.toContain("1500ms");
+  });
+
   it("chips 含 llm 与 execution_status", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     expect(w.text()).toContain("llm");
@@ -62,5 +76,28 @@ describe("CycleDetailPanel", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail({ cache_hit_rate: 92.76 }) as any } });
     expect(w.text()).toContain("cache 93%");
     expect(w.text()).not.toContain("9276");
+  });
+
+  it("§议题6 标题改为「推理与行动过程」", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    expect(w.text()).toContain("推理与行动过程");
+    expect(w.text()).not.toContain("ReAct 过程");
+  });
+
+  it("§议题4 状态快照详情区：展开后渲染持仓/余额/告警", async () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    const toggle = w.findAll(".snapshot-toggle")[0];
+    await toggle.trigger("click");
+    const txt = w.text();
+    expect(txt).toContain("17.99");      // 持仓张数
+    expect(txt).toContain("9000");       // 余额 free
+    expect(txt).toContain("breakout");   // 告警 reasoning
+    expect(txt).not.toContain("_cycle_id");   // 内部键不展示
+  });
+
+  it("§议题5 chips token 千分位 + 耗时 s", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ tokens_consumed: 80733, wall_time_ms: 49770 }) as any } });
+    expect(w.text()).toContain("80,733");
+    expect(w.text()).toContain("49.8s");
   });
 });

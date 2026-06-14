@@ -7,7 +7,7 @@ beforeEach(() => setActivePinia(createPinia()));
 afterEach(() => vi.restoreAllMocks());
 
 function cyc(id: number) {
-  return { id, cycle_label: `c${id}`, triggered_by: "scheduled", created_at: "2026-06-12T10:00:00Z", decision_head: "d", tokens_consumed: 1, wall_time_ms: 1, execution_status: "ok" };
+  return { id, cycle_label: `c${id}`, triggered_by: "scheduled", created_at: "2026-06-12T10:00:00Z", tokens_consumed: 1, wall_time_ms: 1, execution_status: "ok", position: null, key_events: [] };
 }
 
 describe("sessions store", () => {

@@ -49,7 +49,7 @@ async def test_get_cycles_orders_desc_and_paginates(engine):
     assert [r.id for r in older] == [ids[2], ids[1]]
     newer = await get_cycles(engine, "s1", after_id=ids[3])
     assert [r.id for r in newer] == [ids[4]]
-    assert rows[0].decision_head and "line1" in rows[0].decision_head
+    assert rows[0].position is None and rows[0].key_events == []
 
 
 @pytest.mark.asyncio
@@ -222,3 +222,170 @@ async def test_list_sessions_summary(engine):
     detail = await get_session_detail(engine, "s1")
     assert detail.scheduler_interval_min == 15
     assert await get_session_detail(engine, "nope") is None
+
+
+@pytest.mark.asyncio
+async def test_get_session_detail_exposes_system_prompt(engine):
+    """SessionDetail 暴露 Session.system_prompt（会话固定 persona）。"""
+    async with get_session(engine) as s:
+        s.add(SessionModel(id="sp1", name="sp1", symbol="BTC/USDT:USDT",
+                           initial_balance=10000.0, status="active",
+                           scheduler_interval_min=15,
+                           system_prompt="You are a disciplined futures trader."))
+        await s.commit()
+    from src.webui.queries import get_session_detail
+    d = await get_session_detail(engine, "sp1")
+    assert d.system_prompt == "You are a disciplined futures trader."
+
+
+def _fill(reason, *, pnl=None, full=False, side="long"):
+    return {"type": "fill", "trigger_reason": reason, "position_side": side,
+            "pnl": pnl, "is_full_close": full, "side": "buy", "amount": 1.0,
+            "fill_price": 63000.0, "fee": 0.1, "order_id": "o1", "timestamp": 0}
+
+
+def test_classify_fill_branches():
+    from src.webui.queries import _classify_fill
+    # 限价开仓（pnl is None）
+    e = _classify_fill(_fill("limit", pnl=None, side="long"))
+    assert (e.kind, e.label, e.direction) == ("fill_open", "限价开多", "long")
+    e = _classify_fill(_fill("limit", pnl=None, side="short"))
+    assert e.label == "限价开空"
+    # 止损 / 止盈 / 强平 / 限价平（pnl≠None 且 full close）
+    assert _classify_fill(_fill("stop", pnl=-50.0, full=True)).label == "止损平仓"
+    assert _classify_fill(_fill("take_profit", pnl=80.0, full=True)).label == "止盈平仓"
+    assert _classify_fill(_fill("liquidation", pnl=-200.0, full=True)).label == "强平"
+    assert _classify_fill(_fill("limit", pnl=30.0, full=True)).label == "限价平仓"
+    for r in ("stop", "take_profit", "liquidation", "limit"):
+        assert _classify_fill(_fill(r, pnl=1.0, full=True)).kind == "fill_close"
+    # 部分平（pnl≠None 非 full close）
+    e = _classify_fill(_fill("stop", pnl=10.0, full=False))
+    assert (e.kind, e.label) == ("fill_partial", "部分平仓")
+    # market 回声 → 跳过（去重）
+    assert _classify_fill(_fill("market", pnl=None)) is None
+    assert _classify_fill(_fill("market", pnl=50.0, full=True)) is None
+
+
+def test_classify_action_branches():
+    from src.webui.queries import _classify_action
+    # open_position：前 flat → open；前同向 → add；前反向 → flip
+    e = _classify_action("open_position", {"side": "long"}, None)
+    assert (e.kind, e.label, e.direction) == ("open", "开多", "long")
+    assert _classify_action("open_position", {"side": "short"}, None).label == "开空"
+    assert _classify_action("open_position", {"side": "long"}, "long").kind == "add"
+    e = _classify_action("open_position", {"side": "short"}, "long")
+    assert (e.kind, e.label) == ("flip", "反手→空")
+    # close_position：无 side，方向取 prev
+    e = _classify_action("close_position", {}, "long")
+    assert (e.kind, e.label, e.direction) == ("close", "平多", "long")
+    assert _classify_action("close_position", {}, "short").label == "平空"
+    assert _classify_action("close_position", {}, None).label == "平仓"   # prev 缺失兜底
+    # place_limit_order
+    e = _classify_action("place_limit_order", {"side": "long"}, None)
+    assert (e.kind, e.label, e.direction) == ("limit_order", "挂限价单·多", "long")
+    # 非交易工具 → None
+    assert _classify_action("get_market_data", {}, None) is None
+    # args 非 dict（截断回退 str）→ 不抛、side 缺失走 '?'
+    assert _classify_action("open_position", "broken", None).kind == "open"
+
+
+def test_derive_position_and_normalize():
+    from src.webui.queries import _derive_position, _normalize_to_list, _safe
+    # 有持仓
+    snap = {"position": {"side": "short", "contracts": 17.99, "entry_price": 63896.0}}
+    p = _derive_position(snap)
+    assert (p.side, p.contracts, p.entry_price) == ("short", 17.99, 63896.0)
+    # flat：position=None / contracts=0 → None
+    assert _derive_position({"position": None}) is None
+    assert _derive_position({"position": {"side": "long", "contracts": 0}}) is None
+    # 异常形态（snapshot 是 list/str/None）→ None，不抛
+    assert _derive_position(["x"]) is None
+    assert _derive_position("broken") is None
+    assert _derive_position(None) is None
+    # 形态归一：list[dict] 直用 / dict 包单元素 / 其他 → []
+    assert _normalize_to_list([{"a": 1}, {"b": 2}]) == [{"a": 1}, {"b": 2}]
+    assert _normalize_to_list({"a": 1}) == [{"a": 1}]
+    assert _normalize_to_list("broken") == []
+    assert _normalize_to_list(None) == []
+    assert _normalize_to_list([1, {"a": 1}]) == [{"a": 1}]   # 非 dict 元素剔除
+    # _safe：异常 → None
+    assert _safe(lambda: 1 / 0) is None
+    assert _safe(lambda: 42) == 42
+
+
+async def _add_tool(engine, cycle_id, tool_name, args, sid="s1"):
+    async with get_session(engine) as s:
+        s.add(ToolCall(session_id=sid, cycle_id=cycle_id, tool_name=tool_name,
+                       status="ok", duration_ms=10,
+                       args=json.dumps(args) if args is not None else None))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_get_cycles_key_events_active_actions(engine):
+    await _seed_session(engine)
+    # 开多（前 flat）
+    await _add_cycle(engine, cycle_id="open1", snapshot='{"position":null}')
+    await _add_tool(engine, "open1", "open_position", {"side": "long"})
+    # 加仓（前同向 long）
+    await _add_cycle(engine, cycle_id="add1",
+                     snapshot='{"position":{"side":"long","contracts":2.0,"entry_price":63000.0}}')
+    await _add_tool(engine, "add1", "open_position", {"side": "long"})
+    # 反手（前反向 long → 开 short）
+    await _add_cycle(engine, cycle_id="flip1",
+                     snapshot='{"position":{"side":"long","contracts":2.0,"entry_price":63000.0}}')
+    await _add_tool(engine, "flip1", "open_position", {"side": "short"})
+    # 主动平仓 + 挂限价单（同轮两动作，按执行序）
+    await _add_cycle(engine, cycle_id="mix1",
+                     snapshot='{"position":{"side":"long","contracts":2.0,"entry_price":63000.0}}')
+    await _add_tool(engine, "mix1", "close_position", None)
+    await _add_tool(engine, "mix1", "place_limit_order", {"side": "short"})
+    from src.webui.queries import get_cycles
+    by = {r.cycle_label: r for r in await get_cycles(engine, "s1")}
+    assert [e.kind for e in by["open1"].key_events] == ["open"]
+    assert by["open1"].position is None
+    assert [e.kind for e in by["add1"].key_events] == ["add"]
+    assert by["add1"].position.side == "long" and by["add1"].position.contracts == 2.0
+    assert [e.kind for e in by["flip1"].key_events] == ["flip"]
+    assert [e.kind for e in by["mix1"].key_events] == ["close", "limit_order"]
+
+
+@pytest.mark.asyncio
+async def test_get_cycles_key_events_passive_fills_and_dedup(engine):
+    await _seed_session(engine)
+    # 止损平仓 fill
+    await _add_cycle(engine, cycle_id="stop1", trigger_context=[_fill("stop", pnl=-50.0, full=True)])
+    # market 回声 → 去重（不计入）
+    await _add_cycle(engine, cycle_id="mkt1", trigger_context=[_fill("market", pnl=20.0, full=True)])
+    # 同轮双事件：止损全平 fill（被动）→ snapshot 已空仓（fill 撮合早于 snapshot，cli/app.py:508→514，
+    # 已用 cycle 1147 DB 实证）→ 主动反向 open 从空仓新开 = open（非 flip）
+    await _add_cycle(engine, cycle_id="dual1",
+                     trigger_context=[_fill("stop", pnl=-30.0, full=True, side="long")],
+                     snapshot='{"position":null}')
+    await _add_tool(engine, "dual1", "open_position", {"side": "short"})
+    from src.webui.queries import get_cycles
+    by = {r.cycle_label: r for r in await get_cycles(engine, "s1")}
+    assert [e.kind for e in by["stop1"].key_events] == ["fill_close"]
+    assert by["stop1"].key_events[0].label == "止损平仓"
+    assert by["mkt1"].key_events == []                          # market 回声去重
+    # 同轮：被动 fill 在前、主动动作在后；全平后 snapshot 空仓 → prev_side=None → open（非 flip）
+    assert [e.kind for e in by["dual1"].key_events] == ["fill_close", "open"]
+    assert by["dual1"].key_events[1].label == "开空"
+
+
+@pytest.mark.asyncio
+async def test_get_cycles_derivation_fail_isolated(engine):
+    """派生真异常被 _safe 兜住、不阻断 feed（区别于"被类型守卫提前挡成 None"——那不验证 _safe）：
+    - position.contracts 非数 → PositionBrief(contracts: float) 构造 ValidationError；
+    - fill.position_side 为 dict → KeyEvent(direction: str|None) 构造 ValidationError。
+    两路异常各被 _safe 吞为 None。"""
+    await _seed_session(engine)
+    await _add_cycle(
+        engine, cycle_id="bad1",
+        trigger_context=[{"type": "fill", "trigger_reason": "stop",
+                          "position_side": {"bad": 1}, "pnl": -1.0, "is_full_close": True}],
+        snapshot='{"position":{"side":"long","contracts":"not_a_number"}}')
+    from src.webui.queries import get_cycles
+    rows = await get_cycles(engine, "s1")            # 不抛（feed 不阻断）
+    r = next(x for x in rows if x.cycle_label == "bad1")
+    assert r.position is None and r.key_events == []  # position 与 fill 两路异常各被 _safe 兜住
