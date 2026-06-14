@@ -69,6 +69,7 @@ describe("DashboardView", () => {
     expect(card.text()).toContain("BTC/USDT:USDT"); // 配置段
     expect(card.text()).toContain("空仓");          // 实时状态段
     expect(card.text()).not.toContain("提醒");
+    expect(card.text()).toContain("时间均为 UTC");   // 全局时区标注（去歧义、不逐戳加噪）
   });
 
   it("store.error 时渲染错误横幅（错误不再静默）", async () => {
