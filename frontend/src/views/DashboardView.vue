@@ -32,8 +32,11 @@ onUnmounted(() => polling.stop());
     <n-alert v-if="store.error" type="error" title="加载出错" closable class="err" @close="store.error = null">
       {{ store.error }}
     </n-alert>
-    <SessionMeta />
-    <LiveStatusCard />
+    <div class="session-header ob-card">
+      <SessionMeta />
+      <div class="header-divider" />
+      <LiveStatusCard />
+    </div>
     <div class="stream-wrap"><DecisionStream /></div>
     <PerformanceBar />
   </div>
@@ -42,6 +45,7 @@ onUnmounted(() => polling.stop());
 
 <style scoped>
 .dashboard { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.header-divider { height: 1px; background: var(--ob-border); margin: 8px 0; }
 .stream-wrap { flex: 1; overflow-y: auto; min-height: 0; }
 .empty { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--ob-text-muted); }
 .err { margin: 8px 16px 0; }

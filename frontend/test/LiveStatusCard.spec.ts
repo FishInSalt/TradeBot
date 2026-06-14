@@ -18,6 +18,8 @@ describe("LiveStatusCard", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.text()).toContain("long");
     expect(wrapper.text()).toContain("1.5");
+    // "提醒"计数已移除（口径 bug 期间避免误导观测者，详见 v_alert_lifecycle over-count）
+    expect(wrapper.text()).not.toContain("提醒");
   });
 
   it("无持仓显示空仓", async () => {

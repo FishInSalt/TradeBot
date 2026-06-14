@@ -9,7 +9,7 @@ const promptOpen = ref(false);
 </script>
 
 <template>
-  <div v-if="d" class="session-meta-wrap ob-card">
+  <div v-if="d" class="session-meta-wrap">
     <n-descriptions :column="5" size="small" label-placement="left" class="session-meta" bordered>
       <n-descriptions-item label="Symbol">{{ d.symbol }}</n-descriptions-item>
       <n-descriptions-item label="周期">{{ d.timeframe }}</n-descriptions-item>
@@ -27,7 +27,6 @@ const promptOpen = ref(false);
 </template>
 
 <style scoped>
-.session-meta-wrap { padding: 6px 16px; }
 .session-meta { margin-bottom: 6px; }
 .sysprompt-toggle { cursor: pointer; user-select: none; font-size: 12px; color: var(--ob-text-muted); }
 .clickable { cursor: pointer; user-select: none; }

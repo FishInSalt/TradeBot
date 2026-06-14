@@ -49,6 +49,28 @@ describe("DashboardView", () => {
     expect(store.selectSession).toHaveBeenCalledWith("sim19");
   });
 
+  it("会话头合并为单卡：.session-header.ob-card 内同含配置与实时状态", async () => {
+    const router = makeRouter();
+    router.push("/sessions/s1");
+    await router.isReady();
+    const wrapper = mount(DashboardView, {
+      global: { plugins: [createTestingPinia({ createSpy: vi.fn, stubActions: true }), router] },
+      props: { id: "s1" },
+    });
+    const store = useSessionsStore();
+    store.detail = { id: "s1", name: "n1", symbol: "BTC/USDT:USDT", status: "active", timeframe: "1h",
+      scheduler_interval_min: 15, initial_balance: 10000, token_budget: 200000,
+      created_at: "2026-06-12T10:00:00Z", last_active_at: null } as any;
+    store.live = { status: "active", last_active_at: "2026-06-12T10:00:00Z", position: null,
+      open_orders: [], active_alerts: [] } as any;
+    await wrapper.vm.$nextTick();
+    const card = wrapper.find(".session-header.ob-card");
+    expect(card.exists()).toBe(true);
+    expect(card.text()).toContain("BTC/USDT:USDT"); // 配置段
+    expect(card.text()).toContain("空仓");          // 实时状态段
+    expect(card.text()).not.toContain("提醒");
+  });
+
   it("store.error 时渲染错误横幅（错误不再静默）", async () => {
     const router = makeRouter();
     router.push("/sessions/bad");

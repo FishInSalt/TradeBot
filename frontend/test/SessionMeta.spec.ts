@@ -52,7 +52,7 @@ describe("SessionMeta", () => {
     expect(wrapper.text()).not.toContain("System Prompt");
   });
 
-  it("§4 dashboard 卡片化：根容器带 ob-card", async () => {
+  it("卡片 chrome 上移到 DashboardView 合并卡：SessionMeta 自身不再带 ob-card，但仍渲染配置", async () => {
     const wrapper = mount(SessionMeta, {
       global: { plugins: [createTestingPinia({ createSpy: vi.fn, stubActions: true })] },
     });
@@ -61,6 +61,8 @@ describe("SessionMeta", () => {
       scheduler_interval_min: 15, initial_balance: 10000, token_budget: 200000,
       created_at: "2026-06-12T10:00:00Z", last_active_at: null } as any;
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".ob-card").exists()).toBe(true);
+    expect(wrapper.find(".ob-card").exists()).toBe(false);
+    expect(wrapper.find(".session-meta").exists()).toBe(true);
+    expect(wrapper.text()).toContain("BTC/USDT:USDT");
   });
 });
