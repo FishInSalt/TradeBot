@@ -84,15 +84,19 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).not.toContain("ReAct 过程");
   });
 
-  it("§议题4 状态快照详情区：展开后渲染持仓/余额/告警", async () => {
+  it("§⑤⑥ 状态快照默认展开 + 置顶 + 格式化", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
-    const toggle = w.findAll(".snapshot-toggle")[0];
-    await toggle.trigger("click");
     const txt = w.text();
-    expect(txt).toContain("17.99");      // 持仓张数
-    expect(txt).toContain("9000");       // 余额 free
-    expect(txt).toContain("breakout");   // 告警 reasoning
-    expect(txt).not.toContain("_cycle_id");   // 内部键不展示
+    expect(txt).toContain("本轮开始时的状态");
+    expect(txt).not.toContain("开始态");
+    expect(txt).toContain("17.99");          // 默认展开即可见（持仓 contracts）
+    expect(txt).not.toContain("_cycle_id");
+    expect(txt.indexOf("本轮开始时的状态")).toBeLessThan(txt.indexOf("推理与行动过程"));
+  });
+
+  it("§① chip 输入/输出 token 文案", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    expect(w.text()).toContain("输入 8,000 / 输出 1,000 tok");
   });
 
   it("§议题5 chips token 千分位 + 耗时 s", () => {
