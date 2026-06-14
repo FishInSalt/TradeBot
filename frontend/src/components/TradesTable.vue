@@ -28,6 +28,6 @@ const data = computed(() => props.trades);
 </template>
 
 <style scoped>
-:deep(.pos) { color: #4ade80; }
-:deep(.neg) { color: #f87171; }
+:deep(.pos) { color: var(--ob-pos); }
+:deep(.neg) { color: var(--ob-neg); }
 </style>

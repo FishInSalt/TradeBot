@@ -43,6 +43,6 @@ onUnmounted(() => polling.stop());
 <style scoped>
 .dashboard { height: 100%; display: flex; flex-direction: column; min-height: 0; }
 .stream-wrap { flex: 1; overflow-y: auto; min-height: 0; }
-.empty { height: 100%; display: flex; align-items: center; justify-content: center; opacity: 0.5; }
+.empty { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--ob-text-muted); }
 .err { margin: 8px 16px 0; }
 </style>
