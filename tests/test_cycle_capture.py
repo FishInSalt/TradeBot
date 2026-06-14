@@ -47,6 +47,7 @@ def deps_with_position():
     ])
     deps.exchange.get_contract_size = AsyncMock(return_value=1.0)
     deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
 
     deps.market_data = MagicMock()
     deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
@@ -69,6 +70,7 @@ def deps_flat():
     ))
     deps.exchange.fetch_open_orders = AsyncMock(return_value=[])
     deps.exchange.get_price_level_alerts = MagicMock(return_value=[])
+    deps.exchange.get_alert_params = MagicMock(return_value=None)
     deps.market_data = MagicMock()
     deps.market_data.get_ticker = AsyncMock(return_value=Ticker(
         symbol="BTC/USDT:USDT", last=75000.0, bid=74999.0, ask=75001.0,
@@ -160,7 +162,7 @@ async def test_state_snapshot_position_fetch_failed(deps_with_position):
 
 
 async def test_state_snapshot_all_failed():
-    """T-SS-7: 全部 fetch 失败 → 所有字段 None + _errors 5 项 + 不抛异常。"""
+    """T-SS-7: 全部 6 个 best-effort fetch 失败 → 所有字段 None + _errors 6 项 + 不抛异常。"""
     deps = MagicMock()
     deps.symbol = "BTC/USDT:USDT"
     deps.exchange = MagicMock()
@@ -168,6 +170,7 @@ async def test_state_snapshot_all_failed():
     deps.exchange.fetch_balance = AsyncMock(side_effect=RuntimeError())
     deps.exchange.fetch_open_orders = AsyncMock(side_effect=RuntimeError())
     deps.exchange.get_price_level_alerts = MagicMock(side_effect=RuntimeError())
+    deps.exchange.get_alert_params = MagicMock(side_effect=RuntimeError())
     deps.market_data = MagicMock()
     deps.market_data.get_ticker = AsyncMock(side_effect=RuntimeError())
 
@@ -177,7 +180,8 @@ async def test_state_snapshot_all_failed():
     assert snap["market"] is None
     assert snap["pending_orders"] == []
     assert snap["active_alerts"] == []
-    assert len(snap["_errors"]) == 5
+    assert snap["volatility_alert"] is None
+    assert len(snap["_errors"]) == 6
 
 
 async def test_state_snapshot_json_round_trip(deps_with_position):
@@ -237,6 +241,7 @@ async def test_state_snapshot_always_returns_dict_never_none():
     deps.exchange.fetch_balance = AsyncMock(side_effect=Exception("xxx"))
     deps.exchange.fetch_open_orders = AsyncMock(side_effect=Exception("xxx"))
     deps.exchange.get_price_level_alerts = MagicMock(side_effect=Exception("xxx"))
+    deps.exchange.get_alert_params = MagicMock(side_effect=Exception("xxx"))
     deps.market_data = MagicMock()
     deps.market_data.get_ticker = AsyncMock(side_effect=Exception("xxx"))
 
@@ -250,6 +255,28 @@ async def test_state_snapshot_always_returns_dict_never_none():
     # json.dumps 必须不抛 TypeError (锁住 cli/app.py 写入路径契约)
     serialized = json.dumps(snap)
     assert isinstance(serialized, str) and len(serialized) > 0
+
+
+async def test_state_snapshot_captures_volatility_alert(deps_with_position):
+    """T-SS-12 (B3): 设了波动告警 → snapshot.volatility_alert = {threshold_pct, window_minutes}。"""
+    deps_with_position.exchange.get_alert_params = MagicMock(return_value=(1.5, 15))
+    snap = await _capture_state_snapshot("c-vol-1", deps_with_position)
+    assert snap["volatility_alert"] == {"threshold_pct": 1.5, "window_minutes": 15}
+
+
+async def test_state_snapshot_volatility_alert_none_when_disabled(deps_with_position):
+    """T-SS-13 (B3): 未设波动告警（get_alert_params 返 None）→ volatility_alert = None。"""
+    deps_with_position.exchange.get_alert_params = MagicMock(return_value=None)
+    snap = await _capture_state_snapshot("c-vol-2", deps_with_position)
+    assert snap["volatility_alert"] is None
+
+
+async def test_state_snapshot_volatility_alert_error_isolated(deps_with_position):
+    """T-SS-14 (B3): getter 抛异常 → volatility_alert 留 None + _errors 标记、不抛。"""
+    deps_with_position.exchange.get_alert_params = MagicMock(side_effect=RuntimeError("boom"))
+    snap = await _capture_state_snapshot("c-vol-3", deps_with_position)
+    assert snap["volatility_alert"] is None
+    assert any("volatility_alert_read_failed" in e for e in snap["_errors"])
 
 
 # === T-TC: trigger_context ===
