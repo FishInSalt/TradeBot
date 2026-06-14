@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { NTag } from "naive-ui";
 import type { ToolCallRow } from "@/api/client";
 import JsonBlock from "@/components/JsonBlock.vue";
+import InjectionCard from "@/components/InjectionCard.vue";
 import { fmtArgs, fmtDuration, clipArgs } from "@/utils/format";
 
 interface ReactTool { tool_call_id: string | null; tool_name: string }
@@ -12,6 +13,8 @@ interface InjectedEvent {
   after_tool?: string;
   offset_ms?: number | null;
   after_tool_call_id?: string | null;
+  triggered_ago?: string | null;
+  kind_label?: string;
 }
 
 const props = defineProps<{
@@ -142,24 +145,15 @@ function statusType(s: string) {
           </div>
         </div>
 
-        <!-- 该工具后锚定的注入事件（批量并排） -->
-        <div v-for="(inj, ii) in injectionsFor(t, si, ti)" :key="`inj-${si}-${ti}-${ii}`" class="injection-card">
-          <span class="step-icon">⚡</span>
-          <span class="inj-title">触发事件注入</span>
-          <span v-if="inj.offset_ms != null" class="muted">+{{ inj.offset_ms }}ms</span>
-          <JsonBlock :value="inj.event" />
-        </div>
+        <!-- 该工具后锚定的注入事件（批量并排，人读摘要卡） -->
+        <InjectionCard v-for="(inj, ii) in injectionsFor(t, si, ti)" :key="`inj-${si}-${ti}-${ii}`" :inj="inj" />
       </template>
     </div>
 
     <!-- §10：未能按 id/名锚定的注入 → 时间线末尾归组 -->
     <div v-if="orphanInjections.length" class="orphan-injections">
-      <div v-for="(inj, oi) in orphanInjections" :key="`orphan-inj-${oi}`" class="injection-card">
-        <span class="step-icon">⚡</span>
-        <span class="inj-title">触发事件注入（未能锚定）</span>
-        <span v-if="inj.offset_ms != null" class="muted">+{{ inj.offset_ms }}ms</span>
-        <JsonBlock :value="inj.event" />
-      </div>
+      <div class="orphan-label muted">未能锚定的注入事件</div>
+      <InjectionCard v-for="(inj, oi) in orphanInjections" :key="`orphan-inj-${oi}`" :inj="inj" />
     </div>
   </div>
 </template>
@@ -175,13 +169,9 @@ function statusType(s: string) {
 .tool-body { padding: 4px 8px 8px 26px; }
 .kv { display: flex; gap: 8px; margin-top: 4px; font-size: 12px; }
 .kv .k { color: var(--ob-text-muted); min-width: 32px; }
-.injection-card { display: flex; align-items: center; gap: 6px; margin: 6px 0 6px 18px; padding: 5px 8px; background: var(--ob-warn-soft); border-radius: 4px; font-size: 12px; }
-.inj-title { font-weight: 600; }
 .step-icon { flex: 0 0 auto; }
 .muted { color: var(--ob-text-muted); }
-/* 注入卡 warn-soft 琥珀底上 muted(#6b7280) 仅 4.34 → 用更深 warn 达 AA（review）。
-   scoped (0,2,0) 按特异性胜 .muted (0,1,0)，全局 muted/工具耗时仍白卡 4.83 不受影响。 */
-.injection-card .muted { color: var(--ob-warn); }
+.orphan-label { font-size: 11px; margin: 8px 0 2px 18px; }
 .orphan { font-style: italic; }
 .seam { font-size: 12px; color: var(--ob-text-muted); font-style: italic; }
 .clickable { cursor: pointer; }

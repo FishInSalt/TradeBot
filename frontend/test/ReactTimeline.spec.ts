@@ -63,6 +63,7 @@ describe("ReactTimeline", () => {
     const iNext = txt.indexOf("open_position");
     expect(iInj).toBeGreaterThan(txt.indexOf("get_position"));
     expect(iInj).toBeLessThan(iNext);
+    expect(txt).not.toContain("+1200ms");   // D：去掉 offset_ms 显示
   });
 
   it("批量注入（共享 after_tool_call_id）并排多张", () => {
