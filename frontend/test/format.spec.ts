@@ -64,6 +64,14 @@ describe("clipArgs", () => {
   it("嵌套值回退 JSON 串", () => {
     expect(clipArgs({ a: { b: 1 } })).toEqual({ text: 'a={"b":1}', clipped: false });
   });
+  it("按码点截断：不在代理对中间切出孤立代理（review Minor）", () => {
+    // "ab=" 3 码元 + 60 个 emoji（各 2 码元）→ 码元 index 60 落在某 emoji 中间，
+    // 旧 slice(0,60) 会切出孤立高代理；按码点截断则每个 emoji 完整。
+    const r = clipArgs({ ab: "😀".repeat(60) });
+    expect(r.clipped).toBe(true);
+    expect(r.text.endsWith("…")).toBe(true);
+    expect(r.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/); // 无孤立高代理
+  });
 });
 
 describe("fmtNum", () => {

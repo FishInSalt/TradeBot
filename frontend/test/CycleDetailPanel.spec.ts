@@ -94,6 +94,18 @@ describe("CycleDetailPanel", () => {
     expect(txt.indexOf("本轮开始时的状态")).toBeLessThan(txt.indexOf("推理与行动过程"));
   });
 
+  it("§⑥ 快照格式化真实行为：方向/杠杆×/USDT/− 号/红绿着色（议题 6 核心交付）", () => {
+    // fixture：side=short / unrealized_pnl=-12.5 / leverage=5
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    const txt = w.text();
+    expect(txt).toContain("空");              // short → 空
+    expect(txt).toContain("杠杆 5×");          // leverage 带 × 单位
+    expect(txt).toContain("−12.5");           // 浮盈带 U+2212 负号（非 ASCII -）
+    expect(txt).toContain("USDT");            // 浮盈带单位
+    expect(w.find(".dir.short").exists()).toBe(true);  // 方向着色 class
+    expect(w.find(".neg").exists()).toBe(true);        // 负浮盈红字 class
+  });
+
   it("§① chip 输入/输出 token 文案", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     expect(w.text()).toContain("输入 8,000 / 输出 1,000 tok");
