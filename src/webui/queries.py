@@ -63,6 +63,24 @@ def _loads(raw: str | None):
         return raw          # 截断的 outlier 行：回退原始字符串（spec 契约）
 
 
+def _classify_fill(fill: dict) -> schemas.KeyEvent | None:
+    """trigger_context 里单个 fill dict → KeyEvent。
+    market 回声 = 历史会话旧派发产物（spec §2），跳过去重 → None。
+    pnl is None → 开仓型；pnl≠None 且 is_full_close → 全平；否则部分平。"""
+    reason = fill.get("trigger_reason")
+    if reason == "market":
+        return None
+    side = fill.get("position_side")
+    d = "多" if side == "long" else "空" if side == "short" else "?"
+    if fill.get("pnl") is None:
+        return schemas.KeyEvent(kind="fill_open", label=f"限价开{d}", direction=side)
+    if fill.get("is_full_close"):
+        label = {"stop": "止损平仓", "take_profit": "止盈平仓",
+                 "liquidation": "强平", "limit": "限价平仓"}.get(reason, "平仓")
+        return schemas.KeyEvent(kind="fill_close", label=label, direction=side)
+    return schemas.KeyEvent(kind="fill_partial", label="部分平仓", direction=side)
+
+
 async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleDetail | None:
     async with get_session(engine) as s:
         c = (await s.execute(

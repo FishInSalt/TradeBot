@@ -236,3 +236,31 @@ async def test_get_session_detail_exposes_system_prompt(engine):
     from src.webui.queries import get_session_detail
     d = await get_session_detail(engine, "sp1")
     assert d.system_prompt == "You are a disciplined futures trader."
+
+
+def _fill(reason, *, pnl=None, full=False, side="long"):
+    return {"type": "fill", "trigger_reason": reason, "position_side": side,
+            "pnl": pnl, "is_full_close": full, "side": "buy", "amount": 1.0,
+            "fill_price": 63000.0, "fee": 0.1, "order_id": "o1", "timestamp": 0}
+
+
+def test_classify_fill_branches():
+    from src.webui.queries import _classify_fill
+    # 限价开仓（pnl is None）
+    e = _classify_fill(_fill("limit", pnl=None, side="long"))
+    assert (e.kind, e.label, e.direction) == ("fill_open", "限价开多", "long")
+    e = _classify_fill(_fill("limit", pnl=None, side="short"))
+    assert e.label == "限价开空"
+    # 止损 / 止盈 / 强平 / 限价平（pnl≠None 且 full close）
+    assert _classify_fill(_fill("stop", pnl=-50.0, full=True)).label == "止损平仓"
+    assert _classify_fill(_fill("take_profit", pnl=80.0, full=True)).label == "止盈平仓"
+    assert _classify_fill(_fill("liquidation", pnl=-200.0, full=True)).label == "强平"
+    assert _classify_fill(_fill("limit", pnl=30.0, full=True)).label == "限价平仓"
+    for r in ("stop", "take_profit", "liquidation", "limit"):
+        assert _classify_fill(_fill(r, pnl=1.0, full=True)).kind == "fill_close"
+    # 部分平（pnl≠None 非 full close）
+    e = _classify_fill(_fill("stop", pnl=10.0, full=False))
+    assert (e.kind, e.label) == ("fill_partial", "部分平仓")
+    # market 回声 → 跳过（去重）
+    assert _classify_fill(_fill("market", pnl=None)) is None
+    assert _classify_fill(_fill("market", pnl=50.0, full=True)) is None
