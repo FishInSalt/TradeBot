@@ -32,8 +32,3 @@ export function fmtUtcEpoch(ms: number | null | undefined): string {
   const d = new Date(ms);
   return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
 }
-
-export function fmtLocal(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  return parseUtc(iso).toLocaleString();
-}

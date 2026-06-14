@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { NTag, NSpace } from "naive-ui";
 import { useSessionsStore } from "@/stores/sessions";
-import { fmtLocal } from "@/utils/time";
+import { fmtUtc } from "@/utils/time";
 
 const store = useSessionsStore();
 const live = computed(() => store.live);
@@ -13,7 +13,7 @@ const stalled = computed(() => store.pollFailCount >= 3);
   <div v-if="live" class="status-card">
     <n-space align="center" :size="18">
       <n-tag :type="live.status === 'active' ? 'success' : 'warning'" size="small" round>{{ live.status }}</n-tag>
-      <span class="muted">@ {{ fmtLocal(live.last_active_at) }}</span>
+      <span class="muted">@ {{ fmtUtc(live.last_active_at) }}</span>
       <template v-if="live.position">
         <span class="label">持仓</span>
         <span class="pos" :class="live.position.side">{{ live.position.side }}</span>
