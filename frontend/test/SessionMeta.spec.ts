@@ -51,4 +51,16 @@ describe("SessionMeta", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.text()).not.toContain("System Prompt");
   });
+
+  it("§4 dashboard 卡片化：根容器带 ob-card", async () => {
+    const wrapper = mount(SessionMeta, {
+      global: { plugins: [createTestingPinia({ createSpy: vi.fn, stubActions: true })] },
+    });
+    const store = useSessionsStore();
+    store.detail = { id: "s1", name: "n1", symbol: "BTC/USDT:USDT", status: "active", timeframe: "1h",
+      scheduler_interval_min: 15, initial_balance: 10000, token_budget: 200000,
+      created_at: "2026-06-12T10:00:00Z", last_active_at: null } as any;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".ob-card").exists()).toBe(true);
+  });
 });

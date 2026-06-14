@@ -27,7 +27,7 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
 </script>
 
 <template>
-  <div class="decision-stream">
+  <div class="decision-stream ob-card">
     <n-collapse accordion :expanded-names="expandedNames" @update:expanded-names="onUpdate">
       <n-collapse-item v-for="c in cycles" :key="c.id" :name="c.id">
         <template #header><CycleRowHeader :cycle="c" /></template>
@@ -41,6 +41,6 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
 
 <style scoped>
 .decision-stream { padding: 4px 8px; }
-.loading { padding: 12px; opacity: 0.5; font-size: 13px; }
-.empty { padding: 24px; text-align: center; opacity: 0.5; font-size: 13px; }
+.loading { padding: 12px; color: var(--ob-text-muted); font-size: 13px; }
+.empty { padding: 24px; text-align: center; color: var(--ob-text-muted); font-size: 13px; }
 </style>
