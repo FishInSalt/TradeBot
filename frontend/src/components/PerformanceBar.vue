@@ -11,7 +11,7 @@ const showTrades = ref(false);
 </script>
 
 <template>
-  <div v-if="perf" class="perf-bar">
+  <div v-if="perf" class="perf-bar ob-card">
     <div class="left">
       <div class="caliper">净值曲线 <n-tag size="tiny" :bordered="false">盯市·含未实现PnL</n-tag></div>
       <EquityChart :points="perf.equity_curve" />
@@ -40,10 +40,10 @@ const showTrades = ref(false);
 </template>
 
 <style scoped>
-.perf-bar { border-top: 1px solid rgba(255, 255, 255, 0.08); padding: 8px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-height: 40vh; overflow-y: auto; }
+.perf-bar { border-top: 1px solid var(--ob-border); padding: 8px 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-height: 40vh; overflow-y: auto; }
 .left { min-width: 0; }
-.caliper { font-size: 12px; opacity: 0.75; margin-bottom: 4px; }
-.note { font-size: 11px; opacity: 0.5; margin-top: 6px; }
-.neg { color: #f87171; }
+.caliper { font-size: 12px; color: var(--ob-text-muted); margin-bottom: 4px; }
+.note { font-size: 11px; color: var(--ob-text-muted); margin-top: 6px; }
+.neg { color: var(--ob-neg); }
 .trades-wrap { grid-column: 1 / -1; margin-top: 8px; }
 </style>

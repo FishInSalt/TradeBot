@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 import { NTag } from "naive-ui";
 import type { ToolCallRow } from "@/api/client";
 import JsonBlock from "@/components/JsonBlock.vue";
-import { fmtArgs, fmtDuration } from "@/utils/format";
+import { fmtArgs, fmtDuration, clipArgs } from "@/utils/format";
 
 interface ReactTool { tool_call_id: string | null; tool_name: string }
 interface ReactStep { thinking: string | null; tools: ReactTool[] }
@@ -86,6 +86,10 @@ function toggle(key: string) {
 function rowFor(t: ReactTool): ToolCallRow | undefined {
   return t.tool_call_id ? toolMap.value.get(t.tool_call_id) : undefined;
 }
+function headArgs(t: ReactTool): { text: string; clipped: boolean } {
+  const r = rowFor(t);
+  return r ? clipArgs(r.args) : { text: "", clipped: false };
+}
 function injectionsFor(t: ReactTool, si: number, ti: number): InjectedEvent[] {
   return injectionBuckets.value.byKey.get(cardKey(t, si, ti)) ?? [];
 }
@@ -114,7 +118,7 @@ function statusType(s: string) {
         <div class="tool-card">
           <div class="tool-head" :class="{ clickable: rowFor(t) }" @click="rowFor(t) && toggle(cardKey(t, si, ti))">
             <span class="step-icon">⚙</span>
-            <span class="tool-name">{{ t.tool_name }}</span>
+            <span class="tool-name">{{ t.tool_name }}<template v-if="rowFor(t)">(<span class="tool-args">{{ headArgs(t).text }}</span>)</template></span>
             <template v-if="rowFor(t)">
               <n-tag size="tiny" :type="statusType(rowFor(t)!.status)">
                 {{ rowFor(t)!.error_type ? `${rowFor(t)!.status} · ${rowFor(t)!.error_type}` : rowFor(t)!.status }}
@@ -124,7 +128,7 @@ function statusType(s: string) {
             <span v-else class="muted orphan">无遥测记录（被拒或记录失败）</span>
           </div>
           <div v-if="rowFor(t) && openCards.has(cardKey(t, si, ti))" class="tool-body">
-            <div class="kv"><span class="k">入参</span><span class="args-compact">{{ fmtArgs(rowFor(t)!.args) }}</span></div>
+            <div v-if="headArgs(t).clipped" class="kv"><span class="k">入参</span><span class="args-compact">{{ fmtArgs(rowFor(t)!.args) }}</span></div>
             <div class="kv"><span class="k">结果</span>
               <JsonBlock v-if="rowFor(t)!.result != null" :value="rowFor(t)!.result" />
               <span v-else class="seam">结果未捕获</span>
@@ -155,23 +159,27 @@ function statusType(s: string) {
 </template>
 
 <style scoped>
-.react-step { border-left: 2px solid rgba(96, 165, 250, 0.3); padding-left: 10px; margin-bottom: 14px; }
+.react-step { border-left: 2px solid var(--ob-thinking-border); padding-left: 10px; margin-bottom: 14px; }
 .thinking { display: flex; gap: 6px; margin-bottom: 8px; }
-.thinking-text { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; line-height: 1.5; background: rgba(0,0,0,0.18); padding: 6px 8px; border-radius: 4px; flex: 1; }
-.tool-card { margin: 6px 0; background: rgba(255,255,255,0.03); border-radius: 4px; }
+.thinking-text { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; line-height: 1.5; background: var(--ob-block-bg); padding: 6px 8px; border-radius: 4px; flex: 1; }
+.tool-card { margin: 6px 0; background: var(--ob-block-bg); border-radius: 4px; }
 .tool-head { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; user-select: none; font-size: 12px; }
 .tool-name { font-weight: 600; }
+.tool-args { color: var(--ob-text-muted); }
 .tool-body { padding: 4px 8px 8px 26px; }
 .kv { display: flex; gap: 8px; margin-top: 4px; font-size: 12px; }
-.kv .k { opacity: 0.6; min-width: 32px; }
-.injection-card { display: flex; align-items: center; gap: 6px; margin: 6px 0 6px 18px; padding: 5px 8px; background: rgba(250, 204, 21, 0.1); border-radius: 4px; font-size: 12px; }
+.kv .k { color: var(--ob-text-muted); min-width: 32px; }
+.injection-card { display: flex; align-items: center; gap: 6px; margin: 6px 0 6px 18px; padding: 5px 8px; background: var(--ob-warn-soft); border-radius: 4px; font-size: 12px; }
 .inj-title { font-weight: 600; }
 .step-icon { flex: 0 0 auto; }
-.muted { opacity: 0.55; }
+.muted { color: var(--ob-text-muted); }
+/* 注入卡 warn-soft 琥珀底上 muted(#6b7280) 仅 4.34 → 用更深 warn 达 AA（review）。
+   scoped (0,2,0) 按特异性胜 .muted (0,1,0)，全局 muted/工具耗时仍白卡 4.83 不受影响。 */
+.injection-card .muted { color: var(--ob-warn); }
 .orphan { font-style: italic; }
-.seam { font-size: 12px; opacity: 0.5; font-style: italic; }
+.seam { font-size: 12px; color: var(--ob-text-muted); font-style: italic; }
 .clickable { cursor: pointer; }
 .thinking-body { flex: 1; }
-.thinking-toggle { font-size: 11px; opacity: 0.6; }
+.thinking-toggle { font-size: 11px; color: var(--ob-text-muted); }
 .args-compact { font-size: 12px; word-break: break-word; }
 </style>

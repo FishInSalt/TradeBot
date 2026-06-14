@@ -15,7 +15,7 @@ const isEmpty = computed(() => props.value === null || props.value === undefined
 </template>
 
 <style scoped>
-.json, .raw { margin: 0; padding: 8px; background: rgba(0, 0, 0, 0.25); border-radius: 4px; font-size: 12px; line-height: 1.4; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-.raw { color: #fbbf24; }
-.empty { opacity: 0.5; }
+.json, .raw { margin: 0; padding: 8px; background: var(--ob-block-bg); border-radius: 4px; font-size: 12px; line-height: 1.4; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+.raw { color: var(--ob-warn); }
+.empty { color: var(--ob-text-muted); }
 </style>

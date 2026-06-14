@@ -40,11 +40,12 @@ function open(id: string) {
 
 <style scoped>
 .session-row { cursor: pointer; }
-.session-row.active { background: rgba(96, 165, 250, 0.15); }
+.session-row.active { background: var(--ob-accent-soft); }
 .row { display: flex; flex-direction: column; gap: 2px; width: 100%; }
 .top { display: flex; align-items: center; gap: 6px; font-weight: 600; }
-.bottom { display: flex; justify-content: space-between; font-size: 12px; opacity: 0.7; }
-.ret { color: #4ade80; }
-.ret.neg { color: #f87171; }
-.empty { padding: 16px; opacity: 0.5; font-size: 13px; }
+.bottom { display: flex; justify-content: space-between; font-size: 12px; }
+.symbol { color: var(--ob-text-muted); }
+.ret { color: var(--ob-pos); }
+.ret.neg { color: var(--ob-neg); }
+.empty { padding: 16px; color: var(--ob-text-muted); font-size: 13px; }
 </style>

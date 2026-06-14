@@ -49,4 +49,10 @@ describe("DecisionStream", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.text()).toContain("暂无决策");
   });
+
+  it("§4 feed 包白卡 ob-card", async () => {
+    const { wrapper } = mountStream();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".ob-card").exists()).toBe(true);
+  });
 });

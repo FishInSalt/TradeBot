@@ -7,7 +7,7 @@ import {
   NLayoutHeader,
   NLayoutSider,
   NLayoutContent,
-  darkTheme,
+  lightTheme,
 } from "naive-ui";
 import SessionList from "@/components/SessionList.vue";
 import { useSessionsStore } from "@/stores/sessions";
@@ -17,7 +17,7 @@ onMounted(() => store.loadSessions());
 </script>
 
 <template>
-  <n-config-provider :theme="darkTheme">
+  <n-config-provider :theme="lightTheme">
     <n-global-style />
     <n-layout class="app-shell" style="height: 100vh">
       <n-layout-header bordered class="topbar">TradeBot 观察台</n-layout-header>
@@ -46,5 +46,9 @@ onMounted(() => store.loadSessions());
 }
 .main :deep(.n-layout-content__main) {
   height: 100%;
+}
+.app-shell :deep(.n-layout-content),
+.app-shell :deep(.n-layout-content__main) {
+  background: var(--ob-page-bg);
 }
 </style>

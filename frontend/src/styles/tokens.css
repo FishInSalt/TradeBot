@@ -1,0 +1,29 @@
+/* 观察台浅色设计令牌（单一来源，spec §3.2）。对比度均按白卡底 #ffffff 计——
+   彩字/正文经 §4 卡片化落白卡，故达标口径成立（见 spec §3.2 对比度基准注）。 */
+:root {
+  --ob-page-bg: #eef0f3;
+  --ob-card-bg: #ffffff;
+  --ob-card-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --ob-block-bg: #f6f7f9;
+  --ob-border: #e5e7eb;
+  --ob-text-muted: #6b7280;
+  --ob-accent: #2563eb;
+  --ob-accent-soft: #eff6ff;
+  --ob-thinking-border: #93c5fd;
+  --ob-pos: #15803d;       /* 正向：白底 ≈5:1（文本 AA）/ ≥3:1（图形线） */
+  --ob-neg: #dc2626;       /* 负向：白底 ≈4.8:1 */
+  --ob-warn: #b45309;      /* 告警/未解析文本：白底 ≈5:1 */
+  --ob-warn-soft: #fef3c7; /* 注入卡背景：浅琥珀 */
+}
+
+/* 统一白卡（spec §4）：dashboard 表面 + CycleDetailPanel 区块共用。
+   注（审查 6）：带自身 padding 的组件根（.perf-bar/.session-meta-wrap/.decision-stream）其 scoped
+   选择器含 [data-v-x] 属性、特异性 (0,2,0) 高于本全局类 (0,1,0)，故组件自身 padding 按特异性
+   确定性胜出（与注入顺序无关）；.ob-card 实际只贡献 bg/radius/shadow/margin。 */
+.ob-card {
+  background: var(--ob-card-bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: var(--ob-card-shadow);
+  margin-bottom: 10px;
+}

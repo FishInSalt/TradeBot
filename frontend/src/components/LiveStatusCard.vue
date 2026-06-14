@@ -30,8 +30,8 @@ const stalled = computed(() => store.pollFailCount >= 3);
 
 <style scoped>
 .status-card :deep(.n-card__content) { padding: 8px 16px; font-size: 13px; }
-.label { opacity: 0.55; }
-.muted { opacity: 0.5; }
-.pos.long { color: #4ade80; }
-.pos.short { color: #f87171; }
+.label { color: var(--ob-text-muted); }
+.muted { color: var(--ob-text-muted); }
+.pos.long { color: var(--ob-pos); }
+.pos.short { color: var(--ob-neg); }
 </style>

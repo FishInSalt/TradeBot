@@ -31,12 +31,12 @@ onMounted(() => {
   if (!el.value) return;
   chart = createChart(el.value, {
     autoSize: true,
-    layout: { background: { color: "transparent" }, textColor: "#9ca3af" },
-    grid: { vertLines: { visible: false }, horzLines: { color: "rgba(255,255,255,0.05)" } },
+    layout: { background: { color: "transparent" }, textColor: "#6b7280" },
+    grid: { vertLines: { visible: false }, horzLines: { color: "#e5e7eb" } },
     rightPriceScale: { borderVisible: false },
     timeScale: { borderVisible: false, timeVisible: true },
   });
-  series = chart.addLineSeries({ color: "#4ade80", lineWidth: 2 });
+  series = chart.addLineSeries({ color: "#15803d", lineWidth: 2 });
   render();
 });
 

@@ -41,9 +41,9 @@ describe("CycleRowHeader", () => {
     expect(w.find(".keyrow").exists()).toBe(true);    // 关键事件锚点色条
   });
 
-  it("遥测用 format util（千分位 + s）", () => {
+  it("遥测用 format util（千分位 + tok 空格 + s）", () => {
     const w = mount(CycleRowHeader, { props: { cycle: cycle() as any } });
-    expect(w.text()).toContain("80,733");
+    expect(w.text()).toContain("80,733 tok");   // tok 前有空格（fixture tokens_consumed:80733）
     expect(w.text()).toContain("49.8s");
   });
 });

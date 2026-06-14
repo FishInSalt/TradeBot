@@ -121,7 +121,7 @@ describe("ReactTimeline", () => {
     expect(w.text()).not.toContain("展开全文");
   });
 
-  it("§议题5 工具卡 args 紧凑单行 + duration 友好", async () => {
+  it("§④ 工具头函数式：短参 name(k=v) + 展开体只给结果（不重复入参）", async () => {
     const p = {
       ...baseProps(),
       steps: [{ thinking: null, tools: [{ tool_call_id: "call_a", tool_name: "get_market_data" }] }],
@@ -129,9 +129,37 @@ describe("ReactTimeline", () => {
                     args: { timeframe: "1h", candle_count: 30 }, result: "ok", tool_call_id: "call_a" }],
     };
     const w = mount(ReactTimeline, { props: p as any });
-    expect(w.text()).toContain("1.5s");                          // duration 友好
+    expect(w.text()).toContain("get_market_data(timeframe=1h, candle_count=30)"); // 头部函数式
+    expect(w.text()).toContain("1.5s");
     await w.findAll(".tool-card .tool-head")[0].trigger("click");
-    expect(w.text()).toContain("timeframe=1h, candle_count=30"); // args 紧凑单行
+    expect(w.text()).toContain("结果");
+    expect(w.text()).not.toContain("入参");      // 短参：展开体不重复入参
+  });
+
+  it("§④ 长参头部截断 …，展开体补完整入参", async () => {
+    const long = "y".repeat(80);
+    const p = {
+      ...baseProps(),
+      steps: [{ thinking: null, tools: [{ tool_call_id: "call_b", tool_name: "save_memory" }] }],
+      toolCalls: [{ tool_name: "save_memory", status: "ok", duration_ms: 8, error_type: null,
+                    args: { category: "trade", content: long }, result: "saved", tool_call_id: "call_b" }],
+    };
+    const w = mount(ReactTimeline, { props: p as any });
+    expect(w.text()).toContain("…");              // 头部截断
+    await w.findAll(".tool-card .tool-head")[0].trigger("click");
+    expect(w.text()).toContain("入参");           // 长参：展开体补完整入参
+    expect(w.text()).toContain(long);             // 完整内容
+  });
+
+  it("§④ 无参工具头 name()", () => {
+    const p = {
+      ...baseProps(),
+      steps: [{ thinking: null, tools: [{ tool_call_id: "call_c", tool_name: "get_position" }] }],
+      toolCalls: [{ tool_name: "get_position", status: "ok", duration_ms: 12, error_type: null,
+                    args: {}, result: "flat", tool_call_id: "call_c" }],
+    };
+    const w = mount(ReactTimeline, { props: p as any });
+    expect(w.text()).toContain("get_position()");
   });
 
   it("orphan 工具卡 .tool-head 不带 clickable（无遥测则点击无意义）", () => {
