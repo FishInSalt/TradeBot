@@ -81,6 +81,7 @@ class ToolCallRow(BaseModel):
 
 class CycleDetail(BaseModel):
     id: int
+    seq: int                  # 会话内 1-based 绝对序号（与 CycleRow.seq 同口径）
     cycle_label: str
     triggered_by: str
     created_at: UtcDatetime

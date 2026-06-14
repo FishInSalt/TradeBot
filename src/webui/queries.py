@@ -175,13 +175,17 @@ async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleD
         )).scalar_one_or_none()
         if c is None:
             return None
+        seq = (await s.execute(
+            select(func.count()).select_from(AgentCycle)
+            .where(AgentCycle.session_id == c.session_id, AgentCycle.id <= c.id)
+        )).scalar_one()
         tcs = list((await s.execute(
             select(ToolCall)
             .where(ToolCall.cycle_id == c.cycle_id, ToolCall.session_id == c.session_id)
             .order_by(ToolCall.id.asc())
         )).scalars().all())
     return schemas.CycleDetail(
-        id=c.id, cycle_label=c.cycle_id, triggered_by=c.triggered_by, created_at=c.created_at,
+        id=c.id, seq=seq, cycle_label=c.cycle_id, triggered_by=c.triggered_by, created_at=c.created_at,
         reasoning=c.reasoning, decision=c.decision,
         trigger_context=_loads(c.trigger_context), state_snapshot=_loads(c.state_snapshot),
         injected_events=_loads(c.injected_events),

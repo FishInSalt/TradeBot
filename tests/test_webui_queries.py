@@ -405,3 +405,15 @@ async def test_get_cycles_derivation_fail_isolated(engine):
     rows = await get_cycles(engine, "s1")            # 不抛（feed 不阻断）
     r = next(x for x in rows if x.cycle_label == "bad1")
     assert r.position is None and r.key_events == []  # position 与 fill 两路异常各被 _safe 兜住
+
+
+@pytest.mark.asyncio
+async def test_get_cycle_detail_seq_matches_session_position(engine):
+    """get_cycle_detail.seq = 会话内 1-based 位置（与 get_cycles 同口径）。"""
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    ids = [await _add_cycle(engine, cycle_id=f"ds{i}", created_at=base + timedelta(minutes=i))
+           for i in range(3)]
+    from src.webui.queries import get_cycle_detail
+    assert (await get_cycle_detail(engine, ids[0])).seq == 1
+    assert (await get_cycle_detail(engine, ids[2])).seq == 3
