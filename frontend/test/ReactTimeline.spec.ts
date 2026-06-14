@@ -120,6 +120,19 @@ describe("ReactTimeline", () => {
     expect(w.text()).not.toContain("展开全文");
   });
 
+  it("§议题5 工具卡 args 紧凑单行 + duration 友好", async () => {
+    const p = {
+      ...baseProps(),
+      steps: [{ thinking: null, tools: [{ tool_call_id: "call_a", tool_name: "get_market_data" }] }],
+      toolCalls: [{ tool_name: "get_market_data", status: "ok", duration_ms: 1500, error_type: null,
+                    args: { timeframe: "1h", candle_count: 30 }, result: "ok", tool_call_id: "call_a" }],
+    };
+    const w = mount(ReactTimeline, { props: p as any });
+    expect(w.text()).toContain("1.5s");                          // duration 友好
+    await w.findAll(".tool-card .tool-head")[0].trigger("click");
+    expect(w.text()).toContain("timeframe=1h, candle_count=30"); // args 紧凑单行
+  });
+
   it("orphan 工具卡 .tool-head 不带 clickable（无遥测则点击无意义）", () => {
     const p = baseProps();
     p.steps[1].tools[0].tool_call_id = "call_missing";   // open_position 变 orphan

@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { NTag } from "naive-ui";
 import type { ToolCallRow } from "@/api/client";
 import JsonBlock from "@/components/JsonBlock.vue";
+import { fmtArgs, fmtDuration } from "@/utils/format";
 
 interface ReactTool { tool_call_id: string | null; tool_name: string }
 interface ReactStep { thinking: string | null; tools: ReactTool[] }
@@ -118,12 +119,12 @@ function statusType(s: string) {
               <n-tag size="tiny" :type="statusType(rowFor(t)!.status)">
                 {{ rowFor(t)!.error_type ? `${rowFor(t)!.status} · ${rowFor(t)!.error_type}` : rowFor(t)!.status }}
               </n-tag>
-              <span class="muted">{{ rowFor(t)!.duration_ms }}ms</span>
+              <span class="muted">{{ fmtDuration(rowFor(t)!.duration_ms) }}</span>
             </template>
             <span v-else class="muted orphan">无遥测记录（被拒或记录失败）</span>
           </div>
           <div v-if="rowFor(t) && openCards.has(cardKey(t, si, ti))" class="tool-body">
-            <div class="kv"><span class="k">入参</span><JsonBlock :value="rowFor(t)!.args" /></div>
+            <div class="kv"><span class="k">入参</span><span class="args-compact">{{ fmtArgs(rowFor(t)!.args) }}</span></div>
             <div class="kv"><span class="k">结果</span>
               <JsonBlock v-if="rowFor(t)!.result != null" :value="rowFor(t)!.result" />
               <span v-else class="seam">结果未捕获</span>
@@ -172,4 +173,5 @@ function statusType(s: string) {
 .clickable { cursor: pointer; }
 .thinking-body { flex: 1; }
 .thinking-toggle { font-size: 11px; opacity: 0.6; }
+.args-compact { font-size: 12px; word-break: break-word; }
 </style>
