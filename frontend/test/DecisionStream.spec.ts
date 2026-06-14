@@ -5,7 +5,7 @@ import { useSessionsStore } from "@/stores/sessions";
 import DecisionStream from "@/components/DecisionStream.vue";
 
 function cyc(id: number) {
-  return { id, cycle_label: `c${id}`, triggered_by: "scheduled", created_at: "2026-06-12T10:00:00Z", decision_head: `head${id}`, tokens_consumed: 1, wall_time_ms: 1, execution_status: "ok" };
+  return { id, cycle_label: `c${id}`, triggered_by: `t${id}`, created_at: "2026-06-12T10:00:00Z", tokens_consumed: 1, wall_time_ms: 1, execution_status: "ok", position: null, key_events: [] };
 }
 function det(id: number) {
   return { id, cycle_label: `c${id}`, triggered_by: "scheduled", created_at: "2026-06-12T10:00:00Z", reasoning: "r", decision: "d", trigger_context: null, state_snapshot: null, injected_events: null, tool_calls: [], tokens_consumed: 1, input_tokens: null, output_tokens: null, cache_hit_rate: null, wall_time_ms: null, llm_call_ms: null, model_id: null };
@@ -24,8 +24,8 @@ describe("DecisionStream", () => {
   it("按 store.cycles 顺序渲染每条 cycle 表头", async () => {
     const { wrapper } = mountStream();
     await wrapper.vm.$nextTick();
-    expect(wrapper.text()).toContain("head3");
-    expect(wrapper.text()).toContain("head1");
+    expect(wrapper.findAll(".cycle-head").length).toBe(3);   // 三条都渲染
+    expect(wrapper.text().indexOf("t3")).toBeLessThan(wrapper.text().indexOf("t1"));  // store.cycles 顺序
   });
 
   it("点击折叠项表头调 store.expandCycle(id)", async () => {
