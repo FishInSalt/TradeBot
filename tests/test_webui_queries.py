@@ -287,3 +287,27 @@ def test_classify_action_branches():
     assert _classify_action("get_market_data", {}, None) is None
     # args 非 dict（截断回退 str）→ 不抛、side 缺失走 '?'
     assert _classify_action("open_position", "broken", None).kind == "open"
+
+
+def test_derive_position_and_normalize():
+    from src.webui.queries import _derive_position, _normalize_to_list, _safe
+    # 有持仓
+    snap = {"position": {"side": "short", "contracts": 17.99, "entry_price": 63896.0}}
+    p = _derive_position(snap)
+    assert (p.side, p.contracts, p.entry_price) == ("short", 17.99, 63896.0)
+    # flat：position=None / contracts=0 → None
+    assert _derive_position({"position": None}) is None
+    assert _derive_position({"position": {"side": "long", "contracts": 0}}) is None
+    # 异常形态（snapshot 是 list/str/None）→ None，不抛
+    assert _derive_position(["x"]) is None
+    assert _derive_position("broken") is None
+    assert _derive_position(None) is None
+    # 形态归一：list[dict] 直用 / dict 包单元素 / 其他 → []
+    assert _normalize_to_list([{"a": 1}, {"b": 2}]) == [{"a": 1}, {"b": 2}]
+    assert _normalize_to_list({"a": 1}) == [{"a": 1}]
+    assert _normalize_to_list("broken") == []
+    assert _normalize_to_list(None) == []
+    assert _normalize_to_list([1, {"a": 1}]) == [{"a": 1}]   # 非 dict 元素剔除
+    # _safe：异常 → None
+    assert _safe(lambda: 1 / 0) is None
+    assert _safe(lambda: 42) == 42

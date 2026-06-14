@@ -103,6 +103,38 @@ def _classify_action(tool_name: str, args, prev_side: str | None) -> schemas.Key
     return None
 
 
+def _derive_position(snapshot) -> schemas.PositionBrief | None:
+    """state_snapshot.position → PositionBrief。flat（position=None / contracts=0）
+    或异常形态（snapshot 非 dict）→ None。"""
+    if not isinstance(snapshot, dict):
+        return None
+    pos = snapshot.get("position")
+    if not isinstance(pos, dict):
+        return None
+    side, contracts = pos.get("side"), pos.get("contracts")
+    if not side or not contracts:
+        return None
+    return schemas.PositionBrief(side=side, contracts=contracts, entry_price=pos.get("entry_price"))
+
+
+def _normalize_to_list(raw) -> list:
+    """trigger_context 形态归一（schemas.py:72 已放宽为 dict|list|str|None）：
+    list → 仅保留 dict 元素；dict → 单元素 list；其他 → []。"""
+    if isinstance(raw, list):
+        return [x for x in raw if isinstance(x, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
+
+
+def _safe(fn):
+    """派生 fail-isolate：单事件解析异常 → None（沿用 #78 _safe_* 风格），不阻断 feed。"""
+    try:
+        return fn()
+    except Exception:
+        return None
+
+
 async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleDetail | None:
     async with get_session(engine) as s:
         c = (await s.execute(
