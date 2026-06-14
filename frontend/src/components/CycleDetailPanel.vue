@@ -40,7 +40,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
     render: (r) => h(NTag, { size: "small", type: statusType(r.status) },
       { default: () => (r.error_type ? `${r.status} · ${r.error_type}` : r.status) }),
   },
-  { title: "耗时(ms)", key: "duration_ms" },
+  { title: "耗时", key: "duration_ms", render: (r) => fmtDuration(r.duration_ms) },
   { title: "入参", key: "args", render: (r) => h(JsonBlock, { value: r.args }) },
   { title: "结果", key: "result",
     render: (r) => (r.result == null ? h("span", { class: "seam" }, "结果未捕获") : h(JsonBlock, { value: r.result })) },
@@ -78,7 +78,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
       <div v-else class="flat-fallback">
         <p class="seam">该 cycle 无交错时间线（历史 / 取证记录）。下方为扁平视图。</p>
         <h5 class="tools-toggle clickable" @click="toolsOpen = !toolsOpen">
-          工具调用（{{ detail.tool_calls.length }} 个 · 最慢 {{ slowest }}ms）{{ toolsOpen ? "▾" : "▸" }}
+          工具调用（{{ detail.tool_calls.length }} 个 · 最慢 {{ fmtDuration(slowest) }}）{{ toolsOpen ? "▾" : "▸" }}
         </h5>
         <n-data-table v-if="toolsOpen" :columns="toolColumns" :data="detail.tool_calls" size="small" :bordered="false" />
         <!-- 注入事件：legacy cycle 可能 react_steps=null 而 injected_events 非空（注入 iter 晚于无骨架行），

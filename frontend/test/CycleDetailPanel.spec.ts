@@ -59,6 +59,13 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("中途注入事件");
   });
 
+  it("§议题5 flat 回退路径耗时走 fmtDuration（与主路径一致，不再裸 ms）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null,
+      tool_calls: [{ tool_name: "get_position", status: "ok", duration_ms: 1500, error_type: null, args: null, result: "ok", tool_call_id: "c1" }] }) as any } });
+    expect(w.text()).toContain("最慢 1.5s");
+    expect(w.text()).not.toContain("1500ms");
+  });
+
   it("chips 含 llm 与 execution_status", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     expect(w.text()).toContain("llm");

@@ -111,6 +111,7 @@ describe("ReactTimeline", () => {
     expect(w.text()).not.toContain(long);               // 折叠态不渲染全文
     await w.find(".thinking-toggle").trigger("click");
     expect(w.text()).toContain(long);                   // 展开后渲染全文
+    expect(w.find(".thinking-toggle").text()).toContain("收起");   // 切换文案
   });
 
   it("§议题2 短 thinking 不折叠（无展开按钮）", () => {
