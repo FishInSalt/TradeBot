@@ -185,6 +185,7 @@ async def get_session_detail(engine: AsyncEngine, session_id: str) -> schemas.Se
         timeframe=sess.timeframe, scheduler_interval_min=sess.scheduler_interval_min,
         initial_balance=sess.initial_balance, token_budget=sess.token_budget,
         created_at=sess.created_at, last_active_at=sess.last_active_at,
+        system_prompt=sess.system_prompt,
     )
 
 

@@ -222,3 +222,17 @@ async def test_list_sessions_summary(engine):
     detail = await get_session_detail(engine, "s1")
     assert detail.scheduler_interval_min == 15
     assert await get_session_detail(engine, "nope") is None
+
+
+@pytest.mark.asyncio
+async def test_get_session_detail_exposes_system_prompt(engine):
+    """SessionDetail 暴露 Session.system_prompt（会话固定 persona）。"""
+    async with get_session(engine) as s:
+        s.add(SessionModel(id="sp1", name="sp1", symbol="BTC/USDT:USDT",
+                           initial_balance=10000.0, status="active",
+                           scheduler_interval_min=15,
+                           system_prompt="You are a disciplined futures trader."))
+        await s.commit()
+    from src.webui.queries import get_session_detail
+    d = await get_session_detail(engine, "sp1")
+    assert d.system_prompt == "You are a disciplined futures trader."

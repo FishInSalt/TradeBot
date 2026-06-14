@@ -47,6 +47,7 @@ async def test_api_endpoints(seeded):
     assert c.get("/api/sessions").status_code == 200
     assert c.get("/api/sessions").json()[0]["id"] == "s1"
     assert c.get("/api/sessions/s1").json()["scheduler_interval_min"] == 15
+    assert c.get("/api/sessions/s1").json()["system_prompt"] is None
     cyc = c.get("/api/sessions/s1/cycles").json()
     assert cyc[0]["cycle_label"] == "c1"
     pk = cyc[0]["id"]

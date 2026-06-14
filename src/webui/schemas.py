@@ -39,6 +39,7 @@ class SessionDetail(BaseModel):
     token_budget: int
     created_at: UtcDatetime
     last_active_at: UtcDatetime | None
+    system_prompt: str | None = None    # 会话固定 persona（建会话时渲染，models.py:54-55）
 
 
 class CycleRow(BaseModel):
