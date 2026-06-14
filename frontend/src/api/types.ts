@@ -194,14 +194,15 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
-            /** Decision Head */
-            decision_head: string | null;
             /** Tokens Consumed */
             tokens_consumed: number;
             /** Wall Time Ms */
             wall_time_ms: number | null;
             /** Execution Status */
             execution_status: string;
+            position: components["schemas"]["PositionBrief"] | null;
+            /** Key Events */
+            key_events: components["schemas"]["KeyEvent"][];
         };
         /** EquityPoint */
         EquityPoint: {
@@ -217,6 +218,18 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * KeyEvent
+         * @description feed end：本轮单个关键事件。被动 fill（fill_*）+ 主动动作（open/add/close/flip/limit_order）。
+         */
+        KeyEvent: {
+            /** Kind */
+            kind: string;
+            /** Label */
+            label: string;
+            /** Direction */
+            direction: string | null;
         };
         /** LiveStatus */
         LiveStatus: {
@@ -278,6 +291,18 @@ export interface components {
             /** Trades */
             trades: components["schemas"]["TradeRow"][];
         };
+        /**
+         * PositionBrief
+         * @description feed head：本轮开始态持仓精简（state_snapshot.position）。flat → None（不构造本模型）。
+         */
+        PositionBrief: {
+            /** Side */
+            side: string;
+            /** Contracts */
+            contracts: number;
+            /** Entry Price */
+            entry_price: number | null;
+        };
         /** PositionInfo */
         PositionInfo: {
             /** Symbol */
@@ -316,6 +341,8 @@ export interface components {
             created_at: string;
             /** Last Active At */
             last_active_at: string | null;
+            /** System Prompt */
+            system_prompt?: string | null;
         };
         /** SessionSummary */
         SessionSummary: {
