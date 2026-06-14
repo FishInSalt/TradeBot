@@ -12,10 +12,10 @@ const promptOpen = ref(false);
   <div v-if="d" class="session-meta-wrap">
     <n-descriptions :column="5" size="small" label-placement="left" class="session-meta" bordered>
       <n-descriptions-item label="Symbol">{{ d.symbol }}</n-descriptions-item>
-      <n-descriptions-item label="周期">{{ d.timeframe }}</n-descriptions-item>
-      <n-descriptions-item label="调度间隔">{{ d.scheduler_interval_min }}min</n-descriptions-item>
-      <n-descriptions-item label="初始余额">{{ d.initial_balance }}</n-descriptions-item>
-      <n-descriptions-item label="Token 预算">{{ d.token_budget }}</n-descriptions-item>
+      <n-descriptions-item label="时间周期">{{ d.timeframe }}</n-descriptions-item>
+      <n-descriptions-item label="默认唤醒间隔">{{ d.scheduler_interval_min }}min</n-descriptions-item>
+      <n-descriptions-item label="初始余额">{{ d.initial_balance }} USDT</n-descriptions-item>
+      <n-descriptions-item label="Token 预算">{{ d.token_budget }} /天</n-descriptions-item>
     </n-descriptions>
     <section v-if="d.system_prompt" class="sysprompt">
       <span class="sysprompt-toggle clickable" @click="promptOpen = !promptOpen">
