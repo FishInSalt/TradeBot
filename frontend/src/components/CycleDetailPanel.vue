@@ -14,7 +14,7 @@ const hasInjected = computed(() => {
   const e = props.detail.injected_events;
   return Array.isArray(e) ? e.length > 0 : e != null;
 });
-const contextOpen = ref(true);
+const contextOpen = ref(false);   // A3：唤醒上下文默认折叠，按需展开
 
 // 与 ReactTimeline.statusType 同口径（biz_error→warning），避免同数据两视图配色不一致
 function statusType(s: string) {
@@ -50,27 +50,19 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
 
 <template>
   <div class="cycle-detail">
-    <!-- 1. 头部遥测 chips -->
+    <!-- 1. 头部遥测 chips（C3：去掉 tokens 总片 + wall 片，已在 header 显示；保留拆解/cache/llm/status/model） -->
     <n-space class="chips" :size="6">
-      <n-tag size="small">tokens {{ fmtTokens(detail.tokens_consumed) }}</n-tag>
       <n-tag v-if="detail.input_tokens != null" size="small">输入 {{ fmtTokens(detail.input_tokens) }} / 输出 {{ fmtTokens(detail.output_tokens) }} tok</n-tag>
       <n-tag v-if="detail.cache_hit_rate != null" size="small">cache {{ detail.cache_hit_rate.toFixed(0) }}%</n-tag>
-      <n-tag v-if="detail.wall_time_ms != null" size="small">wall {{ fmtDuration(detail.wall_time_ms) }}</n-tag>
       <n-tag v-if="detail.llm_call_ms != null" size="small">llm {{ fmtDuration(detail.llm_call_ms) }}</n-tag>
       <n-tag size="small" :type="detail.execution_status === 'ok' ? 'default' : 'error'">{{ detail.execution_status }}</n-tag>
       <n-tag v-if="detail.model_id" size="small">{{ detail.model_id }}</n-tag>
     </n-space>
 
-    <!-- 2. 唤醒上下文（原文版，可折叠；null 不渲染） -->
-    <section v-if="detail.user_prompt_snapshot" class="ob-card">
-      <h4 class="clickable" @click="contextOpen = !contextOpen">唤醒上下文 {{ contextOpen ? "▾" : "▸" }}</h4>
-      <pre v-if="contextOpen" class="context">{{ detail.user_prompt_snapshot }}</pre>
-    </section>
-
-    <!-- 3. 状态快照（默认展开，置顶；state_snapshot 是本轮开始态） -->
+    <!-- 2. 唤醒时状态（默认展开，置顶；state_snapshot 是唤醒瞬间态） -->
     <section v-if="snapshot" class="ob-card">
       <h4 class="snapshot-toggle clickable" @click="snapshotOpen = !snapshotOpen">
-        本轮开始时的状态 {{ snapshotOpen ? "▾" : "▸" }}
+        唤醒时状态 {{ snapshotOpen ? "▾" : "▸" }}
       </h4>
       <div v-if="snapshotOpen" class="snapshot">
         <template v-if="snapshot.position">
@@ -99,6 +91,12 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
           <span><span v-for="(a, i) in snapshot.active_alerts" :key="i" class="snap-item">{{ a.direction }} @{{ fmtNum(a.price) }}<span v-if="a.reasoning" class="muted"> · {{ a.reasoning }}</span></span></span>
         </template>
       </div>
+    </section>
+
+    <!-- 3. 唤醒上下文（原文版，默认折叠 A3；null 不渲染） -->
+    <section v-if="detail.user_prompt_snapshot" class="ob-card">
+      <h4 class="context-toggle clickable" @click="contextOpen = !contextOpen">唤醒上下文 {{ contextOpen ? "▾" : "▸" }}</h4>
+      <pre v-if="contextOpen" class="context">{{ detail.user_prompt_snapshot }}</pre>
     </section>
 
     <!-- 4. ReAct 时间线（主角）或扁平回退 -->

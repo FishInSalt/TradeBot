@@ -38,9 +38,12 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("(1) Stance: hold");
   });
 
-  it("渲染唤醒上下文原文（user_prompt_snapshot）", () => {
+  it("§A3 唤醒上下文默认折叠，点击展开原文", async () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
-    expect(w.text()).toContain("Woke by scheduled tick at 10:00");
+    expect(w.text()).toContain("唤醒上下文");                 // 标题在
+    expect(w.text()).not.toContain("Woke by scheduled tick"); // 默认折叠：原文不渲染
+    await w.find(".context-toggle").trigger("click");
+    expect(w.text()).toContain("Woke by scheduled tick");      // 展开后可见
   });
 
   it("user_prompt_snapshot 为 null（legacy）时不渲染 Context 块", () => {
@@ -84,14 +87,15 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).not.toContain("ReAct 过程");
   });
 
-  it("§⑤⑥ 状态快照默认展开 + 置顶 + 格式化", () => {
+  it("§重排/重命名 唤醒时状态默认展开 + 置顶（先于唤醒上下文与时间线）", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     const txt = w.text();
-    expect(txt).toContain("本轮开始时的状态");
-    expect(txt).not.toContain("开始态");
+    expect(txt).toContain("唤醒时状态");
+    expect(txt).not.toContain("本轮开始时的状态");
     expect(txt).toContain("17.99");          // 默认展开即可见（持仓 contracts）
     expect(txt).not.toContain("_cycle_id");
-    expect(txt.indexOf("本轮开始时的状态")).toBeLessThan(txt.indexOf("推理与行动过程"));
+    expect(txt.indexOf("唤醒时状态")).toBeLessThan(txt.indexOf("唤醒上下文"));
+    expect(txt.indexOf("唤醒时状态")).toBeLessThan(txt.indexOf("推理与行动过程"));
   });
 
   it("§⑥ 快照格式化真实行为：方向/杠杆×/USDT/− 号/红绿着色（议题 6 核心交付）", () => {
@@ -111,9 +115,12 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("输入 8,000 / 输出 1,000 tok");
   });
 
-  it("§议题5 chips token 千分位 + 耗时 s", () => {
-    const w = mount(CycleDetailPanel, { props: { detail: detail({ tokens_consumed: 80733, wall_time_ms: 49770 }) as any } });
-    expect(w.text()).toContain("80,733");
-    expect(w.text()).toContain("49.8s");
+  it("§C3 chips 去掉 tokens/wall 重复片（只留 header），保留拆解", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ tokens_consumed: 80733, wall_time_ms: 49770, input_tokens: 60000, output_tokens: 20000, llm_call_ms: 30000 }) as any } });
+    const txt = w.text();
+    expect(txt).not.toContain("tokens 80,733");   // 去掉总 tokens 片
+    expect(txt).not.toContain("wall ");            // 去掉 wall 片
+    expect(txt).toContain("输入");                 // 保留输入/输出拆解
+    expect(txt).toContain("llm");                  // 保留 llm
   });
 });
