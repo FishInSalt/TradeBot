@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import type { CycleRow } from "@/api/client";
 import { NTag } from "naive-ui";
-import { fmtLocal } from "@/utils/time";
+import { fmtUtc, fmtUtcTime } from "@/utils/time";
 import { fmtTokens, fmtDuration } from "@/utils/format";
 
 const props = defineProps<{ cycle: CycleRow }>();
@@ -13,6 +13,14 @@ const headText = computed(() => {
   const d = p.side === "long" ? "多" : p.side === "short" ? "空" : p.side;
   const ep = p.entry_price != null ? ` @${Math.round(p.entry_price)}` : "";
   return `${d} ${p.contracts}张${ep}`;
+});
+
+// C2: created_at 是 cycle 结束时刻；开始 ≈ created_at − wall_time_ms（数据核实）。
+// wall_time_ms=null（forensic）→ 无法推开始，startAt=null（模板只渲结束单点）。
+const startAt = computed(() => {
+  const w = props.cycle.wall_time_ms;
+  if (w == null) return null;
+  return new Date(new Date(props.cycle.created_at).getTime() - w).toISOString();
 });
 
 // kind → chip 配色：开=绿 / 平=红 / 挂单=蓝 / 反手=黄（spec §3.4）
@@ -27,7 +35,11 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
 
 <template>
   <div class="cycle-head" :class="{ keyrow: cycle.key_events.length > 0 }">
-    <span class="time">{{ fmtLocal(cycle.created_at) }}</span>
+    <span class="seq">#{{ cycle.seq }}</span>
+    <span class="time">
+      <template v-if="startAt">{{ fmtUtc(startAt) }} → {{ fmtUtcTime(cycle.created_at) }}</template>
+      <template v-else>{{ fmtUtc(cycle.created_at) }}</template>
+    </span>
     <n-tag size="small" :bordered="false">{{ cycle.triggered_by }}</n-tag>
     <span class="seg head-pos"><span class="seg-label">开始:</span> {{ headText }}</span>
     <span class="seg end-events">
@@ -49,6 +61,7 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
 <style scoped>
 .cycle-head { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 13px; padding-left: 6px; border-left: 3px solid transparent; }
 .cycle-head.keyrow { border-left-color: var(--ob-accent); }   /* 关键事件锚点高亮 */
+.seq { color: var(--ob-text-muted); background: var(--ob-block-bg); border-radius: 4px; padding: 0 5px; font-size: 11px; white-space: nowrap; }
 .time { opacity: 0.7; white-space: nowrap; }
 .seg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; }
 .seg-label { color: var(--ob-text-muted); font-size: 11px; }
