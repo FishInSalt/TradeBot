@@ -123,4 +123,37 @@ describe("CycleDetailPanel", () => {
     expect(txt).toContain("输入");                 // 保留输入/输出拆解
     expect(txt).toContain("llm");                  // 保留 llm
   });
+
+  it("§B1 余额三标签格（总额/可用/占用 + USDT 收尾）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    const txt = w.text();
+    expect(txt).toContain("总额");
+    expect(txt).toContain("可用");
+    expect(txt).toContain("占用");
+    expect(txt).toContain("10,000");          // total_usdt 千分位
+    expect(txt).toContain("USDT");
+    expect(txt).not.toContain("总 10,000");   // 旧平铺文案移除
+  });
+
+  it("§B2 现价时间 UTC 格式化（非裸 ISO）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    const txt = w.text();
+    expect(txt).toContain("2026-06-12 10:00:00");        // fetched_at 2026-06-12T10:00:00Z
+    expect(txt).not.toContain("2026-06-12T10:00:00Z");   // 不再裸 ISO
+  });
+
+  it("§B3 快照渲染波动告警（价格/波动两子标签）", () => {
+    const base = detail();
+    const w = mount(CycleDetailPanel, { props: { detail: { ...base,
+      state_snapshot: { ...base.state_snapshot, volatility_alert: { threshold_pct: 1.5, window_minutes: 15 } } } as any } });
+    const txt = w.text();
+    expect(txt).toContain("价格");            // 价格告警子标签（fixture active_alerts 非空）
+    expect(txt).toContain("波动");            // 波动子标签
+    expect(txt).toContain("±1.5% / 15min");   // 波动阈值/窗口
+  });
+
+  it("§B3 历史快照缺 volatility_alert 键 → 不渲波动子段", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });   // fixture 无 volatility_alert
+    expect(w.text()).not.toContain("波动");
+  });
 });
