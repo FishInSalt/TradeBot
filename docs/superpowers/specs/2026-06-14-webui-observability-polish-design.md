@@ -27,15 +27,18 @@ cycle 状态快照、推理折叠、数值友好化、标题通俗化。
   CycleSummary**）；feed 查询 = `get_cycles`（queries.py:28，**非 get_session_cycles**）；
   单会话查询 = `get_session_detail`（queries.py:176，**非 get_session**——`get_session`
   是 `src.storage.database` 的 DB 会话上下文管理器，queries.py:11，勿混）。端点全部带
-  `/api` 前缀（app.py:25-58）。前端类型同名 `CycleRow`（client.ts:6 / CycleRowHeader.vue /
+  `/api` 前缀（src/webui/app.py:25-58）。前端类型同名 `CycleRow`（client.ts:6 / CycleRowHeader.vue /
   stores/sessions.ts）。
 - **system prompt**：`Session.system_prompt` 列**已落库**（建会话时渲染、session-fixed，
   models.py:54-55），`/api/sessions/{sid}`（`get_session_detail`）未暴露。
 - **state_snapshot**：`/api/cycles/{pk}` detail **已含**（schemas.py:73 + queries.py:81），
   结构 `position / balance / market / pending_orders / active_alerts`（+ 内部键 `_errors` /
   `_cycle_id` 不展示）；但 `CycleDetailPanel.vue` 未渲染它，且 feed 的 `CycleRow` 不含它。
-- **snapshot 时序（核心约束）**：`state_snapshot` 在 `agent.run` **之前**拍（app.py:514 早于
-  556）= **本轮开始态 / 操作前持仓**。cycle **结束态未落库**。故 feed 行须用 head/end
+- **snapshot 时序（核心约束）**：`state_snapshot` 在 `agent.run` **之前**拍（src/cli/app.py:514
+  早于 556）= **本轮开始态 / 操作前持仓**。被动 fill 撮合/派发早于整个 cycle 体（fill 是唤醒因——
+  撮合在 `_process_tick`/`_dispatch_fill_event`、drain 在 scheduler，均先于 cycle 体；src/cli/app.py:508
+  仅 capture 已 drain events 的 trigger 镜像，非 drain 本身），故 snapshot 反映 fill **之后**的持仓
+  （DB 实证：cycle 1147 stop 全平 short 后 snapshot.position=null）。cycle **结束态未落库**。故 feed 行须用 head/end
   双段表达（§3.1），不能拿开始态当"当前持仓"。
 - **fill 开/平区分**：FillEvent 字段含 `pnl` / `is_full_close` / `position_side` /
   `trigger_reason`。`trigger_reason` 全取值（base.py:382）：`market` / `limit` / `stop` /
@@ -89,9 +92,10 @@ class CycleRow(BaseModel):
     key_events: list[KeyEvent]       # end：本轮关键动作；无 → [] （空列表，非 None）
 ```
 
-`key_events` 用 **list**（非单值）——支持同轮多动作（止损 fill 唤醒 + 同轮主动反手）。
+`key_events` 用 **list**（非单值）——支持同轮多动作（被动 fill 唤醒 + 同轮主动动作）。
 实证：**非-market 被动 fill + 同轮主动动作 = 3 轮**（cycle 301/1147/1476，如 1147
-`stop fill + open_position` 反手）；虽罕见，单值会丢掉主动动作。
+`stop fill + open_position`：止损全平 short 后 snapshot 已空仓（§2 时序），open(short) 从空仓
+新开 → 派生 `[fill_close 止损平仓, open 开空]` 两事件，单值会丢掉主动动作）。
 
 > **删 `decision_head`**：它是 `_head(c.decision)` = 决策正文**首行**（queries.py:21-25/50，
 > 非 stance 字段，只是当前 persona 模板首行恰为 `(1) Stance —`）。按用户拍板"feed 去
@@ -197,7 +201,9 @@ triggered_by + status + token·ms）：
   不抛 + `get_session_detail.system_prompt` 暴露。fixture 造 tool_calls + state_snapshot +
   trigger_context（各 reason × is_full_close × pnl 组合）。
 - **既有测试同步**：`test_get_cycles_orders_desc_and_paginates`（test_webui_queries.py:52）
-  断言 `rows[0].decision_head`，删字段会破，须改为断言 `position` / `key_events`。
+  断言 `rows[0].decision_head`，删字段会破，须改为断言 `position` / `key_events`。前端两处
+  `decision_head` 消费者同步：`DecisionStream.spec.ts`（cyc 工厂 + head3/head1 断言——删后
+  mount CycleRowHeader 会因 undefined `key_events` 崩）+ `store.spec.ts`（cyc 工厂残留字段）。
 - 前端（vitest）：feed 行 head/end 双段渲染 + 有/无 key_events 的色条与 chip + 同轮多 chip +
   状态快照详情区各子块 + system prompt 折叠 + 推理超长折叠/短不折叠 + 数值格式化。
 - 全量 gate：`pytest -q` 全跑（#78 教训：per-file 漏 drift）+ `vue-tsc --noEmit` + `npm run build`。
@@ -213,4 +219,15 @@ triggered_by + status + token·ms）：
   被动部分成交由 fill `is_full_close=False` 走 `fill_partial`，已覆盖。
 - `cancel_order`（撤挂单）本轮不单独标 key_event（pending 计数变化在状态快照详情区可见）；
   若 review 认为撤单也是关键决策，再补一类。
+- `set_stop_loss` / `set_take_profit` / `adjust_leverage` 同样不标 key_event：前两者是保护性
+  algo 挂单、不即时改持仓，其效果在触发时以被动 `fill_close`（止损/止盈平仓）体现；`adjust_leverage`
+  仅改杠杆、不改持仓方向。三者的状态（algo 挂单 / 杠杆）均在状态快照详情区（§4）可见。key_events
+  聚焦「持仓方向/规模变化」（开/平/加/反手 + 建仓性挂单），故与 cancel_order 同类排除。
+- **同轮多个主动动作共享 cycle 起始 prev_side**（取自 state_snapshot.position）：主动平仓后
+  同轮再开反向仓，open 仍按起始持仓算 → 标 `flip` 而非 `open`。被动 fill 后的主动开仓**不**受影响
+  ——snapshot 已反映 fill 后状态（全平→空仓时 open 正确标 `open`，§2 时序已用 cycle 1147 验证）。
+  实证全库仅 1 例命中此边缘（约 1/1770 cycle，alert 唤醒 close→open），后果是 label 冗余非错误，不重算。
+- **`fill_open` 一律标「限价开」**：当前撮合只 limit/market 能开仓、market 已跳过去重（§3.3），
+  故 `pnl is None` 的非-market fill 必为 limit 开仓，label 准确。该口径隐含「limit 开仓」假设；
+  实盘 OKX 若现其他开仓路径需复核（实盘 backlog，sim-only 不触发）。
 - 不做实时推送（仍 5s 轮询）。
