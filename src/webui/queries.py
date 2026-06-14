@@ -15,15 +15,6 @@ from src.storage.models import (
 from src.services.metrics import MetricsService
 from src.webui import schemas
 
-_DECISION_HEAD_CHARS = 280
-
-
-def _head(text_val: str | None) -> str | None:
-    if not text_val:
-        return None
-    first = text_val.strip().split("\n", 1)[0]
-    return first[:_DECISION_HEAD_CHARS]
-
 
 async def get_cycles(
     engine: AsyncEngine, session_id: str, *,
@@ -42,16 +33,49 @@ async def get_cycles(
         stmt = stmt.order_by(AgentCycle.id.desc()).limit(limit)
     async with get_session(engine) as s:
         rows = list((await s.execute(stmt)).scalars().all())
+        # 批量 join tool_calls（一次查整批 cycle，feed limit≤200）；按 cycle_id 分组、保留执行序
+        cycle_ids = [c.cycle_id for c in rows]
+        tool_rows = []
+        if cycle_ids:
+            tool_rows = list((await s.execute(
+                select(ToolCall.cycle_id, ToolCall.tool_name, ToolCall.args)
+                .where(ToolCall.session_id == session_id, ToolCall.cycle_id.in_(cycle_ids))
+                .order_by(ToolCall.id.asc())
+            )).all())
     if after_id is not None:
         rows.reverse()          # 统一为 id DESC 输出（最新在前）
+    tools_by_cycle: dict[str, list[tuple[str, object]]] = {}
+    for cid, tname, targs in tool_rows:
+        tools_by_cycle.setdefault(cid, []).append((tname, _loads(targs)))
     return [
         schemas.CycleRow(
             id=c.id, cycle_label=c.cycle_id, triggered_by=c.triggered_by,
-            created_at=c.created_at, decision_head=_head(c.decision),
-            tokens_consumed=c.tokens_consumed, wall_time_ms=c.wall_time_ms,
-            execution_status=c.execution_status,
+            created_at=c.created_at, tokens_consumed=c.tokens_consumed,
+            wall_time_ms=c.wall_time_ms, execution_status=c.execution_status,
+            position=_safe(lambda c=c: _derive_position(_loads(c.state_snapshot))),
+            key_events=_derive_key_events(c, tools_by_cycle.get(c.cycle_id, [])),
         ) for c in rows
     ]
+
+
+def _derive_key_events(c, tools: list[tuple[str, object]]) -> list[schemas.KeyEvent]:
+    """组装本轮 key_events：被动 fill（trigger_context，在前）+ 主动动作（tool_calls，在后）。
+    每事件 _safe 包裹——单事件异常跳过、不阻断 feed。"""
+    prev_side = None
+    pos = _safe(lambda: _derive_position(_loads(c.state_snapshot)))
+    if pos is not None:
+        prev_side = pos.side
+    events: list[schemas.KeyEvent] = []
+    for item in _normalize_to_list(_loads(c.trigger_context)):
+        if item.get("type") == "fill":
+            ev = _safe(lambda item=item: _classify_fill(item))
+            if ev is not None:
+                events.append(ev)
+    for tname, targs in tools:
+        ev = _safe(lambda tname=tname, targs=targs: _classify_action(tname, targs, prev_side))
+        if ev is not None:
+            events.append(ev)
+    return events
 
 
 def _loads(raw: str | None):

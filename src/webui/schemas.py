@@ -61,10 +61,11 @@ class CycleRow(BaseModel):
     cycle_label: str          # agent_cycles.cycle_id 字符串，仅显示
     triggered_by: str
     created_at: UtcDatetime
-    decision_head: str | None # decision 首段（截断）
     tokens_consumed: int
     wall_time_ms: int | None
     execution_status: str
+    position: PositionBrief | None    # head：本轮开始态持仓（state_snapshot.position）；flat → None
+    key_events: list[KeyEvent]        # end：本轮关键动作（被动 fill 在前、主动在后）；无 → []
 
 
 class ToolCallRow(BaseModel):
