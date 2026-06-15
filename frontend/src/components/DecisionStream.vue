@@ -8,19 +8,10 @@ import CycleDetailPanel from "@/components/CycleDetailPanel.vue";
 const store = useSessionsStore();
 const cycles = computed(() => store.cycles);
 
-// 单向：从 store 派生展开项；accordion 模式下至多一项
-const expandedNames = computed<number[]>(() =>
-  store.expandedCycleId != null ? [store.expandedCycleId] : [],
-);
-
+// 受控：展开态唯一来源 store.expandedCycleIds（多展开，无 accordion）。naive 给全量数组，
+// 仅做 number 归一（name 绑数字 id），交由 store.setExpandedCycles 做新增懒加载 + 移除保留。
 function onUpdate(names: Array<string | number>) {
-  const next = names.length ? Number(names[0]) : null;
-  if (next == null) {
-    // 关闭当前项：expandCycle 同 id toggle 成 null
-    if (store.expandedCycleId != null) void store.expandCycle(store.expandedCycleId);
-  } else if (next !== store.expandedCycleId) {
-    void store.expandCycle(next); // 打开：设 id + 懒加载
-  }
+  void store.setExpandedCycles(names.map(Number));
 }
 
 const detailFor = (id: number) => store.cycleDetails.get(id);
@@ -28,9 +19,9 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
 
 <template>
   <div class="decision-stream ob-card">
-    <n-collapse accordion :expanded-names="expandedNames" @update:expanded-names="onUpdate">
+    <n-collapse :expanded-names="store.expandedCycleIds" @update:expanded-names="onUpdate">
       <n-collapse-item v-for="c in cycles" :key="c.id" :name="c.id">
-        <template #header><CycleRowHeader :cycle="c" /></template>
+        <template #header><CycleRowHeader :cycle="c" :expanded="store.expandedCycleIds.includes(c.id)" /></template>
         <CycleDetailPanel v-if="detailFor(c.id)" :detail="detailFor(c.id)!" />
         <div v-else class="loading">加载详情…</div>
       </n-collapse-item>
@@ -41,6 +32,11 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
 
 <style scoped>
 .decision-stream { padding: 4px 8px; }
+/* §1②：相邻 cycle 行不糊在一起——清晰 hairline 分隔线 + 表头 hover 反馈（可点 affordance）。
+   注：依赖 naive 内部 class（.n-collapse-item / __header），升级 naive（pin 2.38.1）须复验这些选择器。 */
+.decision-stream :deep(.n-collapse-item:not(:first-child)) { border-top: 1px solid var(--ob-border); }
+.decision-stream :deep(.n-collapse-item__header) { transition: background 0.12s; }
+.decision-stream :deep(.n-collapse-item__header:hover) { background: var(--ob-block-bg); }
 .loading { padding: 12px; color: var(--ob-text-muted); font-size: 13px; }
 .empty { padding: 24px; text-align: center; color: var(--ob-text-muted); font-size: 13px; }
 </style>

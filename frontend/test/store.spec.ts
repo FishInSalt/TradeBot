@@ -23,7 +23,7 @@ describe("sessions store", () => {
     expect(s.live?.status).toBe("active");
     expect(s.performance?.initial_balance).toBe(100);
     expect(s.cycles.map((c) => c.id)).toEqual([3, 2, 1]);
-    expect(s.expandedCycleId).toBeNull();
+    expect(s.expandedCycleIds).toEqual([]);
   });
 
   it("pollTick 增量 append 且按 id 去重并保持 id DESC", async () => {
@@ -57,16 +57,29 @@ describe("sessions store", () => {
     expect(s.pollFailCount).toBe(0);
   });
 
-  it("expandCycle 懒加载并缓存，再点同一条收起", async () => {
+  it("setExpandedCycles 懒加载新增 id 并缓存；收起时保留缓存、再展开命中缓存", async () => {
     const spy = vi.spyOn(api, "getCycle").mockResolvedValue({ id: 5 } as any);
     const s = useSessionsStore();
-    await s.expandCycle(5);
-    expect(s.expandedCycleId).toBe(5);
+    await s.setExpandedCycles([5]);
+    expect(s.expandedCycleIds).toEqual([5]);
     expect(s.cycleDetails.get(5)?.id).toBe(5);
-    await s.expandCycle(5); // toggle 收起
-    expect(s.expandedCycleId).toBeNull();
-    await s.expandCycle(5); // 再展开命中缓存,不重复拉取
+    await s.setExpandedCycles([]); // 收起：从展开态移除
+    expect(s.expandedCycleIds).toEqual([]);
+    expect(s.cycleDetails.has(5)).toBe(true); // 缓存保留
+    await s.setExpandedCycles([5]); // 再展开命中缓存,不重复拉取
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("setExpandedCycles 多 id 同时展开各自懒加载；增量展开仅拉新增 id", async () => {
+    const spy = vi.spyOn(api, "getCycle").mockImplementation(async (id: any) => ({ id }) as any);
+    const s = useSessionsStore();
+    await s.setExpandedCycles([3, 2, 1]);
+    expect(s.expandedCycleIds).toEqual([3, 2, 1]);
+    expect(s.cycleDetails.get(2)?.id).toBe(2);
+    expect(spy).toHaveBeenCalledTimes(3);
+    await s.setExpandedCycles([3, 2, 1, 4]); // 增量：仅 4 是新增
+    expect(spy).toHaveBeenCalledTimes(4);
+    expect(s.cycleDetails.get(4)?.id).toBe(4);
   });
 
   it("currentSession getter 按 currentId 命中列表项", () => {
@@ -118,13 +131,13 @@ describe("sessions store", () => {
     expect(s.pollFailCount).toBe(0);
   });
 
-  it("expandCycle await 期间被切换会话时丢弃陈旧详情", async () => {
+  it("ensureCycleDetail await 期间被切换会话时丢弃陈旧详情", async () => {
     let resolveCycle!: (v: unknown) => void;
     const pendingCycle = new Promise((r) => { resolveCycle = r; });
     vi.spyOn(api, "getCycle").mockReturnValue(pendingCycle as any);
     const s = useSessionsStore();
     s.currentId = "A";
-    const p = s.expandCycle(7); // sid=A，挂起在 getCycle(7)
+    const p = s.setExpandedCycles([7]); // sid=A，挂起在 getCycle(7)
     s.currentId = "B"; // await 期间切走
     resolveCycle({ id: 7 });
     await p;
@@ -149,18 +162,59 @@ describe("sessions store", () => {
     expect(s.detail).toMatchObject({ id: "new" });
   });
 
-  it("expandCycle 拉取失败：收起当前项 + 设 error（不卡加载态，可重试）", async () => {
+  it("setExpandedCycles 拉取失败：从展开态移除该 id + 设 error（不卡加载态，可重试）", async () => {
     const spy = vi.spyOn(api, "getCycle").mockRejectedValue(new Error("boom"));
     const s = useSessionsStore();
     s.currentId = "s1";
-    await s.expandCycle(5);
-    expect(s.expandedCycleId).toBeNull(); // 失败收起，不卡在"加载详情…"
+    await s.setExpandedCycles([5]);
+    expect(s.expandedCycleIds).toEqual([]); // 失败仅移除该 id，不卡在"加载详情…"
     expect(s.error).toContain("boom"); // error 有出口（DashboardView 横幅消费）
     expect(s.cycleDetails.has(5)).toBe(false);
     spy.mockResolvedValue({ id: 5 } as any);
-    await s.expandCycle(5); // 再点重试：缓存仍空 → 再拉
+    await s.setExpandedCycles([5]); // 再展开重试：缓存仍空 → 再拉
     expect(s.cycleDetails.get(5)?.id).toBe(5);
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("setExpandedCycles 一个 id 失败仅移除自己，其余展开/缓存不受影响", async () => {
+    const spy = vi.spyOn(api, "getCycle").mockImplementation(async (id: any) =>
+      id === 2 ? Promise.reject(new Error("boom")) : ({ id } as any));
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    await s.setExpandedCycles([3, 2, 1]);
+    expect(s.expandedCycleIds).toEqual([3, 1]); // 仅 2 被移除
+    expect(s.cycleDetails.get(3)?.id).toBe(3);
+    expect(s.cycleDetails.get(1)?.id).toBe(1);
+    expect(s.cycleDetails.has(2)).toBe(false);
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
+  it("setExpandedCycles 多 id 并发全失败收敛到 []（链式 read-modify-write 不丢移除）", async () => {
+    vi.spyOn(api, "getCycle").mockRejectedValue(new Error("boom"));
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    await s.setExpandedCycles([3, 2, 1]);
+    expect(s.expandedCycleIds).toEqual([]); // 三个各自移除，单线程链式收敛到空
+    expect(s.cycleDetails.size).toBe(0);
+    expect(s.error).toContain("boom");
+  });
+
+  it("setExpandedCycles await 期间切会话：成功返回不污染新会话（钉死乐观写不变量）", async () => {
+    // 守卫缺失隐患的回归锚点：乐观写 expandedCycleIds 在 await 前且无 sid 守卫，
+    // 当前靠 selectSession/clearSelection 同步清空 + ensureCycleDetail 双路守卫才安全。
+    // 若未来给 setExpandedCycles 加 await-后回写而漏守卫，此用例立即变红。
+    let resolveCycle!: (v: unknown) => void;
+    const pending = new Promise((r) => { resolveCycle = r; });
+    vi.spyOn(api, "getCycle").mockReturnValue(pending as any);
+    const s = useSessionsStore();
+    s.currentId = "A";
+    const p = s.setExpandedCycles([5]); // sid=A，乐观写 [5] 后挂起在 getCycle
+    s.currentId = "B"; // 切会话（selectSession:63 会同步清空展开态）
+    s.expandedCycleIds = [];
+    resolveCycle({ id: 5 });
+    await p;
+    expect(s.cycleDetails.has(5)).toBe(false); // A 的详情未写入 B
+    expect(s.expandedCycleIds).toEqual([]); // 不残留 A 的展开 id
   });
 
   it("clearSelection 清空选中态（回 home 停轮询）", () => {
@@ -169,13 +223,13 @@ describe("sessions store", () => {
     s.detail = { id: "s1" } as any;
     s.live = { status: "active" } as any;
     s.cycles = [cyc(1)] as any;
-    s.expandedCycleId = 1;
+    s.expandedCycleIds = [1];
     s.clearSelection();
     expect(s.currentId).toBeNull();
     expect(s.detail).toBeNull();
     expect(s.live).toBeNull();
     expect(s.cycles).toEqual([]);
-    expect(s.expandedCycleId).toBeNull();
+    expect(s.expandedCycleIds).toEqual([]);
   });
 
   it("selectSession 同会话快速重入（A→B→A）：旧批晚到不覆盖新批（selectSeq）", async () => {

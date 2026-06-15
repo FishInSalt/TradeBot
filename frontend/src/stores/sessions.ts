@@ -18,7 +18,7 @@ interface State {
   performance: Performance | null;
   cycles: CycleRow[]; // 维护为 id DESC（新在顶）
   cycleDetails: Map<number, CycleDetail>; // 展开懒加载缓存
-  expandedCycleId: number | null;
+  expandedCycleIds: number[]; // 多展开：受控展开态（naive expanded-names），唯一来源
   loading: boolean;
   error: string | null;
   pollFailCount: number;
@@ -35,7 +35,7 @@ export const useSessionsStore = defineStore("sessions", {
     performance: null,
     cycles: [],
     cycleDetails: new Map(),
-    expandedCycleId: null,
+    expandedCycleIds: [],
     loading: false,
     error: null,
     pollFailCount: 0,
@@ -60,7 +60,7 @@ export const useSessionsStore = defineStore("sessions", {
     async selectSession(id: string) {
       const seq = ++this.selectSeq; // 区分同一 id 的多次在途调用（A→B→A 重入）；currentId 守卫只防不同会话
       this.currentId = id;
-      this.expandedCycleId = null;
+      this.expandedCycleIds = [];
       this.cycleDetails = new Map();
       this.detail = null; // 进入即清旧会话数据，避免加载窗内沿用旧会话造成视觉闪烁
       this.live = null;
@@ -123,24 +123,28 @@ export const useSessionsStore = defineStore("sessions", {
       }
     },
 
-    async expandCycle(id: number) {
-      if (this.expandedCycleId === id) {
-        this.expandedCycleId = null; // 再点同条收起
-        return;
-      }
-      this.expandedCycleId = id;
-      if (!this.cycleDetails.has(id)) {
-        const sid = this.currentId; // 与 selectSession/pollTick 一致：await 后校验会话身份
-        try {
-          const d = await api.getCycle(id);
-          if (this.currentId !== sid) return; // 已切走：勿写陈旧详情
-          this.cycleDetails.set(id, d);
-        } catch (e) {
-          if (this.currentId !== sid) return; // 已切走：勿用旧会话错误覆盖
-          this.error = e instanceof ApiError ? e.message : String(e);
-          // 失败收起当前项，避免永久卡在"加载详情…"；error 由横幅提示，再点表头即重试（缓存仍空）
-          if (this.expandedCycleId === id) this.expandedCycleId = null;
-        }
+    // 受控入口（唯一写展开态的 action）：naive @update:expanded-names 给全量数组。
+    // 乐观写入，diff 出新增 id 各自懒加载；移除的 id 不动缓存（保留，再展开命中）。
+    async setExpandedCycles(ids: number[]) {
+      const prev = this.expandedCycleIds;
+      const added = ids.filter((id) => !prev.includes(id));
+      this.expandedCycleIds = ids;
+      await Promise.all(added.map((id) => this.ensureCycleDetail(id)));
+    },
+
+    // 仅懒加载详情：成功路径不改展开态；失败仅从展开态移除该 id（不卡"加载详情…"）。
+    async ensureCycleDetail(id: number) {
+      if (this.cycleDetails.has(id)) return; // 命中缓存不重复拉
+      const sid = this.currentId; // 与 selectSession/pollTick 一致：await 后校验会话身份
+      try {
+        const d = await api.getCycle(id);
+        if (this.currentId !== sid) return; // 已切走：勿写陈旧详情
+        this.cycleDetails.set(id, d);
+      } catch (e) {
+        if (this.currentId !== sid) return; // 已切走：勿用旧会话错误覆盖
+        this.error = e instanceof ApiError ? e.message : String(e);
+        // 失败仅收起该 id，其余展开/缓存不受影响；error 由横幅提示，再展开即重试（缓存仍空）
+        this.expandedCycleIds = this.expandedCycleIds.filter((x) => x !== id);
       }
     },
 
@@ -152,7 +156,7 @@ export const useSessionsStore = defineStore("sessions", {
       this.performance = null;
       this.cycles = [];
       this.cycleDetails = new Map();
-      this.expandedCycleId = null;
+      this.expandedCycleIds = [];
       this.error = null;
       this.pollFailCount = 0;
     },

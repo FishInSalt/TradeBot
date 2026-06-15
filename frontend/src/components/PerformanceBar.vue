@@ -61,6 +61,7 @@ const signClass = (n: number | null | undefined) =>
       <div class="exp-head" @click="expanded = false">
         <span class="lead">收益分析 ▾</span>
         <span class="caveat">已实现指标 vs 盯市曲线 不同口径、不可逐点对账</span>
+        <span class="collapse-hint">点击折叠 ▾</span>
       </div>
 
       <!-- 当前持仓条（仅未平仓） -->
@@ -117,7 +118,10 @@ const signClass = (n: number | null | undefined) =>
 </template>
 
 <style scoped>
-.perf-bar { border-top: 1px solid var(--ob-border); }
+/* §1③：底部抽屉与上方 stream 明确分隔——上投影制造"浮起"感（覆盖 .ob-card 默认下投影），
+   折叠条微染区别于白内容区。四边框继承全局 .ob-card（§1 所有卡面统一带边，有意为之，非仅 border-top）。 */
+.perf-bar { box-shadow: 0 -3px 10px rgba(0, 0, 0, 0.08); }
+.perf-bar:not(.expanded) { background: var(--ob-block-bg); }
 .perf-bar.expanded { max-height: 55vh; overflow-y: auto; padding: 8px 16px; }
 
 .collapsed-bar { display: flex; align-items: center; gap: 10px; padding: 9px 16px; font-size: 13px; cursor: pointer; flex-wrap: wrap; }
@@ -129,6 +133,8 @@ const signClass = (n: number | null | undefined) =>
 
 .exp-head { display: flex; align-items: center; gap: 12px; padding: 4px 0 8px; cursor: pointer; }
 .caveat { color: var(--ob-text-muted); font-size: 11px; }
+/* ④：与折叠态 .expand-hint「点击展开 ▴」对称的折叠提示 */
+.collapse-hint { margin-left: auto; color: var(--ob-text-muted); font-size: 12px; }
 
 .held-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 13px;
   margin-bottom: 10px; padding: 8px 12px; border-radius: 6px;
