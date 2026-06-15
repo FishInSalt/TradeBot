@@ -15,6 +15,7 @@ function pad2(n: number): string {
 export function fmtUtc(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = parseUtc(iso);
+  if (Number.isNaN(d.getTime())) return "—";   // F1：坏串降级占位，不渲 NaN-NaN-NaN
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} ` +
     `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
 }
@@ -23,12 +24,15 @@ export function fmtUtc(iso: string | null | undefined): string {
 export function fmtUtcTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = parseUtc(iso);
+  if (Number.isNaN(d.getTime())) return "—";
   return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
 }
 
-/** epoch ms → "HH:MM:SS"（UTC，给注入事件 event.timestamp 这类 epoch-ms 源）。 */
+/** epoch ms → "HH:MM:SS"（UTC，给注入事件 event.timestamp 这类 epoch-ms 源）。
+ *  注入 blob 的 timestamp 运行时可能非数字（坏/legacy 数据，TS 类型挡不住）→ NaN 守卫降级占位。 */
 export function fmtUtcEpoch(ms: number | null | undefined): string {
   if (ms == null) return "—";
   const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "—";   // F1：NaN/非数字 epoch 降级占位
   return `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}:${pad2(d.getUTCSeconds())}`;
 }

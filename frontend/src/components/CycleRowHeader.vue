@@ -20,7 +20,9 @@ const headText = computed(() => {
 const startAt = computed(() => {
   const w = props.cycle.wall_time_ms;
   if (w == null) return null;
-  return new Date(new Date(props.cycle.created_at).getTime() - w).toISOString();
+  const endMs = new Date(props.cycle.created_at).getTime();
+  if (Number.isNaN(endMs)) return null;   // F2：坏 created_at → 不 toISOString(NaN) 抛 RangeError，退单点（fmtUtc 再降级占位）
+  return new Date(endMs - w).toISOString();
 });
 
 // kind → chip 配色：开=绿 / 平=红 / 挂单=蓝 / 反手=黄（spec §3.4）

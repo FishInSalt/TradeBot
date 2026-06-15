@@ -121,6 +121,13 @@ describe("ReactTimeline", () => {
     expect(w.find(".thinking-head").exists()).toBe(false);   // 无折叠头
   });
 
+  it("§F3 单行无换行但 >100 字符 → 折叠（锁 THINKING_INLINE_MAX 阈值分支）", () => {
+    const long = "x".repeat(101);   // 无换行、超单行容量
+    const p = { ...baseProps(), steps: [{ thinking: long, tools: [] }] };
+    const w = mount(ReactTimeline, { props: p as any });
+    expect(w.find(".thinking-head").exists()).toBe(true);    // length 分支也给折叠 affordance
+  });
+
   it("§A2 思考块用 💭 图标 + 「思考」标签", () => {
     const p = { ...baseProps(), steps: [{ thinking: "短推理", tools: [] }] };
     const w = mount(ReactTimeline, { props: p as any });

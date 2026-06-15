@@ -67,4 +67,12 @@ describe("CycleRowHeader", () => {
     expect(txt).toContain("2026-06-12 10:00:00");
     expect(txt).not.toContain("→");
   });
+
+  it("§F2 created_at 不可解析（坏数据）→ startAt 不抛 RangeError、降级占位", () => {
+    // wall 已设 → 旧实现走 new Date(NaN).toISOString() 抛 RangeError；守卫后 startAt=null → 渲占位
+    expect(() => mount(CycleRowHeader, { props: { cycle: cycle({ created_at: "not-a-date" }) as any } })).not.toThrow();
+    const w = mount(CycleRowHeader, { props: { cycle: cycle({ created_at: "not-a-date" }) as any } });
+    expect(w.text()).toContain("—");
+    expect(w.text()).not.toContain("→");
+  });
 });

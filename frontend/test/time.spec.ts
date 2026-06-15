@@ -32,4 +32,12 @@ describe("time utils", () => {
     expect(fmtUtcEpoch(1781258400000)).toBe("10:00:00");
     expect(fmtUtcEpoch(null)).toBe("—");
   });
+
+  it("§F1 不可解析输入降级为占位（非 NaN-NaN-NaN）", () => {
+    expect(fmtUtc("not-a-date")).toBe("—");
+    expect(fmtUtcTime("not-a-date")).toBe("—");
+    expect(fmtUtcEpoch(NaN)).toBe("—");
+    // 注入 blob 的 timestamp 运行时可能是非数字串（TS 类型挡不住），也应降级
+    expect(fmtUtcEpoch("garbage" as unknown as number)).toBe("—");
+  });
 });
