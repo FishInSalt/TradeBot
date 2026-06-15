@@ -237,6 +237,26 @@ def _derive_position(snapshot) -> schemas.PositionBrief | None:
     return schemas.PositionBrief(side=side, contracts=contracts, entry_price=pos.get("entry_price"))
 
 
+def _derive_open_position(sim_pos, snapshot) -> schemas.OpenPositionBrief | None:
+    """当前持仓 + 未实现毛。存在性与 side/contracts/entry_price 取自 SimPosition（权威当前态，
+    与 get_live_status 同源）；unrealized_pnl/pnl_pct_of_notional 仅当最新 cycle
+    state_snapshot.position 与 SimPosition 同向时借用（snapshot=本轮开始态、可能矛盾），否则 None。
+    同向闸只比 side 不比 contracts（未实现本就是本轮开始态近似，可接受 size 漂移）。
+    SimPosition 平/空（None 或 contracts 0）→ None。"""
+    if sim_pos is None or not sim_pos.contracts:
+        return None
+    unrealized = pct = None
+    if isinstance(snapshot, dict):
+        sp = snapshot.get("position")
+        if isinstance(sp, dict) and sp.get("side") == sim_pos.side:   # 同向闸
+            unrealized = sp.get("unrealized_pnl")
+            pct = sp.get("pnl_pct_of_notional")
+    return schemas.OpenPositionBrief(
+        side=sim_pos.side, contracts=sim_pos.contracts, entry_price=sim_pos.entry_price,
+        unrealized_pnl=unrealized, pnl_pct_of_notional=pct,
+    )
+
+
 def _normalize_to_list(raw) -> list:
     """trigger_context 形态归一（schemas.py:72 已放宽为 dict|list|str|None）：
     list → 仅保留 dict 元素；dict → 单元素 list；其他 → []。"""
@@ -356,6 +376,11 @@ async def get_performance(engine: AsyncEngine, session_id: str) -> schemas.Perfo
             .where(TradeAction.action == "order_filled")
             .order_by(TradeAction.id.asc())
         )).scalars().all())
+        latest_snapshot = (await s.execute(
+            text("SELECT state_snapshot FROM agent_cycles WHERE session_id=:sid "
+                 "ORDER BY id DESC LIMIT 1"),
+            {"sid": session_id},
+        )).scalar_one_or_none()
 
     cur = _current_position_label(pos)
     m = await MetricsService(engine, session_id, sess.initial_balance).compute(current_position=cur)
@@ -371,7 +396,10 @@ async def get_performance(engine: AsyncEngine, session_id: str) -> schemas.Perfo
         net_losing_trades=m.net_losing_trades, total_fees=m.total_fees,
         equity_curve=equity_curve,
         trades=[schemas.TradeRow(at=t.created_at, action=t.action, side=t.side, price=t.price,
-                                 amount=t.amount, pnl=t.pnl, fee=t.fee) for t in trades],
+                                 amount=t.amount, pnl=t.pnl, fee=t.fee,
+                                 trigger_reason=t.trigger_reason) for t in trades],
+        open_position=_derive_open_position(pos, _loads(latest_snapshot)),
+        total_pnl=m.total_pnl,
     )
 
 

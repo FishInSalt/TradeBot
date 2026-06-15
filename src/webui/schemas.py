@@ -49,6 +49,18 @@ class PositionBrief(BaseModel):
     entry_price: float | None
 
 
+class OpenPositionBrief(BaseModel):
+    """当前未平仓持仓 + 未实现收益。存在性 + side/contracts/entry_price 取自 SimPosition（权威
+    当前态，与 get_live_status 同源）；unrealized_pnl/pnl_pct_of_notional 仅当最新 cycle
+    state_snapshot.position 与之同向时借用（SimPosition 不存未实现），否则 None。
+    与 PositionBrief（feed-head 开始态、无未实现）语义不同。"""
+    side: str                          # 'long' | 'short'（来自 SimPosition）
+    contracts: float                   # 来自 SimPosition（权威）
+    entry_price: float | None          # 来自 SimPosition
+    unrealized_pnl: float | None       # 盯市 mark-vs-entry 毛额；snapshot 同向才有，否则 None
+    pnl_pct_of_notional: float | None  # 未实现 / 名义本金 * 100；同上
+
+
 class KeyEvent(BaseModel):
     """feed end：本轮单个关键事件。被动 fill（fill_*）+ 主动动作（open/add/close/flip/limit_order）。"""
     kind: str                # open|add|close|flip|limit_order | fill_open|fill_close|fill_partial
@@ -117,6 +129,7 @@ class TradeRow(BaseModel):
     amount: float | None
     pnl: float | None
     fee: float | None
+    trigger_reason: str | None = None   # 平仓/开仓触发细分（trade_actions.trigger_reason）
 
 
 class Performance(BaseModel):
@@ -137,6 +150,8 @@ class Performance(BaseModel):
     total_fees: float
     equity_curve: list[EquityPoint]    # 盯市（含未实现 PnL），每 cycle；≠ 上方已实现指标口径
     trades: list[TradeRow]
+    open_position: OpenPositionBrief | None = None   # 未平仓时当前持仓（SimPosition 权威）；平尾 → None
+    total_pnl: float = 0.0                            # 已实现毛额（MetricsService.total_pnl）；毛PnL 直取免反推
 
 
 class PositionInfo(BaseModel):

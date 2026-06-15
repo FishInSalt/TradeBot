@@ -598,3 +598,84 @@ async def test_injection_age_event_after_cycle_end_stays_none(engine):
     from src.webui.queries import get_cycle_detail
     d = await get_cycle_detail(engine, pk)
     assert d.injected_events[0]["triggered_ago"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_performance_exposes_trigger_reason_and_total_pnl(engine):
+    """get_performance 暴露 close fill 的 trigger_reason + total_pnl（毛额）。
+    注：symbol 必填（TradeAction.symbol NOT NULL，models.py:78）；total_pnl 由 MetricsService
+    按价格重算 gross =(close.price − open.entry_px)*amount*sign*contract_size（metrics.py:192-196），
+    非记录的 pnl 字段——故断言用重算值。"""
+    from src.storage.models import TradeAction
+    await _seed_session(engine)
+    async with get_session(engine) as s:
+        s.add(TradeAction(session_id="s1", action="order_filled", symbol="BTC/USDT:USDT",
+                          side="long", price=65000.0, amount=0.1, fee=3.0, pnl=None,
+                          entry_price=None, trigger_reason="market"))
+        s.add(TradeAction(session_id="s1", action="order_filled", symbol="BTC/USDT:USDT",
+                          side="long", price=64900.0, amount=0.1, fee=3.0, pnl=-10.0,
+                          entry_price=65000.0, trigger_reason="stop"))
+        await s.commit()
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")
+    assert perf.trades[1].trigger_reason == "stop"          # id ASC：开仓在前、平仓在后
+    # gross =(64900−65000)*0.1*sign(long=+1)*cs(1.0, session 无 contract_size→fallback) = -10.0
+    assert round(perf.total_pnl, 2) == -10.0
+
+
+@pytest.mark.asyncio
+async def test_open_position_sim_authoritative_with_snapshot_unrealized(engine):
+    """(a) SimPosition 有仓 + snapshot 同向 → side/数量/入场价取 SimPosition、未实现借 snapshot。"""
+    from src.storage.models import SimPosition
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="short",
+                          contracts=10.82, entry_price=65542.1, leverage=10))
+        await s.commit()
+    await _add_cycle(engine, cycle_id="cz", created_at=base,
+                     snapshot=json.dumps({"balance": {"total_usdt": 9440.89},
+                       "position": {"side": "short", "contracts": 10.82, "entry_price": 65542.1,
+                                    "unrealized_pnl": -13.97, "pnl_pct_of_notional": -0.2}}))
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")
+    assert perf.open_position is not None
+    assert perf.open_position.side == "short"
+    assert round(perf.open_position.contracts, 2) == 10.82
+    assert round(perf.open_position.unrealized_pnl, 2) == -13.97
+    assert round(perf.open_position.pnl_pct_of_notional, 2) == -0.2
+
+
+@pytest.mark.asyncio
+async def test_open_position_sim_authoritative_snapshot_mismatch_unrealized_none(engine):
+    """(b) SimPosition 有仓 + snapshot flat/异向（漏显反例）→ side/数量/入场价仍取 SimPosition、未实现 None。"""
+    from src.storage.models import SimPosition
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="short",
+                          contracts=0.265, entry_price=65000.0, leverage=10))
+        await s.commit()
+    await _add_cycle(engine, cycle_id="cf", created_at=base,
+                     snapshot=json.dumps({"balance": {"total_usdt": 9900.0}}))   # snapshot 无 position
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")
+    assert perf.open_position is not None
+    assert perf.open_position.side == "short"
+    assert round(perf.open_position.contracts, 3) == 0.265
+    assert perf.open_position.unrealized_pnl is None
+    assert perf.open_position.pnl_pct_of_notional is None
+
+
+@pytest.mark.asyncio
+async def test_open_position_none_when_sim_flat_despite_snapshot(engine):
+    """(c) SimPosition 平/空 + snapshot 有仓（幻影反例）→ open_position is None（权威）。"""
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    await _add_cycle(engine, cycle_id="cp", created_at=base,
+                     snapshot=json.dumps({"balance": {"total_usdt": 10000.0},
+                       "position": {"side": "long", "contracts": 0.121, "entry_price": 60000.0,
+                                    "unrealized_pnl": -8.16, "pnl_pct_of_notional": -0.1}}))
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")     # 无 SimPosition
+    assert perf.open_position is None
