@@ -9,6 +9,7 @@ export type ToolCallRow = S["ToolCallRow"];
 export type Performance = S["Performance"];
 export type EquityPoint = S["EquityPoint"];
 export type TradeRow = S["TradeRow"];
+export type OpenPositionBrief = S["OpenPositionBrief"];
 export type LiveStatus = S["LiveStatus"];
 export type PositionInfo = S["PositionInfo"];
 export type OrderInfo = S["OrderInfo"];

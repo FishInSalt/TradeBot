@@ -76,3 +76,10 @@ export function fmtSigned(n: number | null | undefined, maxFrac = 2): string {
   const s = Math.abs(n).toLocaleString("en-US", { maximumFractionDigits: maxFrac });
   return n < 0 ? `−${s}` : `+${s}`;
 }
+
+/** 带符号百分比（U+2212 负号、固定两位小数、带 %），null → —。用于 PnL%。 */
+export function fmtSignedPct(n: number | null | undefined): string {
+  if (n == null) return "—";
+  const s = Math.abs(n).toFixed(2);
+  return n < 0 ? `−${s}%` : `+${s}%`;
+}

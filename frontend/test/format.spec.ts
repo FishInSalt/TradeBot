@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmtTokens, fmtTokensCompact, fmtGap, fmtDuration, fmtArgs, clipArgs, fmtNum, fmtSigned, HEAD_ARGS_MAX } from "@/utils/format";
+import { fmtTokens, fmtTokensCompact, fmtGap, fmtDuration, fmtArgs, clipArgs, fmtNum, fmtSigned, fmtSignedPct, HEAD_ARGS_MAX } from "@/utils/format";
 
 describe("fmtTokens", () => {
   it("千分位", () => {
@@ -117,4 +117,18 @@ describe("fmtSigned", () => {
   it("负值带 − 号", () => expect(fmtSigned(-42.5)).toBe("−42.5"));
   it("正值带 + 号", () => expect(fmtSigned(120)).toBe("+120"));
   it("null → —", () => expect(fmtSigned(null)).toBe("—"));
+});
+
+describe("fmtSignedPct", () => {
+  it("正 → +N.NN%（固定两位）", () => {
+    expect(fmtSignedPct(0.07)).toBe("+0.07%");
+    expect(fmtSignedPct(2.5)).toBe("+2.50%");
+  });
+  it("负 → −N.NN%（U+2212）", () => {
+    expect(fmtSignedPct(-0.95)).toBe("−0.95%");
+  });
+  it("null/undefined → 占位", () => {
+    expect(fmtSignedPct(null)).toBe("—");
+    expect(fmtSignedPct(undefined)).toBe("—");
+  });
 });

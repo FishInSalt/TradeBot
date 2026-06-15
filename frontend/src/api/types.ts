@@ -251,6 +251,25 @@ export interface components {
             /** Tokens Consumed Total */
             tokens_consumed_total: number;
         };
+        /**
+         * OpenPositionBrief
+         * @description 当前未平仓持仓 + 未实现收益。存在性 + side/contracts/entry_price 取自 SimPosition（权威
+         *     当前态，与 get_live_status 同源）；unrealized_pnl/pnl_pct_of_notional 仅当最新 cycle
+         *     state_snapshot.position 与之同向时借用（SimPosition 不存未实现），否则 None。
+         *     与 PositionBrief（feed-head 开始态、无未实现）语义不同。
+         */
+        OpenPositionBrief: {
+            /** Side */
+            side: string;
+            /** Contracts */
+            contracts: number;
+            /** Entry Price */
+            entry_price: number | null;
+            /** Unrealized Pnl */
+            unrealized_pnl: number | null;
+            /** Pnl Pct Of Notional */
+            pnl_pct_of_notional: number | null;
+        };
         /** OrderInfo */
         OrderInfo: {
             /** Order Id */
@@ -298,6 +317,12 @@ export interface components {
             equity_curve: components["schemas"]["EquityPoint"][];
             /** Trades */
             trades: components["schemas"]["TradeRow"][];
+            open_position?: components["schemas"]["OpenPositionBrief"] | null;
+            /**
+             * Total Pnl
+             * @default 0
+             */
+            total_pnl: number;
         };
         /**
          * PositionBrief
@@ -414,6 +439,8 @@ export interface components {
             pnl: number | null;
             /** Fee */
             fee: number | null;
+            /** Trigger Reason */
+            trigger_reason?: string | null;
         };
         /** ValidationError */
         ValidationError: {
