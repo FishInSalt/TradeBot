@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, DateTime
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import aliased
 
@@ -26,12 +26,19 @@ async def get_cycles(
     # seq = 会话内 1-based 绝对序号：row_number 须在【游标过滤之前】对全量 session 子集开窗
     # （子查询），外层再套游标 + 方向排序 + limit；否则 after_id 翻页会从游标处重启序号。
     inner = (
-        select(AgentCycle, func.row_number().over(order_by=AgentCycle.id.asc()).label("seq"))
+        select(
+            AgentCycle,
+            func.row_number().over(order_by=AgentCycle.id.asc()).label("seq"),
+            # type_ 不可省：func.lag 默认 NullType，SQLite datetime 存为 text 会回读为裸字符串、
+            # 与 ORM 实体的 datetime 相减 TypeError；给 DateTime 后回读 datetime（与 created_at 同 naive）。
+            func.lag(AgentCycle.created_at, type_=DateTime(timezone=True))
+            .over(order_by=AgentCycle.id.asc()).label("prev_created_at"),
+        )
         .where(AgentCycle.session_id == session_id)
         .subquery()
     )
     ac = aliased(AgentCycle, inner)
-    stmt = select(ac, inner.c.seq)
+    stmt = select(ac, inner.c.seq, inner.c.prev_created_at)
     if before_id is not None:
         stmt = stmt.where(inner.c.id < before_id)
     if after_id is not None:
@@ -43,9 +50,9 @@ async def get_cycles(
     else:
         stmt = stmt.order_by(inner.c.id.desc()).limit(limit)
     async with get_session(engine) as s:
-        result = list((await s.execute(stmt)).all())     # [(AgentCycle, seq), ...]
+        result = list((await s.execute(stmt)).all())     # [(AgentCycle, seq, prev_created_at), ...]
         # 批量 join tool_calls（一次查整批 cycle，feed limit≤200）；按 cycle_id 分组、保留执行序
-        cycle_ids = [c.cycle_id for c, _ in result]
+        cycle_ids = [c.cycle_id for c, _, _ in result]
         tool_rows = []
         if cycle_ids:
             tool_rows = list((await s.execute(
@@ -63,10 +70,20 @@ async def get_cycles(
             id=c.id, seq=seq, cycle_label=c.cycle_id, triggered_by=c.triggered_by,
             created_at=c.created_at, tokens_consumed=c.tokens_consumed,
             wall_time_ms=c.wall_time_ms, execution_status=c.execution_status,
+            gap_since_prev_ms=_gap_since_prev_ms(c.created_at, c.wall_time_ms, prev_created_at),
             position=_safe(lambda c=c: _derive_position(_loads(c.state_snapshot))),
             key_events=_derive_key_events(c, tools_by_cycle.get(c.cycle_id, [])),
-        ) for c, seq in result
+        ) for c, seq, prev_created_at in result
     ]
+
+
+def _gap_since_prev_ms(created_at, wall_time_ms, prev_created_at):
+    """空闲间隔 = 本轮 start − 上轮 end = (created_at − prev_created_at) − wall_time_ms（ms）。
+    先守卫后计算（lazy）：首轮 prev=None / wall 缺 → None；负值（时钟抖动）→ 归 0。"""
+    if prev_created_at is None or wall_time_ms is None:
+        return None
+    gap_ms = (created_at - prev_created_at).total_seconds() * 1000 - wall_time_ms
+    return max(0, round(gap_ms))
 
 
 def _derive_key_events(c, tools: list[tuple[str, object]]) -> list[schemas.KeyEvent]:

@@ -14,7 +14,7 @@ from src.storage.models import Session as SessionModel, AgentCycle
 def test_schemas_importable():
     from src.webui import schemas
     s = schemas.LiveStatus(status="active", last_active_at=None, position=None,
-                           open_orders=[], active_alerts=[])
+                           open_orders=[], active_alerts=[], tokens_consumed_total=0)
     assert s.model_dump()["status"] == "active"
 
 UTC = timezone.utc

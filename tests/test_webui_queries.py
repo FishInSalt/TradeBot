@@ -56,6 +56,40 @@ async def test_get_cycles_orders_desc_and_paginates(engine):
 
 
 @pytest.mark.asyncio
+async def test_get_cycles_gap_since_prev_normal_and_first_null(engine):
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    await _add_cycle(engine, cycle_id="c0", created_at=base, wall=5000)
+    await _add_cycle(engine, cycle_id="c1", created_at=base + timedelta(minutes=10), wall=5000)
+    from src.webui.queries import get_cycles
+    rows = {r.cycle_label: r for r in await get_cycles(engine, "s1")}
+    assert rows["c0"].gap_since_prev_ms is None            # 首轮无上轮
+    assert rows["c1"].gap_since_prev_ms == 595000          # 10min 间隔 − 5s wall = 595000ms
+
+
+@pytest.mark.asyncio
+async def test_get_cycles_gap_since_prev_null_when_wall_missing(engine):
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    await _add_cycle(engine, cycle_id="c0", created_at=base, wall=5000)
+    await _add_cycle(engine, cycle_id="c1", created_at=base + timedelta(minutes=10), wall=None)
+    from src.webui.queries import get_cycles
+    rows = {r.cycle_label: r for r in await get_cycles(engine, "s1")}
+    assert rows["c1"].gap_since_prev_ms is None            # wall=None 推不出本轮 start
+
+
+@pytest.mark.asyncio
+async def test_get_cycles_gap_since_prev_clamps_negative_to_zero(engine):
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    await _add_cycle(engine, cycle_id="c0", created_at=base, wall=5000)
+    await _add_cycle(engine, cycle_id="c1", created_at=base + timedelta(seconds=1), wall=5000)
+    from src.webui.queries import get_cycles
+    rows = {r.cycle_label: r for r in await get_cycles(engine, "s1")}
+    assert rows["c1"].gap_since_prev_ms == 0               # (1s − 5s wall) 负 → 归 0
+
+
+@pytest.mark.asyncio
 async def test_get_cycles_after_id_no_gap_when_new_exceeds_limit(engine):
     """after_id 增量轮询：新增数 > limit 时取紧邻游标的一批（不跳过中间 cycle）。"""
     await _seed_session(engine)

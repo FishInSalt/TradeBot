@@ -65,6 +65,7 @@ class CycleRow(BaseModel):
     tokens_consumed: int
     wall_time_ms: int | None
     execution_status: str
+    gap_since_prev_ms: int | None     # 距上一 cycle 的空闲间隔（本轮 start − 上轮 end）；首轮/wall 缺 → None
     position: PositionBrief | None    # head：本轮开始态持仓（state_snapshot.position）；flat → None
     key_events: list[KeyEvent]        # end：本轮关键动作（被动 fill 在前、主动在后）；无 → []
 
