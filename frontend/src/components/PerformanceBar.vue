@@ -119,7 +119,7 @@ const signClass = (n: number | null | undefined) =>
 
 <style scoped>
 /* §1③：底部抽屉与上方 stream 明确分隔——上投影制造"浮起"感（覆盖 .ob-card 默认下投影），
-   折叠条微染区别于白内容区。 */
+   折叠条微染区别于白内容区。四边框继承全局 .ob-card（§1 所有卡面统一带边，有意为之，非仅 border-top）。 */
 .perf-bar { box-shadow: 0 -3px 10px rgba(0, 0, 0, 0.08); }
 .perf-bar:not(.expanded) { background: var(--ob-block-bg); }
 .perf-bar.expanded { max-height: 55vh; overflow-y: auto; padding: 8px 16px; }

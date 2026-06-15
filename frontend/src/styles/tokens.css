@@ -14,7 +14,7 @@
   --ob-text-muted: #6b7280;
   --ob-accent: #2563eb;
   --ob-accent-soft: #eff6ff;
-  --ob-row-active: #f6faff;  /* 展开行高亮底：比 accent-soft 更亮，使其上 muted(#6b7280)/neg 仍 ≥4.5（#eff6ff=4.44 不达标） */
+  --ob-row-active: #f6faff;  /* 展开行高亮底：比 accent-soft 更亮，使其上 muted(#6b7280)/neg 仍 ≥4.5（实测 ≈4.61；accent-soft #eff6ff=4.44 不达标，勿回退） */
   --ob-thinking-border: #93c5fd;
   --ob-pos: #15803d;       /* 正向：白底 ≈5:1（文本 AA）/ ≥3:1（图形线） */
   --ob-neg: #dc2626;       /* 负向：白底 ≈4.8:1 */

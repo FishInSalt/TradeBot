@@ -32,7 +32,8 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
 
 <style scoped>
 .decision-stream { padding: 4px 8px; }
-/* §1②：相邻 cycle 行不糊在一起——清晰 hairline 分隔线 + 表头 hover 反馈（可点 affordance） */
+/* §1②：相邻 cycle 行不糊在一起——清晰 hairline 分隔线 + 表头 hover 反馈（可点 affordance）。
+   注：依赖 naive 内部 class（.n-collapse-item / __header），升级 naive（pin 2.38.1）须复验这些选择器。 */
 .decision-stream :deep(.n-collapse-item:not(:first-child)) { border-top: 1px solid var(--ob-border); }
 .decision-stream :deep(.n-collapse-item__header) { transition: background 0.12s; }
 .decision-stream :deep(.n-collapse-item__header:hover) { background: var(--ob-block-bg); }

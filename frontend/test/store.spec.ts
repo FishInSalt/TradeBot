@@ -189,6 +189,34 @@ describe("sessions store", () => {
     expect(spy).toHaveBeenCalledTimes(3);
   });
 
+  it("setExpandedCycles 多 id 并发全失败收敛到 []（链式 read-modify-write 不丢移除）", async () => {
+    vi.spyOn(api, "getCycle").mockRejectedValue(new Error("boom"));
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    await s.setExpandedCycles([3, 2, 1]);
+    expect(s.expandedCycleIds).toEqual([]); // 三个各自移除，单线程链式收敛到空
+    expect(s.cycleDetails.size).toBe(0);
+    expect(s.error).toContain("boom");
+  });
+
+  it("setExpandedCycles await 期间切会话：成功返回不污染新会话（钉死乐观写不变量）", async () => {
+    // 守卫缺失隐患的回归锚点：乐观写 expandedCycleIds 在 await 前且无 sid 守卫，
+    // 当前靠 selectSession/clearSelection 同步清空 + ensureCycleDetail 双路守卫才安全。
+    // 若未来给 setExpandedCycles 加 await-后回写而漏守卫，此用例立即变红。
+    let resolveCycle!: (v: unknown) => void;
+    const pending = new Promise((r) => { resolveCycle = r; });
+    vi.spyOn(api, "getCycle").mockReturnValue(pending as any);
+    const s = useSessionsStore();
+    s.currentId = "A";
+    const p = s.setExpandedCycles([5]); // sid=A，乐观写 [5] 后挂起在 getCycle
+    s.currentId = "B"; // 切会话（selectSession:63 会同步清空展开态）
+    s.expandedCycleIds = [];
+    resolveCycle({ id: 5 });
+    await p;
+    expect(s.cycleDetails.has(5)).toBe(false); // A 的详情未写入 B
+    expect(s.expandedCycleIds).toEqual([]); // 不残留 A 的展开 id
+  });
+
   it("clearSelection 清空选中态（回 home 停轮询）", () => {
     const s = useSessionsStore();
     s.currentId = "s1";

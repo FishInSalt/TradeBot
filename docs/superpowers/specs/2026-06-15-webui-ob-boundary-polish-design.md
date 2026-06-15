@@ -23,8 +23,8 @@
 
 落地:
 
-- **①**:hairline 加在全局 `.ob-card`(`tokens.css:23`)——浅色主题下所有卡面(header / perf-bar / DecisionStream / detail section)统一获得清晰边,与上面通用规则自洽。展开的 cycle detail 区做成「内嵌、属于该行」:内嵌底(`--ob-block-bg`)+ 左侧 cycle accent 边框;内层 `section` 随全局 hairline 获得边。**注**:`.context/.reasoning` 已用 `--ob-block-bg`(`CycleDetailPanel.vue:163-164`),detail 区再上 block-bg 形成「灰-白(section)-灰」嵌套,靠 border 区隔属预期分层。
-- **②**:cycle 行间分隔线提对比;**所有展开行**整体高亮(accent 左边框 + 极淡背景染)——高亮需 CycleRowHeader 知道自身是否展开,由 DecisionStream 传入新增 `expanded` prop(见 T2)。
+- **①**:hairline 加在全局 `.ob-card`(`tokens.css:23`)——浅色主题下所有卡面(header / perf-bar / DecisionStream / detail section)统一获得清晰边,与上面通用规则自洽。展开的 cycle detail 区做成「内嵌、属于该行」:内嵌底(`--ob-block-bg`)+ 中性 1px `--ob-border` 全边框（不用 accent 蓝——蓝竖带专给关键事件 keyrow，见 §1②）;内层 `section` 随全局 hairline 获得边。**注**:`.context/.reasoning` 已用 `--ob-block-bg`(`CycleDetailPanel.vue:163-164`),detail 区再上 block-bg 形成「灰-白(section)-灰」嵌套,靠 border 区隔属预期分层。
+- **②**:cycle 行间分隔线提对比;**所有展开行**整体高亮(仅淡蓝底 `--ob-row-active`;蓝竖带专给关键事件 keyrow,二者正交避免同色混淆)——高亮需 CycleRowHeader 知道自身是否展开,由 DecisionStream 传入新增 `expanded` prop(见 T2)。
 - **③**:PerformanceBar(底部抽屉)与上方 stream 间用更强分隔——加重 `border-top` + 顶部上投影制造"抽屉浮起"感;折叠条底色可微染区别于白内容区。
 
 精确数值由实现期 Playwright 量化走查定(沿用 #80/#81:对比度含祖先 opacity 合成、**覆盖全部表面类型**——header/perf-bar/snapshot/decision 等,不只验 cycle detail)。
