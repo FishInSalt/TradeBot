@@ -5,6 +5,7 @@ import type { DataTableColumns } from "naive-ui";
 import type { CycleDetail, ToolCallRow } from "@/api/client";
 import JsonBlock from "@/components/JsonBlock.vue";
 import ReactTimeline from "@/components/ReactTimeline.vue";
+import InjectionCard from "@/components/InjectionCard.vue";
 import { fmtTokens, fmtDuration, fmtNum, fmtSigned } from "@/utils/format";
 import { fmtUtc } from "@/utils/time";
 
@@ -15,6 +16,11 @@ const hasInjected = computed(() => {
   const e = props.detail.injected_events;
   return Array.isArray(e) ? e.length > 0 : e != null;
 });
+// 回退路径注入渲染：list（富化后主流形态）→ 逐条 InjectionCard 人读摘要（D 对 react_steps=null
+// 的 legacy/forensic cycle 同样生效，当前所有 sim 均属此路径）；非 list legacy 形态保留 JsonBlock 兜底。
+const injectedFlat = computed(() =>
+  Array.isArray(props.detail.injected_events) ? props.detail.injected_events : null,
+);
 const contextOpen = ref(false);   // A3：唤醒上下文默认折叠，按需展开
 
 // 与 ReactTimeline.statusType 同口径（biz_error→warning），避免同数据两视图配色不一致
@@ -133,7 +139,10 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
              回退分支须渲染，否则其注入在 WebUI 彻底丢失（恢复旧 CycleDetailPanel 行为） -->
         <div v-if="hasInjected" class="inj-fallback">
           <h5>中途注入事件</h5>
-          <JsonBlock :value="detail.injected_events" />
+          <template v-if="injectedFlat">
+            <InjectionCard v-for="(inj, i) in injectedFlat" :key="i" :inj="(inj as any)" />
+          </template>
+          <JsonBlock v-else :value="detail.injected_events" />
         </div>
         <pre class="reasoning">{{ detail.reasoning || "—" }}</pre>
       </div>

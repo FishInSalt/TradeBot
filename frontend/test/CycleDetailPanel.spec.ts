@@ -57,9 +57,23 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("thinking text");   // 回退渲 reasoning 整块
   });
 
-  it("回退分支：react_steps=null 但 injected_events 非空时仍渲染注入事件（防丢失）", () => {
-    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null, injected_events: [{ event: { type: "fill" } }] }) as any } });
+  it("§D回退 react_steps=null + injected_events list → 渲 InjectionCard 人读摘要（非原始 JSON dump）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null, injected_events: [
+      { event: { type: "fill", position_side: "short", amount: 13.46, fill_price: 63916, pnl: 7.59, fee: 8.6, timestamp: Date.UTC(2026, 5, 12, 16, 13, 9) },
+        kind_label: "止损平仓", triggered_ago: "2 sec ago" },
+    ] }) as any } });
+    const txt = w.text();
+    expect(txt).toContain("中途注入事件");        // 分组标题保留
+    expect(txt).toContain("止损平仓");             // InjectionCard 标题（后端 kind_label）
+    expect(txt).toContain("13.46 张");             // 人读摘要
+    expect(txt).toContain("2 sec ago");            // age 片
+    expect(txt).not.toContain("position_side");    // 折叠态不裸 dump JSON key（区别于旧 JsonBlock）
+  });
+
+  it("§D回退 injected_events 非 list（legacy dict）→ 保留 JsonBlock 兜底", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null, injected_events: { legacy: "blob" } }) as any } });
     expect(w.text()).toContain("中途注入事件");
+    expect(w.text()).toContain("legacy");          // 非 list 形态走 JsonBlock dump
   });
 
   it("§议题5 flat 回退路径耗时走 fmtDuration（与主路径一致，不再裸 ms）", () => {
