@@ -36,6 +36,7 @@ class PerformanceMetrics:
     total_fees: float = 0.0
     # Net metrics (iter-tool-opt-net-pnl-metrics — per spec §C3)
     net_pnl: float = 0.0
+    net_return_pct: float = 0.0   # 净收益率（net_pnl / initial_balance）——与毛 total_return_pct 配对
     net_profit_factor: float | None = None
     net_win_rate: float = 0.0
     avg_win_net: float = 0.0
@@ -332,6 +333,7 @@ class MetricsService:
             recent_summary=recent_summary,
             total_fees=total_fees,
             net_pnl=net_pnl,
+            net_return_pct=(net_pnl / self._initial_balance) * 100 if self._initial_balance > 0 else 0.0,
             net_profit_factor=(net_profit / net_loss_abs) if (net_wins and net_loss_abs > 0) else None,
             net_win_rate=len(net_wins) / len(rts),
             avg_win_net=net_profit / len(net_wins) if net_wins else 0.0,
