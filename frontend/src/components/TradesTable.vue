@@ -3,12 +3,12 @@ import { computed, h } from "vue";
 import { NDataTable } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import type { TradeRow } from "@/api/client";
-import { fmtLocal } from "@/utils/time";
+import { fmtUtc } from "@/utils/time";
 
 const props = defineProps<{ trades: TradeRow[] }>();
 
 const columns: DataTableColumns<TradeRow> = [
-  { title: "时间", key: "at", render: (r) => fmtLocal(r.at) },
+  { title: "时间", key: "at", render: (r) => fmtUtc(r.at) },
   { title: "动作", key: "action" },
   { title: "方向", key: "side", render: (r) => r.side ?? "—" },
   { title: "价格", key: "price", render: (r) => (r.price ?? "—").toString() },

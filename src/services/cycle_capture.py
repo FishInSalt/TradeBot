@@ -95,8 +95,8 @@ def _capture_trigger_contexts(cycle_id: str, events: list[tuple[str, Any]]) -> l
 async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
     """Capture system-side objective state at decision time. Best-effort per-field.
 
-    **Contract**: 永不 raise，永不 return None — 即使所有 5 个 fetch 全失败也返回完整 dict
-    (字段值为 None / [] + _errors 列出 5 个 fail 原因 + _cycle_id 仍填)。
+    **Contract**: 永不 raise，永不 return None — 即使所有 6 个 fetch 全失败也返回完整 dict
+    (字段值为 None / [] + _errors 列出 6 个 fail 原因 + _cycle_id 仍填)。
 
     存储层契约 (cli/app.py 写入)：调用方对 state_snapshot 字段无条件做 json.dumps，
     DB state_snapshot 列实际**永非 NULL** (虽然 schema 声明 nullable=True)。schema
@@ -109,7 +109,7 @@ async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
 
     Returns:
         dict with keys: position / balance / market / pending_orders / active_alerts
-        + _errors (list of `{name}_fetch_failed: {ExceptionType}`) + _cycle_id.
+        / volatility_alert + _errors (list of `{name}_fetch_failed: {ExceptionType}`) + _cycle_id.
         Per-field exception → field = None / [] (绝不抛异常).
     """
     snapshot: dict = {
@@ -118,6 +118,7 @@ async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
         "market": None,
         "pending_orders": [],
         "active_alerts": [],
+        "volatility_alert": None,
         "_errors": [],
         "_cycle_id": cycle_id,
     }
@@ -211,6 +212,20 @@ async def _capture_state_snapshot(cycle_id: str, deps: TradingDeps) -> dict:
         ]
     except Exception as e:
         msg = f"alerts_read_failed: {type(e).__name__}"
+        snapshot["_errors"].append(msg)
+        logger.warning("state_snapshot capture: cycle_id=%s %s", cycle_id, msg)
+
+    # 6. volatility alert (singleton) — get_alert_params 返回 (threshold_pct, window_minutes)|None
+    # 形状守卫：仅当返回是 2 元 tuple/list 才解构；非契约返回 fail-safe 成 None，
+    # 守住本函数「永不返非 json-serializable 值」契约（与 async 段 await-raise 自保等价）。
+    try:
+        vol = deps.exchange.get_alert_params()
+        snapshot["volatility_alert"] = (
+            {"threshold_pct": vol[0], "window_minutes": vol[1]}
+            if isinstance(vol, (tuple, list)) and len(vol) == 2 else None
+        )
+    except Exception as e:
+        msg = f"volatility_alert_read_failed: {type(e).__name__}"
         snapshot["_errors"].append(msg)
         logger.warning("state_snapshot capture: cycle_id=%s %s", cycle_id, msg)
 

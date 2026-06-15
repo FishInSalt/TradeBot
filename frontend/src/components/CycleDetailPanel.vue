@@ -5,7 +5,9 @@ import type { DataTableColumns } from "naive-ui";
 import type { CycleDetail, ToolCallRow } from "@/api/client";
 import JsonBlock from "@/components/JsonBlock.vue";
 import ReactTimeline from "@/components/ReactTimeline.vue";
+import InjectionCard from "@/components/InjectionCard.vue";
 import { fmtTokens, fmtDuration, fmtNum, fmtSigned } from "@/utils/format";
+import { fmtUtc } from "@/utils/time";
 
 const props = defineProps<{ detail: CycleDetail }>();
 
@@ -14,7 +16,12 @@ const hasInjected = computed(() => {
   const e = props.detail.injected_events;
   return Array.isArray(e) ? e.length > 0 : e != null;
 });
-const contextOpen = ref(true);
+// 回退路径注入渲染：list（富化后主流形态）→ 逐条 InjectionCard 人读摘要（D 对 react_steps=null
+// 的 legacy/forensic cycle 同样生效，当前所有 sim 均属此路径）；非 list legacy 形态保留 JsonBlock 兜底。
+const injectedFlat = computed(() =>
+  Array.isArray(props.detail.injected_events) ? props.detail.injected_events : null,
+);
+const contextOpen = ref(false);   // A3：唤醒上下文默认折叠，按需展开
 
 // 与 ReactTimeline.statusType 同口径（biz_error→warning），避免同数据两视图配色不一致
 function statusType(s: string) {
@@ -50,27 +57,19 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
 
 <template>
   <div class="cycle-detail">
-    <!-- 1. 头部遥测 chips -->
+    <!-- 1. 头部遥测 chips（C3：去掉 tokens 总片 + wall 片，已在 header 显示；保留拆解/cache/llm/status/model） -->
     <n-space class="chips" :size="6">
-      <n-tag size="small">tokens {{ fmtTokens(detail.tokens_consumed) }}</n-tag>
       <n-tag v-if="detail.input_tokens != null" size="small">输入 {{ fmtTokens(detail.input_tokens) }} / 输出 {{ fmtTokens(detail.output_tokens) }} tok</n-tag>
       <n-tag v-if="detail.cache_hit_rate != null" size="small">cache {{ detail.cache_hit_rate.toFixed(0) }}%</n-tag>
-      <n-tag v-if="detail.wall_time_ms != null" size="small">wall {{ fmtDuration(detail.wall_time_ms) }}</n-tag>
       <n-tag v-if="detail.llm_call_ms != null" size="small">llm {{ fmtDuration(detail.llm_call_ms) }}</n-tag>
       <n-tag size="small" :type="detail.execution_status === 'ok' ? 'default' : 'error'">{{ detail.execution_status }}</n-tag>
       <n-tag v-if="detail.model_id" size="small">{{ detail.model_id }}</n-tag>
     </n-space>
 
-    <!-- 2. 唤醒上下文（原文版，可折叠；null 不渲染） -->
-    <section v-if="detail.user_prompt_snapshot" class="ob-card">
-      <h4 class="clickable" @click="contextOpen = !contextOpen">唤醒上下文 {{ contextOpen ? "▾" : "▸" }}</h4>
-      <pre v-if="contextOpen" class="context">{{ detail.user_prompt_snapshot }}</pre>
-    </section>
-
-    <!-- 3. 状态快照（默认展开，置顶；state_snapshot 是本轮开始态） -->
+    <!-- 2. 唤醒时状态（默认展开，置顶；state_snapshot 是唤醒瞬间态） -->
     <section v-if="snapshot" class="ob-card">
       <h4 class="snapshot-toggle clickable" @click="snapshotOpen = !snapshotOpen">
-        本轮开始时的状态 {{ snapshotOpen ? "▾" : "▸" }}
+        唤醒时状态 {{ snapshotOpen ? "▾" : "▸" }}
       </h4>
       <div v-if="snapshotOpen" class="snapshot">
         <template v-if="snapshot.position">
@@ -84,21 +83,41 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
         <template v-else><span class="snap-k">持仓</span><span class="muted">空仓</span></template>
         <template v-if="snapshot.balance">
           <span class="snap-k">余额</span>
-          <span>总 {{ fmtNum(snapshot.balance.total_usdt) }} · 可用 {{ fmtNum(snapshot.balance.free_usdt) }} · 占用 {{ fmtNum(snapshot.balance.used_usdt) }} USDT</span>
+          <span class="bal">
+            <span class="seg"><span class="sl">总额</span><span class="sv">{{ fmtNum(snapshot.balance.total_usdt) }}</span></span>
+            <span class="seg"><span class="sl">可用</span><span class="sv">{{ fmtNum(snapshot.balance.free_usdt) }}</span></span>
+            <span class="seg"><span class="sl">占用</span><span class="sv">{{ fmtNum(snapshot.balance.used_usdt) }}</span></span>
+            <span class="unit">USDT</span>
+          </span>
         </template>
         <template v-if="snapshot.market">
           <span class="snap-k">现价</span>
-          <span>{{ fmtNum(snapshot.market.ticker_last) }} <span class="muted">@ {{ snapshot.market.fetched_at }}</span></span>
+          <span>{{ fmtNum(snapshot.market.ticker_last) }} <span class="muted">@ {{ fmtUtc(snapshot.market.fetched_at) }}</span></span>
         </template>
         <template v-if="snapshot.pending_orders && snapshot.pending_orders.length">
           <span class="snap-k">挂单</span>
           <span><span v-for="(o, i) in snapshot.pending_orders" :key="i" class="snap-item">{{ o.order_type }} {{ o.side }} @{{ fmtNum(o.trigger_price ?? o.price) }} ×{{ o.amount }}</span></span>
         </template>
-        <template v-if="snapshot.active_alerts && snapshot.active_alerts.length">
+        <template v-if="(snapshot.active_alerts && snapshot.active_alerts.length) || snapshot.volatility_alert">
           <span class="snap-k">告警</span>
-          <span><span v-for="(a, i) in snapshot.active_alerts" :key="i" class="snap-item">{{ a.direction }} @{{ fmtNum(a.price) }}<span v-if="a.reasoning" class="muted"> · {{ a.reasoning }}</span></span></span>
+          <span>
+            <span v-if="snapshot.active_alerts && snapshot.active_alerts.length" class="alert-grp">
+              <span class="muted alert-lbl">价格</span>
+              <span v-for="(a, i) in snapshot.active_alerts" :key="i" class="snap-item">{{ a.direction }} @{{ fmtNum(a.price) }}<span v-if="a.reasoning" class="muted"> · {{ a.reasoning }}</span></span>
+            </span>
+            <span v-if="snapshot.volatility_alert" class="alert-grp">
+              <span class="muted alert-lbl">波动</span>
+              <span class="snap-item">±{{ fmtNum(snapshot.volatility_alert.threshold_pct) }}% / {{ snapshot.volatility_alert.window_minutes }}min</span>
+            </span>
+          </span>
         </template>
       </div>
+    </section>
+
+    <!-- 3. 唤醒上下文（原文版，默认折叠 A3；null 不渲染） -->
+    <section v-if="detail.user_prompt_snapshot" class="ob-card">
+      <h4 class="context-toggle clickable" @click="contextOpen = !contextOpen">唤醒上下文 {{ contextOpen ? "▾" : "▸" }}</h4>
+      <pre v-if="contextOpen" class="context">{{ detail.user_prompt_snapshot }}</pre>
     </section>
 
     <!-- 4. ReAct 时间线（主角）或扁平回退 -->
@@ -120,7 +139,10 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
              回退分支须渲染，否则其注入在 WebUI 彻底丢失（恢复旧 CycleDetailPanel 行为） -->
         <div v-if="hasInjected" class="inj-fallback">
           <h5>中途注入事件</h5>
-          <JsonBlock :value="detail.injected_events" />
+          <template v-if="injectedFlat">
+            <InjectionCard v-for="(inj, i) in injectedFlat" :key="i" :inj="(inj as any)" />
+          </template>
+          <JsonBlock v-else :value="detail.injected_events" />
         </div>
         <pre class="reasoning">{{ detail.reasoning || "—" }}</pre>
       </div>
@@ -147,6 +169,13 @@ h5 { margin: 6px 0 4px; font-size: 12px; opacity: 0.8; }
 .snapshot { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
 .snap-k { color: var(--ob-text-muted); }
 .snap-item { display: inline-block; margin-right: 10px; }
+.bal { display: inline-flex; gap: 18px; align-items: baseline; flex-wrap: wrap; }
+.seg { display: inline-flex; gap: 5px; align-items: baseline; }
+.seg .sl { color: var(--ob-text-muted); }
+.seg .sv { font-variant-numeric: tabular-nums; }
+.unit { color: var(--ob-text-muted); }
+.alert-grp { display: inline-flex; gap: 6px; align-items: baseline; margin-right: 14px; }
+.alert-lbl { font-size: 11px; }
 .muted { color: var(--ob-text-muted); }
 .dir.long, .pos { color: var(--ob-pos); font-weight: 600; }
 .dir.short, .neg { color: var(--ob-neg); font-weight: 600; }

@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.orm import aliased
 
 from src.storage.database import get_session
 from src.storage.models import (
@@ -14,27 +16,36 @@ from src.storage.models import (
 )
 from src.services.metrics import MetricsService
 from src.webui import schemas
+from src.services.event_render import _format_event_age
 
 
 async def get_cycles(
     engine: AsyncEngine, session_id: str, *,
     limit: int = 50, before_id: int | None = None, after_id: int | None = None,
 ) -> list[schemas.CycleRow]:
-    stmt = select(AgentCycle).where(AgentCycle.session_id == session_id)
+    # seq = 会话内 1-based 绝对序号：row_number 须在【游标过滤之前】对全量 session 子集开窗
+    # （子查询），外层再套游标 + 方向排序 + limit；否则 after_id 翻页会从游标处重启序号。
+    inner = (
+        select(AgentCycle, func.row_number().over(order_by=AgentCycle.id.asc()).label("seq"))
+        .where(AgentCycle.session_id == session_id)
+        .subquery()
+    )
+    ac = aliased(AgentCycle, inner)
+    stmt = select(ac, inner.c.seq)
     if before_id is not None:
-        stmt = stmt.where(AgentCycle.id < before_id)
+        stmt = stmt.where(inner.c.id < before_id)
     if after_id is not None:
-        stmt = stmt.where(AgentCycle.id > after_id)
+        stmt = stmt.where(inner.c.id > after_id)
     # after_id（取更新方向）须取紧邻游标的 n 条（ASC）再 reverse，否则 DESC+LIMIT 会返回
     # 游标之上「最新」的 n 条、新增数 > limit 时静默跳过紧邻那批 → 时间线空洞。
     if after_id is not None:
-        stmt = stmt.order_by(AgentCycle.id.asc()).limit(limit)
+        stmt = stmt.order_by(inner.c.id.asc()).limit(limit)
     else:
-        stmt = stmt.order_by(AgentCycle.id.desc()).limit(limit)
+        stmt = stmt.order_by(inner.c.id.desc()).limit(limit)
     async with get_session(engine) as s:
-        rows = list((await s.execute(stmt)).scalars().all())
+        result = list((await s.execute(stmt)).all())     # [(AgentCycle, seq), ...]
         # 批量 join tool_calls（一次查整批 cycle，feed limit≤200）；按 cycle_id 分组、保留执行序
-        cycle_ids = [c.cycle_id for c in rows]
+        cycle_ids = [c.cycle_id for c, _ in result]
         tool_rows = []
         if cycle_ids:
             tool_rows = list((await s.execute(
@@ -43,18 +54,18 @@ async def get_cycles(
                 .order_by(ToolCall.id.asc())
             )).all())
     if after_id is not None:
-        rows.reverse()          # 统一为 id DESC 输出（最新在前）
+        result.reverse()          # 统一为 id DESC 输出（最新在前），rows/seq 同步 reverse
     tools_by_cycle: dict[str, list[tuple[str, object]]] = {}
     for cid, tname, targs in tool_rows:
         tools_by_cycle.setdefault(cid, []).append((tname, _loads(targs)))
     return [
         schemas.CycleRow(
-            id=c.id, cycle_label=c.cycle_id, triggered_by=c.triggered_by,
+            id=c.id, seq=seq, cycle_label=c.cycle_id, triggered_by=c.triggered_by,
             created_at=c.created_at, tokens_consumed=c.tokens_consumed,
             wall_time_ms=c.wall_time_ms, execution_status=c.execution_status,
             position=_safe(lambda c=c: _derive_position(_loads(c.state_snapshot))),
             key_events=_derive_key_events(c, tools_by_cycle.get(c.cycle_id, [])),
-        ) for c in rows
+        ) for c, seq in result
     ]
 
 
@@ -103,6 +114,74 @@ def _classify_fill(fill: dict) -> schemas.KeyEvent | None:
                  "liquidation": "强平", "limit": "限价平仓"}.get(reason, "平仓")
         return schemas.KeyEvent(kind="fill_close", label=label, direction=side)
     return schemas.KeyEvent(kind="fill_partial", label="部分平仓", direction=side)
+
+
+def _injection_kind_label(event) -> str:
+    """注入事件人读标题。fill 复用 _classify_fill（单一权威来源、消除前端 fill 词汇漂移）；
+    _classify_fill 对 trigger_reason=='market' 回 None → 泛标题「成交」（禁直接 .label，
+    否则 None.label AttributeError）。其余静态标题在此一处定义；未知类型 → 泛标题「事件」。"""
+    if not isinstance(event, dict):
+        return "事件"
+    etype = event.get("type")
+    if etype == "fill":
+        kl = _classify_fill(event)
+        return kl.label if kl else "成交"
+    if etype == "percentage_alert":
+        return "波动告警触发"
+    if etype == "price_level_alert":
+        return "价格告警触发"
+    return "事件"
+
+
+def _injection_age(base_aware: datetime, end_aware: datetime, rec: dict) -> str | None:
+    """注入事件 age（英文 ladder，复用 event_render._format_event_age）。
+    base_aware = aware UTC 的 cycle 开始时刻；injection_moment = base + offset_ms；
+    end_aware = aware UTC 的 cycle 结束时刻（created_at）。
+    event None / 缺 timestamp → None。
+
+    刚触发事件修正：injection_moment=(created_at−wall)+offset 是估算，事件因果上必先于
+    其触发的注入，但估算噪声可让 event_ts 微落"未来"（实测 price_level_alert ~0.2s）→
+    _format_event_age 的 `then>now` 会吞成 None（右上无 age 片）。若 event_ts 仍落在
+    cycle 窗口内（≤ 结束），视为估算噪声 → "just now"；仅真晚于 cycle 结束（异常/损坏戳）
+    才保留 None（仅显 UTC）。原则性边界（cycle 窗口），非魔数 tolerance。"""
+    event = rec.get("event")
+    if not isinstance(event, dict) or event.get("timestamp") is None:
+        return None
+    injection_moment = base_aware + timedelta(milliseconds=rec.get("offset_ms") or 0)
+    event_ts = datetime.fromtimestamp(event["timestamp"] / 1000, tz=timezone.utc)   # aware
+    age = _format_event_age(injection_moment, event_ts)
+    if age is None and event_ts <= end_aware:
+        return "just now"
+    return age
+
+
+def _enrich_injected_events(raw, created_at, wall_time_ms):
+    """富化 injected_events 供 WebUI 注入卡：每条加 triggered_ago + kind_label。
+    仅处理 list[dict-with-'event'] 形态；其他形态（dict/str/None）原样返回。
+
+    逐条 try/except 降级裸 event —— get_cycle_detail 无外层 try/except，任一事件富化
+    异常绝不冒泡成 500（spec §6 / P0）。
+
+    ⚠ P0：c.created_at 经 ORM 从 SQLite 读回是 naive；不补 aware UTC 则 _format_event_age
+    首行 `then > now`（aware event_ts vs naive now）抛 TypeError → 500，且只在有注入事件的
+    cycle 触发。补 tz 与 _ensure_utc 同模式。created_at 是 cycle 结束时刻；开始 ≈ created_at − wall_time_ms。"""
+    if not isinstance(raw, list):
+        return raw
+    end_aware = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+    base = end_aware if wall_time_ms is None else end_aware - timedelta(milliseconds=wall_time_ms)
+    out = []
+    for rec in raw:
+        if not isinstance(rec, dict) or "event" not in rec:
+            out.append(rec)
+            continue
+        try:
+            enriched = dict(rec)
+            enriched["triggered_ago"] = _injection_age(base, end_aware, rec)
+            enriched["kind_label"] = _injection_kind_label(rec.get("event"))
+            out.append(enriched)
+        except Exception:
+            out.append(rec)        # 降级裸 event（不附富化字段）
+    return out
 
 
 def _classify_action(tool_name: str, args, prev_side: str | None) -> schemas.KeyEvent | None:
@@ -166,16 +245,20 @@ async def get_cycle_detail(engine: AsyncEngine, cycle_pk: int) -> schemas.CycleD
         )).scalar_one_or_none()
         if c is None:
             return None
+        seq = (await s.execute(
+            select(func.count()).select_from(AgentCycle)
+            .where(AgentCycle.session_id == c.session_id, AgentCycle.id <= c.id)
+        )).scalar_one()
         tcs = list((await s.execute(
             select(ToolCall)
             .where(ToolCall.cycle_id == c.cycle_id, ToolCall.session_id == c.session_id)
             .order_by(ToolCall.id.asc())
         )).scalars().all())
     return schemas.CycleDetail(
-        id=c.id, cycle_label=c.cycle_id, triggered_by=c.triggered_by, created_at=c.created_at,
+        id=c.id, seq=seq, cycle_label=c.cycle_id, triggered_by=c.triggered_by, created_at=c.created_at,
         reasoning=c.reasoning, decision=c.decision,
         trigger_context=_loads(c.trigger_context), state_snapshot=_loads(c.state_snapshot),
-        injected_events=_loads(c.injected_events),
+        injected_events=_enrich_injected_events(_loads(c.injected_events), c.created_at, c.wall_time_ms),
         tool_calls=[
             schemas.ToolCallRow(tool_name=t.tool_name, status=t.status, duration_ms=t.duration_ms,
                                 error_type=t.error_type, args=_loads(t.args),

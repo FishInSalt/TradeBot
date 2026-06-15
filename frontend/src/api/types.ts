@@ -128,6 +128,8 @@ export interface components {
         CycleDetail: {
             /** Id */
             id: number;
+            /** Seq */
+            seq: number;
             /** Cycle Label */
             cycle_label: string;
             /** Triggered By */
@@ -185,6 +187,8 @@ export interface components {
         CycleRow: {
             /** Id */
             id: number;
+            /** Seq */
+            seq: number;
             /** Cycle Label */
             cycle_label: string;
             /** Triggered By */

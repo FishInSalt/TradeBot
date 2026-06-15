@@ -1264,11 +1264,12 @@ def test_dg_2_thinking_part_precedes_toolcall_in_smoke_baseline():
 
 
 async def test_dg_3_state_snapshot_field_set_unchanged():
-    """T-DG-3: state_snapshot 7 字段集合 = R2-7 contract.
-    新增字段触发本测试 fail，提示 R2-8a 是否需消费."""
+    """T-DG-3: state_snapshot 8 字段集合 = R2-7 contract.
+    新增字段触发本测试 fail，提示 R2-8a 是否需消费.
+    volatility_alert: B3 新增，CycleDetailPanel 快照「告警·波动」子段已消费."""
     expected = {
         "position", "balance", "market", "pending_orders",
-        "active_alerts", "_errors", "_cycle_id",
+        "active_alerts", "volatility_alert", "_errors", "_cycle_id",
     }
     from unittest.mock import AsyncMock, MagicMock
     from src.integrations.exchange.base import Balance, Ticker

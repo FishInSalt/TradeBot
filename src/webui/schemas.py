@@ -58,6 +58,7 @@ class KeyEvent(BaseModel):
 
 class CycleRow(BaseModel):
     id: int                   # int PK — 详情跳转/游标用这个
+    seq: int                  # 会话内 1-based 绝对序号（窗口函数派生，翻页不重启）
     cycle_label: str          # agent_cycles.cycle_id 字符串，仅显示
     triggered_by: str
     created_at: UtcDatetime
@@ -80,6 +81,7 @@ class ToolCallRow(BaseModel):
 
 class CycleDetail(BaseModel):
     id: int
+    seq: int                  # 会话内 1-based 绝对序号（与 CycleRow.seq 同口径）
     cycle_label: str
     triggered_by: str
     created_at: UtcDatetime

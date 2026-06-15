@@ -38,9 +38,12 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("(1) Stance: hold");
   });
 
-  it("渲染唤醒上下文原文（user_prompt_snapshot）", () => {
+  it("§A3 唤醒上下文默认折叠，点击展开原文", async () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
-    expect(w.text()).toContain("Woke by scheduled tick at 10:00");
+    expect(w.text()).toContain("唤醒上下文");                 // 标题在
+    expect(w.text()).not.toContain("Woke by scheduled tick"); // 默认折叠：原文不渲染
+    await w.find(".context-toggle").trigger("click");
+    expect(w.text()).toContain("Woke by scheduled tick");      // 展开后可见
   });
 
   it("user_prompt_snapshot 为 null（legacy）时不渲染 Context 块", () => {
@@ -54,9 +57,23 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("thinking text");   // 回退渲 reasoning 整块
   });
 
-  it("回退分支：react_steps=null 但 injected_events 非空时仍渲染注入事件（防丢失）", () => {
-    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null, injected_events: [{ event: { type: "fill" } }] }) as any } });
+  it("§D回退 react_steps=null + injected_events list → 渲 InjectionCard 人读摘要（非原始 JSON dump）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null, injected_events: [
+      { event: { type: "fill", position_side: "short", amount: 13.46, fill_price: 63916, pnl: 7.59, fee: 8.6, timestamp: Date.UTC(2026, 5, 12, 16, 13, 9) },
+        kind_label: "止损平仓", triggered_ago: "2 sec ago" },
+    ] }) as any } });
+    const txt = w.text();
+    expect(txt).toContain("中途注入事件");        // 分组标题保留
+    expect(txt).toContain("止损平仓");             // InjectionCard 标题（后端 kind_label）
+    expect(txt).toContain("13.46 张");             // 人读摘要
+    expect(txt).toContain("2 sec ago");            // age 片
+    expect(txt).not.toContain("position_side");    // 折叠态不裸 dump JSON key（区别于旧 JsonBlock）
+  });
+
+  it("§D回退 injected_events 非 list（legacy dict）→ 保留 JsonBlock 兜底", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null, injected_events: { legacy: "blob" } }) as any } });
     expect(w.text()).toContain("中途注入事件");
+    expect(w.text()).toContain("legacy");          // 非 list 形态走 JsonBlock dump
   });
 
   it("§议题5 flat 回退路径耗时走 fmtDuration（与主路径一致，不再裸 ms）", () => {
@@ -84,14 +101,15 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).not.toContain("ReAct 过程");
   });
 
-  it("§⑤⑥ 状态快照默认展开 + 置顶 + 格式化", () => {
+  it("§重排/重命名 唤醒时状态默认展开 + 置顶（先于唤醒上下文与时间线）", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     const txt = w.text();
-    expect(txt).toContain("本轮开始时的状态");
-    expect(txt).not.toContain("开始态");
+    expect(txt).toContain("唤醒时状态");
+    expect(txt).not.toContain("本轮开始时的状态");
     expect(txt).toContain("17.99");          // 默认展开即可见（持仓 contracts）
     expect(txt).not.toContain("_cycle_id");
-    expect(txt.indexOf("本轮开始时的状态")).toBeLessThan(txt.indexOf("推理与行动过程"));
+    expect(txt.indexOf("唤醒时状态")).toBeLessThan(txt.indexOf("唤醒上下文"));
+    expect(txt.indexOf("唤醒时状态")).toBeLessThan(txt.indexOf("推理与行动过程"));
   });
 
   it("§⑥ 快照格式化真实行为：方向/杠杆×/USDT/− 号/红绿着色（议题 6 核心交付）", () => {
@@ -111,9 +129,45 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("输入 8,000 / 输出 1,000 tok");
   });
 
-  it("§议题5 chips token 千分位 + 耗时 s", () => {
-    const w = mount(CycleDetailPanel, { props: { detail: detail({ tokens_consumed: 80733, wall_time_ms: 49770 }) as any } });
-    expect(w.text()).toContain("80,733");
-    expect(w.text()).toContain("49.8s");
+  it("§C3 chips 去掉 tokens/wall 重复片（只留 header），保留拆解", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ tokens_consumed: 80733, wall_time_ms: 49770, input_tokens: 60000, output_tokens: 20000, llm_call_ms: 30000 }) as any } });
+    const txt = w.text();
+    expect(txt).not.toContain("tokens 80,733");   // 去掉总 tokens 片
+    expect(txt).not.toContain("wall ");            // 去掉 wall 片
+    expect(txt).toContain("输入");                 // 保留输入/输出拆解
+    expect(txt).toContain("llm");                  // 保留 llm
+  });
+
+  it("§B1 余额三标签格（总额/可用/占用 + USDT 收尾）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    const txt = w.text();
+    expect(txt).toContain("总额");
+    expect(txt).toContain("可用");
+    expect(txt).toContain("占用");
+    expect(txt).toContain("10,000");          // total_usdt 千分位
+    expect(txt).toContain("USDT");
+    expect(txt).not.toContain("总 10,000");   // 旧平铺文案移除
+  });
+
+  it("§B2 现价时间 UTC 格式化（非裸 ISO）", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    const txt = w.text();
+    expect(txt).toContain("2026-06-12 10:00:00");        // fetched_at 2026-06-12T10:00:00Z
+    expect(txt).not.toContain("2026-06-12T10:00:00Z");   // 不再裸 ISO
+  });
+
+  it("§B3 快照渲染波动告警（价格/波动两子标签）", () => {
+    const base = detail();
+    const w = mount(CycleDetailPanel, { props: { detail: { ...base,
+      state_snapshot: { ...base.state_snapshot, volatility_alert: { threshold_pct: 1.5, window_minutes: 15 } } } as any } });
+    const txt = w.text();
+    expect(txt).toContain("价格");            // 价格告警子标签（fixture active_alerts 非空）
+    expect(txt).toContain("波动");            // 波动子标签
+    expect(txt).toContain("±1.5% / 15min");   // 波动阈值/窗口
+  });
+
+  it("§B3 历史快照缺 volatility_alert 键 → 不渲波动子段", () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });   // fixture 无 volatility_alert
+    expect(w.text()).not.toContain("波动");
   });
 });

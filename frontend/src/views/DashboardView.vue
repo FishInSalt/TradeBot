@@ -36,6 +36,7 @@ onUnmounted(() => polling.stop());
       <SessionMeta />
       <div class="header-divider" />
       <LiveStatusCard />
+      <div class="tz-note">时间均为 UTC</div>
     </div>
     <div class="stream-wrap"><DecisionStream /></div>
     <PerformanceBar />
@@ -46,6 +47,7 @@ onUnmounted(() => polling.stop());
 <style scoped>
 .dashboard { height: 100%; display: flex; flex-direction: column; min-height: 0; }
 .header-divider { height: 1px; background: var(--ob-border); margin: 8px 0; }
+.tz-note { margin-top: 6px; font-size: 11px; color: var(--ob-text-muted); }
 .stream-wrap { flex: 1; overflow-y: auto; min-height: 0; }
 .empty { height: 100%; display: flex; align-items: center; justify-content: center; color: var(--ob-text-muted); }
 .err { margin: 8px 16px 0; }

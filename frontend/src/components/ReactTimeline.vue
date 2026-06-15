@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { NTag } from "naive-ui";
 import type { ToolCallRow } from "@/api/client";
 import JsonBlock from "@/components/JsonBlock.vue";
+import InjectionCard from "@/components/InjectionCard.vue";
 import { fmtArgs, fmtDuration, clipArgs } from "@/utils/format";
 
 interface ReactTool { tool_call_id: string | null; tool_name: string }
@@ -12,6 +13,8 @@ interface InjectedEvent {
   after_tool?: string;
   offset_ms?: number | null;
   after_tool_call_id?: string | null;
+  triggered_ago?: string | null;
+  kind_label?: string;
 }
 
 const props = defineProps<{
@@ -58,16 +61,15 @@ const injectionBuckets = computed(() => {
 // 每张工具卡的展开态：key = tool_call_id（无 id 用合成 key）
 const openCards = ref<Set<string>>(new Set());
 
-// 思考块折叠态（议题 2）
-const THINKING_FOLD_CHARS = 600;   // 超此字符数默认折叠
-const THINKING_HEAD_CHARS = 360;   // 折叠态预览长度（≈前 6 行）
+// 思考块整块折叠（A1）：默认折叠（openThinking 初始空集），按需整块展开。
+// needsFold：有换行 或 超单行容量 → 给折叠 affordance 并默认折叠；只有真·单行短句豁免常显。
+const THINKING_INLINE_MAX = 100;   // 单行容量小值（非旧的 600）
 const openThinking = ref<Set<number>>(new Set());
-function thinkingFolds(text: string) {
-  return text.length > THINKING_FOLD_CHARS;
+function needsFold(text: string) {
+  return text.includes("\n") || text.length > THINKING_INLINE_MAX;
 }
-function thinkingShown(text: string, si: number) {
-  if (!thinkingFolds(text) || openThinking.value.has(si)) return text;
-  return text.slice(0, THINKING_HEAD_CHARS) + "…";
+function previewLine(text: string) {
+  return text.split("\n")[0];      // 折叠态预览取首行（CSS 再做 ellipsis）
 }
 function toggleThinking(si: number) {
   const s = new Set(openThinking.value);
@@ -102,14 +104,21 @@ function statusType(s: string) {
 <template>
   <div class="react-timeline">
     <div v-for="(step, si) in steps" :key="si" class="react-step">
-      <!-- 思考块（超长默认折叠，议题 2） -->
+      <!-- 思考块（💭 思考，整块折叠默认收起 A1/A2；单行短句豁免常显） -->
       <div v-if="step.thinking" class="thinking">
-        <span class="step-icon">🧠</span>
+        <span class="step-icon">💭</span>
         <div class="thinking-body">
-          <pre class="thinking-text">{{ thinkingShown(step.thinking, si) }}</pre>
-          <span v-if="thinkingFolds(step.thinking)" class="thinking-toggle clickable" @click="toggleThinking(si)">
-            {{ openThinking.has(si) ? "收起 ▴" : "展开全文 ▾" }}
-          </span>
+          <template v-if="needsFold(step.thinking)">
+            <div class="thinking-head clickable" @click="toggleThinking(si)">
+              <span class="tk-lbl">思考</span>
+              <span class="tk-caret">{{ openThinking.has(si) ? "▾" : "▸" }}</span>
+              <span v-if="!openThinking.has(si)" class="tk-preview">{{ previewLine(step.thinking) }}</span>
+            </div>
+            <pre v-if="openThinking.has(si)" class="thinking-text">{{ step.thinking }}</pre>
+          </template>
+          <template v-else>
+            <span class="tk-lbl">思考</span> <span class="tk-inline">{{ step.thinking }}</span>
+          </template>
         </div>
       </div>
 
@@ -136,24 +145,15 @@ function statusType(s: string) {
           </div>
         </div>
 
-        <!-- 该工具后锚定的注入事件（批量并排） -->
-        <div v-for="(inj, ii) in injectionsFor(t, si, ti)" :key="`inj-${si}-${ti}-${ii}`" class="injection-card">
-          <span class="step-icon">⚡</span>
-          <span class="inj-title">触发事件注入</span>
-          <span v-if="inj.offset_ms != null" class="muted">+{{ inj.offset_ms }}ms</span>
-          <JsonBlock :value="inj.event" />
-        </div>
+        <!-- 该工具后锚定的注入事件（批量并排，人读摘要卡） -->
+        <InjectionCard v-for="(inj, ii) in injectionsFor(t, si, ti)" :key="`inj-${si}-${ti}-${ii}`" :inj="inj" />
       </template>
     </div>
 
     <!-- §10：未能按 id/名锚定的注入 → 时间线末尾归组 -->
     <div v-if="orphanInjections.length" class="orphan-injections">
-      <div v-for="(inj, oi) in orphanInjections" :key="`orphan-inj-${oi}`" class="injection-card">
-        <span class="step-icon">⚡</span>
-        <span class="inj-title">触发事件注入（未能锚定）</span>
-        <span v-if="inj.offset_ms != null" class="muted">+{{ inj.offset_ms }}ms</span>
-        <JsonBlock :value="inj.event" />
-      </div>
+      <div class="orphan-label muted">未能锚定的注入事件</div>
+      <InjectionCard v-for="(inj, oi) in orphanInjections" :key="`orphan-inj-${oi}`" :inj="inj" />
     </div>
   </div>
 </template>
@@ -169,17 +169,17 @@ function statusType(s: string) {
 .tool-body { padding: 4px 8px 8px 26px; }
 .kv { display: flex; gap: 8px; margin-top: 4px; font-size: 12px; }
 .kv .k { color: var(--ob-text-muted); min-width: 32px; }
-.injection-card { display: flex; align-items: center; gap: 6px; margin: 6px 0 6px 18px; padding: 5px 8px; background: var(--ob-warn-soft); border-radius: 4px; font-size: 12px; }
-.inj-title { font-weight: 600; }
 .step-icon { flex: 0 0 auto; }
 .muted { color: var(--ob-text-muted); }
-/* 注入卡 warn-soft 琥珀底上 muted(#6b7280) 仅 4.34 → 用更深 warn 达 AA（review）。
-   scoped (0,2,0) 按特异性胜 .muted (0,1,0)，全局 muted/工具耗时仍白卡 4.83 不受影响。 */
-.injection-card .muted { color: var(--ob-warn); }
+.orphan-label { font-size: 11px; margin: 8px 0 2px 18px; }
 .orphan { font-style: italic; }
 .seam { font-size: 12px; color: var(--ob-text-muted); font-style: italic; }
 .clickable { cursor: pointer; }
-.thinking-body { flex: 1; }
-.thinking-toggle { font-size: 11px; color: var(--ob-text-muted); }
+.thinking-body { flex: 1; min-width: 0; }
+.thinking-head { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.tk-lbl { color: var(--ob-text-muted); font-weight: 600; }
+.tk-caret { color: var(--ob-text-muted); }
+.tk-preview { color: var(--ob-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.tk-inline { font-size: 12px; }
 .args-compact { font-size: 12px; word-break: break-word; }
 </style>

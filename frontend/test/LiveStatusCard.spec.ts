@@ -36,4 +36,11 @@ describe("LiveStatusCard", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.text()).toContain("轮询中断");
   });
+
+  it("§全局 last_active_at 按 UTC 展示", async () => {
+    const { wrapper, store } = mountCard();
+    store.live = { status: "active", last_active_at: "2026-06-12T10:00:00Z", position: null, open_orders: [], active_alerts: [] } as any;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.text()).toContain("2026-06-12 10:00:00");
+  });
 });
