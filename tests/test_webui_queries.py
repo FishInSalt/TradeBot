@@ -163,6 +163,25 @@ async def test_get_live_status_assembles(engine):
 
 
 @pytest.mark.asyncio
+async def test_get_live_status_tokens_consumed_total_sums_cycles(engine):
+    await _seed_session(engine)
+    await _add_cycle(engine, cycle_id="c0", tokens=1200)
+    await _add_cycle(engine, cycle_id="c1", tokens=3400)
+    from src.webui.queries import get_live_status
+    ls = await get_live_status(engine, "s1")
+    assert ls.tokens_consumed_total == 4600
+
+
+@pytest.mark.asyncio
+async def test_get_live_status_tokens_consumed_total_zero_when_no_cycles(engine):
+    # 全新会话（0 cycle）：SQLite SUM 空集返 NULL，须 coalesce 到 0，否则 int 字段 pydantic 校验失败
+    await _seed_session(engine)
+    from src.webui.queries import get_live_status
+    ls = await get_live_status(engine, "s1")
+    assert ls.tokens_consumed_total == 0
+
+
+@pytest.mark.asyncio
 async def test_get_performance_equity_skips_none_balance(engine):
     await _seed_session(engine)
     base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)

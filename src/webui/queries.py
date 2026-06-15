@@ -294,9 +294,15 @@ async def get_live_status(engine: AsyncEngine, session_id: str) -> schemas.LiveS
                  "ORDER BY registered_at ASC"),
             {"sid": session_id},
         )).mappings().all())
+        # 会话累计 token：coalesce 兜空集——SQLite SUM 对 0 cycle 返 NULL，int 字段会 pydantic 失败
+        tokens_total = (await s.execute(
+            select(func.coalesce(func.sum(AgentCycle.tokens_consumed), 0))
+            .where(AgentCycle.session_id == session_id)
+        )).scalar_one()
     return schemas.LiveStatus(
         status=sess.status,
         last_active_at=sess.last_active_at,
+        tokens_consumed_total=tokens_total,
         position=(schemas.PositionInfo(symbol=pos.symbol, side=pos.side, contracts=pos.contracts,
                                        entry_price=pos.entry_price, leverage=pos.leverage)
                   if pos else None),

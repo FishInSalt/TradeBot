@@ -167,3 +167,4 @@ class LiveStatus(BaseModel):
     position: PositionInfo | None
     open_orders: list[OrderInfo]
     active_alerts: list[AlertInfo]
+    tokens_consumed_total: int        # 会话累计 token（coalesce sum，0 cycle → 0）
