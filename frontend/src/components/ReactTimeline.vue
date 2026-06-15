@@ -133,6 +133,8 @@ function statusType(s: string) {
                 {{ rowFor(t)!.error_type ? `${rowFor(t)!.status} · ${rowFor(t)!.error_type}` : rowFor(t)!.status }}
               </n-tag>
               <span class="muted">{{ fmtDuration(rowFor(t)!.duration_ms) }}</span>
+              <!-- 展开/折叠 affordance：与思考块 .tk-caret 同口径，补上工具卡缺失的可展开提示 -->
+              <span class="tool-caret">{{ openCards.has(cardKey(t, si, ti)) ? "▾" : "▸" }}</span>
             </template>
             <span v-else class="muted orphan">无遥测记录（被拒或记录失败）</span>
           </div>
@@ -160,12 +162,16 @@ function statusType(s: string) {
 
 <style scoped>
 .react-step { border-left: 2px solid var(--ob-thinking-border); padding-left: 10px; margin-bottom: 14px; }
-.thinking { display: flex; gap: 6px; margin-bottom: 8px; }
-.thinking-text { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; line-height: 1.5; background: var(--ob-block-bg); padding: 6px 8px; border-radius: 4px; flex: 1; }
+/* 思考块给浅蓝底框（--ob-thinking-bg），折叠态也成框，破"白底裸文字与白卡难分"；
+   蓝底 + 💭 图标 + 蓝左边框三重区分"思考 vs 灰底工具卡"。展开体 .thinking-text 去自带底色避免框中框。
+   块内 muted 文字（标签/预览/caret）用更深的 --ob-thinking-text 保 AA（蓝底压低 muted #6b7280 对比）。 */
+.thinking { display: flex; gap: 6px; margin-bottom: 8px; background: var(--ob-thinking-bg); border-radius: 4px; padding: 5px 8px; }
+.thinking-text { white-space: pre-wrap; word-break: break-word; margin: 4px 0 0; font-size: 12px; line-height: 1.5; flex: 1; }
 .tool-card { margin: 6px 0; background: var(--ob-block-bg); border-radius: 4px; }
 .tool-head { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; user-select: none; font-size: 12px; }
 .tool-name { font-weight: 600; }
 .tool-args { color: var(--ob-text-muted); }
+.tool-caret { margin-left: auto; color: var(--ob-text-muted); font-size: 14px; }   /* 调大箭头：密列表用 caret 而非文字提示 */
 .tool-body { padding: 4px 8px 8px 26px; }
 .kv { display: flex; gap: 8px; margin-top: 4px; font-size: 12px; }
 .kv .k { color: var(--ob-text-muted); min-width: 32px; }
@@ -177,9 +183,9 @@ function statusType(s: string) {
 .clickable { cursor: pointer; }
 .thinking-body { flex: 1; min-width: 0; }
 .thinking-head { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
-.tk-lbl { color: var(--ob-text-muted); font-weight: 600; }
-.tk-caret { color: var(--ob-text-muted); }
-.tk-preview { color: var(--ob-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.tk-lbl { color: var(--ob-thinking-text); font-weight: 600; }
+.tk-caret { color: var(--ob-thinking-text); font-size: 14px; }   /* 尺寸与 .tool-caret / 开关 caret 统一 14px；色随思考块蓝底加深 */
+.tk-preview { color: var(--ob-thinking-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
 .tk-inline { font-size: 12px; }
 .args-compact { font-size: 12px; word-break: break-word; }
 </style>
