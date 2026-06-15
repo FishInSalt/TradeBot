@@ -64,8 +64,9 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
 <style scoped>
 .cycle-head { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 13px; padding-left: 6px; border-left: 3px solid transparent; }
 .cycle-head.keyrow { border-left-color: var(--ob-accent); }   /* 关键事件锚点高亮 */
-/* §1②：所有展开行整体高亮——accent 左边 + 极淡染，"在看哪条"一目了然（多展开下可多条同时高亮） */
-.cycle-head.expanded { border-left-color: var(--ob-accent); background: var(--ob-row-active); }
+/* §1②：所有展开行整体高亮——仅淡蓝底（蓝竖带专给关键事件 keyrow，避免两语义同色混淆）；
+   多展开下可多条同时高亮，配 naive ▾ 箭头 + 下方灰凹陷详情区共同指明展开。 */
+.cycle-head.expanded { background: var(--ob-row-active); }
 .seq { color: var(--ob-text-muted); background: var(--ob-block-bg); border-radius: 4px; padding: 0 5px; font-size: 11px; white-space: nowrap; }
 .time { opacity: 0.7; white-space: nowrap; }
 .gap { font-size: 11px; color: var(--ob-text-muted); white-space: nowrap; }
