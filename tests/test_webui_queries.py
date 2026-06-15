@@ -679,3 +679,20 @@ async def test_open_position_none_when_sim_flat_despite_snapshot(engine):
     from src.webui.queries import get_performance
     perf = await get_performance(engine, "s1")     # 无 SimPosition
     assert perf.open_position is None
+
+
+def test_close_label_drift_guard_ts_matches_classify_fill():
+    """CLOSE_LABEL（trades.ts）平仓词汇必须与 _classify_fill 逐字同源（spec §C drift-guard）。
+    _classify_fill 是单一权威来源：改它的标签 → 本测试读 TS 源校验同字面，强制 TS 同步。"""
+    from pathlib import Path
+    from src.webui.queries import _classify_fill
+    expected = set()
+    for reason in ["stop", "take_profit", "liquidation", "limit", "other"]:
+        ev = _classify_fill({"trigger_reason": reason, "position_side": "long",
+                             "pnl": 1.0, "is_full_close": True})
+        expected.add(ev.label)        # other → 泛标签「平仓」
+    repo_root = Path(__file__).resolve().parents[1]   # tests/ 的上一级 = 仓库根（不依赖 pytest CWD）
+    ts = (repo_root / "frontend/src/utils/trades.ts").read_text(encoding="utf-8")
+    # 用带引号字面校验（如 '"止损平仓"'），比裸 substring 更严：避免「平仓」是「止损平仓」子串的松配。
+    missing = [label for label in expected if f'"{label}"' not in ts]
+    assert not missing, f"CLOSE_LABEL drift: {missing} 不在 trades.ts（与 _classify_fill 漂移）"
