@@ -28,19 +28,27 @@ describe("DecisionStream", () => {
     expect(wrapper.text().indexOf("t3")).toBeLessThan(wrapper.text().indexOf("t1"));  // store.cycles 顺序
   });
 
-  it("点击折叠项表头调 store.expandCycle(id)", async () => {
+  it("点击折叠项表头走受控路径调 store.setExpandedCycles（含新展开 id）", async () => {
     const { wrapper, store } = mountStream();
     await wrapper.vm.$nextTick();
     await wrapper.find(".n-collapse-item__header-main").trigger("click");
-    expect(store.expandCycle).toHaveBeenCalledWith(3);
+    expect(store.setExpandedCycles).toHaveBeenCalledWith([3]);
   });
 
-  it("expandedCycleId 命中且详情已缓存时仅渲染一个详情面板", async () => {
+  it("expandedCycleIds 命中且详情已缓存时渲染对应详情面板", async () => {
     const { wrapper, store } = mountStream();
-    store.expandedCycleId = 2;
+    store.expandedCycleIds = [2];
     store.cycleDetails = new Map([[2, det(2)]]) as any;
     await wrapper.vm.$nextTick();
     expect(wrapper.findAll(".cycle-detail").length).toBe(1);
+  });
+
+  it("多个 cycle 同时展开各自渲染详情面板（去 accordion）", async () => {
+    const { wrapper, store } = mountStream();
+    store.expandedCycleIds = [3, 2];
+    store.cycleDetails = new Map([[3, det(3)], [2, det(2)]]) as any;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll(".cycle-detail").length).toBe(2);
   });
 
   it("无 cycle 时显示空态", async () => {

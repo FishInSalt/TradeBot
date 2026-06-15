@@ -8,19 +8,10 @@ import CycleDetailPanel from "@/components/CycleDetailPanel.vue";
 const store = useSessionsStore();
 const cycles = computed(() => store.cycles);
 
-// 单向：从 store 派生展开项；accordion 模式下至多一项
-const expandedNames = computed<number[]>(() =>
-  store.expandedCycleId != null ? [store.expandedCycleId] : [],
-);
-
+// 受控：展开态唯一来源 store.expandedCycleIds（多展开，无 accordion）。naive 给全量数组，
+// 仅做 number 归一（name 绑数字 id），交由 store.setExpandedCycles 做新增懒加载 + 移除保留。
 function onUpdate(names: Array<string | number>) {
-  const next = names.length ? Number(names[0]) : null;
-  if (next == null) {
-    // 关闭当前项：expandCycle 同 id toggle 成 null
-    if (store.expandedCycleId != null) void store.expandCycle(store.expandedCycleId);
-  } else if (next !== store.expandedCycleId) {
-    void store.expandCycle(next); // 打开：设 id + 懒加载
-  }
+  void store.setExpandedCycles(names.map(Number));
 }
 
 const detailFor = (id: number) => store.cycleDetails.get(id);
@@ -28,7 +19,7 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
 
 <template>
   <div class="decision-stream ob-card">
-    <n-collapse accordion :expanded-names="expandedNames" @update:expanded-names="onUpdate">
+    <n-collapse :expanded-names="store.expandedCycleIds" @update:expanded-names="onUpdate">
       <n-collapse-item v-for="c in cycles" :key="c.id" :name="c.id">
         <template #header><CycleRowHeader :cycle="c" /></template>
         <CycleDetailPanel v-if="detailFor(c.id)" :detail="detailFor(c.id)!" />
