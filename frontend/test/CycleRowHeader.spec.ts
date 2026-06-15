@@ -47,6 +47,13 @@ describe("CycleRowHeader", () => {
     expect(w.text()).toContain("49.8s");
   });
 
+  it("§② gap_since_prev_ms 有值 → 显示空闲间隔；null → 不渲染该节", () => {
+    const w = mount(CycleRowHeader, { props: { cycle: cycle({ gap_since_prev_ms: 600000 }) as any } });
+    expect(w.text()).toContain("间隔 10m");
+    const w2 = mount(CycleRowHeader, { props: { cycle: cycle({ gap_since_prev_ms: null }) as any } });
+    expect(w2.text()).not.toContain("间隔");
+  });
+
   it("§C1 行首显示会话内序号 #N", () => {
     const w = mount(CycleRowHeader, { props: { cycle: cycle() as any } });
     expect(w.text()).toContain("#7");

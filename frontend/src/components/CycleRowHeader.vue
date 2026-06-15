@@ -3,7 +3,7 @@ import { computed } from "vue";
 import type { CycleRow } from "@/api/client";
 import { NTag } from "naive-ui";
 import { fmtUtc, fmtUtcTime } from "@/utils/time";
-import { fmtTokens, fmtDuration } from "@/utils/format";
+import { fmtTokens, fmtDuration, fmtGap } from "@/utils/format";
 
 const props = defineProps<{ cycle: CycleRow }>();
 
@@ -42,6 +42,7 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
       <template v-if="startAt">{{ fmtUtc(startAt) }} → {{ fmtUtcTime(cycle.created_at) }}</template>
       <template v-else>{{ fmtUtc(cycle.created_at) }}</template>
     </span>
+    <span v-if="cycle.gap_since_prev_ms != null" class="gap">· 间隔 {{ fmtGap(cycle.gap_since_prev_ms) }}</span>
     <n-tag size="small" :bordered="false">{{ cycle.triggered_by }}</n-tag>
     <span class="seg head-pos"><span class="seg-label">开始:</span> {{ headText }}</span>
     <span class="seg end-events">
@@ -65,6 +66,7 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
 .cycle-head.keyrow { border-left-color: var(--ob-accent); }   /* 关键事件锚点高亮 */
 .seq { color: var(--ob-text-muted); background: var(--ob-block-bg); border-radius: 4px; padding: 0 5px; font-size: 11px; white-space: nowrap; }
 .time { opacity: 0.7; white-space: nowrap; }
+.gap { font-size: 11px; color: var(--ob-text-muted); white-space: nowrap; }
 .seg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; }
 .seg-label { color: var(--ob-text-muted); font-size: 11px; }
 .head-pos { min-width: 120px; }

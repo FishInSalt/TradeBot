@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { NTag, NSpace } from "naive-ui";
 import { useSessionsStore } from "@/stores/sessions";
 import { fmtUtc } from "@/utils/time";
+import { fmtTokensCompact } from "@/utils/format";
 
 const store = useSessionsStore();
 const live = computed(() => store.live);
@@ -21,6 +22,7 @@ const stalled = computed(() => store.pollFailCount >= 3);
       </template>
       <span v-else class="muted">空仓</span>
       <span><span class="label">挂单</span> {{ live.open_orders.length }}</span>
+      <span class="muted">累计 {{ fmtTokensCompact(live.tokens_consumed_total) }} tok</span>
       <n-tag v-if="stalled" type="warning" size="small">⚠ 轮询中断</n-tag>
     </n-space>
   </div>
