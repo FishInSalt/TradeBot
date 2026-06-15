@@ -53,3 +53,31 @@ export function deriveTradeFills(trades: TradeRow[]): DerivedFill[] {
   }
   return out;
 }
+
+export interface EpisodeSummary {
+  episodes: number;             // 已平仓周期数
+  wins: number;
+  losses: number;
+  winRate: number | null;       // 胜 /(胜+负)；胜+负=0 → null
+  profitFactor: number | null;  // Σ盈 / |Σ亏|；无盈利周期 或 无亏损周期 → null
+  best: number | null;          // max(各周期 finalPnl)
+  worst: number | null;         // min(各周期 finalPnl)
+}
+
+/** 从 deriveTradeFills 输出的已平仓行 finalPnl 聚合周期级指标（Tier 1/2 + 表头单一来源）。 */
+export function summarizeEpisodes(fills: DerivedFill[]): EpisodeSummary {
+  const finals = fills.filter((r) => r.finalPnl != null).map((r) => r.finalPnl as number);
+  const wins = finals.filter((v) => v > 0);
+  const losses = finals.filter((v) => v < 0);
+  const grossWin = wins.reduce((a, b) => a + b, 0);
+  const grossLoss = Math.abs(losses.reduce((a, b) => a + b, 0));
+  return {
+    episodes: finals.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate: wins.length + losses.length > 0 ? wins.length / (wins.length + losses.length) : null,
+    profitFactor: grossWin > 0 && grossLoss > 0 ? grossWin / grossLoss : null,
+    best: finals.length ? Math.max(...finals) : null,
+    worst: finals.length ? Math.min(...finals) : null,
+  };
+}

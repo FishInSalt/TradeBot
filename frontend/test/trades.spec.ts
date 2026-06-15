@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveTradeFills, OPEN_LABEL, CLOSE_LABEL } from "@/utils/trades";
+import { deriveTradeFills, summarizeEpisodes, OPEN_LABEL, CLOSE_LABEL } from "@/utils/trades";
 import type { TradeRow } from "@/api/client";
 
 const f = (o: Partial<TradeRow>): TradeRow => ({
@@ -90,5 +90,44 @@ describe("deriveTradeFills", () => {
       f({ pnl: 50, fee: 1 }),                   // clean 平
     ]);
     expect(mixed.map((r) => r.type)).toEqual(["开仓", "平仓"]);
+  });
+});
+
+describe("summarizeEpisodes", () => {
+  it("1 胜 1 负 → 计数/胜率/盈亏比/最佳最差", () => {
+    const fills = deriveTradeFills([
+      f({ pnl: null, fee: 1 }), f({ pnl: 100, fee: 1 }),          // ep0 win: final 98
+      f({ pnl: null, fee: 1 }), f({ pnl: -50, fee: 1 }),         // ep1 loss: final -52
+    ]);
+    const s = summarizeEpisodes(fills);
+    expect(s.episodes).toBe(2);
+    expect(s.wins).toBe(1);
+    expect(s.losses).toBe(1);
+    expect(s.winRate).toBeCloseTo(0.5, 6);
+    expect(s.profitFactor).toBeCloseTo(98 / 52, 4);
+    expect(s.best).toBeCloseTo(98, 6);
+    expect(s.worst).toBeCloseTo(-52, 6);
+  });
+
+  it("全打平（胜+负=0）→ 净胜率 / 盈亏比 null，不抛", () => {
+    const fills = deriveTradeFills([f({ pnl: null, fee: 1 }), f({ pnl: 2, fee: 1 })]);  // final 0
+    const s = summarizeEpisodes(fills);
+    expect(s.episodes).toBe(1);
+    expect(s.winRate).toBeNull();
+    expect(s.profitFactor).toBeNull();
+  });
+
+  it("无已平仓周期（空 / 仅未平仓开仓）→ 全 null/0", () => {
+    expect(summarizeEpisodes([])).toEqual({
+      episodes: 0, wins: 0, losses: 0, winRate: null, profitFactor: null, best: null, worst: null,
+    });
+    const onlyOpen = summarizeEpisodes(deriveTradeFills([f({ pnl: null })]));
+    expect(onlyOpen.episodes).toBe(0);
+    expect(onlyOpen.best).toBeNull();
+  });
+
+  it("有盈无亏 → 盈亏比 null（分母 0，避免 ∞）", () => {
+    const s = summarizeEpisodes(deriveTradeFills([f({ pnl: null, fee: 1 }), f({ pnl: 100, fee: 1 })]));
+    expect(s.profitFactor).toBeNull();
   });
 });
