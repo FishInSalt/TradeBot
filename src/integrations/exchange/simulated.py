@@ -34,6 +34,17 @@ from src.utils.cache import RateLimitHit
 logger = logging.getLogger(__name__)
 
 
+def _ensure_aware_utc(dt: datetime) -> datetime:
+    """Coerce a naive datetime to aware UTC.
+
+    SQLite ignores `DateTime(timezone=True)` — it drops tzinfo on write and
+    reads back naive. `_Position` invariant is aware-UTC timestamps (set by its
+    default_factory), so DB-restored values must be re-stamped or downstream
+    `now(tz) - created_at` subtractions raise TypeError.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 @dataclass
 class _Position:
     """Internal position representation."""
@@ -843,7 +854,8 @@ class SimulatedExchange(BaseExchange):
                 self._positions[pos.symbol] = _Position(
                     side=pos.side, contracts=pos.contracts,
                     entry_price=pos.entry_price, leverage=pos.leverage,
-                    created_at=pos.created_at, updated_at=pos.updated_at,
+                    created_at=_ensure_aware_utc(pos.created_at),
+                    updated_at=_ensure_aware_utc(pos.updated_at),
                 )
                 self._leverage[pos.symbol] = pos.leverage
 

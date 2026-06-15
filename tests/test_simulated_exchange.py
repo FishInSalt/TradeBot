@@ -532,6 +532,55 @@ async def test_persist_and_restore():
     await engine.dispose()
 
 
+async def test_restored_position_created_at_is_tz_aware():
+    """Resume must restore created_at as tz-aware UTC.
+
+    SQLite drops tzinfo on DateTime(timezone=True) and reads back naive, so a
+    restored position whose created_at stayed naive crashes get_position's
+    duration render: `datetime.now(timezone.utc) - p.created_at` raises
+    `can't subtract offset-naive and offset-aware datetimes`.
+    """
+    from datetime import datetime, timezone
+    from src.storage.database import init_db, get_session
+    from src.storage.models import Session
+    from src.integrations.exchange.simulated import SimulatedExchange
+
+    engine = await init_db("sqlite+aiosqlite:///:memory:")
+
+    async with get_session(engine) as sess:
+        sess.add(Session(id="test-tz", name="test", initial_balance=100.0))
+        await sess.commit()
+
+    config = MagicMock()
+    config.fee_rate = 0.0005
+
+    ex1 = SimulatedExchange(config, engine, "test-tz", "BTC/USDT:USDT")
+    await ex1._init_state(initial_balance=100.0)
+    ex1._latest_ticker = Ticker(
+        symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534400000,
+    )
+    ex1._latest_mark_price = 95010.0
+    ex1._leverage["BTC/USDT:USDT"] = 3
+    await ex1.create_order("BTC/USDT:USDT", "buy", "market", 0.001)
+    await ex1._process_tick(Ticker(
+        symbol="BTC/USDT:USDT", last=95000.0, bid=94990.0, ask=95010.0,
+        high=96000.0, low=94000.0, base_volume=1000.0, timestamp=1712534401000,
+    ))
+    await ex1._persist_state()
+
+    ex2 = SimulatedExchange(config, engine, "test-tz", "BTC/USDT:USDT")
+    await ex2._restore_state()
+
+    restored = ex2._positions["BTC/USDT:USDT"]
+    assert restored.created_at.tzinfo is not None
+    assert restored.updated_at.tzinfo is not None
+    # The actual symptom: this subtraction must not raise.
+    _ = datetime.now(timezone.utc) - restored.created_at
+
+    await engine.dispose()
+
+
 async def test_fetch_closed_orders_from_db():
     """Market orders should be queryable via fetch_closed_orders after fill."""
     from src.storage.database import init_db, get_session
