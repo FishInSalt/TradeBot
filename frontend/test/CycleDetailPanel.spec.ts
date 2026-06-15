@@ -170,4 +170,23 @@ describe("CycleDetailPanel", () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });   // fixture 无 volatility_alert
     expect(w.text()).not.toContain("波动");
   });
+
+  it("§③ 多条价格告警逐条成行：方向 glyph ↓/↑ + 各条独立 .snap-item + 值单元格 .alerts", () => {
+    const base = detail();
+    const w = mount(CycleDetailPanel, { props: { detail: { ...base,
+      state_snapshot: { ...base.state_snapshot, active_alerts: [
+        { id: "a1", direction: "below", price: 64400, reasoning: "early warning" },
+        { id: "a2", direction: "below", price: 64636, reasoning: "failed reclaim" },
+        { id: "a3", direction: "above", price: 65600, reasoning: "breakout" },
+      ] } } as any } });
+    // 各告警条独立成行（值单元格 column 容器 + 价格组内逐条）
+    expect(w.find(".alerts").exists()).toBe(true);
+    expect(w.findAll(".alerts .alert-grp .snap-item").length).toBe(3);
+    const txt = w.text();
+    expect(txt).toContain("↓");          // below → ↓ glyph（取代裸 "below" 单词）
+    expect(txt).toContain("↑");          // above → ↑
+    expect(txt).not.toContain("below");  // 不再渲染方向英文单词
+    expect(txt).toContain("64,400");
+    expect(txt).toContain("65,600");
+  });
 });

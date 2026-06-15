@@ -100,10 +100,10 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
         </template>
         <template v-if="(snapshot.active_alerts && snapshot.active_alerts.length) || snapshot.volatility_alert">
           <span class="snap-k">告警</span>
-          <span>
+          <span class="alerts">
             <span v-if="snapshot.active_alerts && snapshot.active_alerts.length" class="alert-grp">
               <span class="muted alert-lbl">价格</span>
-              <span v-for="(a, i) in snapshot.active_alerts" :key="i" class="snap-item">{{ a.direction }} @{{ fmtNum(a.price) }}<span v-if="a.reasoning" class="muted"> · {{ a.reasoning }}</span></span>
+              <span v-for="(a, i) in snapshot.active_alerts" :key="i" class="snap-item"><span class="dir-glyph">{{ a.direction === 'below' ? '↓' : '↑' }}</span> @{{ fmtNum(a.price) }}<span v-if="a.reasoning" class="muted"> · {{ a.reasoning }}</span></span>
             </span>
             <span v-if="snapshot.volatility_alert" class="alert-grp">
               <span class="muted alert-lbl">波动</span>
@@ -174,8 +174,12 @@ h5 { margin: 6px 0 4px; font-size: 12px; opacity: 0.8; }
 .seg .sl { color: var(--ob-text-muted); }
 .seg .sv { font-variant-numeric: tabular-nums; }
 .unit { color: var(--ob-text-muted); }
-.alert-grp { display: inline-flex; gap: 6px; align-items: baseline; margin-right: 14px; }
+/* 告警值单元格：价格组 / 波动组纵向堆叠（组间竖排，波动落价格下方） */
+.alerts { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+/* 组内竖排：label 在上、各告警条逐条独占一行（杠杆在容器方向，非 .snap-item——后者与挂单共用） */
+.alert-grp { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
 .alert-lbl { font-size: 11px; }
+.dir-glyph { display: inline-block; width: 1em; text-align: center; color: var(--ob-text-muted); }
 .muted { color: var(--ob-text-muted); }
 .dir.long, .pos { color: var(--ob-pos); font-weight: 600; }
 .dir.short, .neg { color: var(--ob-neg); font-weight: 600; }
