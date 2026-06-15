@@ -185,4 +185,17 @@ describe("ReactTimeline", () => {
     expect(heads[0].classes()).toContain("clickable");                  // 正常卡可点
     expect(heads[heads.length - 1].classes()).not.toContain("clickable"); // orphan 卡不可点
   });
+
+  it("工具卡带展开/折叠 caret：折叠 ▸、展开 ▾；orphan 卡无 caret", async () => {
+    const p = baseProps();
+    p.steps[1].tools[0].tool_call_id = "call_missing";   // 最后一张 open_position 变 orphan
+    const w = mount(ReactTimeline, { props: p as any });
+    const cards = w.findAll(".tool-card");
+    const caret0 = cards[0].find(".tool-caret");
+    expect(caret0.exists()).toBe(true);
+    expect(caret0.text()).toBe("▸");                          // 折叠态
+    await cards[0].find(".tool-head").trigger("click");
+    expect(cards[0].find(".tool-caret").text()).toBe("▾");    // 展开态
+    expect(cards[cards.length - 1].find(".tool-caret").exists()).toBe(false);  // orphan 无 caret
+  });
 });

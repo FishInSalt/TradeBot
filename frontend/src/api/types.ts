@@ -398,6 +398,8 @@ export interface components {
             cycle_count: number;
             /** Total Return Pct */
             total_return_pct: number;
+            /** Net Return Pct */
+            net_return_pct: number;
         };
         /** ToolCallRow */
         ToolCallRow: {

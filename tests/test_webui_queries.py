@@ -281,6 +281,27 @@ async def test_list_sessions_summary(engine):
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_exposes_net_return_pct(engine):
+    """SessionSummary 暴露 net_return_pct（净收益率，已扣手续费）——与毛 total_return_pct 区分。
+    左侧会话列表用净口径横向对比，避免毛收益率高估（手续费占比可观）。"""
+    from src.storage.models import TradeAction
+    await _seed_session(engine)   # initial_balance=10000.0
+    async with get_session(engine) as s:
+        s.add(TradeAction(session_id="s1", action="order_filled", symbol="BTC/USDT:USDT",
+                          side="long", price=65000.0, amount=0.1, fee=5.0, pnl=None,
+                          entry_price=None, trigger_reason="market"))
+        s.add(TradeAction(session_id="s1", action="order_filled", symbol="BTC/USDT:USDT",
+                          side="long", price=66000.0, amount=0.1, fee=5.0, pnl=100.0,
+                          entry_price=65000.0, trigger_reason="take_profit"))
+        await s.commit()
+    from src.webui.queries import list_sessions
+    rows = await list_sessions(engine)
+    # gross =(66000−65000)*0.1*1*cs(1.0) = +100 → 1.0%；net = 100 − 5 − 5 = 90 → 0.9%
+    assert round(rows[0].total_return_pct, 4) == 1.0
+    assert round(rows[0].net_return_pct, 4) == 0.9
+
+
+@pytest.mark.asyncio
 async def test_get_session_detail_exposes_system_prompt(engine):
     """SessionDetail 暴露 Session.system_prompt（会话固定 persona）。"""
     async with get_session(engine) as s:

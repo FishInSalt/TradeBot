@@ -31,6 +31,7 @@ function statusType(s: string) {
 // 回退扁平视图：仅 react_steps 缺失（legacy/forensic）时用
 const toolsOpen = ref(false);
 const snapshotOpen = ref(true);
+const decisionOpen = ref(true);   // 决策默认展开（最关键产出），可折叠便于多 cycle 横向扫
 // state_snapshot 可能是 dict|list|str（放宽形态）；仅 dict 渲染结构化详情，内部键剔除
 const snapshot = computed(() => {
   const s = props.detail.state_snapshot;
@@ -69,7 +70,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
     <!-- 2. 唤醒时状态（默认展开，置顶；state_snapshot 是唤醒瞬间态） -->
     <section v-if="snapshot" class="ob-card">
       <h4 class="snapshot-toggle clickable" @click="snapshotOpen = !snapshotOpen">
-        唤醒时状态 {{ snapshotOpen ? "▾" : "▸" }}
+        唤醒时状态 <span class="toggle-caret">{{ snapshotOpen ? "▾" : "▸" }}</span>
       </h4>
       <div v-if="snapshotOpen" class="snapshot">
         <template v-if="snapshot.position">
@@ -116,7 +117,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
 
     <!-- 3. 唤醒上下文（原文版，默认折叠 A3；null 不渲染） -->
     <section v-if="detail.user_prompt_snapshot" class="ob-card">
-      <h4 class="context-toggle clickable" @click="contextOpen = !contextOpen">唤醒上下文 {{ contextOpen ? "▾" : "▸" }}</h4>
+      <h4 class="context-toggle clickable" @click="contextOpen = !contextOpen">唤醒上下文 <span class="toggle-caret">{{ contextOpen ? "▾" : "▸" }}</span></h4>
       <pre v-if="contextOpen" class="context">{{ detail.user_prompt_snapshot }}</pre>
     </section>
 
@@ -132,7 +133,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
       <div v-else class="flat-fallback">
         <p class="seam">该 cycle 无交错时间线（历史 / 取证记录）。下方为扁平视图。</p>
         <h5 class="tools-toggle clickable" @click="toolsOpen = !toolsOpen">
-          工具调用（{{ detail.tool_calls.length }} 个 · 最慢 {{ fmtDuration(slowest) }}）{{ toolsOpen ? "▾" : "▸" }}
+          工具调用（{{ detail.tool_calls.length }} 个 · 最慢 {{ fmtDuration(slowest) }}）<span class="toggle-caret">{{ toolsOpen ? "▾" : "▸" }}</span>
         </h5>
         <n-data-table v-if="toolsOpen" :columns="toolColumns" :data="detail.tool_calls" size="small" :bordered="false" />
         <!-- 注入事件：legacy cycle 可能 react_steps=null 而 injected_events 非空（注入 iter 晚于无骨架行），
@@ -148,8 +149,11 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
       </div>
     </section>
 
-    <!-- 5. 决策 -->
-    <section class="ob-card"><h4>决策</h4><pre class="decision">{{ detail.decision || "—" }}</pre></section>
+    <!-- 5. 决策（默认展开，可折叠） -->
+    <section class="ob-card">
+      <h4 class="decision-toggle clickable" @click="decisionOpen = !decisionOpen">决策 <span class="toggle-caret">{{ decisionOpen ? "▾" : "▸" }}</span></h4>
+      <pre v-if="decisionOpen" class="decision">{{ detail.decision || "—" }}</pre>
+    </section>
   </div>
 </template>
 
@@ -162,6 +166,11 @@ section { margin-bottom: 12px; }
 h4 { margin: 0 0 4px; font-size: 13px; opacity: 0.85; }
 h5 { margin: 6px 0 4px; font-size: 12px; opacity: 0.8; }
 .clickable { cursor: pointer; user-select: none; }
+/* 折叠开关 caret：调大 14px + muted，与 ReactTimeline 思考/工具卡 caret 同口径。
+   opacity:1 破除 h4/h5 的 .85/.8 dim，否则 caret 经 opacity 合成被压淡、与其它 caret 不一致
+   （交互头比静态标题更醒目，合理）。 */
+.snapshot-toggle, .context-toggle, .tools-toggle, .decision-toggle { opacity: 1; }
+.toggle-caret { color: var(--ob-text-muted); font-size: 14px; margin-left: 2px; }
 .context { white-space: pre-wrap; word-break: break-word; background: var(--ob-block-bg); padding: 8px; border-radius: 4px; font-size: 12px; line-height: 1.5; margin: 0; max-height: 240px; overflow-y: auto; }
 .reasoning { max-height: 360px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; background: var(--ob-block-bg); padding: 8px; border-radius: 4px; font-size: 12px; line-height: 1.5; margin: 8px 0 0; }
 .decision { white-space: pre-wrap; word-break: break-word; background: var(--ob-accent-soft); padding: 8px; border-radius: 4px; font-size: 12px; line-height: 1.5; margin: 0; }

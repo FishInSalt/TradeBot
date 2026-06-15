@@ -28,8 +28,8 @@ function open(id: string) {
         </div>
         <div class="bottom">
           <span class="symbol">{{ s.symbol }}</span>
-          <span class="ret" :class="{ neg: s.total_return_pct < 0 }">
-            {{ s.total_return_pct >= 0 ? "+" : "" }}{{ s.total_return_pct.toFixed(2) }}%
+          <span class="ret" :class="{ neg: s.net_return_pct < 0 }">
+            <span class="ret-lbl">净</span>{{ s.net_return_pct >= 0 ? "+" : "" }}{{ s.net_return_pct.toFixed(2) }}%
           </span>
         </div>
       </div>
@@ -40,12 +40,15 @@ function open(id: string) {
 
 <style scoped>
 .session-row { cursor: pointer; }
-.session-row.active { background: var(--ob-accent-soft); }
+/* 选中行高亮用 --ob-row-active(#f6faff)而非 --ob-accent-soft(#eff6ff)：后者使行内 muted
+   文字(.symbol / .ret-lbl)对比度跌到 4.44<AA；前者≈4.61 达标（PR#81/#83 footgun，勿回退）。 */
+.session-row.active { background: var(--ob-row-active); }
 .row { display: flex; flex-direction: column; gap: 2px; width: 100%; }
 .top { display: flex; align-items: center; gap: 6px; font-weight: 600; }
 .bottom { display: flex; justify-content: space-between; font-size: 12px; }
 .symbol { color: var(--ob-text-muted); }
 .ret { color: var(--ob-pos); }
 .ret.neg { color: var(--ob-neg); }
+.ret-lbl { color: var(--ob-text-muted); font-size: 10px; margin-right: 3px; }
 .empty { padding: 16px; color: var(--ob-text-muted); font-size: 13px; }
 </style>

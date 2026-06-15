@@ -16,6 +16,8 @@
   --ob-accent-soft: #eff6ff;
   --ob-row-active: #f6faff;  /* 展开行高亮底：比 accent-soft 更亮，使其上 muted(#6b7280)/neg 仍 ≥4.5（实测 ≈4.61；accent-soft #eff6ff=4.44 不达标，勿回退） */
   --ob-thinking-border: #93c5fd;
+  --ob-thinking-bg: #eaf1fb;   /* 思考块底：清晰浅蓝，与灰工具卡区分、呼应 thinking-border 蓝主题 */
+  --ob-thinking-text: #586070; /* 思考块 muted 文字：比 --ob-text-muted 深一档，使其在 thinking-bg 上 ≥AA（实测 ≈5.56；muted #6b7280 在该蓝底仅 4.25 不达标） */
   --ob-pos: #15803d;       /* 正向：白底 ≈5:1（文本 AA）/ ≥3:1（图形线） */
   --ob-neg: #dc2626;       /* 负向：白底 ≈4.8:1 */
   --ob-warn: #b45309;      /* 告警/未解析文本：白底 ≈5:1 */

@@ -434,5 +434,6 @@ async def list_sessions(engine: AsyncEngine) -> list[schemas.SessionSummary]:
             id=sess.id, name=sess.name, symbol=sess.symbol, status=sess.status,
             created_at=sess.created_at, last_active_at=sess.last_active_at,
             cycle_count=counts.get(sess.id, 0), total_return_pct=m.total_return_pct,
+            net_return_pct=m.net_return_pct,
         ))
     return out

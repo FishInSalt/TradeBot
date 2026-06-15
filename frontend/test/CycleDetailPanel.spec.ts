@@ -38,12 +38,34 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).toContain("(1) Stance: hold");
   });
 
+  it("决策块默认展开、可折叠（caret 切换 + 点击收起内容）", async () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
+    expect(w.find(".decision-toggle .toggle-caret").text()).toBe("▾");   // 默认展开
+    expect(w.find("pre.decision").exists()).toBe(true);
+    expect(w.text()).toContain("(1) Stance: hold");
+    await w.find(".decision-toggle").trigger("click");
+    expect(w.find(".decision-toggle .toggle-caret").text()).toBe("▸");   // 折叠态
+    expect(w.find("pre.decision").exists()).toBe(false);                  // 内容收起
+  });
+
   it("§A3 唤醒上下文默认折叠，点击展开原文", async () => {
     const w = mount(CycleDetailPanel, { props: { detail: detail() as any } });
     expect(w.text()).toContain("唤醒上下文");                 // 标题在
     expect(w.text()).not.toContain("Woke by scheduled tick"); // 默认折叠：原文不渲染
     await w.find(".context-toggle").trigger("click");
     expect(w.text()).toContain("Woke by scheduled tick");      // 展开后可见
+  });
+
+  it("三个同级折叠开关用裸 caret（▾/▸）指示展开态，无冗余「展开/折叠」文字", async () => {
+    const w = mount(CycleDetailPanel, { props: { detail: detail({ react_steps: null }) as any } });
+    const caret = (sel: string) => w.find(`${sel} .toggle-caret`);
+    expect(caret(".snapshot-toggle").text()).toBe("▾");   // 唤醒时状态默认展开
+    expect(caret(".context-toggle").text()).toBe("▸");    // 唤醒上下文默认折叠
+    expect(caret(".tools-toggle").text()).toBe("▸");      // 工具调用默认折叠
+    await w.find(".tools-toggle").trigger("click");
+    expect(caret(".tools-toggle").text()).toBe("▾");      // 展开后切换
+    expect(w.text()).not.toContain("展开");                // 去掉冗余文字提示
+    expect(w.text()).not.toContain("折叠");
   });
 
   it("user_prompt_snapshot 为 null（legacy）时不渲染 Context 块", () => {

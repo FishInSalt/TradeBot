@@ -25,7 +25,8 @@ class SessionSummary(BaseModel):
     created_at: UtcDatetime
     last_active_at: UtcDatetime | None
     cycle_count: int
-    total_return_pct: float
+    total_return_pct: float    # 毛收益率（未扣手续费）
+    net_return_pct: float      # 净收益率（已扣手续费）——列表横向对比主口径
 
 
 class SessionDetail(BaseModel):
