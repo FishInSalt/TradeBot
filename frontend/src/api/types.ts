@@ -204,6 +204,8 @@ export interface components {
             wall_time_ms: number | null;
             /** Execution Status */
             execution_status: string;
+            /** Gap Since Prev Ms */
+            gap_since_prev_ms: number | null;
             position: components["schemas"]["PositionBrief"] | null;
             /** Key Events */
             key_events: components["schemas"]["KeyEvent"][];
@@ -246,6 +248,8 @@ export interface components {
             open_orders: components["schemas"]["OrderInfo"][];
             /** Active Alerts */
             active_alerts: components["schemas"]["AlertInfo"][];
+            /** Tokens Consumed Total */
+            tokens_consumed_total: number;
         };
         /** OrderInfo */
         OrderInfo: {

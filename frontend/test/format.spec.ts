@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmtTokens, fmtDuration, fmtArgs, clipArgs, fmtNum, fmtSigned, HEAD_ARGS_MAX } from "@/utils/format";
+import { fmtTokens, fmtTokensCompact, fmtGap, fmtDuration, fmtArgs, clipArgs, fmtNum, fmtSigned, HEAD_ARGS_MAX } from "@/utils/format";
 
 describe("fmtTokens", () => {
   it("千分位", () => {
@@ -9,6 +9,39 @@ describe("fmtTokens", () => {
   it("null/undefined → 占位", () => {
     expect(fmtTokens(null)).toBe("—");
     expect(fmtTokens(undefined)).toBe("—");
+  });
+});
+
+describe("fmtTokensCompact", () => {
+  it("千为单位、千分位、K 后缀、无小数", () => {
+    expect(fmtTokensCompact(75795)).toBe("76K");
+    expect(fmtTokensCompact(6778612)).toBe("6,779K");
+    expect(fmtTokensCompact(31500513)).toBe("31,501K");
+    expect(fmtTokensCompact(0)).toBe("0K");
+  });
+  it("null/undefined → 占位", () => {
+    expect(fmtTokensCompact(null)).toBe("—");
+    expect(fmtTokensCompact(undefined)).toBe("—");
+  });
+});
+
+describe("fmtGap", () => {
+  it("<60s → <1m（含 clamp 0）", () => {
+    expect(fmtGap(0)).toBe("<1m");
+    expect(fmtGap(59999)).toBe("<1m");
+  });
+  it("分钟段", () => {
+    expect(fmtGap(60000)).toBe("1m");
+    expect(fmtGap(600000)).toBe("10m");
+    expect(fmtGap(3599000)).toBe("59m");
+  });
+  it("小时段（整点省略分）", () => {
+    expect(fmtGap(3600000)).toBe("1h");
+    expect(fmtGap(3720000)).toBe("1h2m");
+  });
+  it("null/undefined → 占位", () => {
+    expect(fmtGap(null)).toBe("—");
+    expect(fmtGap(undefined)).toBe("—");
   });
 });
 

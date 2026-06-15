@@ -5,6 +5,22 @@ export function fmtTokens(n: number | null | undefined): string {
   return n.toLocaleString("en-US");
 }
 
+/** 会话累计 token 紧凑展示：千为单位、千分位、`K` 后缀、无小数（如 `6,779K`）。null → —。 */
+export function fmtTokensCompact(n: number | null | undefined): string {
+  if (n == null) return "—";
+  return Math.round(n / 1000).toLocaleString("en-US") + "K";
+}
+
+/** 空闲间隔展示：<1m / Nm / NhMm（整点省略分）。null → —（前端通常 v-if 不渲染，仍给占位）。 */
+export function fmtGap(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+  if (ms < 60000) return "<1m";
+  if (ms < 3600000) return `${Math.floor(ms / 60000)}m`;
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return m === 0 ? `${h}h` : `${h}h${m}m`;
+}
+
 export function fmtDuration(ms: number | null | undefined): string {
   if (ms == null) return "—";
   if (ms === 0) return "<1ms";
