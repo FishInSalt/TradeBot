@@ -41,7 +41,7 @@ describe("LiveStatusCard", () => {
     const { wrapper, store } = mountCard();
     store.live = { status: "active", last_active_at: null, position: null, open_orders: [], active_alerts: [], tokens_consumed_total: 6778612 } as any;
     await wrapper.vm.$nextTick();
-    expect(wrapper.text()).toContain("累计 6,779K");
+    expect(wrapper.text()).toContain("累计消耗tok 6,779K");
   });
 
   it("§全局 last_active_at 按 UTC 展示", async () => {

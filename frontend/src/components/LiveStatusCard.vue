@@ -22,7 +22,7 @@ const stalled = computed(() => store.pollFailCount >= 3);
       </template>
       <span v-else class="muted">空仓</span>
       <span><span class="label">挂单</span> {{ live.open_orders.length }}</span>
-      <span class="muted">累计 {{ fmtTokensCompact(live.tokens_consumed_total) }} tok</span>
+      <span class="muted">累计消耗tok {{ fmtTokensCompact(live.tokens_consumed_total) }}</span>
       <n-tag v-if="stalled" type="warning" size="small">⚠ 轮询中断</n-tag>
     </n-space>
   </div>

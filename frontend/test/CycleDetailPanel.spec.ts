@@ -171,7 +171,7 @@ describe("CycleDetailPanel", () => {
     expect(w.text()).not.toContain("波动");
   });
 
-  it("§③ 多条价格告警逐条成行：方向 glyph ↓/↑ + 各条独立 .snap-item + 值单元格 .alerts", () => {
+  it("§③ 多条价格告警逐条成行：方向用英文单词 below/above + 各条独立 .snap-item + 值单元格 .alerts", () => {
     const base = detail();
     const w = mount(CycleDetailPanel, { props: { detail: { ...base,
       state_snapshot: { ...base.state_snapshot, active_alerts: [
@@ -183,10 +183,7 @@ describe("CycleDetailPanel", () => {
     expect(w.find(".alerts").exists()).toBe(true);
     expect(w.findAll(".alerts .alert-grp .snap-item").length).toBe(3);
     const txt = w.text();
-    expect(txt).toContain("↓");          // below → ↓ glyph（取代裸 "below" 单词）
-    expect(txt).toContain("↑");          // above → ↑
-    expect(txt).not.toContain("below");  // 不再渲染方向英文单词
-    expect(txt).toContain("64,400");
-    expect(txt).toContain("65,600");
+    expect(txt).toContain("below @64,400");   // 方向用英文单词（不用上下符号）
+    expect(txt).toContain("above @65,600");
   });
 });
