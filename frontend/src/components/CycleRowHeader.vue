@@ -5,7 +5,7 @@ import { NTag } from "naive-ui";
 import { fmtUtc, fmtUtcTime } from "@/utils/time";
 import { fmtTokens, fmtDuration, fmtGap } from "@/utils/format";
 
-const props = defineProps<{ cycle: CycleRow }>();
+const props = defineProps<{ cycle: CycleRow; expanded?: boolean }>();
 
 const headText = computed(() => {
   const p = props.cycle.position;
@@ -36,7 +36,7 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
 </script>
 
 <template>
-  <div class="cycle-head" :class="{ keyrow: cycle.key_events.length > 0 }">
+  <div class="cycle-head" :class="{ keyrow: cycle.key_events.length > 0, expanded }">
     <span class="seq">#{{ cycle.seq }}</span>
     <span class="time">
       <template v-if="startAt">{{ fmtUtc(startAt) }} → {{ fmtUtcTime(cycle.created_at) }}</template>
@@ -64,6 +64,8 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
 <style scoped>
 .cycle-head { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 13px; padding-left: 6px; border-left: 3px solid transparent; }
 .cycle-head.keyrow { border-left-color: var(--ob-accent); }   /* 关键事件锚点高亮 */
+/* §1②：所有展开行整体高亮——accent 左边 + 极淡染，"在看哪条"一目了然（多展开下可多条同时高亮） */
+.cycle-head.expanded { border-left-color: var(--ob-accent); background: var(--ob-row-active); }
 .seq { color: var(--ob-text-muted); background: var(--ob-block-bg); border-radius: 4px; padding: 0 5px; font-size: 11px; white-space: nowrap; }
 .time { opacity: 0.7; white-space: nowrap; }
 .gap { font-size: 11px; color: var(--ob-text-muted); white-space: nowrap; }

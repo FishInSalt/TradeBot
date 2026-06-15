@@ -1,5 +1,10 @@
 /* 观察台浅色设计令牌（单一来源，spec §3.2）。对比度均按白卡底 #ffffff 计——
-   彩字/正文经 §4 卡片化落白卡，故达标口径成立（见 spec §3.2 对比度基准注）。 */
+   彩字/正文经 §4 卡片化落白卡，故达标口径成立（见 spec §3.2 对比度基准注）。
+
+   表面层级 + 分隔规则（boundary-polish spec §1，单一来源）：
+   三级表面 页面 --ob-page-bg(灰) > 卡 --ob-card-bg(白) > 内嵌块 --ob-block-bg(浅灰)。
+   分隔规则：跨层级靠底色差；同层级 / 同色相邻元素必须有 hairline border 兜底，不靠阴影
+   （白叠白时阴影几乎不可见）。故 .ob-card 一律带 1px --ob-border。 */
 :root {
   --ob-page-bg: #eef0f3;
   --ob-card-bg: #ffffff;
@@ -9,6 +14,7 @@
   --ob-text-muted: #6b7280;
   --ob-accent: #2563eb;
   --ob-accent-soft: #eff6ff;
+  --ob-row-active: #f6faff;  /* 展开行高亮底：比 accent-soft 更亮，使其上 muted(#6b7280)/neg 仍 ≥4.5（#eff6ff=4.44 不达标） */
   --ob-thinking-border: #93c5fd;
   --ob-pos: #15803d;       /* 正向：白底 ≈5:1（文本 AA）/ ≥3:1（图形线） */
   --ob-neg: #dc2626;       /* 负向：白底 ≈4.8:1 */
@@ -22,6 +28,7 @@
    确定性胜出（与注入顺序无关）；.ob-card 实际只贡献 bg/radius/shadow/margin。 */
 .ob-card {
   background: var(--ob-card-bg);
+  border: 1px solid var(--ob-border);   /* §1 同层级 hairline 兜底：白叠白也有清晰边 */
   border-radius: 8px;
   padding: 10px 12px;
   box-shadow: var(--ob-card-shadow);

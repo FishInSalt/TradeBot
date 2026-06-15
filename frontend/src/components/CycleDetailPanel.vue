@@ -154,7 +154,9 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
 </template>
 
 <style scoped>
-.cycle-detail { padding: 8px 4px; }
+/* §1①：展开详情做成「内嵌、属于该行」的凹陷区——灰底 + 左 accent 边；
+   内层 section.ob-card（白 + 全局 hairline）在此灰底上获得清晰边界，破白叠白。 */
+.cycle-detail { padding: 10px 12px; background: var(--ob-block-bg); border-left: 3px solid var(--ob-accent); border-radius: 0 6px 6px 0; }
 .chips { margin-bottom: 10px; }
 section { margin-bottom: 12px; }
 h4 { margin: 0 0 4px; font-size: 13px; opacity: 0.85; }
