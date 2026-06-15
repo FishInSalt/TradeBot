@@ -504,3 +504,44 @@ async def test_injected_events_non_list_passthrough(engine):
     from src.webui.queries import get_cycle_detail
     d = await get_cycle_detail(engine, pk)
     assert d.injected_events is None
+
+
+@pytest.mark.asyncio
+async def test_injection_age_just_triggered_within_cycle_is_just_now(engine):
+    """刚触发事件：event_ts 微落 injection_moment 估算之"未来"但仍在 cycle 窗口内
+    （≤ created_at）→ 因果上必先于其触发的注入、是估算噪声 → "just now"（非 None）。
+    复现 sim#21 实测：price_level_alert event_ts 比 (created_at−wall)+offset 晚 ~0.2s。"""
+    await _seed_session(engine)
+    created = datetime(2026, 6, 12, 10, 5, 0, tzinfo=UTC)       # cycle 结束
+    wall = 60_000                                              # 开始 = 10:04:00
+    base_start = created - timedelta(milliseconds=wall)
+    # 注入于开始后 30s（injection_moment 估算=10:04:30）；事件戳 = 估算+0.3s（落"未来"但 ≤ 结束）
+    event_ts_ms = _ms(base_start + timedelta(seconds=30, milliseconds=300))
+    injected = [{
+        "event": {"type": "price_level_alert", "direction": "above", "target_price": 65600.0,
+                  "current_price": 65694.2, "timestamp": event_ts_ms},
+        "after_tool": "add_price_level_alert", "after_tool_call_id": "call_9", "offset_ms": 30_000,
+    }]
+    pk = await _add_cycle(engine, cycle_id="agenow", created_at=created, wall=wall,
+                          injected_events=injected)
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert d.injected_events[0]["triggered_ago"] == "just now"   # 修前是 None（无 age 片）
+
+
+@pytest.mark.asyncio
+async def test_injection_age_event_after_cycle_end_stays_none(engine):
+    """event_ts 真晚于 cycle 结束（created_at）→ 异常/损坏戳，保留 None（仅显 UTC），不误标 just now。"""
+    await _seed_session(engine)
+    created = datetime(2026, 6, 12, 10, 5, 0, tzinfo=UTC)
+    after_end_ms = _ms(created + timedelta(seconds=10))         # 晚于 cycle 结束
+    injected = [{
+        "event": {"type": "price_level_alert", "direction": "above", "target_price": 1.0,
+                  "current_price": 2.0, "timestamp": after_end_ms},
+        "after_tool": "t", "after_tool_call_id": None, "offset_ms": 0,
+    }]
+    pk = await _add_cycle(engine, cycle_id="ageanom", created_at=created, wall=60_000,
+                          injected_events=injected)
+    from src.webui.queries import get_cycle_detail
+    d = await get_cycle_detail(engine, pk)
+    assert d.injected_events[0]["triggered_ago"] is None

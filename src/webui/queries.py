@@ -133,16 +133,26 @@ def _injection_kind_label(event) -> str:
     return "事件"
 
 
-def _injection_age(base_aware: datetime, rec: dict) -> str | None:
+def _injection_age(base_aware: datetime, end_aware: datetime, rec: dict) -> str | None:
     """注入事件 age（英文 ladder，复用 event_render._format_event_age）。
-    base_aware = aware UTC 的 cycle 开始时刻；injection_moment = base + offset_ms。
-    event None / 缺 timestamp → None；未来时点（skew）→ None（_format_event_age 既有语义）。"""
+    base_aware = aware UTC 的 cycle 开始时刻；injection_moment = base + offset_ms；
+    end_aware = aware UTC 的 cycle 结束时刻（created_at）。
+    event None / 缺 timestamp → None。
+
+    刚触发事件修正：injection_moment=(created_at−wall)+offset 是估算，事件因果上必先于
+    其触发的注入，但估算噪声可让 event_ts 微落"未来"（实测 price_level_alert ~0.2s）→
+    _format_event_age 的 `then>now` 会吞成 None（右上无 age 片）。若 event_ts 仍落在
+    cycle 窗口内（≤ 结束），视为估算噪声 → "just now"；仅真晚于 cycle 结束（异常/损坏戳）
+    才保留 None（仅显 UTC）。原则性边界（cycle 窗口），非魔数 tolerance。"""
     event = rec.get("event")
     if not isinstance(event, dict) or event.get("timestamp") is None:
         return None
     injection_moment = base_aware + timedelta(milliseconds=rec.get("offset_ms") or 0)
     event_ts = datetime.fromtimestamp(event["timestamp"] / 1000, tz=timezone.utc)   # aware
-    return _format_event_age(injection_moment, event_ts)
+    age = _format_event_age(injection_moment, event_ts)
+    if age is None and event_ts <= end_aware:
+        return "just now"
+    return age
 
 
 def _enrich_injected_events(raw, created_at, wall_time_ms):
@@ -157,9 +167,8 @@ def _enrich_injected_events(raw, created_at, wall_time_ms):
     cycle 触发。补 tz 与 _ensure_utc 同模式。created_at 是 cycle 结束时刻；开始 ≈ created_at − wall_time_ms。"""
     if not isinstance(raw, list):
         return raw
-    base = created_at if wall_time_ms is None else created_at - timedelta(milliseconds=wall_time_ms)
-    if base.tzinfo is None:
-        base = base.replace(tzinfo=timezone.utc)
+    end_aware = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+    base = end_aware if wall_time_ms is None else end_aware - timedelta(milliseconds=wall_time_ms)
     out = []
     for rec in raw:
         if not isinstance(rec, dict) or "event" not in rec:
@@ -167,7 +176,7 @@ def _enrich_injected_events(raw, created_at, wall_time_ms):
             continue
         try:
             enriched = dict(rec)
-            enriched["triggered_ago"] = _injection_age(base, rec)
+            enriched["triggered_ago"] = _injection_age(base, end_aware, rec)
             enriched["kind_label"] = _injection_kind_label(rec.get("event"))
             out.append(enriched)
         except Exception:
