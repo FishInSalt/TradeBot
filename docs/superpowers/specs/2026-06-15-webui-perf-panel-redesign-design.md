@@ -17,12 +17,13 @@
 **前端为主 + 两处后端字段暴露,无迁移、不动 `MetricsService`。** 展示值多数从现有 `Performance` API 字段派生(见「数据来源与派生」);两处后端改动都只是把 DB 现有数据经 API 暴露:
 
 - `TradeRow` 增 `trigger_reason`(`trade_actions.trigger_reason` 现有列)→ 支持平仓/开仓触发细分。
-- `Performance` 增 `open_position: OpenPositionBrief | None`(取自最新 cycle 的 `state_snapshot.position`)→ 支持未平仓时的未实现收益展示。
+- `Performance` 增 `open_position: OpenPositionBrief | None` → 支持未平仓时的未实现收益展示。**数据源 = `SimPosition`(权威当前态),非 `state_snapshot.position`(本轮开始态、会与权威矛盾)**;详见下「open_position 数据源」。
+- `Performance` 增 `total_pnl: float`(`MetricsService.total_pnl` 现有,毛额)→ 毛PnL 直取,免前端反推 `total_return_pct/100*initial`。
 
 涉及文件:
 
-- `src/webui/schemas.py` — `TradeRow` 增 `trigger_reason: str | None`;`Performance` 增 `open_position`(类型见下)。新增 `OpenPositionBrief`(side/contracts/entry_price/unrealized_pnl/pnl_pct)与既有 `PositionBrief`(schemas.py:45,side/contracts/entry_price)字段重叠但语义不同(后者=feed-head 开始态、无未实现;前者=当前态+未实现);复用扩展 vs 平行模型留实施判断
-- `src/webui/queries.py` — `get_performance` 映 `t.trigger_reason`;从最新 cycle `state_snapshot.position` 取 `side/contracts/entry_price/unrealized_pnl/pnl_pct_of_notional` 构造 `open_position`(无持仓 → None)
+- `src/webui/schemas.py` — `TradeRow` 增 `trigger_reason: str | None`;`Performance` 增 `open_position`(类型见下)+ `total_pnl: float`。新增 `OpenPositionBrief`(side/contracts/entry_price/unrealized_pnl/pnl_pct_of_notional)与既有 `PositionBrief`(schemas.py:45,side/contracts/entry_price)字段重叠但语义不同(后者=feed-head 开始态、无未实现;前者=当前态+未实现);平行模型(不复用 PositionBrief,因后者无未实现字段且语义为开始态)
+- `src/webui/queries.py` — `get_performance` 映 `t.trigger_reason` + `m.total_pnl`;`open_position` 以已查的 `pos`(`SimPosition`,queries.py:345)为权威构造 side/contracts/entry_price(平/空 → None),unrealized_pnl/pnl_pct_of_notional 仅当最新 cycle `state_snapshot.position` 与 `pos` **同向**时借用、否则 None
 - `frontend/src/components/PerformanceBar.vue` — 重构为可折叠底部抽屉 + 指标分层 + 当前持仓条 + 布局
 - `frontend/src/components/TradesTable.vue` — 重写为 A+ 交易历程表
 - `frontend/src/utils/trades.ts` — **新增**:持仓周期(episode)派生 + 类型标签 + 周期级聚合(计数/胜负/盈亏比/最佳最差)纯函数
@@ -46,7 +47,7 @@
 |---|---|
 | 净PnL 绝对值 | `net_pnl`(= Σ 各周期最终收益,见下) |
 | 净PnL % | `net_pnl / initial_balance * 100` |
-| 毛PnL 绝对值 | `total_return_pct / 100 * initial_balance` |
+| 毛PnL 绝对值 | `total_pnl`(新暴露,毛额直取;免反推) |
 | 毛PnL % | `total_return_pct` |
 | 手续费(已实现) | `毛PnL − 净PnL`(按定义恒等于已实现手续费,保证 `毛 − 费 = 净` 精确) |
 | 净胜率 | episode 胜数 /(胜数 + 负数) |
@@ -58,10 +59,10 @@
 | 净值曲线 | `equity_curve`（不变,盯市含未实现） |
 | 交易历程表 | `trades`(按时序的完整 fill 列表)经 episode 派生 |
 | 类型（开/加/平 + 触发细分） | `trade.pnl`(空=开仓型 / 非空=平仓型)+ 周期内是否已有同向开仓(开 vs 加)+ `trade.trigger_reason`(market/limit/stop/take_profit/liquidation 细分) |
-| 未实现收益(毛) | `open_position.unrealized_pnl`(盯市 mark-vs-entry,未扣平仓费;仅未平仓时非空) |
-| 未实现 % | `open_position.pnl_pct_of_notional` |
+| 未实现收益(毛) | `open_position.unrealized_pnl`(盯市 mark-vs-entry,未扣平仓费;snapshot 与权威持仓同向时借用,否则 None — 不展示「未实现」行) |
+| 未实现 % | `open_position.pnl_pct_of_notional`(同上,同向才有) |
 | 未平仓入场费 | `total_fees − 手续费(已实现)`(= 未平仓 open lot 的已付入场费;平尾时为 0) |
-| 当前持仓 方向/数量/入场价 | `open_position.{side, contracts, entry_price}` |
+| 当前持仓 方向/数量/入场价 | `open_position.{side, contracts, entry_price}` ← `SimPosition`(权威当前态,与 LiveStatusCard 同源,杜绝同屏矛盾) |
 
 **口径一致性(单一来源,非-legacy 会话):** per-trade 量(持仓周期数 / 胜负 / 净胜率 / 盈亏比 / 最佳最差)全部出自同一 episode 派生,故 Tier 2 计数与表头「N 笔」、胜率分母完全一致。`net_pnl`(API)= Σ 各周期最终收益(两者都 = Σ毛利 − Σ已实现手续费,已实证非-legacy sim#19 = −95.14)。**与 `MetricsService` 的 FIFO 计数差异:** `total_trades`/`net_win_rate`/`net_profit_factor`/`net_winning_trades`/`net_losing_trades`(schema 现有,本面板不再消费)按 FIFO lot 配对,加仓时一平拆多配,会比 episode 多;仅 2 个 clean 加仓会话(sim#19 / sim#20)受影响(如 sim#19:FIFO 8 笔 1/8 vs episode 7 周期 1/7;sim#1 的"加仓"混在 legacy null-amount 数据中,见边界),且这些 FIFO 数在人看的 WebUI 别处不展示(会话列表只显 `total_return_pct`,与粒度无关),无跨面矛盾。选 episode 因其 = 用户心智的"一笔" + 与表一致。
 
@@ -95,6 +96,8 @@
 **Tier 2**(Tier 1 下方,单行次级文字):持仓周期 · 胜负(胜:负)· 最佳单笔 · 最差单笔 · 初始余额。
 
 双口径警示(`已实现指标 vs 盯市曲线 不同口径、不可逐点对账`)沿用现有文案,置于头条。
+
+**口径声明(观察者跨工具对账提示):** 本台净胜率 / 盈亏比 / 胜负计数为**持仓周期(episode, flat→flat)口径**,与 `MetricsService` / `analyze_sim.py` 的 **FIFO roundtrip 口径**不同——加仓会话里一个 episode 会被 FIFO 拆成多个 roundtrip(零部分平仓下仅此一类差异),故两者胜率/盈亏比可能不同;本台选 episode 因 = 人读「一笔交易」直觉 + 与表头「N 笔」/胜率分母自洽(已决设计,见「数据来源与派生」)。
 
 ### §C A+ 交易历程表
 
@@ -139,7 +142,7 @@ return out
 
 周期级聚合 `summarizeEpisodes(fills)`(同模块)从已平仓行的 `finalPnl` 算:持仓周期数、胜/负数、净胜率、盈亏比、最佳/最差单笔 —— 供 Tier 1/2 与表头复用(单一来源)。**除零守卫:** 胜+负=0(无决出周期 / 全打平)→ 净胜率 `—`;无盈利周期 → 盈亏比 `—`;无已平仓周期 → 最佳/最差 `—`。
 
-**不变量(全库实证):** `flip_without_close = 0`、`consecutive_closes = 0` —— 每次平仓都清空持仓、反手必经平仓 fill、无部分平仓。故「平仓即结束周期」「开仓后同向再开 = 加仓」对现有全部数据成立。**降级:** 若未来出现部分平仓(连续平仓),首个平仓行会把当时累积的开仓手续费全摊给它(口径略偏),作为已知边界,待部分平仓真实出现时(数据驱动)再细化。会话以未平仓持仓结尾时,尾部开/加行 `finalPnl = —`、不递增 episodeIndex,如实呈现未平仓入场(其入场费见 §F「未平仓入场费」)。
+**不变量(全库实证,2026-06-15 复核):** **零部分平仓** —— `trade_actions` 153 个平仓 fill(pnl≠null)按持仓重建 100% 全平,`trigger_context.is_full_close` 在真平仓事件中亦 100% = true(`is_full_close=false` 的 138 条全是开仓 fill,开仓本不平仓、该 flag 天然 false——勿将其误计为部分平仓)。故「平仓即结束周期」「开仓后同向再开 = 加仓」对现有全部数据成立。**降级:** 若未来出现部分平仓(连续平仓),首个平仓行会把当时累积的开仓手续费全摊给它(口径略偏),作为已知边界,待部分平仓真实出现时(数据驱动)再细化。会话以未平仓持仓结尾时,尾部开/加行 `finalPnl = —`、不递增 episodeIndex,如实呈现未平仓入场(其入场费见 §F「未平仓入场费」)。
 
 **渲染:**
 
@@ -181,13 +184,15 @@ return out
 
 ### §F 当前持仓与未实现收益(仅未平仓时)
 
+**open_position 数据源(权威性):** 存在性 + `side`/`contracts`/`entry_price` 取自 `SimPosition`(权威当前态,与 `get_live_status` / LiveStatusCard 同源,queries.py:302/323/345),**不取 `state_snapshot.position`**——后者是「本轮开始态」快照,实测全库 3/21 会话与权威持仓矛盾(snapshot 显示已平的幻影持仓 / snapshot flat 却实际有仓),用它会让 PerformanceBar 持仓条与同屏 LiveStatusCard 自相矛盾。`SimPosition` 无 `unrealized_pnl`(mark 相关、未存),故 `unrealized_pnl`/`pnl_pct_of_notional` 从最新 cycle `state_snapshot.position` 借用,**仅当其 `side` 与 `SimPosition` 同向**(best-effort 一致性闸;**只比 `side` 不比 `contracts`**——若末轮同向改了仓位大小,借用值是 snapshot 旧 size 的盯市,而未实现本就是「本轮开始态」近似,可接受);不同向 / snapshot 无仓 → 该两值 None,持仓条仍渲(方向/数量/入场价)但不显「未实现」行(如实,不编造)。`SimPosition` 平/空 → `open_position = None`、本条不渲染。
+
 `open_position != null` 时,在展开态头条下渲一条独立「当前持仓(未平仓)」条,**与 Tier 1 已实现指标口径分开**:
 
 - `{方向标签} {contracts} @ {entry_price}`(方向按多/空着色)
-- `未实现收益(毛) {unrealized_pnl}` + `{unrealized_pct}%` + 标签 `盯市,未扣平仓费`
+- (`unrealized_pnl != null` 时)`未实现收益(毛) {unrealized_pnl}` + `{unrealized_pct}%` + 标签 `盯市,未扣平仓费`
 - `未平仓入场费 {total_fees − 已实现手续费}` + 注 `已付,从净值扣`
 
-折叠态末尾同步追加一格 `持仓 未实现(毛) {unrealized_pnl}`。
+折叠态末尾在 `unrealized_pnl != null` 时同步追加一格 `持仓 未实现(毛) {unrealized_pnl}`。
 
 **口径自洽(实证 sim#21):** `初始 + 已实现净 + 未实现毛 − 未平仓入场费 = 盯市净值`(`10000 − 538.04 − 13.97 − 7.09 = 9440.90 ≈ 9440.89`)。未实现是**毛**(mark-vs-entry、未扣平仓费),入场费已单列且已从净值扣;两者分开后,**非-legacy 会话** Tier 1 的 `毛 − 手续费(已实现) = 净` 精确成立(legacy 见边界)。平尾会话(如 sim#19)`open_position = null`,本条不渲染、未平仓入场费 = 0、手续费 = `total_fees`。
 
@@ -205,7 +210,7 @@ return out
 
 逐项 red-green:
 
-1. **后端 — `get_performance` 暴露 `trigger_reason` + `open_position`:** seed 带 `trigger_reason='stop'` 的 close fill + 一条 `state_snapshot.position` 含 `unrealized_pnl`,`GET …/performance` 返回 `trades[0].trigger_reason=='stop'` 且 `open_position.unrealized_pnl` 正确;无持仓会话 `open_position is None`。
+1. **后端 — `get_performance` 暴露 `trigger_reason` + `open_position`(SimPosition 权威)+ `total_pnl`:** seed 带 `trigger_reason='stop'` 的 close fill → `trades[0].trigger_reason=='stop'`、`total_pnl` 等于 metrics 毛额。`open_position` 三态(对应实测矛盾会话):(a) `SimPosition` 有仓 + snapshot 同向 → side/contracts/entry 取 SimPosition、unrealized 借 snapshot;(b) `SimPosition` 有仓 + snapshot flat/异向(漏显反例)→ side/contracts/entry 仍取 SimPosition、`unrealized_pnl is None`;(c) `SimPosition` 平/空 + snapshot 有仓(幻影反例)→ `open_position is None`。
 2. **`utils/trades.ts` — `deriveTradeFills`(纯函数,核心):**
    - 单开单平(market)→ 2 行,类型 `开仓`/`平仓`,平仓 finalPnl = pnl − (开费+平费),feeBreakdown 两项,episodeIndex 0。
    - 加仓周期(开+加+平)→ 3 行,中间行 isAdd/`加仓`,平仓 finalPnl = pnl − 三费,feeBreakdown 三项,同 episodeIndex。
@@ -221,7 +226,8 @@ return out
 
 ## 验收标准
 
-- 后端仅 `TradeRow.trigger_reason` + `Performance.open_position` 两处暴露既有数据;`MetricsService` 未动;无迁移;`api/types.ts` 已重生成。
+- 后端仅 `TradeRow.trigger_reason` + `Performance.open_position`(SimPosition 权威)+ `Performance.total_pnl` 三处暴露既有数据;`MetricsService` 未动;无迁移;`api/types.ts` 已重生成。
+- `open_position` 与同屏 LiveStatusCard 持仓**同源(SimPosition)、不矛盾**;snapshot 仅在同向时贡献未实现毛。
 - 后端测试套件全绿(无回归);前端 vitest 全绿;vue-tsc 0 错。
 - 默认折叠;展开见(当前持仓条 if 未平仓)+ 曲线 + Tier1 六格 + Tier2 + 交易历程(再折叠)。
 - per-trade 计数全 episode 口径,Tier2「持仓周期」与表头「N 笔」、胜率分母一致;非-legacy 会话 `毛 − 手续费(已实现) = 净` 精确(legacy 跳 null-amount 后大头对齐,残留 invariant 发散见边界)。
