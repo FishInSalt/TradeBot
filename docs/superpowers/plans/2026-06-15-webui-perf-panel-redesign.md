@@ -714,13 +714,13 @@ describe("TradesTable (A+)", () => {
       props: { trades: [
         f({ pnl: null, fee: 1 }),
         f({ pnl: null, fee: 1 }),                          // 加仓
-        f({ pnl: -7.62, fee: 1, trigger_reason: "market" }),  // final -9.62
+        f({ pnl: -7.62, fee: 1, trigger_reason: "market" }),  // final -10.62（3×fee=1：开+加+平 全计入）
       ] },
     });
     const t = w.text();
     expect(t).toContain("加仓");
     expect(t).toContain("平仓");
-    expect(t).toContain("−9.62");        // 最终收益（U+2212）
+    expect(t).toContain("−10.62");       // 最终收益（U+2212；毛 −7.62 − 3×fee 1 = −10.62）
     expect(t).toContain("=");            // 逐笔算式行前缀
   });
 
