@@ -820,3 +820,18 @@ async def test_get_ohlcv_unknown_sid_raises_valueerror(engine):
     from src.webui import queries
     with pytest.raises(ValueError, match="session not found"):
         await queries.get_ohlcv(engine, "nope", None)
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_explicit_valid_tf_used_directly(engine, monkeypatch):
+    """显式有效 tf（4h）→ 直接采用、跳过会话 tf 查询、透传给 fetch。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h")   # 会话 tf 故意 != 4h
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", fetch)
+
+    series = await queries.get_ohlcv(engine, "s1", "4h")
+    assert series.timeframe == "4h"                       # 用显式 tf，非会话 1h
+    # fetch 收到的 timeframe 参数是 4h（透传，位置参数 args[1]）
+    assert fetch.await_args.args[1] == "4h"
