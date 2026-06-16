@@ -36,7 +36,7 @@ export function snapToBarTime(atSec: number, barTimes: number[]): number {
 /** 蜡烛间距 clamp(px)：理想间距 = 图宽 / bar 数，夹在 [min,max]。
  *  粗周期（bar 少）→ 命中 max，蜡烛不膨胀；细周期（bar 多）→ 命中 min，保可读（超出可横向滚动）。
  *  bar ≤ 1 或宽 ≤ 0（退化/未布局）→ 返回 max。供 setVisibleLogicalRange 反算可见逻辑宽用。 */
-export function clampBarSpacing(width: number, barCount: number, min = 3, max = 16): number {
+export function clampBarSpacing(width: number, barCount: number, min = 8, max = 16): number {
   if (barCount <= 1 || width <= 0) return max;
   return Math.max(min, Math.min(max, width / barCount));
 }
@@ -45,7 +45,7 @@ export function clampBarSpacing(width: number, barCount: number, min = 3, max = 
  *  to = barCount - 0.5（末根恒贴右，半槽右边距）；from = to - 可见根数（不足填满 → from<0 左留白）。
  *  width ≤ 0 或 barCount < 1 → null（调用方走 fitContent 兜底）。 */
 export function latestVisibleRange(
-  width: number, barCount: number, min = 3, max = 16,
+  width: number, barCount: number, min = 8, max = 16,
 ): { from: number; to: number } | null {
   if (width <= 0 || barCount < 1) return null;
   const visible = width / clampBarSpacing(width, barCount, min, max);

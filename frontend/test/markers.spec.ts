@@ -43,17 +43,20 @@ describe("snapToBarTime", () => {
 
 describe("clampBarSpacing", () => {
   it("理想间距落 [min,max] 内 → 原样返回", () => {
-    expect(clampBarSpacing(800, 100, 3, 16)).toBeCloseTo(8);   // 800/100 = 8
+    expect(clampBarSpacing(1000, 100, 8, 16)).toBeCloseTo(10);  // 1000/100 = 10
   });
   it("粗周期 bar 少 → 夹到 max（蜡烛不膨胀）", () => {
-    expect(clampBarSpacing(1000, 10, 3, 16)).toBe(16);          // 100 > 16
+    expect(clampBarSpacing(1000, 10, 8, 16)).toBe(16);          // 100 > 16
   });
   it("细周期 bar 多 → 夹到 min（保可读）", () => {
-    expect(clampBarSpacing(1000, 2000, 3, 16)).toBe(3);         // 0.5 < 3
+    expect(clampBarSpacing(1000, 2000, 8, 16)).toBe(8);         // 0.5 < 8
+  });
+  it("默认 min=8（与生产 MIN_BAR_SPACING 一致，不留非生产值）", () => {
+    expect(clampBarSpacing(1000, 2000)).toBe(8);                // 默认实参即生产档
   });
   it("bar ≤ 1 或宽 ≤ 0 → max（退化兜底）", () => {
-    expect(clampBarSpacing(1000, 1, 3, 16)).toBe(16);
-    expect(clampBarSpacing(0, 100, 3, 16)).toBe(16);
+    expect(clampBarSpacing(1000, 1, 8, 16)).toBe(16);
+    expect(clampBarSpacing(0, 100, 8, 16)).toBe(16);
   });
 });
 
