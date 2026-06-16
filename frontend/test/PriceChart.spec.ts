@@ -37,6 +37,14 @@ const SERIES = {
   symbol: "BTC/USDT:USDT", timeframe: "1h",
   bars: [{ at: "2026-06-12T10:00:00Z", open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 }],
 };
+// n 根递增分钟戳 candle（用于把 renderedCount 抬到 >1，测粘性右锚 1.5 阈值真实临界）
+const manyBars = (n: number) => ({
+  symbol: "BTC/USDT:USDT", timeframe: "1h",
+  bars: Array.from({ length: n }, (_, i) => ({
+    at: new Date(Date.UTC(2026, 5, 12, 0, i)).toISOString(),
+    open: 1, high: 2, low: 0.5, close: 1.5, volume: 10,
+  })),
+});
 
 const mountChart = (defaultTimeframe = "1h", latestCycleId: number | null = 1) =>
   mount(PriceChart, {
@@ -270,6 +278,32 @@ describe("PriceChart", () => {
     await w.setProps({ latestCycleId: 2 });
     await flushPromises();
     expect(setVisibleLogicalRange).not.toHaveBeenCalled();  // 保留用户视口
+  });
+
+  // 粘性右锚 1.5 阈值真实临界：renderedCount=100 → 边界 = 100-1.5 = 98.5；卡两侧钉死该魔数
+  // （改 1.5→0.5 上沿用例失败、改 1.5→5 下沿用例失败，单根 SERIES 的退化阈值 -0.5 测不到）
+  it("粘性阈值临界上沿：renderedCount=100、to=98.6（≥98.5）→ 重锚", async () => {
+    getOhlcv.mockResolvedValue(manyBars(100));
+    const w = mountChart("1h", 1);
+    stubWidth(w);
+    await flushPromises();                                  // renderedCount=100
+    getVisibleLogicalRange.mockReturnValue({ from: 0, to: 98.6 });
+    setVisibleLogicalRange.mockClear();
+    await w.setProps({ latestCycleId: 2 });
+    await flushPromises();
+    expect(setVisibleLogicalRange).toHaveBeenCalled();
+  });
+
+  it("粘性阈值临界下沿：renderedCount=100、to=98.4（<98.5）→ 保留", async () => {
+    getOhlcv.mockResolvedValue(manyBars(100));
+    const w = mountChart("1h", 1);
+    stubWidth(w);
+    await flushPromises();
+    getVisibleLogicalRange.mockReturnValue({ from: 0, to: 98.4 });
+    setVisibleLogicalRange.mockClear();
+    await w.setProps({ latestCycleId: 2 });
+    await flushPromises();
+    expect(setVisibleLogicalRange).not.toHaveBeenCalled();
   });
 
   it("getOhlcv 抛非 ApiError（如 TypeError）→ 也进错误占位、不致 unhandled rejection", async () => {

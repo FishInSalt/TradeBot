@@ -4,7 +4,7 @@ import { createChart, type IChartApi, type ISeriesApi } from "lightweight-charts
 import { NRadioGroup, NRadioButton } from "naive-ui";
 import { api, ApiError, type OhlcvBar, type TradeRow } from "@/api/client";
 import { deriveTradeFills, type DerivedFill } from "@/utils/trades";
-import { toCandleData, snapToBarTime, toMarkers, latestVisibleRange, POS_HEX, NEG_HEX } from "@/utils/markers";
+import { toCandleData, snapToBarTime, toMarkers, latestVisibleRange, MIN_BAR_SPACING, MAX_BAR_SPACING, POS_HEX, NEG_HEX } from "@/utils/markers";
 import { epochSec } from "@/utils/time";
 import { fmtNum, fmtSigned } from "@/utils/format";
 
@@ -18,8 +18,7 @@ const props = defineProps<{
 
 const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 const FOLD: Record<string, string> = { H: "h", D: "d", W: "w" };
-const MIN_BAR_SPACING = 8;        // px：细周期下限，保蜡烛可读（放不下则右锚最新、可左滚）
-const MAX_BAR_SPACING = 16;       // px：粗周期上限，防蜡烛膨胀
+// 间距档位 MIN/MAX_BAR_SPACING 单源自 markers.ts，import 复用（避免双源漂移，见审查 I-2）
 
 function normalizeTf(tf: string): string {
   const m = /^(\d+)([a-zA-Z])$/.exec((tf ?? "").trim());

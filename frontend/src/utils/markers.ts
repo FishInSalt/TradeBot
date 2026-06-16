@@ -33,10 +33,16 @@ export function snapToBarTime(atSec: number, barTimes: number[]): number {
   return ans;
 }
 
+// 蜡烛间距档位（px）唯一来源：PriceChart 与下方纯函数默认值均引用此处，避免双源漂移。
+export const MIN_BAR_SPACING = 8;   // 细周期下限，保蜡烛可读（放不下则右锚最新、可左滚）
+export const MAX_BAR_SPACING = 16;  // 粗周期上限，防蜡烛膨胀
+
 /** 蜡烛间距 clamp(px)：理想间距 = 图宽 / bar 数，夹在 [min,max]。
  *  粗周期（bar 少）→ 命中 max，蜡烛不膨胀；细周期（bar 多）→ 命中 min，保可读（超出可横向滚动）。
  *  bar ≤ 1 或宽 ≤ 0（退化/未布局）→ 返回 max。供 setVisibleLogicalRange 反算可见逻辑宽用。 */
-export function clampBarSpacing(width: number, barCount: number, min = 8, max = 16): number {
+export function clampBarSpacing(
+  width: number, barCount: number, min = MIN_BAR_SPACING, max = MAX_BAR_SPACING,
+): number {
   if (barCount <= 1 || width <= 0) return max;
   return Math.max(min, Math.min(max, width / barCount));
 }
@@ -45,7 +51,7 @@ export function clampBarSpacing(width: number, barCount: number, min = 8, max = 
  *  to = barCount - 0.5（末根恒贴右，半槽右边距）；from = to - 可见根数（不足填满 → from<0 左留白）。
  *  width ≤ 0 或 barCount < 1 → null（调用方走 fitContent 兜底）。 */
 export function latestVisibleRange(
-  width: number, barCount: number, min = 8, max = 16,
+  width: number, barCount: number, min = MIN_BAR_SPACING, max = MAX_BAR_SPACING,
 ): { from: number; to: number } | null {
   if (width <= 0 || barCount < 1) return null;
   const visible = width / clampBarSpacing(width, barCount, min, max);
