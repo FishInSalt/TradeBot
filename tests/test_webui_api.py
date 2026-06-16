@@ -92,3 +92,13 @@ async def test_api_cycle_detail_includes_tool_result(engine):
     assert cd.status_code == 200
     tcs = cd.json()["tool_calls"]
     assert tcs[0]["result"] == "=== Ticker ===\nlast 63000"
+
+
+def test_ohlcv_schemas_importable():
+    from src.webui import schemas
+    bar = schemas.OhlcvBar(at=datetime(2026, 6, 12, 10, 0, tzinfo=UTC),
+                           open=1.0, high=2.0, low=0.5, close=1.5, volume=10.0)
+    s = schemas.OhlcvSeries(symbol="BTC/USDT:USDT", timeframe="1h", bars=[bar])
+    dumped = s.model_dump()
+    assert dumped["timeframe"] == "1h"
+    assert dumped["bars"][0]["open"] == 1.0
