@@ -106,6 +106,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{sid}/ohlcv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Ohlcv */
+        get: operations["_ohlcv_api_sessions__sid__ohlcv_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -250,6 +267,33 @@ export interface components {
             active_alerts: components["schemas"]["AlertInfo"][];
             /** Tokens Consumed Total */
             tokens_consumed_total: number;
+        };
+        /** OhlcvBar */
+        OhlcvBar: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Open */
+            open: number;
+            /** High */
+            high: number;
+            /** Low */
+            low: number;
+            /** Close */
+            close: number;
+            /** Volume */
+            volume: number;
+        };
+        /** OhlcvSeries */
+        OhlcvSeries: {
+            /** Symbol */
+            symbol: string;
+            /** Timeframe */
+            timeframe: string;
+            /** Bars */
+            bars: components["schemas"]["OhlcvBar"][];
         };
         /**
          * OpenPositionBrief
@@ -632,6 +676,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LiveStatus"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    _ohlcv_api_sessions__sid__ohlcv_get: {
+        parameters: {
+            query?: {
+                timeframe?: string | null;
+            };
+            header?: never;
+            path: {
+                sid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OhlcvSeries"];
                 };
             };
             /** @description Validation Error */

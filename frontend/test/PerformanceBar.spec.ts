@@ -6,12 +6,26 @@ import { useSessionsStore } from "@/stores/sessions";
 vi.mock("lightweight-charts", () => ({
   createChart: vi.fn(() => ({
     addLineSeries: vi.fn(() => ({ setData: vi.fn() })),
+    addCandlestickSeries: vi.fn(() => ({ setData: vi.fn(), setMarkers: vi.fn() })),
+    subscribeCrosshairMove: vi.fn(),
     timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
     remove: vi.fn(),
   })),
 }));
 
 import PerformanceBar from "@/components/PerformanceBar.vue";
+
+const PriceChartStub = {
+  name: "PriceChart",
+  props: ["sessionId", "symbol", "defaultTimeframe", "trades"],
+  template: "<div class='pc-stub'></div>",
+};
+
+const DETAIL = {
+  id: "s1", name: "n1", symbol: "BTC/USDT:USDT", status: "active", timeframe: "1H",
+  scheduler_interval_min: 15, initial_balance: 10000, token_budget: 0,
+  created_at: "2026-06-12T08:00:00Z", last_active_at: "2026-06-12T10:00:00Z", system_prompt: null,
+};
 
 // 2 周期（1 胜 1 负）trades + 标量字段。
 // 注：标量（net_pnl/total_pnl/total_fees）与 trades 是【独立测试输入】——组件 PnL/费/% 取 API 标量、
@@ -32,11 +46,15 @@ const PERF_FLAT = {
   open_position: null,
 };
 
-const mountBar = (perf: unknown) => {
+const mountBar = (perf: unknown, detail: unknown = null) => {
   const w = mount(PerformanceBar, {
-    global: { plugins: [createTestingPinia({ createSpy: vi.fn, stubActions: true })] },
+    global: {
+      plugins: [createTestingPinia({ createSpy: vi.fn, stubActions: true })],
+      stubs: { PriceChart: PriceChartStub },
+    },
   });
   (useSessionsStore() as any).performance = perf;
+  (useSessionsStore() as any).detail = detail;
   return w;
 };
 
@@ -138,5 +156,25 @@ describe("PerformanceBar 抽屉", () => {
     expect(w.find(".trades-a").exists()).toBe(false);   // showTrades 默认 false
     await w.find(".trades-fold button").trigger("click");
     expect(w.find(".trades-a").exists()).toBe(true);
+  });
+
+  it("store.detail 有值 + 展开 → 渲价格走势 section + 传 props 给 PriceChart", async () => {
+    const w = mountBar(PERF_FLAT, DETAIL);
+    await w.vm.$nextTick();
+    await w.find(".collapsed-bar").trigger("click");
+    expect(w.find(".price-section").exists()).toBe(true);
+    const pc = w.findComponent(PriceChartStub);
+    expect(pc.exists()).toBe(true);
+    expect(pc.props("symbol")).toBe("BTC/USDT:USDT");
+    expect(pc.props("defaultTimeframe")).toBe("1H");
+    expect(pc.props("sessionId")).toBe("s1");
+    expect(pc.props("trades")).toHaveLength(4);
+  });
+
+  it("store.detail null → 不渲价格走势 section", async () => {
+    const w = mountBar(PERF_FLAT, null);
+    await w.vm.$nextTick();
+    await w.find(".collapsed-bar").trigger("click");
+    expect(w.find(".price-section").exists()).toBe(false);
   });
 });

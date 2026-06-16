@@ -717,3 +717,121 @@ def test_close_label_drift_guard_ts_matches_classify_fill():
     # 用带引号字面校验（如 '"止损平仓"'），比裸 substring 更严：避免「平仓」是「止损平仓」子串的松配。
     missing = [label for label in expected if f'"{label}"' not in ts]
     assert not missing, f"CLOSE_LABEL drift: {missing} 不在 trades.ts（与 _classify_fill 漂移）"
+
+
+from unittest.mock import AsyncMock
+
+
+async def _seed_session_with_window(engine, sid, *, timeframe, hours=2,
+                                    symbol="BTC/USDT:USDT"):
+    start = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SessionModel(id=sid, name=sid, symbol=symbol, initial_balance=10000.0,
+                           status="active", scheduler_interval_min=15, timeframe=timeframe,
+                           created_at=start, last_active_at=start + timedelta(hours=hours)))
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_fetches_and_builds_series(engine, monkeypatch):
+    """miss → 调 fetch + 返回 OhlcvSeries（裸行 → OhlcvBar，aware UTC）。内存 engine → cache_dir None。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h")
+    bars = [[1_778_846_400_000, 1.0, 2.0, 0.5, 1.5, 10.0]]   # ts = start_ms（2026-05-15 12:00 UTC）
+    fetch = AsyncMock(return_value=bars)
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", fetch)
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)   # 内存库降级：每次实拉
+
+    series = await queries.get_ohlcv(engine, "s1", None)  # 默认 tf=会话 1h
+    assert series.timeframe == "1h"
+    assert series.symbol == "BTC/USDT:USDT"
+    assert len(series.bars) == 1
+    assert series.bars[0].at.tzinfo is not None              # aware UTC
+    assert fetch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_cache_hit_skips_fetch(engine, tmp_path, monkeypatch):
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h")
+    cache_dir = tmp_path / "ohlcv_cache"
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: cache_dir)
+    fetch = AsyncMock(return_value=[[1_778_846_400_000, 1.0, 2.0, 0.5, 1.5, 10.0]])
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", fetch)
+
+    await queries.get_ohlcv(engine, "s1", None)              # miss → fetch + write
+    await queries.get_ohlcv(engine, "s1", None)              # hit → 不再 fetch
+    assert fetch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_empty_window(engine, monkeypatch):
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h")
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", AsyncMock(return_value=[]))
+    series = await queries.get_ohlcv(engine, "s1", None)
+    assert series.bars == []
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_default_uppercase_1H_normalized(engine, monkeypatch):
+    """默认路径会话 timeframe='1H' → 归一 1h，不抛、timeframe=='1h'。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1H")
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", AsyncMock(return_value=[]))
+    series = await queries.get_ohlcv(engine, "s1", None)
+    assert series.timeframe == "1h"
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_default_outside_6frame_clamps_to_1h(engine, monkeypatch):
+    """默认路径会话 timeframe='30m'（15 框内、6 框外）→ 确定性兜底 1h，不报错。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="30m")
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", AsyncMock(return_value=[]))
+    series = await queries.get_ohlcv(engine, "s1", None)
+    assert series.timeframe == "1h"
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_explicit_month_1M_rejected(engine, monkeypatch):
+    """显式 1M（月，归一有效但 6 框外）→ InvalidTimeframe（不误折成分钟 1m）。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h")
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    with pytest.raises(queries.InvalidTimeframe):
+        await queries.get_ohlcv(engine, "s1", "1M")
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_explicit_garbage_rejected(engine):
+    from src.webui import queries
+    await _seed_session_with_window(engine, "s1", timeframe="1h")
+    with pytest.raises(queries.InvalidTimeframe):
+        await queries.get_ohlcv(engine, "s1", "ZZ")
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_unknown_sid_raises_valueerror(engine):
+    """未知 sid（默认路径）→ resolve_session_window 抛 ValueError（端点转 404）。"""
+    from src.webui import queries
+    with pytest.raises(ValueError, match="session not found"):
+        await queries.get_ohlcv(engine, "nope", None)
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_explicit_valid_tf_used_directly(engine, monkeypatch):
+    """显式有效 tf（4h）→ 直接采用、跳过会话 tf 查询、透传给 fetch。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h")   # 会话 tf 故意 != 4h
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", fetch)
+
+    series = await queries.get_ohlcv(engine, "s1", "4h")
+    assert series.timeframe == "4h"                       # 用显式 tf，非会话 1h
+    # fetch 收到的 timeframe 参数是 4h（透传，位置参数 args[1]）
+    assert fetch.await_args.args[1] == "4h"

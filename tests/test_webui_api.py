@@ -92,3 +92,68 @@ async def test_api_cycle_detail_includes_tool_result(engine):
     assert cd.status_code == 200
     tcs = cd.json()["tool_calls"]
     assert tcs[0]["result"] == "=== Ticker ===\nlast 63000"
+
+
+def test_ohlcv_schemas_importable():
+    from src.webui import schemas
+    bar = schemas.OhlcvBar(at=datetime(2026, 6, 12, 10, 0, tzinfo=UTC),
+                           open=1.0, high=2.0, low=0.5, close=1.5, volume=10.0)
+    s = schemas.OhlcvSeries(symbol="BTC/USDT:USDT", timeframe="1h", bars=[bar])
+    dumped = s.model_dump()
+    assert dumped["timeframe"] == "1h"
+    assert dumped["bars"][0]["open"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_ohlcv_endpoint(engine, monkeypatch):
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+    import ccxt
+    from src.webui import queries, ohlcv_cache
+    start = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SessionModel(id="s1", name="n1", symbol="BTC/USDT:USDT", initial_balance=10000.0,
+                           status="active", scheduler_interval_min=15, timeframe="1H",
+                           created_at=start, last_active_at=start + timedelta(hours=2)))
+        await s.commit()
+    # 内存 engine → cache_dir None（断言不污染真 data/）；mock fetch
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    bars = [[1_778_846_400_000, 1.0, 2.0, 0.5, 1.5, 10.0]]
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", AsyncMock(return_value=bars))
+
+    c = _client(engine)
+    # 200 + 默认 tf = 会话归一 timeframe（1H → 1h）
+    r = c.get("/api/sessions/s1/ohlcv")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["timeframe"] == "1h"
+    assert body["symbol"] == "BTC/USDT:USDT"
+    assert body["bars"][0]["at"].endswith("Z")          # UTC 归一带 Z
+    # 显式合法 tf 透传
+    assert c.get("/api/sessions/s1/ohlcv?timeframe=5m").json()["timeframe"] == "5m"
+    # 显式非法 tf → 400
+    assert c.get("/api/sessions/s1/ohlcv?timeframe=ZZ").status_code == 400
+    assert c.get("/api/sessions/s1/ohlcv?timeframe=1M").status_code == 400   # 月，6 框外
+    # 未知 sid → 404
+    assert c.get("/api/sessions/nope/ohlcv").status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_ohlcv_endpoint_fetch_failure_503(engine, monkeypatch):
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+    import ccxt
+    from src.webui import queries, ohlcv_cache
+    start = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SessionModel(id="s1", name="n1", symbol="BTC/USDT:USDT", initial_balance=10000.0,
+                           status="active", scheduler_interval_min=15, timeframe="1h",
+                           created_at=start, last_active_at=start + timedelta(hours=2)))
+        await s.commit()
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: None)
+    monkeypatch.setattr(queries, "fetch_ohlcv_window",
+                        AsyncMock(side_effect=ccxt.NetworkError("dead")))
+    c = _client(engine)
+    r = c.get("/api/sessions/s1/ohlcv")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "NetworkError"          # 仅类名（redaction 纪律）

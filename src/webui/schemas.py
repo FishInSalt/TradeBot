@@ -122,6 +122,21 @@ class EquityPoint(BaseModel):
     equity: float             # 账户盯市净值 = free+used+frozen+未实现PnL（含浮盈浮亏，已扣 fee）
 
 
+class OhlcvBar(BaseModel):
+    at: UtcDatetime          # 该 K 线开盘时刻（ts_ms → aware UTC）
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class OhlcvSeries(BaseModel):
+    symbol: str
+    timeframe: str            # 归一后的小写形态（1h 等）
+    bars: list[OhlcvBar]      # 升序、同 ts 去重、半开过滤；窗口内无数据 → []
+
+
 class TradeRow(BaseModel):
     at: UtcDatetime
     action: str

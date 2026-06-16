@@ -4,6 +4,7 @@ import { NTag, NButton } from "naive-ui";
 import { useSessionsStore } from "@/stores/sessions";
 import EquityChart from "@/components/EquityChart.vue";
 import TradesTable from "@/components/TradesTable.vue";
+import PriceChart from "@/components/PriceChart.vue";
 import { fmtNum, fmtSigned, fmtSignedPct } from "@/utils/format";
 import { deriveTradeFills, summarizeEpisodes } from "@/utils/trades";
 
@@ -12,6 +13,7 @@ const expanded = ref(false);
 const showTrades = ref(false);
 
 const perf = computed(() => store.performance);
+const detail = computed(() => store.detail);
 const fills = computed(() => (perf.value ? deriveTradeFills(perf.value.trades) : []));
 const summary = computed(() => summarizeEpisodes(fills.value));
 
@@ -74,6 +76,16 @@ const signClass = (n: number | null | undefined) =>
           <span class="muted">{{ fmtSignedPct(openPos.pnl_pct_of_notional) }} · 盯市,未扣平仓费</span></span>
         <span class="held-fee">未平仓入场费 <b>{{ fmtNum(unrealizedEntryFee) }}</b>
           <span class="muted">已付,从净值扣</span></span>
+      </div>
+
+      <!-- 价格走势 K 线 + 买卖点 markers（整宽 section，spec §F） -->
+      <div v-if="detail" class="price-section">
+        <PriceChart
+          :session-id="detail.id"
+          :symbol="detail.symbol"
+          :default-timeframe="detail.timeframe"
+          :trades="perf.trades"
+        />
       </div>
 
       <div class="exp-grid">
@@ -155,6 +167,7 @@ const signClass = (n: number | null | undefined) =>
 .cell .pct { font-size: 10px; }
 .tier2 { font-size: 12px; margin-top: 10px; border-top: 1px dashed var(--ob-border); padding-top: 8px; }
 
+.price-section { margin-bottom: 12px; }
 .trades-fold { margin-top: 8px; }
 .pos { color: var(--ob-pos); }
 .neg { color: var(--ob-neg); }
