@@ -84,7 +84,7 @@ const signClass = (n: number | null | undefined) =>
           :session-id="detail.id"
           :symbol="detail.symbol"
           :default-timeframe="detail.timeframe"
-          :trades="perf?.trades ?? []"
+          :trades="perf.trades"
         />
       </div>
 
