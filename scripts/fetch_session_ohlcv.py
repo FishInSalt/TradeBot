@@ -23,6 +23,8 @@ from src.storage.models import Session as SessionModel
 
 # 旧私名 re-export：使 `from scripts.fetch_session_ohlcv import _resolve_session,
 # _paginate_ohlcv, TF_MS, TIMEFRAMES` 的存量测试 import 完全不动。
+# 其中 fetch_ohlcv_window 为本脚本主入口自用；_ensure_utc / _fetch_with_retry 无现有
+# 测试直接 import，按防漂移原则一并 re-export（其行为由 test_ohlcv_history.py 直测）。
 from src.services.ohlcv_history import (  # noqa: F401  (re-export)
     TF_MS,
     TIMEFRAMES,
