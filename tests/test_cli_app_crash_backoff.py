@@ -10,7 +10,7 @@ from src.storage.models import AgentCycle
 
 
 def test_trading_deps_has_scheduler_interval_min_field():
-    """TradingDeps 暴露 scheduler_interval_min（退避封顶来源），默认 60，可覆写。"""
+    """TradingDeps 暴露 scheduler_interval_min（退避封顶来源），默认 15，可覆写。"""
     from src.agent.trader import TradingDeps
 
     deps = TradingDeps(
@@ -18,7 +18,7 @@ def test_trading_deps_has_scheduler_interval_min_field():
         market_data=MagicMock(), exchange=MagicMock(), technical=MagicMock(),
         memory=MagicMock(), session_id="s",
     )
-    assert deps.scheduler_interval_min == 60
+    assert deps.scheduler_interval_min == 15
 
     deps2 = TradingDeps(
         symbol="BTC/USDT:USDT", timeframe="15m",

@@ -465,6 +465,7 @@ async def test_build_services_sim_path(stub_market_meta):
     assert deps.symbol == "BTC/USDT:USDT"
     assert deps.timeframe == "15m"
     assert deps.approval_enabled is False
+    assert deps.scheduler_interval_min == 15   # wiring: result.scheduler_interval_min 传穿到 deps
     assert budget.remaining == 500000
     MockSim.assert_called_once()
 

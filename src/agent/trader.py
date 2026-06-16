@@ -46,8 +46,9 @@ class TradingDeps:
     # 崩溃退避封顶来源（spec §1「fallback 来源」）：run_agent_cycle 签名与 deps 现有
     # 字段都拿不到会话兜底间隔，且无法由 wake_max_minutes 反推（_compute_max_wake 在
     # x≤15 恒 60 / x≥45 恒 180 两端不可逆）。wiring 时由 build_services 赋实值；
-    # 默认 60 仅为单测/旧路径兜底。
-    scheduler_interval_min: int = 60
+    # 默认 15 对齐唯一权威来源（models.py / session_manager.py 的 scheduler_interval_min
+    # DEFAULT 15），使任何绕过 build_services 的构造路径也拿规范默认，不踩 60 的陷阱。
+    scheduler_interval_min: int = 15
     set_next_wake_fn: Callable[[int, str], None] | None = None
     initial_balance: float = 10000.0
     fee_rate: float = DEFAULT_TAKER_FEE_RATE
