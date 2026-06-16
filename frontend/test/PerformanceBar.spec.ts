@@ -148,6 +148,32 @@ describe("PerformanceBar 抽屉", () => {
     expect(t).not.toContain("盯市,未扣平仓费");
   });
 
+  it("未平仓 + unrealized_as_of：未实现段显盯市时刻（截至 + UTC 全时戳）", async () => {
+    const perfAsOf = {
+      ...PERF_FLAT, total_fees: 109.12,
+      open_position: { side: "short", contracts: 10.82, entry_price: 65542.1,
+        unrealized_pnl: -13.97, pnl_pct_of_notional: -0.2, unrealized_as_of: "2026-06-12T10:00:30+00:00" },
+    };
+    const w = mountBar(perfAsOf);
+    await w.vm.$nextTick();
+    await w.find(".collapsed-bar").trigger("click");
+    const t = w.text();
+    expect(t).toContain("截至");
+    expect(t).toContain("2026-06-12 10:00:30");   // fmtUtc 全时戳
+  });
+
+  it("未平仓 + unrealized_as_of=null：不显盯市时刻（不编造时间）", async () => {
+    const perfNoAsOf = {
+      ...PERF_FLAT, total_fees: 109.12,
+      open_position: { side: "short", contracts: 10.82, entry_price: 65542.1,
+        unrealized_pnl: -13.97, pnl_pct_of_notional: -0.2, unrealized_as_of: null },
+    };
+    const w = mountBar(perfNoAsOf);
+    await w.vm.$nextTick();
+    await w.find(".collapsed-bar").trigger("click");
+    expect(w.text()).not.toContain("截至");
+  });
+
   it("交易历程默认折叠（不见 A+ 表单位标注）、展开后可见", async () => {
     const w = mountBar(PERF_FLAT);
     await w.vm.$nextTick();

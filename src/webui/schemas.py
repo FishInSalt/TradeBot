@@ -60,6 +60,7 @@ class OpenPositionBrief(BaseModel):
     entry_price: float | None          # 来自 SimPosition
     unrealized_pnl: float | None       # 盯市 mark-vs-entry 毛额；snapshot 同向才有，否则 None
     pnl_pct_of_notional: float | None  # 未实现 / 名义本金 * 100；同上
+    unrealized_as_of: str | None       # 未实现的盯市时刻（snapshot.market.fetched_at）；仅借到未实现+有 market 才带
 
 
 class KeyEvent(BaseModel):

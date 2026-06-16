@@ -313,6 +313,8 @@ export interface components {
             unrealized_pnl: number | null;
             /** Pnl Pct Of Notional */
             pnl_pct_of_notional: number | null;
+            /** Unrealized As Of */
+            unrealized_as_of: string | null;
         };
         /** OrderInfo */
         OrderInfo: {

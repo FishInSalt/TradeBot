@@ -689,6 +689,68 @@ async def test_open_position_sim_authoritative_snapshot_mismatch_unrealized_none
 
 
 @pytest.mark.asyncio
+async def test_open_position_unrealized_as_of_from_snapshot_market(engine):
+    """② 同向借未实现 + snapshot.market.fetched_at → unrealized_as_of 取该盯市时刻（同源）。"""
+    from src.storage.models import SimPosition
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="short",
+                          contracts=10.82, entry_price=65542.1, leverage=10))
+        await s.commit()
+    await _add_cycle(engine, cycle_id="cz", created_at=base,
+                     snapshot=json.dumps({"balance": {"total_usdt": 9440.89},
+                       "market": {"ticker_last": 65555.0, "fetched_at": "2026-06-12T10:00:30+00:00"},
+                       "position": {"side": "short", "contracts": 10.82, "entry_price": 65542.1,
+                                    "unrealized_pnl": -13.97, "pnl_pct_of_notional": -0.2}}))
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")
+    assert perf.open_position is not None
+    assert perf.open_position.unrealized_pnl is not None
+    assert perf.open_position.unrealized_as_of == "2026-06-12T10:00:30+00:00"
+
+
+@pytest.mark.asyncio
+async def test_open_position_unrealized_as_of_none_without_market(engine):
+    """② 同向借到未实现但 snapshot 无 market → unrealized_as_of None（无盯市时刻可标）。"""
+    from src.storage.models import SimPosition
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="long",
+                          contracts=0.5, entry_price=60000.0, leverage=5))
+        await s.commit()
+    await _add_cycle(engine, cycle_id="cm", created_at=base,
+                     snapshot=json.dumps({"position": {"side": "long", "contracts": 0.5,
+                       "entry_price": 60000.0, "unrealized_pnl": 12.0, "pnl_pct_of_notional": 0.04}}))
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")
+    assert perf.open_position is not None
+    assert perf.open_position.unrealized_pnl is not None      # 借到未实现
+    assert perf.open_position.unrealized_as_of is None         # 但无 market.fetched_at → 不标
+
+
+@pytest.mark.asyncio
+async def test_open_position_unrealized_as_of_none_when_mismatch_despite_market(engine):
+    """② snapshot 无仓（未实现 None）→ 即便有 market.fetched_at，as_of 也 None（同源闸于未实现）。"""
+    from src.storage.models import SimPosition
+    await _seed_session(engine)
+    base = datetime(2026, 6, 12, 10, 0, tzinfo=UTC)
+    async with get_session(engine) as s:
+        s.add(SimPosition(session_id="s1", symbol="BTC/USDT:USDT", side="short",
+                          contracts=0.265, entry_price=65000.0, leverage=10))
+        await s.commit()
+    await _add_cycle(engine, cycle_id="cmm", created_at=base,
+                     snapshot=json.dumps({"balance": {"total_usdt": 9900.0},
+                       "market": {"ticker_last": 64000.0, "fetched_at": "2026-06-12T10:00:30+00:00"}}))
+    from src.webui.queries import get_performance
+    perf = await get_performance(engine, "s1")
+    assert perf.open_position is not None
+    assert perf.open_position.unrealized_pnl is None
+    assert perf.open_position.unrealized_as_of is None
+
+
+@pytest.mark.asyncio
 async def test_open_position_none_when_sim_flat_despite_snapshot(engine):
     """(c) SimPosition 平/空 + snapshot 有仓（幻影反例）→ open_position is None（权威）。"""
     await _seed_session(engine)
