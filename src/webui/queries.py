@@ -17,6 +17,9 @@ from src.storage.models import (
 from src.services.metrics import MetricsService
 from src.webui import schemas
 from src.services.event_render import _format_event_age
+from src.services.ohlcv_history import fetch_ohlcv_window, resolve_session_window, TIMEFRAMES
+from src.webui import ohlcv_cache
+from src.utils.timeframe import normalize_timeframe
 
 
 async def get_cycles(
@@ -437,3 +440,68 @@ async def list_sessions(engine: AsyncEngine) -> list[schemas.SessionSummary]:
             net_return_pct=m.net_return_pct,
         ))
     return out
+
+
+class InvalidTimeframe(ValueError):
+    """显式传入的 timeframe 归一后非法或不可绘图（端点转 400）。
+
+    ValueError 子类——端点须【先】catch 本类（400）再 catch ValueError
+    （resolve_session_window 的未知 sid → 404）。
+    """
+
+
+def _resolve_chart_tf(raw: str | None, session_tf: str | None) -> str:
+    """tf 归一（spec §C）。显式非法 → InvalidTimeframe；默认路径落 6 框外 → 兜底 1h。
+
+    复用 src.utils.timeframe.normalize_timeframe（不自造 .lower()，保 m/M 区分），
+    再以自有 6 框白名单 TIMEFRAMES 做图表收窄。
+    """
+    if raw is not None:
+        try:
+            tf = normalize_timeframe(raw)
+        except ValueError as e:
+            raise InvalidTimeframe(str(e)) from e
+        if tf not in TIMEFRAMES:
+            raise InvalidTimeframe(f"timeframe not chartable: {raw}")
+        return tf
+    # 默认路径：会话 tf 归一；非法 / 6 框外 → 一律确定性兜底 1h（不做模糊「最近较粗框」）
+    if session_tf is None:
+        return "1h"
+    try:
+        tf = normalize_timeframe(session_tf)
+    except ValueError:
+        return "1h"
+    return tf if tf in TIMEFRAMES else "1h"
+
+
+async def get_ohlcv(engine: AsyncEngine, session_id: str,
+                    timeframe: str | None) -> schemas.OhlcvSeries:
+    # 1. 解析 tf：默认路径单独查一次 SessionModel.timeframe（resolve_session_window 三元组
+    #    签名被 F7 re-export 契约冻结、不含 tf，不能扩成四元组）。
+    session_tf: str | None = None
+    if timeframe is None:
+        async with get_session(engine) as s:
+            session_tf = (await s.execute(
+                select(SessionModel.timeframe).where(SessionModel.id == session_id)
+            )).scalar_one_or_none()
+    tf = _resolve_chart_tf(timeframe, session_tf)
+
+    # 2. 解析窗口（未知 sid / 零时长 → ValueError → 端点 404）
+    symbol, start_ms, end_ms = await resolve_session_window(engine, session_id)
+
+    # 3-4. 缓存命中则用，否则拉取 + 落盘
+    cache_dir = ohlcv_cache.cache_dir_for(engine)
+    rows = ohlcv_cache.read(cache_dir, session_id, tf, end_ms)
+    if rows is None:
+        rows = await fetch_ohlcv_window(symbol, tf, start_ms, end_ms)
+        ohlcv_cache.write(cache_dir, session_id, tf, symbol, end_ms, rows)
+
+    # 5. 裸行 → OhlcvBar
+    bars = [
+        schemas.OhlcvBar(
+            at=datetime.fromtimestamp(r[0] / 1000, tz=timezone.utc),
+            open=r[1], high=r[2], low=r[3], close=r[4], volume=r[5],
+        )
+        for r in rows
+    ]
+    return schemas.OhlcvSeries(symbol=symbol, timeframe=tf, bars=bars)
