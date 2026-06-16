@@ -264,6 +264,6 @@ async def test_get_open_orders_ticker_outage_propagates():
     try:
         with pytest.raises(RuntimeError, match="ticker down"):
             await get_open_orders(MockDeps(exchange=exchange, market_data=md))
-        assert _biz_error_type.get() is None
+        assert _biz_error_type.get() is None, "get_open_orders 不得降级 / 打 biz_error"
     finally:
         _biz_error_type.reset(token)
