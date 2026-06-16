@@ -41,6 +41,18 @@ export function clampBarSpacing(width: number, barCount: number, min = 3, max = 
   return Math.max(min, Math.min(max, width / barCount));
 }
 
+/** 右锚可见逻辑范围（latest 贴右）：clamp 间距后反算可见根数，末根靠右边、放不下的部分留左侧可滚。
+ *  to = barCount - 0.5（末根恒贴右，半槽右边距）；from = to - 可见根数（不足填满 → from<0 左留白）。
+ *  width ≤ 0 或 barCount < 1 → null（调用方走 fitContent 兜底）。 */
+export function latestVisibleRange(
+  width: number, barCount: number, min = 3, max = 16,
+): { from: number; to: number } | null {
+  if (width <= 0 || barCount < 1) return null;
+  const visible = width / clampBarSpacing(width, barCount, min, max);
+  const to = barCount - 0.5;
+  return { from: to - visible, to };
+}
+
 /** DerivedFill[] → markers。time 经 snapToBarTime（与 hover map 键同源，保 crosshair param.time 命中）。 */
 export function toMarkers(fills: DerivedFill[], barTimes: number[]): SeriesMarker<Time>[] {
   const markers: SeriesMarker<Time>[] = fills.map((f) => {

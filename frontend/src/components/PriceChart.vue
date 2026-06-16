@@ -4,7 +4,7 @@ import { createChart, type IChartApi, type ISeriesApi } from "lightweight-charts
 import { NRadioGroup, NRadioButton } from "naive-ui";
 import { api, ApiError, type OhlcvBar, type TradeRow } from "@/api/client";
 import { deriveTradeFills, type DerivedFill } from "@/utils/trades";
-import { toCandleData, snapToBarTime, toMarkers, clampBarSpacing, POS_HEX, NEG_HEX } from "@/utils/markers";
+import { toCandleData, snapToBarTime, toMarkers, latestVisibleRange, POS_HEX, NEG_HEX } from "@/utils/markers";
 import { epochSec } from "@/utils/time";
 import { fmtNum, fmtSigned } from "@/utils/format";
 
@@ -18,7 +18,7 @@ const props = defineProps<{
 
 const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 const FOLD: Record<string, string> = { H: "h", D: "d", W: "w" };
-const MIN_BAR_SPACING = 3;        // px：细周期下限，保蜡烛可读
+const MIN_BAR_SPACING = 8;        // px：细周期下限，保蜡烛可读（放不下则右锚最新、可左滚）
 const MAX_BAR_SPACING = 16;       // px：粗周期上限，防蜡烛膨胀
 
 function normalizeTf(tf: string): string {
@@ -77,16 +77,14 @@ function render(fit: boolean) {
   if (fit) applyViewport(barTimes.length);             // fit=false 不碰 timeScale → 保留视口
 }
 
-// 按 clamp 间距设可见逻辑范围：from=-0.5 左锚首根，to 反算可见逻辑宽（图宽/间距）。
-// 粗周期 → 右侧留白、蜡烛不膨胀；细周期 → 左锚会话起点（首批买卖点在视野内）、可横向滚动。
+// 右锚视口：clamp 间距防蜡烛膨胀（含 barCount===1 不被 fitContent 拉满全宽）；
+// 放得下则满铺、放不下则展示最新一段（末根贴右，历史可左滚）。width 未布局/无数据 → fitContent 兜底。
 function applyViewport(barCount: number) {
   const ts = chart?.timeScale();
   if (!ts) return;
-  const width = el.value?.clientWidth ?? 0;
-  if (width <= 0 || barCount < 1) { ts.fitContent(); return; }   // 未布局 / 无数据 → 兜底
-  // barCount===1 也走 clamp（间距取 max）：避免单根 bar 被 fitContent 拉满全宽变"巨型蜡烛"
-  const spacing = clampBarSpacing(width, barCount, MIN_BAR_SPACING, MAX_BAR_SPACING);
-  ts.setVisibleLogicalRange({ from: -0.5, to: width / spacing - 0.5 });
+  const range = latestVisibleRange(el.value?.clientWidth ?? 0, barCount, MIN_BAR_SPACING, MAX_BAR_SPACING);
+  if (range) ts.setVisibleLogicalRange(range);
+  else ts.fitContent();
 }
 
 onMounted(() => {
