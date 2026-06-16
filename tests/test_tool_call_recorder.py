@@ -433,9 +433,10 @@ def test_biz_error_types_drift_guard():
     assert not drift, \
         f"src/agent/ 引用未注册的 biz error type: {drift}（请在 BIZ_ERROR_TYPES 注册或更正字面量）"
 
-    # Sanity: R2-4 应 instrument ≥ 3 处（spec §4.3）
+    # Sanity: 至少覆盖既有 3 个 distinct type（防 regex 哪天静默失配致 guard 形同虚设）。
+    # 注：cited 是 distinct type 集合，非调用点数——B3 后 source_unavailable 多调用点仍只 +1 type。
     assert len(cited) >= 3, \
-        f"应 instrument ≥3 处 note_biz_error；实测 {len(cited)} 处: {cited}"
+        f"应 ≥3 个 distinct biz_error type 被引用；实测 {len(cited)} 个: {cited}"
 
 
 def test_source_unavailable_in_biz_error_types():
