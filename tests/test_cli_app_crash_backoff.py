@@ -89,3 +89,108 @@ async def test_count_consecutive_capped(db_engine, db_session):
     for _ in range(_CRASH_STREAK_FETCH_CAP + 5):
         await _add_cycle(db_session, "sess-E", "retry_exhausted")
     assert await _count_consecutive_retry_exhausted(db_engine, "sess-E") == _CRASH_STREAK_FETCH_CAP
+
+
+# --- _schedule_crash_backoff 单元 ---
+
+@pytest.mark.asyncio
+async def test_schedule_crash_backoff_none_fn_no_raise(db_engine, db_session):
+    """set_next_wake_fn=None（非交互/单测路径）→ 跳过不抛。"""
+    from src.cli.app import _schedule_crash_backoff
+    deps = MagicMock()
+    deps.set_next_wake_fn = None
+    await _schedule_crash_backoff(db_engine, deps, "RequestTimeout")  # 不抛即通过
+
+
+@pytest.mark.asyncio
+async def test_schedule_crash_backoff_normal_value(db_engine, db_session):
+    """已有 1 条 RE 行 → n=1 → backoff_min(1, 60)=2；context 带 err_class。"""
+    from src.cli.app import _schedule_crash_backoff
+    await _add_cycle(db_session, "sess-F", "retry_exhausted")
+    calls = []
+    deps = MagicMock()
+    deps.session_id = "sess-F"
+    deps.scheduler_interval_min = 60
+    deps.set_next_wake_fn = lambda minutes, ctx: calls.append((minutes, ctx))
+
+    await _schedule_crash_backoff(db_engine, deps, "RequestTimeout")
+    assert len(calls) == 1
+    minutes, ctx = calls[0]
+    assert minutes == 2
+    assert ctx.startswith("crash-backoff:")
+    assert "RequestTimeout" in ctx
+
+
+@pytest.mark.asyncio
+async def test_schedule_crash_backoff_count_query_failure_uses_floor(db_engine, monkeypatch):
+    """计数查询自身失败 → fail-isolated 回退 n=1（floor），不二次击穿崩溃路径。"""
+    from src.cli import app as app_mod
+    calls = []
+    deps = MagicMock()
+    deps.session_id = "sess-G"
+    deps.scheduler_interval_min = 60
+    deps.set_next_wake_fn = lambda minutes, ctx: calls.append((minutes, ctx))
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(app_mod, "_count_consecutive_retry_exhausted", _boom)
+
+    await app_mod._schedule_crash_backoff(db_engine, deps, "RequestTimeout")
+    assert calls == [(2, "crash-backoff: RequestTimeout")]   # 回退 n=1 → backoff_min(1, 60)=2=floor
+
+
+# --- 端到端：run_agent_cycle 崩溃路径 ---
+
+def _mock_agent():
+    agent = MagicMock()
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_retry_exhausted_schedules_backoff(deps_factory, db_engine, db_session):
+    """3 attempt 全崩 → 写 retry_exhausted 行 + 调 set_next_wake_fn（值=曲线、context=crash-backoff）。"""
+    from src.cli.app import TokenBudget, run_agent_cycle
+
+    deps = deps_factory()
+    deps.scheduler_interval_min = 60
+    calls = []
+    deps.set_next_wake_fn = lambda minutes, ctx: calls.append((minutes, ctx))
+
+    agent = _mock_agent()
+    agent.run = AsyncMock(side_effect=RuntimeError("network down"))
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        await run_agent_cycle(agent, deps, [("scheduled", None)], TokenBudget(daily_max=10**7), db_engine)
+
+    row = (await db_session.execute(
+        select(AgentCycle).order_by(AgentCycle.id.desc()).limit(1))).scalar_one()
+    assert row.execution_status == "retry_exhausted"
+    # 本会话仅此 1 条 RE → n=1 → backoff_min(1, 60)=2
+    assert len(calls) == 1
+    minutes, ctx = calls[0]
+    assert minutes == 2
+    assert ctx.startswith("crash-backoff:")
+    assert "RuntimeError" in ctx
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_does_not_schedule_backoff(deps_factory, db_engine, db_session):
+    """usage_limit_exceeded 是病理死循环 → 不退避重唤（spec §1 排除）。"""
+    from src.cli.app import TokenBudget, run_agent_cycle
+    from pydantic_ai.exceptions import UsageLimitExceeded
+
+    deps = deps_factory()
+    deps.scheduler_interval_min = 60
+    calls = []
+    deps.set_next_wake_fn = lambda minutes, ctx: calls.append((minutes, ctx))
+
+    agent = _mock_agent()
+    agent.run = AsyncMock(side_effect=UsageLimitExceeded("runaway"))
+
+    with patch("asyncio.sleep", new=AsyncMock()):
+        await run_agent_cycle(agent, deps, [("scheduled", None)], TokenBudget(daily_max=10**7), db_engine)
+
+    row = (await db_session.execute(
+        select(AgentCycle).order_by(AgentCycle.id.desc()).limit(1))).scalar_one()
+    assert row.execution_status == "usage_limit_exceeded"
+    assert calls == [], "usage_limit 不应触发退避重唤"
