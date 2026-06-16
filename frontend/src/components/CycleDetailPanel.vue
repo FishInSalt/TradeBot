@@ -97,7 +97,7 @@ const toolColumns: DataTableColumns<ToolCallRow> = [
         </template>
         <template v-if="snapshot.pending_orders && snapshot.pending_orders.length">
           <span class="snap-k">挂单</span>
-          <span><span v-for="(o, i) in snapshot.pending_orders" :key="i" class="snap-item">{{ o.order_type }} {{ o.side }} @{{ fmtNum(o.trigger_price ?? o.price) }} ×{{ o.amount }}</span></span>
+          <span class="pending"><span v-for="(o, i) in snapshot.pending_orders" :key="i" class="pending-item">{{ o.order_type }} {{ o.side }} @{{ fmtNum(o.trigger_price ?? o.price) }} ×{{ o.amount }}</span></span>
         </template>
         <template v-if="(snapshot.active_alerts && snapshot.active_alerts.length) || snapshot.volatility_alert">
           <span class="snap-k">告警</span>
@@ -180,6 +180,11 @@ h5 { margin: 6px 0 4px; font-size: 12px; opacity: 0.8; }
 .snapshot { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
 .snap-k { color: var(--ob-text-muted); }
 .snap-item { display: inline-block; margin-right: 10px; }
+/* 挂单值区：逐条独占一行（与告警 .alert-grp 同结构）+ 克制微染小块（待成交、值得关注；
+   只承载正文 default 色挂单文本，勿放 muted/neg/pos，见 tokens.css --ob-pending-bg 注 / spec §③b）。 */
+.pending { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  background: var(--ob-pending-bg); border-radius: 4px; padding: 3px 8px; }
+.pending-item { display: block; }
 .bal { display: inline-flex; gap: 18px; align-items: baseline; flex-wrap: wrap; }
 .seg { display: inline-flex; gap: 5px; align-items: baseline; }
 .seg .sl { color: var(--ob-text-muted); }

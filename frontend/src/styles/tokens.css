@@ -22,6 +22,7 @@
   --ob-neg: #dc2626;       /* 负向：白底 ≈4.8:1 */
   --ob-warn: #b45309;      /* 告警/未解析文本：白底 ≈5:1 */
   --ob-warn-soft: #fef3c7; /* 注入卡背景：浅琥珀 */
+  --ob-pending-bg: #fdf4e6; /* 挂单区克制微染：软琥珀（待成交、值得关注）；只承载正文 default 色文本，余量充足。勿放 muted（#6b7280 在此仅 ~4.1<AA，见 spec §③b） */
 }
 
 /* 统一白卡（spec §4）：dashboard 表面 + CycleDetailPanel 区块共用。

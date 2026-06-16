@@ -89,7 +89,7 @@ crosshair 回调内：OHLC 取 lightweight-charts v4 的 `param.seriesData.get(s
 
 - 新增令牌 `--ob-pending-bg`（浅琥珀向，呼应挂单待成交语义；与 accent 蓝、告警语义都区分），落 `tokens.css` 单源。
 - 挂单值容器套圆角小块 + 内边距 + 该底色。**克制**：不用醒目色、不加边框竖带（蓝竖带专给 keyrow）。
-- **硬约束**：Playwright 实测该底色上的 muted 文字、neg/pos 文字、正常文字对比度全部 ≥ 4.5（含祖先 opacity 合成）。规避 `accent-soft #eff6ff` 致 muted 4.44 < AA 的旧坑。底色需在该约束下取值。
+- **硬约束**：微染底色上承载的文字（挂单值为正文 default 色）对比度 ≥ 4.5，Playwright 含祖先 opacity 合成实测。该单元格刻意只放正文色挂单文本，**不放** muted/neg/pos 文字（如未来要放须复验或调浅底色——浅琥珀对 muted #6b7280 余量极小）。规避 `accent-soft #eff6ff` 致 muted 4.44 < AA 的旧坑。
 
 ### 边界 & 测试
 
