@@ -122,3 +122,33 @@ async def test_fetch_ohlcv_window_closes_on_exception(monkeypatch):
         await fetch_ohlcv_window("BTC/USDT:USDT", "1m", 1_700_000_000_000,
                                  1_700_000_000_000 + 10 * 60_000)
     assert client.close.await_count == 1
+
+
+async def test_fetch_with_retry_transient_then_success(monkeypatch):
+    """第 1 次 NetworkError → sleep 1 次 → 第 2 次成功；返回那一页数据。"""
+    from src.services.ohlcv_history import _fetch_with_retry
+    mock_sleep = AsyncMock()
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
+    page = [[1_700_000_000_000, 2, 3, 4, 5, 6]]
+    client = MagicMock()
+    client.fetch_ohlcv = AsyncMock(side_effect=[ccxt.NetworkError("x"), page])
+
+    result = await _fetch_with_retry(client, "BTC/USDT:USDT", "1m", 1_700_000_000_000)
+
+    assert result == page
+    assert mock_sleep.await_count == 1
+
+
+async def test_fetch_with_retry_exhausted_raises(monkeypatch):
+    """连续 3 次 NetworkError → raise；sleep 恰好 2 次（第 3 次失败不 sleep）。"""
+    from src.services.ohlcv_history import _fetch_with_retry
+    mock_sleep = AsyncMock()
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
+    client = MagicMock()
+    client.fetch_ohlcv = AsyncMock(side_effect=ccxt.NetworkError("x"))
+
+    with pytest.raises(ccxt.NetworkError):
+        await _fetch_with_retry(client, "BTC/USDT:USDT", "1m", 1_700_000_000_000)
+
+    assert client.fetch_ohlcv.await_count == 3
+    assert mock_sleep.await_count == 2

@@ -1,7 +1,7 @@
 """OHLCV 拉取共享核心：会话窗口解析 + OKX REST 分页 + 重试 + 排序去重 + 半开过滤。
 
-从 scripts/fetch_session_ohlcv.py（F7）上提，供 webui 复用（spec §A）。脚本侧按旧私名
-re-export 以零破坏既有测试；CLI / CSV / DataFrame 落盘仍留在脚本。
+从 scripts/fetch_session_ohlcv.py（F7）上提，供 webui 复用（spec §A）。后续脚本侧将按旧私名
+re-export 本模块以零破坏既有测试；CLI / CSV / DataFrame 落盘仍留在脚本。
 """
 from __future__ import annotations
 
