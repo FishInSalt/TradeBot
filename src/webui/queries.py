@@ -248,15 +248,19 @@ def _derive_open_position(sim_pos, snapshot) -> schemas.OpenPositionBrief | None
     SimPosition 平/空（None 或 contracts 0）→ None。"""
     if sim_pos is None or not sim_pos.contracts:
         return None
-    unrealized = pct = None
+    unrealized = pct = as_of = None
     if isinstance(snapshot, dict):
         sp = snapshot.get("position")
         if isinstance(sp, dict) and sp.get("side") == sim_pos.side:   # 同向闸
             unrealized = sp.get("unrealized_pnl")
             pct = sp.get("pnl_pct_of_notional")
+            if unrealized is not None:                                # 借到未实现才标盯市时刻（同源）
+                mkt = snapshot.get("market")
+                if isinstance(mkt, dict):
+                    as_of = mkt.get("fetched_at")
     return schemas.OpenPositionBrief(
         side=sim_pos.side, contracts=sim_pos.contracts, entry_price=sim_pos.entry_price,
-        unrealized_pnl=unrealized, pnl_pct_of_notional=pct,
+        unrealized_pnl=unrealized, pnl_pct_of_notional=pct, unrealized_as_of=as_of,
     )
 
 

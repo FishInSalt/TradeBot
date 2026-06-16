@@ -6,11 +6,12 @@ const setMarkers = vi.fn();
 const fitContent = vi.fn();
 const setVisibleLogicalRange = vi.fn();
 const getVisibleLogicalRange = vi.fn(() => null as unknown);
+const seriesObj = { setData, setMarkers };   // 稳定 series 引用：crosshair param.seriesData 以它为键取 OHLC
 let crosshairCb: ((p: unknown) => void) | null = null;
 
 vi.mock("lightweight-charts", () => ({
   createChart: vi.fn(() => ({
-    addCandlestickSeries: vi.fn(() => ({ setData, setMarkers })),
+    addCandlestickSeries: vi.fn(() => seriesObj),
     subscribeCrosshairMove: vi.fn((cb) => { crosshairCb = cb; }),
     // 同一组 hoisted spy（timeScale 每调返回新对象但复用 spy），便于断言视口是否被重置
     timeScale: vi.fn(() => ({ fitContent, setVisibleLogicalRange, getVisibleLogicalRange })),
@@ -149,6 +150,55 @@ describe("PriceChart", () => {
     expect(tip.exists()).toBe(true);
     expect(tip.text()).toContain("开仓");      // DerivedFill.type for first fill (no pnl, non-add = "开仓")
     expect(tip.text()).toContain("多");         // side "long" → "多"
+  });
+
+  const OHLC_DATA = (open: number, close: number) => ({ open, high: 2, low: 0.5, close });
+
+  it("hover 无成交 bar → 浮窗只含 OHLC、无成交行", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    const w = mountChart("1h");
+    await flushPromises();
+    // 9999999 不在 hoverMap（无成交）；seriesData 带该 bar OHLC
+    crosshairCb?.({ time: 9999999, point: { x: 5, y: 5 }, seriesData: new Map([[seriesObj, OHLC_DATA(1, 1.5)]]) });
+    await w.vm.$nextTick();
+    const tip = w.find(".pc-tip");
+    expect(tip.exists()).toBe(true);
+    expect(tip.find(".pc-tip-ohlc").exists()).toBe(true);   // OHLC 行存在
+    expect(tip.find(".pc-tip-row").exists()).toBe(false);   // 无成交行
+  });
+
+  it("hover 成交 bar → 浮窗含 OHLC + 成交行", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    const w = mountChart("1h");
+    await flushPromises();
+    const t = Math.floor(Date.parse("2026-06-12T10:00:00Z") / 1000);
+    crosshairCb?.({ time: t, point: { x: 10, y: 20 }, seriesData: new Map([[seriesObj, OHLC_DATA(1, 1.5)]]) });
+    await w.vm.$nextTick();
+    const tip = w.find(".pc-tip");
+    expect(tip.find(".pc-tip-ohlc").exists()).toBe(true);   // OHLC 行
+    expect(tip.find(".pc-tip-row").exists()).toBe(true);    // 成交行
+    expect(tip.text()).toContain("开仓");
+  });
+
+  it("hover 空白区（无 bar、无成交）→ 不弹浮窗", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    const w = mountChart("1h");
+    await flushPromises();
+    crosshairCb?.({ time: 8888888, point: { x: 5, y: 5 } });   // 无 seriesData、无成交
+    await w.vm.$nextTick();
+    expect(w.find(".pc-tip").exists()).toBe(false);
+  });
+
+  it("OHLC 涨跌着色：收≥开→pos、收<开→neg", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    const w = mountChart("1h");
+    await flushPromises();
+    crosshairCb?.({ time: 9999999, point: { x: 5, y: 5 }, seriesData: new Map([[seriesObj, OHLC_DATA(1, 1.5)]]) });
+    await w.vm.$nextTick();
+    expect(w.find(".pc-tip-ohlc").classes()).toContain("pos");
+    crosshairCb?.({ time: 9999999, point: { x: 5, y: 5 }, seriesData: new Map([[seriesObj, OHLC_DATA(2, 1.0)]]) });
+    await w.vm.$nextTick();
+    expect(w.find(".pc-tip-ohlc").classes()).toContain("neg");
   });
 
   it("首载 → 视口适配（jsdom 宽 0 走 fitContent 兜底）", async () => {

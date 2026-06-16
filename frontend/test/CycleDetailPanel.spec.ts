@@ -208,4 +208,27 @@ describe("CycleDetailPanel", () => {
     expect(txt).toContain("↓ below @64,400");   // 上下符号 + 英文单词配合
     expect(txt).toContain("↑ above @65,600");
   });
+
+  it("§③ 挂单逐条成行（与告警同结构）+ 微染值容器 .pending", () => {
+    const base = detail();
+    const w = mount(CycleDetailPanel, { props: { detail: { ...base,
+      state_snapshot: { ...base.state_snapshot, pending_orders: [
+        { id: "o1", order_type: "stop", side: "sell", trigger_price: 62000, amount: 1 },
+        { id: "o2", order_type: "limit", side: "buy", price: 60000, amount: 2 },
+      ] } } as any } });
+    expect(w.find(".pending").exists()).toBe(true);              // 微染值容器
+    expect(w.findAll(".pending .pending-item").length).toBe(2);  // 逐条独占一行
+    const txt = w.text();
+    expect(txt).toContain("stop");
+    expect(txt).toContain("limit");
+  });
+
+  it("§③ drift-guard：挂单用 pending 专属包裹，不动 .snap-item 全局（告警仍 .snap-item）", () => {
+    const base = detail();
+    const w = mount(CycleDetailPanel, { props: { detail: { ...base,
+      state_snapshot: { ...base.state_snapshot,
+        active_alerts: [{ id: "a1", direction: "above", price: 64000, reasoning: "x" }] } } as any } });
+    expect(w.findAll(".alerts .alert-grp .snap-item").length).toBe(1);   // 告警仍用 .snap-item
+    expect(w.find(".pending .pending-item").exists()).toBe(true);         // 挂单走 pending-item（fixture 默认 1 笔）
+  });
 });

@@ -6,6 +6,7 @@ import EquityChart from "@/components/EquityChart.vue";
 import TradesTable from "@/components/TradesTable.vue";
 import PriceChart from "@/components/PriceChart.vue";
 import { fmtNum, fmtSigned, fmtSignedPct } from "@/utils/format";
+import { fmtUtc } from "@/utils/time";
 import { deriveTradeFills, summarizeEpisodes } from "@/utils/trades";
 
 const store = useSessionsStore();
@@ -75,7 +76,7 @@ const signClass = (n: number | null | undefined) =>
         <span>{{ fmtNum(openPos.contracts, 4) }} @ {{ fmtNum(openPos.entry_price) }}</span>
         <span v-if="openPos.unrealized_pnl != null">未实现收益(毛)
           <b :class="signClass(openPos.unrealized_pnl)">{{ fmtSigned(openPos.unrealized_pnl) }}</b>
-          <span class="muted">{{ fmtSignedPct(openPos.pnl_pct_of_notional) }} · 盯市,未扣平仓费</span></span>
+          <span class="muted">{{ fmtSignedPct(openPos.pnl_pct_of_notional) }} · 盯市,未扣平仓费<template v-if="openPos.unrealized_as_of"> · 截至 {{ fmtUtc(openPos.unrealized_as_of) }}</template></span></span>
         <span class="held-fee">未平仓入场费 <b>{{ fmtNum(unrealizedEntryFee) }}</b>
           <span class="muted">已付,从净值扣</span></span>
       </div>
