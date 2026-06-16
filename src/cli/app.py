@@ -649,6 +649,10 @@ async def run_agent_cycle(
                         react_steps=None,       # webui-react-timeline §5.3: forensic 无骨架
                     ))
                     await session.commit()
+                # crash-backoff 重唤（spec §1）：仅 retry_exhausted（不含 usage_limit——病理死
+                # 循环不重试）。DB 派生连崩计数 → 指数退避，封顶 = 会话兜底间隔。None-guard +
+                # fail-isolated。须在 crash 行 commit 之后，使本行被计入 n。
+                await _schedule_crash_backoff(engine, deps, err_class)
                 # capture cycle_ended_at AFTER DB commit — 与正常路径 + UsageLimitExceeded 路径
                 # 时序对齐：Footer Duration 字段语义统一为 "实墙时间含 DB 写入"
                 cycle_ended_at = datetime.now(timezone.utc)
@@ -797,6 +801,72 @@ def _compute_max_wake(scheduler_interval_min: int) -> int:
     for invariant pinning.
     """
     return min(max(4 * scheduler_interval_min, 60), 180)
+
+
+def backoff_min(n: int, fallback: int) -> int:
+    """崩溃重唤退避分钟数（spec §1 退避曲线纯函数）。
+
+    n        = 连续 retry_exhausted 次数（≥1）。
+    fallback = scheduler_interval_min（会话兜底间隔，即封顶）。
+
+    curve: min(fallback, floor · 2^(n-1)), floor = min(2, fallback)
+      fallback=60  → 2,4,8,16,32,60(封顶),60…
+      fallback=180 → 2,4,…,128,180(封顶)
+      fallback=1   → floor 被 min(2,1) 压成 1 → 恒 1（no-op）
+
+    封顶是兜底间隔而非 wake_max_minutes：崩溃后最坏退回会话正常巡检节奏，绝不更慢。
+    """
+    floor = min(2, fallback)
+    return min(fallback, floor * 2 ** (n - 1))
+
+
+# 退避曲线在 n≈8 即饱和到 fallback（floor·2^7=256 > 最大 fallback 180），故连崩计数
+# 取到 cap 即可——超出部分既不改退避值、又能 bound 内存 + 防 2^(n-1) 大整数膨胀。
+_CRASH_STREAK_FETCH_CAP = 16
+
+
+async def _count_consecutive_retry_exhausted(engine, session_id: str) -> int:
+    """本会话尾部连续 retry_exhausted 的 cycle 数（spec §1「连续崩溃计数」）。
+
+    按 id 倒序（自增 PK 严格单调）从最新 cycle 起数，遇首个非 retry_exhausted 即止。
+    不用 created_at DESC——SQLite DateTime(timezone=True) 读回 naive（feedback_sqlite_
+    naive_datetime_readback）且同秒并列无序。fetch 上限 _CRASH_STREAK_FETCH_CAP：曲线
+    已饱和，streak ≥ cap 与 = cap 产出同一（封顶）退避。
+    """
+    async with get_session(engine) as session:
+        rows = await session.execute(
+            select(AgentCycle.execution_status)
+            .where(AgentCycle.session_id == session_id)
+            .order_by(AgentCycle.id.desc())
+            .limit(_CRASH_STREAK_FETCH_CAP)
+        )
+        n = 0
+        for (status,) in rows:
+            if status == "retry_exhausted":
+                n += 1
+            else:
+                break
+        return n
+
+
+async def _schedule_crash_backoff(engine, deps: TradingDeps, err_class: str) -> None:
+    """崩溃终态后设指数退避重唤（spec §1）。仅在 retry_exhausted 分支调用。
+
+    None-guard：set_next_wake_fn 未接线（非交互 / 单测）→ 跳过，退回默认 _interval。
+    fail-isolation：计数查询自身失败 → 回退 n=1（floor），不让计数错误二次击穿崩溃路径。
+    """
+    if deps.set_next_wake_fn is None:
+        return
+    fallback = deps.scheduler_interval_min
+    try:
+        n = await _count_consecutive_retry_exhausted(engine, deps.session_id)
+    except Exception:
+        logger.warning("crash-backoff count query failed; falling back to floor", exc_info=True)
+        n = 1
+    n = max(1, n)   # 防御：崩溃行已 commit 故 ≥1，但守住 backoff_min 的 n≥1 契约
+    minutes = backoff_min(n, fallback)
+    deps.set_next_wake_fn(minutes, f"crash-backoff: {err_class}")
+    logger.info("crash-backoff: n=%d → next wake in %dmin (%s)", n, minutes, err_class)
 
 
 async def _capture_session_system_prompt(
@@ -973,6 +1043,7 @@ async def build_services(
         onchain=onchain_service,
         wake_min_minutes=1,
         wake_max_minutes=max_wake,
+        scheduler_interval_min=result.scheduler_interval_min,   # spec §1: 退避封顶来源
     )
 
     # R2-5 PR #34 I-A: prompt range (RuntimeConfig) and clamp authority (TradingDeps)

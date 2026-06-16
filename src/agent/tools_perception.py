@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING, Literal
 
 from src.integrations.news.models import extract_base_currency
+from src.services.tool_call_recorder import note_biz_error
 
 if TYPE_CHECKING:
     from src.agent.trader import TradingDeps
@@ -99,6 +100,9 @@ async def get_market_data(
         return f"Error: {e}"
     candle_count = max(10, min(candle_count, 80))
 
+    # 故意不 catch（spec §3）：primary 市场数据（ticker / OHLCV）不可用时，让 agent 在
+    # "看不见市场"下硬决策更糟——异常穿透 → cycle abort → 由 §1 crash-backoff 重唤恢复。
+    # 与 §2 自收敛降级（note_biz_error）的策略明确区分：那是软信号源缺一仍可决策。
     ticker = await deps.market_data.get_ticker(symbol)
     live_price = _live_price(ticker)
     now_dt = datetime.now(timezone.utc)
@@ -999,6 +1003,7 @@ async def get_exchange_announcements(
         exc_class_name = e.__class__.__name__
 
     if announcements is None:
+        note_biz_error("source_unavailable")
         suffix = f" ({exc_class_name})" if exc_class_name else ""
         return (
             f"=== Exchange Announcements (past {lookback_hours}h @ {fetch_ts} UTC) ===\n"
@@ -1042,6 +1047,7 @@ async def get_macro_calendar(
     sections: list[str] = []
 
     if macro_events is None:
+        note_biz_error("source_unavailable")
         sections.append(
             f"=== Upcoming Macro Events (next {lookahead_hours}h @ {fetch_ts} UTC) ===\n"
             "Error: Temporarily unavailable."
@@ -1335,6 +1341,7 @@ async def get_taker_flow(deps: TradingDeps, period: str = "5m", limit: int = 12)
         bars = await deps.market_data.get_taker_flow(symbol, period, n)
     except Exception as e:
         logger.exception("get_taker_flow main fetch failed for %s", symbol)
+        note_biz_error("source_unavailable")
         return f"{header}\nTaker flow temporarily unavailable ({e.__class__.__name__})."
     if not bars:
         return f"{header}\nNo taker-volume data available."
@@ -1398,6 +1405,7 @@ async def get_derivatives_data(
         and isinstance(oi_hist, Exception)
         and isinstance(lsr, Exception)
     ):
+        note_biz_error("source_unavailable")
         return (
             f"=== Derivatives Data ({symbol}) ===\n"
             f"Error: Temporarily unavailable (all 3 data sources failed)."
@@ -1537,6 +1545,7 @@ async def get_higher_timeframe_view(
         live_price = _live_price(ticker)
     except Exception:
         logger.warning("HTF ticker fetch failed for %s", symbol, exc_info=True)
+        note_biz_error("source_unavailable")
         return f"=== Higher Timeframe View ({symbol}) ===\nError: Temporarily unavailable."
 
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -1733,6 +1742,7 @@ async def get_macro_context(deps: TradingDeps) -> str:
         snap = await deps.macro.get_snapshot()
     except Exception:
         logger.warning("Macro snapshot fetch failed", exc_info=True)
+        note_biz_error("source_unavailable")
         return (
             f"=== Macro Context (@ {fetch_ts} UTC) ===\n"
             "Error: Temporarily unavailable."
@@ -1805,6 +1815,7 @@ async def get_macro_context(deps: TradingDeps) -> str:
         sections.append("\n".join(lines))
 
     if not any_available:
+        note_biz_error("source_unavailable")
         return (
             f"=== Macro Context (@ {fetch_ts} UTC) ===\n"
             "Error: All sources temporarily unavailable."
@@ -1883,6 +1894,7 @@ async def get_etf_flows(deps: TradingDeps, days: int = 7) -> str:
     ]
 
     if btc is None and eth is None:
+        note_biz_error("source_unavailable")
         return (
             f"=== BTC Spot ETF Flows (US @ {fetch_ts} UTC) ===\n"
             "Error: Temporarily unavailable."
@@ -1926,12 +1938,14 @@ async def get_stablecoin_supply(deps: TradingDeps) -> str:
         result = await deps.onchain.get_stablecoin_snapshot()
     except Exception:
         logger.warning("Stablecoin snapshot fetch failed", exc_info=True)
+        note_biz_error("source_unavailable")
         return (
             "=== Stablecoin Supply ===\n"
             "Error: Temporarily unavailable."
         )
 
     if result is None:
+        note_biz_error("source_unavailable")
         return (
             "=== Stablecoin Supply ===\n"
             "Error: Temporarily unavailable."
@@ -1991,6 +2005,7 @@ async def get_order_book(deps: TradingDeps, depth: int = ORDER_BOOK_DEPTH_DEFAUL
         ob = await deps.market_data.get_order_book(symbol, depth=depth)
     except Exception as e:
         logger.exception("get_order_book failed for %s", symbol)
+        note_biz_error("source_unavailable")
         return (
             f"=== Order Book ({symbol} @ {fetch_ts} UTC) ===\n"
             f"Error: Temporarily unavailable ({e.__class__.__name__})."
@@ -2106,6 +2121,7 @@ async def get_recent_trades(deps: TradingDeps) -> str:
         trades = await deps.market_data.get_recent_trades(symbol, limit=RECENT_TRADES_MAX_FETCH)
     except Exception as e:
         logger.exception("get_recent_trades failed for %s", symbol)
+        note_biz_error("source_unavailable")
         return f"=== Recent Trades ({symbol} · @ {fetch_ts} UTC) ===\nRecent trades temporarily unavailable ({e.__class__.__name__})."
     if not trades:
         return f"=== Recent Trades ({symbol} · @ {fetch_ts} UTC) ===\nNo recent trades."
@@ -2209,6 +2225,7 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
         live_price = _live_price(ticker)
     except Exception:
         logger.exception("get_multi_timeframe_snapshot ticker fetch failed for %s", symbol)
+        note_biz_error("source_unavailable")
         return f"=== Multi-TF Snapshot ({symbol}) ===\nError: Temporarily unavailable."
 
     fetch_ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -2232,6 +2249,7 @@ async def get_multi_timeframe_snapshot(deps: TradingDeps, tfs: list[str] | None 
     results = await asyncio.gather(*[_fetch_one(tf) for tf in tfs])
 
     if all(isinstance(r[1], Exception) for r in results):
+        note_biz_error("source_unavailable")
         return (
             f"=== Multi-TF Snapshot ({symbol}) ===\n"
             f"Error: Temporarily unavailable (all timeframes failed)."
@@ -2511,6 +2529,7 @@ async def get_price_pivots(deps: TradingDeps) -> str:
         current_price = ticker.last
     except Exception:
         logger.exception("get_price_pivots ticker fetch failed for %s", symbol)
+        note_biz_error("source_unavailable")
         return (
             f"=== Price Pivots ({symbol}, main TF: {main_tf} @ {fetch_ts} UTC) ===\n"
             f"Error: Temporarily unavailable."
