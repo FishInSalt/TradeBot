@@ -232,3 +232,38 @@ async def test_market_news_not_configured_stays_ok():
     result, biz = await _biz_after(get_market_news(MockDeps(news=None)))
     assert "not configured" in result.lower()
     assert biz is None
+
+
+# ============ §3 崩溃穿透：get_market_data / get_open_orders 不降级、不打点 ============
+
+@pytest.mark.asyncio
+async def test_get_market_data_ticker_outage_propagates():
+    """primary 市场数据不可用必须 abort cycle（由 crash-backoff 恢复）：异常穿透，不记 biz_error。"""
+    from src.agent.tools_perception import get_market_data
+    md = SimpleNamespace(get_ticker=AsyncMock(side_effect=RuntimeError("ticker down")))
+    token = _biz_error_type.set(None)
+    try:
+        with pytest.raises(RuntimeError, match="ticker down"):
+            await get_market_data(MockDeps(market_data=md))
+        assert _biz_error_type.get() is None, "get_market_data 不得降级 / 打 biz_error"
+    finally:
+        _biz_error_type.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_get_open_orders_ticker_outage_propagates():
+    """get_open_orders ticker 裸调（real-net）：超时穿透崩溃，行为本 iter 不改。
+
+    get_open_orders 在 fetch_open_orders 返回非空列表后，直接调 get_ticker（line 567），
+    无任何 order 属性访问在先——[object()] 足以让执行走到 ticker 处。
+    """
+    from src.agent.tools_perception import get_open_orders
+    exchange = SimpleNamespace(fetch_open_orders=AsyncMock(return_value=[object()]))  # 非空 → 走到 ticker
+    md = SimpleNamespace(get_ticker=AsyncMock(side_effect=RuntimeError("ticker down")))
+    token = _biz_error_type.set(None)
+    try:
+        with pytest.raises(RuntimeError, match="ticker down"):
+            await get_open_orders(MockDeps(exchange=exchange, market_data=md))
+        assert _biz_error_type.get() is None
+    finally:
+        _biz_error_type.reset(token)

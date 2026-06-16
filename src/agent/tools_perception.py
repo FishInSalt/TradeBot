@@ -100,6 +100,9 @@ async def get_market_data(
         return f"Error: {e}"
     candle_count = max(10, min(candle_count, 80))
 
+    # 故意不 catch（spec §3）：primary 市场数据（ticker / OHLCV）不可用时，让 agent 在
+    # "看不见市场"下硬决策更糟——异常穿透 → cycle abort → 由 §1 crash-backoff 重唤恢复。
+    # 与 §2 自收敛降级（note_biz_error）的策略明确区分：那是软信号源缺一仍可决策。
     ticker = await deps.market_data.get_ticker(symbol)
     live_price = _live_price(ticker)
     now_dt = datetime.now(timezone.utc)
