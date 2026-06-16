@@ -40,3 +40,52 @@ def test_trading_deps_has_scheduler_interval_min_field():
 def test_backoff_min_curve(n, fallback, expected):
     from src.cli.app import backoff_min
     assert backoff_min(n, fallback) == expected
+
+
+async def _add_cycle(db_session, session_id, status):
+    db_session.add(AgentCycle(
+        session_id=session_id, cycle_id="c", triggered_by="scheduled",
+        execution_status=status,
+    ))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_count_consecutive_retry_exhausted_stops_at_first_non_re(db_engine, db_session):
+    """末尾连续 retry_exhausted 计数，遇首个非 RE（含中间夹 ok）即止。"""
+    from src.cli.app import _count_consecutive_retry_exhausted
+
+    # 插入顺序 = id 升序；newest-first 看尾部：RE, RE, ok(止)
+    for st in ["ok", "ok", "retry_exhausted", "ok", "retry_exhausted", "retry_exhausted"]:
+        await _add_cycle(db_session, "sess-A", st)
+
+    n = await _count_consecutive_retry_exhausted(db_engine, "sess-A")
+    assert n == 2
+
+
+@pytest.mark.asyncio
+async def test_count_consecutive_single_crash(db_engine, db_session):
+    """会话首个 cycle 即崩 → n=1。"""
+    from src.cli.app import _count_consecutive_retry_exhausted
+    await _add_cycle(db_session, "sess-B", "retry_exhausted")
+    assert await _count_consecutive_retry_exhausted(db_engine, "sess-B") == 1
+
+
+@pytest.mark.asyncio
+async def test_count_consecutive_is_session_scoped(db_engine, db_session):
+    """计数只看本会话；别的会话的 RE 不串味。"""
+    from src.cli.app import _count_consecutive_retry_exhausted
+    await _add_cycle(db_session, "sess-C", "retry_exhausted")
+    await _add_cycle(db_session, "sess-D", "retry_exhausted")
+    await _add_cycle(db_session, "sess-D", "retry_exhausted")
+    assert await _count_consecutive_retry_exhausted(db_engine, "sess-C") == 1
+    assert await _count_consecutive_retry_exhausted(db_engine, "sess-D") == 2
+
+
+@pytest.mark.asyncio
+async def test_count_consecutive_capped(db_engine, db_session):
+    """连崩超过 fetch cap → 返回 cap（曲线已饱和，超出部分无意义）。"""
+    from src.cli.app import _count_consecutive_retry_exhausted, _CRASH_STREAK_FETCH_CAP
+    for _ in range(_CRASH_STREAK_FETCH_CAP + 5):
+        await _add_cycle(db_session, "sess-E", "retry_exhausted")
+    assert await _count_consecutive_retry_exhausted(db_engine, "sess-E") == _CRASH_STREAK_FETCH_CAP

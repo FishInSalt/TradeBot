@@ -816,6 +816,35 @@ def backoff_min(n: int, fallback: int) -> int:
     return min(fallback, floor * 2 ** (n - 1))
 
 
+# 退避曲线在 n≈8 即饱和到 fallback（floor·2^7=256 > 最大 fallback 180），故连崩计数
+# 取到 cap 即可——超出部分既不改退避值、又能 bound 内存 + 防 2^(n-1) 大整数膨胀。
+_CRASH_STREAK_FETCH_CAP = 16
+
+
+async def _count_consecutive_retry_exhausted(engine, session_id: str) -> int:
+    """本会话尾部连续 retry_exhausted 的 cycle 数（spec §1「连续崩溃计数」）。
+
+    按 id 倒序（自增 PK 严格单调）从最新 cycle 起数，遇首个非 retry_exhausted 即止。
+    不用 created_at DESC——SQLite DateTime(timezone=True) 读回 naive（feedback_sqlite_
+    naive_datetime_readback）且同秒并列无序。fetch 上限 _CRASH_STREAK_FETCH_CAP：曲线
+    已饱和，streak ≥ cap 与 = cap 产出同一（封顶）退避。
+    """
+    async with get_session(engine) as session:
+        rows = await session.execute(
+            select(AgentCycle.execution_status)
+            .where(AgentCycle.session_id == session_id)
+            .order_by(AgentCycle.id.desc())
+            .limit(_CRASH_STREAK_FETCH_CAP)
+        )
+        n = 0
+        for (status,) in rows:
+            if status == "retry_exhausted":
+                n += 1
+            else:
+                break
+        return n
+
+
 async def _capture_session_system_prompt(
     engine,
     session_id: str,
