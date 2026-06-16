@@ -14,6 +14,8 @@ export type LiveStatus = S["LiveStatus"];
 export type PositionInfo = S["PositionInfo"];
 export type OrderInfo = S["OrderInfo"];
 export type AlertInfo = S["AlertInfo"];
+export type OhlcvBar = S["OhlcvBar"];
+export type OhlcvSeries = S["OhlcvSeries"];
 
 export class ApiError extends Error {
   constructor(
@@ -53,4 +55,8 @@ export const api = {
   getCycle: (pk: number) => get<CycleDetail>(`/cycles/${pk}`),
   getPerformance: (sid: string) => get<Performance>(`/sessions/${encodeURIComponent(sid)}/performance`),
   getLive: (sid: string) => get<LiveStatus>(`/sessions/${encodeURIComponent(sid)}/live`),
+  getOhlcv: (sid: string, tf?: string) => {
+    const qs = tf ? `?timeframe=${encodeURIComponent(tf)}` : "";
+    return get<OhlcvSeries>(`/sessions/${encodeURIComponent(sid)}/ohlcv${qs}`);
+  },
 };
