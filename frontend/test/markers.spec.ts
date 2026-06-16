@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toCandleData, snapToBarTime, toMarkers, POS_HEX, NEG_HEX, MUTED_HEX } from "@/utils/markers";
+import { toCandleData, snapToBarTime, toMarkers, clampBarSpacing, POS_HEX, NEG_HEX, MUTED_HEX } from "@/utils/markers";
 import { deriveTradeFills } from "@/utils/trades";
 import { epochSec } from "@/utils/time";
 import type { TradeRow, OhlcvBar } from "@/api/client";
@@ -38,6 +38,22 @@ describe("snapToBarTime", () => {
   });
   it("atSec 精确等于某非首 bar → 返回该 bar（<= 语义）", () => {
     expect(snapToBarTime(t("2026-06-12T10:05:00Z"), barTimes)).toBe(t("2026-06-12T10:05:00Z"));
+  });
+});
+
+describe("clampBarSpacing", () => {
+  it("理想间距落 [min,max] 内 → 原样返回", () => {
+    expect(clampBarSpacing(800, 100, 3, 16)).toBeCloseTo(8);   // 800/100 = 8
+  });
+  it("粗周期 bar 少 → 夹到 max（蜡烛不膨胀）", () => {
+    expect(clampBarSpacing(1000, 10, 3, 16)).toBe(16);          // 100 > 16
+  });
+  it("细周期 bar 多 → 夹到 min（保可读）", () => {
+    expect(clampBarSpacing(1000, 2000, 3, 16)).toBe(3);         // 0.5 < 3
+  });
+  it("bar ≤ 1 或宽 ≤ 0 → max（退化兜底）", () => {
+    expect(clampBarSpacing(1000, 1, 3, 16)).toBe(16);
+    expect(clampBarSpacing(0, 100, 3, 16)).toBe(16);
   });
 });
 

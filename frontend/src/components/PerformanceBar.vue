@@ -14,6 +14,8 @@ const showTrades = ref(false);
 
 const perf = computed(() => store.performance);
 const detail = computed(() => store.detail);
+// cycles 维护为 id DESC，首元即最新 cycle id；驱动 PriceChart 在新 cycle 时追平（不每 5s 复位）
+const latestCycleId = computed(() => (store.cycles.length ? store.cycles[0].id : null));
 const fills = computed(() => (perf.value ? deriveTradeFills(perf.value.trades) : []));
 const summary = computed(() => summarizeEpisodes(fills.value));
 
@@ -85,6 +87,7 @@ const signClass = (n: number | null | undefined) =>
           :symbol="detail.symbol"
           :default-timeframe="detail.timeframe"
           :trades="perf.trades"
+          :latest-cycle-id="latestCycleId"
         />
       </div>
 

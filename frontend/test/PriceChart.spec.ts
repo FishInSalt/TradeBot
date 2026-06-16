@@ -3,13 +3,16 @@ import { mount, flushPromises } from "@vue/test-utils";
 
 const setData = vi.fn();
 const setMarkers = vi.fn();
+const fitContent = vi.fn();
+const setVisibleLogicalRange = vi.fn();
 let crosshairCb: ((p: unknown) => void) | null = null;
 
 vi.mock("lightweight-charts", () => ({
   createChart: vi.fn(() => ({
     addCandlestickSeries: vi.fn(() => ({ setData, setMarkers })),
     subscribeCrosshairMove: vi.fn((cb) => { crosshairCb = cb; }),
-    timeScale: vi.fn(() => ({ fitContent: vi.fn() })),
+    // 同一组 hoisted spy（timeScale 每调返回新对象但复用 spy），便于断言视口是否被重置
+    timeScale: vi.fn(() => ({ fitContent, setVisibleLogicalRange })),
     remove: vi.fn(),
   })),
 }));
@@ -34,13 +37,17 @@ const SERIES = {
   bars: [{ at: "2026-06-12T10:00:00Z", open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 }],
 };
 
-const mountChart = (defaultTimeframe = "1h") =>
-  mount(PriceChart, { props: { sessionId: "s1", symbol: "BTC/USDT:USDT", defaultTimeframe, trades: TRADES } });
+const mountChart = (defaultTimeframe = "1h", latestCycleId: number | null = 1) =>
+  mount(PriceChart, {
+    props: { sessionId: "s1", symbol: "BTC/USDT:USDT", defaultTimeframe, trades: TRADES, latestCycleId },
+  });
 
 beforeEach(() => {
   getOhlcv.mockReset();
   setData.mockReset();
   setMarkers.mockReset();
+  fitContent.mockReset();
+  setVisibleLogicalRange.mockReset();
   crosshairCb = null;
 });
 
@@ -127,6 +134,50 @@ describe("PriceChart", () => {
     expect(tip.exists()).toBe(true);
     expect(tip.text()).toContain("开仓");      // DerivedFill.type for first fill (no pnl, non-add = "开仓")
     expect(tip.text()).toContain("多");         // side "long" → "多"
+  });
+
+  it("首载 → 视口适配（jsdom 宽 0 走 fitContent 兜底）", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    mountChart("1h");
+    await flushPromises();
+    expect(fitContent).toHaveBeenCalled();
+  });
+
+  it("新 cycle（latestCycleId 变大）→ 重新 getOhlcv 同步 bar/markers，但不重置视口", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    const w = mountChart("1h", 1);
+    await flushPromises();
+    getOhlcv.mockClear(); fitContent.mockClear(); setVisibleLogicalRange.mockClear(); setMarkers.mockClear();
+    await w.setProps({ latestCycleId: 2 });
+    await flushPromises();
+    expect(getOhlcv).toHaveBeenCalledTimes(1);          // 追平：重拉 OHLCV
+    expect(setMarkers).toHaveBeenCalled();               // 重绘 markers（仓位变化）
+    expect(fitContent).not.toHaveBeenCalled();           // 视口不重置
+    expect(setVisibleLogicalRange).not.toHaveBeenCalled();
+  });
+
+  it("新成交落地（trades 数变）→ 同步、不重置视口", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    const w = mountChart("1h", 1);
+    await flushPromises();
+    getOhlcv.mockClear(); fitContent.mockClear(); setMarkers.mockClear();
+    await w.setProps({ trades: [...TRADES, { ...TRADES[0], at: "2026-06-12T11:00:00Z" }] });
+    await flushPromises();
+    expect(getOhlcv).toHaveBeenCalledTimes(1);
+    expect(setMarkers).toHaveBeenCalled();
+    expect(fitContent).not.toHaveBeenCalled();
+  });
+
+  it("5s 轮询同内容（trades 换新引用、cycle/笔数不变）→ 不重拉、不重绘、不复位（修复每 5s 重置）", async () => {
+    getOhlcv.mockResolvedValue(SERIES);
+    const w = mountChart("1h", 1);
+    await flushPromises();
+    getOhlcv.mockClear(); fitContent.mockClear(); setMarkers.mockClear();
+    await w.setProps({ trades: [...TRADES] });          // 新数组引用、同长度、latestCycleId 不变
+    await flushPromises();
+    expect(getOhlcv).not.toHaveBeenCalled();
+    expect(setMarkers).not.toHaveBeenCalled();
+    expect(fitContent).not.toHaveBeenCalled();
   });
 
   it("getOhlcv 抛非 ApiError（如 TypeError）→ 也进错误占位、不致 unhandled rejection", async () => {

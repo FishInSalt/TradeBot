@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { createChart, type IChartApi, type ISeriesApi } from "lightweight-charts";
 import { NRadioGroup, NRadioButton } from "naive-ui";
 import { api, ApiError, type OhlcvBar, type TradeRow } from "@/api/client";
 import { deriveTradeFills, type DerivedFill } from "@/utils/trades";
-import { toCandleData, snapToBarTime, toMarkers, POS_HEX, NEG_HEX } from "@/utils/markers";
+import { toCandleData, snapToBarTime, toMarkers, clampBarSpacing, POS_HEX, NEG_HEX } from "@/utils/markers";
 import { epochSec } from "@/utils/time";
 import { fmtNum, fmtSigned } from "@/utils/format";
 
@@ -13,10 +13,13 @@ const props = defineProps<{
   symbol: string;
   defaultTimeframe: string;
   trades: TradeRow[];
+  latestCycleId: number | null;   // 最新 cycle id（DESC 首元）；变化 → 追平 bar/markers，见 syncSig
 }>();
 
 const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 const FOLD: Record<string, string> = { H: "h", D: "d", W: "w" };
+const MIN_BAR_SPACING = 3;        // px：细周期下限，保蜡烛可读
+const MAX_BAR_SPACING = 16;       // px：粗周期上限，防蜡烛膨胀
 
 function normalizeTf(tf: string): string {
   const m = /^(\d+)([a-zA-Z])$/.exec((tf ?? "").trim());
@@ -37,27 +40,27 @@ let hoverMap = new Map<number, DerivedFill[]>();
 let unmounted = false;
 let loadSeq = 0;
 
-async function load() {
+// fit=true：首载 / 切 tf —— 重拉并重置视口（applyViewport）。
+// fit=false：新 cycle / 新成交追平 —— 重拉补尾部新 bar + 重绘 markers，但保留用户当前缩放/平移。
+async function load(fit: boolean) {
   const seq = ++loadSeq;
-  loading.value = true;
-  error.value = false;
-  hover.value = null;
+  if (fit) { loading.value = true; error.value = false; hover.value = null; }   // 同步态后台静默，不闪加载占位
   try {
     const s = await api.getOhlcv(props.sessionId, tf.value);
-    if (unmounted || seq !== loadSeq) return;          // 已卸载 / 被更新的请求取代 → 丢弃，不渲染（不重置视口）
+    if (unmounted || seq !== loadSeq) return;          // 已卸载 / 被更新的请求取代 → 丢弃
     bars.value = s.bars;
-    render();                                          // 仅最新且未卸载才渲染（含 fitContent）
+    render(fit);
   } catch (e) {
     if (unmounted || seq !== loadSeq) return;          // 陈旧/卸载后的错误不落地
-    // ApiError 与非预期错统一显错误占位；非预期错额外 console.error（不静默吞、也不抛成 unhandled rejection）
+    // ApiError 与非预期错统一处理；非预期错额外 console.error（不静默吞、也不抛成 unhandled rejection）
     if (!(e instanceof ApiError)) console.error("PriceChart 价格数据加载失败", e);
-    error.value = true;
+    if (fit) error.value = true;                       // 仅首载/切 tf 显错误占位；同步失败不毁现有图
   } finally {
-    if (!unmounted && seq === loadSeq) loading.value = false;
+    if (fit && !unmounted && seq === loadSeq) loading.value = false;
   }
 }
 
-function render() {
+function render(fit: boolean) {
   if (!series) return;
   const candles = toCandleData(bars.value);
   const barTimes = candles.map((c) => c.time as number);
@@ -71,7 +74,19 @@ function render() {
     arr.push(f);
     hoverMap.set(key, arr);
   }
-  chart?.timeScale().fitContent();
+  if (fit) applyViewport(barTimes.length);             // fit=false 不碰 timeScale → 保留视口
+}
+
+// 按 clamp 间距设可见逻辑范围：from=-0.5 左锚首根，to 反算可见逻辑宽（图宽/间距）。
+// 粗周期 → 右侧留白、蜡烛不膨胀；细周期 → 左锚会话起点（首批买卖点在视野内）、可横向滚动。
+function applyViewport(barCount: number) {
+  const ts = chart?.timeScale();
+  if (!ts) return;
+  const width = el.value?.clientWidth ?? 0;
+  if (width <= 0 || barCount < 1) { ts.fitContent(); return; }   // 未布局 / 无数据 → 兜底
+  // barCount===1 也走 clamp（间距取 max）：避免单根 bar 被 fitContent 拉满全宽变"巨型蜡烛"
+  const spacing = clampBarSpacing(width, barCount, MIN_BAR_SPACING, MAX_BAR_SPACING);
+  ts.setVisibleLogicalRange({ from: -0.5, to: width / spacing - 0.5 });
 }
 
 onMounted(() => {
@@ -93,11 +108,15 @@ onMounted(() => {
     if (t == null || !param.point || !hoverMap.has(t)) { hover.value = null; return; }
     hover.value = { x: param.point.x, y: param.point.y, fills: hoverMap.get(t)! };
   });
-  load();
+  load(true);
 });
 
-watch(tf, load);
-watch(() => props.trades, () => { if (!unmounted && bars.value.length) render(); }, { deep: true });
+// 同步信号：仅在「新 cycle」或「成交笔数变化」时追平——避开 5s 轮询每拍换新引用却内容不变的复位。
+// 覆盖两类：cycle 推进（可能跨新 bar，即便无成交）+ 成交落地（含 mid-cycle 同 id 下笔数增长）。
+const syncSig = computed(() => `${props.latestCycleId ?? ""}:${props.trades.length}`);
+
+watch(tf, () => load(true));                                   // 切 tf：重拉 + 重置视口
+watch(syncSig, () => { if (!unmounted) load(false); });        // 追平：重拉 + 重绘，保留视口
 
 onUnmounted(() => {
   unmounted = true;
