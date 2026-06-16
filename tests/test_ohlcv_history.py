@@ -160,3 +160,25 @@ async def test_fetch_ohlcv_window_rejects_unsupported_tf():
     with pytest.raises(ValueError, match="unsupported timeframe"):
         await fetch_ohlcv_window("BTC/USDT:USDT", "30m", 1_700_000_000_000,
                                  1_700_000_000_000 + 10 * 60_000)
+
+
+def test_merge_bars_overlap_new_wins_and_sorts():
+    """按 ts merge：new 覆盖 old（边界未收完 bar 刷新），结果升序。"""
+    from src.services.ohlcv_history import merge_bars
+    old = [[1000, 1, 2, 0.5, 1.5, 10], [2000, 2, 3, 1.5, 2.5, 20]]
+    new = [[2000, 2, 9, 1.0, 8.0, 99], [3000, 8, 9, 7, 8.5, 30]]   # 2000 重叠 + 3000 新
+    out = merge_bars(old, new)
+    assert [r[0] for r in out] == [1000, 2000, 3000]               # 升序、去重
+    assert out[1] == [2000, 2, 9, 1.0, 8.0, 99]                    # new 胜（边界刷新）
+
+
+def test_merge_bars_empty_tail_returns_old():
+    from src.services.ohlcv_history import merge_bars
+    old = [[1000, 1, 2, 0.5, 1.5, 10], [2000, 2, 3, 1.5, 2.5, 20]]
+    assert merge_bars(old, []) == old
+
+
+def test_merge_bars_empty_old_returns_new_sorted():
+    from src.services.ohlcv_history import merge_bars
+    new = [[2000, 2, 3, 1, 2, 5], [1000, 1, 2, 0.5, 1.5, 10]]      # 乱序输入
+    assert merge_bars([], new) == [[1000, 1, 2, 0.5, 1.5, 10], [2000, 2, 3, 1, 2, 5]]

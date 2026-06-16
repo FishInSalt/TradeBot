@@ -448,6 +448,44 @@ async def test_get_cycles_key_events_passive_fills_and_dedup(engine):
     # 同轮：被动 fill 在前、主动动作在后；全平后 snapshot 空仓 → prev_side=None → open（非 flip）
     assert [e.kind for e in by["dual1"].key_events] == ["fill_close", "open"]
     assert by["dual1"].key_events[1].label == "开空"
+    # trigger / action 一律 mid_cycle=False
+    assert all(e.mid_cycle is False for e in by["dual1"].key_events)
+
+
+@pytest.mark.asyncio
+async def test_get_cycles_key_events_midcycle_injected_fills(engine):
+    """cycle 运行中注入的 fill（injected_events）进 key_events、mid_cycle=True；
+    market 回声跳过；混合时顺序 = trigger fill → action → mid-cycle fill。"""
+    from src.webui.queries import _classify_fill
+    await _seed_session(engine)
+    # 仅注入止损全平（无 trigger fill、无 action）→ 1 条 mid_cycle=True
+    await _add_cycle(engine, cycle_id="mid1",
+                     injected_events=[{"event": _fill("stop", pnl=-50.0, full=True, side="short"),
+                                       "after_tool": "get_position", "offset_ms": 30_000}])
+    # 注入 market 回声 → 跳过（与 trigger 路径一致）
+    await _add_cycle(engine, cycle_id="midmkt1",
+                     injected_events=[{"event": _fill("market", pnl=10.0, full=True), "offset_ms": 1}])
+    # 混合：trigger fill_open + action add + 注入 fill_close → 3 条，flag + 顺序正确
+    await _add_cycle(engine, cycle_id="midmix1",
+                     trigger_context=[_fill("limit", pnl=None, side="long")],
+                     snapshot='{"position":{"side":"long","contracts":2.0,"entry_price":63000.0}}',
+                     injected_events=[{"event": _fill("stop", pnl=-30.0, full=True, side="long"),
+                                       "offset_ms": 5000}])
+    await _add_tool(engine, "midmix1", "open_position", {"side": "long"})
+    from src.webui.queries import get_cycles
+    by = {r.cycle_label: r for r in await get_cycles(engine, "s1")}
+    # 仅注入止损 → fill_close, mid_cycle=True
+    assert [e.kind for e in by["mid1"].key_events] == ["fill_close"]
+    assert by["mid1"].key_events[0].mid_cycle is True
+    # drift-guard：注入路 label 与 _classify_fill 单源直算逐字一致（无重复分类逻辑）
+    assert by["mid1"].key_events[0].label == _classify_fill(
+        _fill("stop", pnl=-50.0, full=True, side="short")).label
+    # market 回声跳过
+    assert by["midmkt1"].key_events == []
+    # 混合：顺序 trigger → action → mid-cycle；flag 正确
+    ev = by["midmix1"].key_events
+    assert [e.kind for e in ev] == ["fill_open", "add", "fill_close"]
+    assert [e.mid_cycle for e in ev] == [False, False, True]
 
 
 @pytest.mark.asyncio
@@ -897,3 +935,64 @@ async def test_get_ohlcv_explicit_valid_tf_used_directly(engine, monkeypatch):
     assert series.timeframe == "4h"                       # 用显式 tf，非会话 1h
     # fetch 收到的 timeframe 参数是 4h（透传，位置参数 args[1]）
     assert fetch.await_args.args[1] == "4h"
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_incremental_fetches_only_tail(engine, tmp_path, monkeypatch):
+    """活跃会话窗口增长（end_ms > 缓存 fetched_end）→ 只拉 [last_ts, end_ms) 尾部、merge、重写 fetched_end。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h", hours=2)
+    start = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    start_ms, mid_ms, end_ms = _ms(start), _ms(start + timedelta(hours=1)), _ms(start + timedelta(hours=2))
+    cache_dir = tmp_path / "ohlcv_cache"
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: cache_dir)
+    # 预置陈旧缓存：只拉到 mid（start+1h），缺 [mid, end) 那段
+    ohlcv_cache.write(cache_dir, "s1", "1h", "BTC/USDT:USDT", mid_ms,
+                      [[start_ms, 1, 1, 1, 1, 1], [mid_ms, 2, 2, 2, 2, 2]])
+    # 尾部含边界 mid（刷新成 9/99）+ 新 end
+    fetch = AsyncMock(return_value=[[mid_ms, 9, 9, 9, 9, 99], [end_ms, 3, 3, 3, 3, 3]])
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", fetch)
+
+    series = await queries.get_ohlcv(engine, "s1", "1h")
+    # 只拉尾部：入参 (last_ts=mid_ms, end_ms)，非 (start_ms, end_ms)
+    assert fetch.await_count == 1
+    assert (fetch.await_args.args[2], fetch.await_args.args[3]) == (mid_ms, end_ms)
+    # merge：边界 mid 被 new 刷新，3 根升序
+    assert [int(b.at.timestamp() * 1000) for b in series.bars] == [start_ms, mid_ms, end_ms]
+    assert series.bars[1].open == 9.0 and series.bars[1].volume == 99.0
+    # 缓存重写 fetched_end=end_ms → 第二次开变全命中、不再 fetch
+    assert ohlcv_cache.read_raw(cache_dir, "s1", "1h")["fetched_end_ms"] == end_ms
+    await queries.get_ohlcv(engine, "s1", "1h")
+    assert fetch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_cold_fetches_full_window(engine, tmp_path, monkeypatch):
+    """无缓存（冷启动）→ 全量拉 [start_ms, end_ms)。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h", hours=2)
+    start = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    start_ms, end_ms = _ms(start), _ms(start + timedelta(hours=2))
+    cache_dir = tmp_path / "ohlcv_cache"
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: cache_dir)
+    fetch = AsyncMock(return_value=[[start_ms, 1, 1, 1, 1, 1]])
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", fetch)
+    await queries.get_ohlcv(engine, "s1", "1h")
+    assert (fetch.await_args.args[2], fetch.await_args.args[3]) == (start_ms, end_ms)
+
+
+@pytest.mark.asyncio
+async def test_get_ohlcv_corrupt_cache_falls_to_cold(engine, tmp_path, monkeypatch):
+    """损坏缓存 → read_raw None → 冷启动全量（从 start_ms）。"""
+    from src.webui import queries, ohlcv_cache
+    await _seed_session_with_window(engine, "s1", timeframe="1h", hours=2)
+    start = datetime(2026, 5, 15, 12, 0, tzinfo=UTC)
+    start_ms = _ms(start)
+    cache_dir = tmp_path / "ohlcv_cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "s1_1h.json").write_text("{corrupt")
+    monkeypatch.setattr(ohlcv_cache, "cache_dir_for", lambda eng: cache_dir)
+    fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(queries, "fetch_ohlcv_window", fetch)
+    await queries.get_ohlcv(engine, "s1", "1h")
+    assert fetch.await_args.args[2] == start_ms

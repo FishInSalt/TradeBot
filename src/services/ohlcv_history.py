@@ -102,6 +102,16 @@ async def _paginate_ohlcv(
     return rows
 
 
+def merge_bars(old: list[list], new: list[list]) -> list[list]:
+    """按 ts merge 两段裸行：new 覆盖 old（刷新边界未收完 bar），升序、同 ts 去重。
+
+    增量缓存用：old = 旧缓存全段，new = 从最后一根缓存 bar 起拉回的尾部（含边界那根）。
+    """
+    by_ts = {r[0]: r for r in old}
+    by_ts.update({r[0]: r for r in new})
+    return sorted(by_ts.values(), key=lambda r: r[0])
+
+
 async def fetch_ohlcv_window(
     symbol: str, timeframe: str, start_ms: int, end_ms: int
 ) -> list[list]:

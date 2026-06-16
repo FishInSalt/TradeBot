@@ -41,6 +41,28 @@ describe("CycleRowHeader", () => {
     expect(w.find(".keyrow").exists()).toBe(true);    // 关键事件锚点色条
   });
 
+  it("mid_cycle fill chip 加 mid-cycle 虚线类；trigger/action 不加", () => {
+    const w = mount(CycleRowHeader, {
+      props: { cycle: cycle({ key_events: [
+        { kind: "fill_open", label: "限价开多", direction: "long", mid_cycle: false },
+        { kind: "fill_close", label: "止损平仓", direction: "long", mid_cycle: true },
+      ] }) as any },
+    });
+    const mids = w.findAll(".mid-cycle");
+    expect(mids.length).toBe(1);                       // 仅注入 fill 那枚
+    expect(mids[0].text()).toContain("止损平仓");
+  });
+
+  it("仅 mid-cycle 注入事件的 cycle 也获 keyrow 高亮（止损出场是关键事件）", () => {
+    const w = mount(CycleRowHeader, {
+      props: { cycle: cycle({ key_events: [
+        { kind: "fill_close", label: "止损平仓", direction: "short", mid_cycle: true },
+      ] }) as any },
+    });
+    expect(w.find(".keyrow").exists()).toBe(true);
+    expect(w.find(".mid-cycle").exists()).toBe(true);
+  });
+
   it("遥测用 format util（千分位 + tok 空格 + s）", () => {
     const w = mount(CycleRowHeader, { props: { cycle: cycle() as any } });
     expect(w.text()).toContain("80,733 tok");   // tok 前有空格（fixture tokens_consumed:80733）

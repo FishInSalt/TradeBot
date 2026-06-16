@@ -253,6 +253,11 @@ export interface components {
             label: string;
             /** Direction */
             direction: string | null;
+            /**
+             * Mid Cycle
+             * @default false
+             */
+            mid_cycle: boolean;
         };
         /** LiveStatus */
         LiveStatus: {

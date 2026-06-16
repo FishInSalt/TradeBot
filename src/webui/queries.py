@@ -17,7 +17,7 @@ from src.storage.models import (
 from src.services.metrics import MetricsService
 from src.webui import schemas
 from src.services.event_render import _format_event_age
-from src.services.ohlcv_history import fetch_ohlcv_window, resolve_session_window, TIMEFRAMES
+from src.services.ohlcv_history import fetch_ohlcv_window, merge_bars, resolve_session_window, TIMEFRAMES
 from src.webui import ohlcv_cache
 from src.utils.timeframe import normalize_timeframe
 
@@ -106,6 +106,15 @@ def _derive_key_events(c, tools: list[tuple[str, object]]) -> list[schemas.KeyEv
         ev = _safe(lambda tname=tname, targs=targs: _classify_action(tname, targs, prev_side))
         if ev is not None:
             events.append(ev)
+    # 第三组：cycle 运行中注入的 fill（injected_events，midcycle_injector）——复用 _classify_fill
+    # 单一权威来源（market 回声仍 → None 跳过）。不去重：scheduler 堆内每事件只被消费一次，
+    # 要么作唤醒触发进 trigger_context、要么 mid-cycle drain 进 injected_events，不会同时落两处。
+    for rec in _normalize_to_list(_loads(c.injected_events)):
+        ev_dict = rec.get("event")
+        if isinstance(ev_dict, dict) and ev_dict.get("type") == "fill":
+            ev = _safe(lambda d=ev_dict: _classify_fill(d))
+            if ev is not None:
+                events.append(ev.model_copy(update={"mid_cycle": True}))
     return events
 
 
@@ -493,10 +502,19 @@ async def get_ohlcv(engine: AsyncEngine, session_id: str,
     # 2. 解析窗口（未知 sid / 零时长 → ValueError → 端点 404）
     symbol, start_ms, end_ms = await resolve_session_window(engine, session_id)
 
-    # 3-4. 缓存命中则用，否则拉取 + 落盘
+    # 3-4. 缓存：① 全命中零网络 / ② 增量补尾部 merge / ③ 冷启动全量
     cache_dir = ohlcv_cache.cache_dir_for(engine)
-    rows = ohlcv_cache.read(cache_dir, session_id, tf, end_ms)
-    if rows is None:
+    blob = ohlcv_cache.read_raw(cache_dir, session_id, tf)
+    if blob is not None and end_ms <= blob["fetched_end_ms"]:
+        rows = blob["bars"]                                           # ① 全命中（已结束会话恒走此）
+    elif blob is not None and blob["bars"]:
+        # ② 活跃会话窗口增长：只拉 [last_ts, end_ms)（含 last_ts 刷新未收完边界 bar）再 merge
+        last_ts = blob["bars"][-1][0]
+        tail = await fetch_ohlcv_window(symbol, tf, last_ts, end_ms)
+        rows = merge_bars(blob["bars"], tail)
+        ohlcv_cache.write(cache_dir, session_id, tf, symbol, end_ms, rows)
+    else:
+        # ③ 冷启动 / 空缓存：全量一次
         rows = await fetch_ohlcv_window(symbol, tf, start_ms, end_ms)
         ohlcv_cache.write(cache_dir, session_id, tf, symbol, end_ms, rows)
 

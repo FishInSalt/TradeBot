@@ -1,7 +1,8 @@
 """OHLCV 文件缓存（不写库）。缓存目录从正在使用的只读 engine 派生（spec §B）。
 
-历史 sim 窗口固定永不过期，故缓存无 TTL，只靠 fetched_end_ms 覆盖判定：
-current_end_ms <= fetched_end_ms 命中（已结束会话恒命中），> 则 miss（活跃会话窗口增长）。
+历史 sim 窗口固定永不过期，故缓存无 TTL。本模块只管文件 I/O：read_raw 取整个 blob、
+write 落盘；覆盖判定（current_end_ms <= fetched_end_ms 全命中 / > 则增量尾部 merge）
+在 queries.get_ohlcv —— 活跃会话窗口增长时只补尾部、不全量重拉。
 """
 from __future__ import annotations
 
@@ -29,11 +30,14 @@ def _cache_file(cache_dir: Path, sid: str, tf: str) -> Path:
     return cache_dir / f"{sid}_{tf}.json"
 
 
-def read(cache_dir: Path | None, sid: str, tf: str, current_end_ms: int) -> list[list] | None:
-    """命中（文件存在 且 current_end_ms <= fetched_end_ms）→ 裸行；否则 None。
+def read_raw(cache_dir: Path | None, sid: str, tf: str) -> dict | None:
+    """文件存在且形态合法（含 fetched_end_ms + bars 键）→ 返回整个 blob；否则 None。
+
+    覆盖判定（current_end_ms <= fetched_end_ms）上移到 queries.get_ohlcv —— 调用方需拿到
+    旧 blob（连同 fetched_end_ms）做增量尾部 merge，故本函数不再自行命中判定。
 
     损坏缓存文件（空 / 截断 / 非法 JSON / 缺键——write_text 非原子，进程中途被杀可致）
-    视为 miss 返回 None，等价于重新拉取（graceful degradation）。
+    视为 None，等价于冷启动重拉（graceful degradation）。
     """
     if cache_dir is None:
         return None
@@ -42,9 +46,9 @@ def read(cache_dir: Path | None, sid: str, tf: str, current_end_ms: int) -> list
         return None
     try:
         blob = json.loads(path.read_text())
-        if current_end_ms <= blob["fetched_end_ms"]:
-            return blob["bars"]
-    except (json.JSONDecodeError, KeyError, TypeError, OSError):
+        if isinstance(blob, dict) and "fetched_end_ms" in blob and "bars" in blob:
+            return blob
+    except (json.JSONDecodeError, TypeError, OSError):
         return None
     return None
 

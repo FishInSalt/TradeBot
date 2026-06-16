@@ -27,37 +27,37 @@ def test_cache_dir_for_memory_returns_none():
     assert ohlcv_cache.cache_dir_for(eng) is None
 
 
-def test_read_write_roundtrip(tmp_path):
+def test_read_raw_write_roundtrip(tmp_path):
+    """read_raw 无视覆盖判定，直接回整个 blob（覆盖判定上移 queries.get_ohlcv）。"""
     cache_dir = tmp_path / "ohlcv_cache"
     bars = [[1_700_000_000_000, 1.0, 2.0, 0.5, 1.5, 10.0]]
     ohlcv_cache.write(cache_dir, "sid1", "1h", "BTC/USDT:USDT", 1_700_000_060_000, bars)
-    # 覆盖判定：current_end <= fetched_end → 命中
-    assert ohlcv_cache.read(cache_dir, "sid1", "1h", 1_700_000_060_000) == bars
-    assert ohlcv_cache.read(cache_dir, "sid1", "1h", 1_700_000_000_000) == bars  # 更早也命中
-    # current_end > fetched_end（活跃会话窗口增长）→ miss
-    assert ohlcv_cache.read(cache_dir, "sid1", "1h", 1_700_000_120_000) is None
+    blob = ohlcv_cache.read_raw(cache_dir, "sid1", "1h")
+    assert blob["bars"] == bars
+    assert blob["fetched_end_ms"] == 1_700_000_060_000
+    assert blob["symbol"] == "BTC/USDT:USDT"
 
 
-def test_read_missing_file_returns_none(tmp_path):
-    assert ohlcv_cache.read(tmp_path / "ohlcv_cache", "nope", "1h", 1) is None
+def test_read_raw_missing_file_returns_none(tmp_path):
+    assert ohlcv_cache.read_raw(tmp_path / "ohlcv_cache", "nope", "1h") is None
 
 
-def test_read_write_none_cache_dir_noop():
-    """cache_dir None（内存库降级）→ read None / write no-op，不抛。"""
-    assert ohlcv_cache.read(None, "sid", "1h", 1) is None
+def test_read_raw_none_cache_dir_noop():
+    """cache_dir None（内存库降级）→ read_raw None / write no-op，不抛。"""
+    assert ohlcv_cache.read_raw(None, "sid", "1h") is None
     ohlcv_cache.write(None, "sid", "1h", "BTC/USDT:USDT", 1, [[1, 1, 1, 1, 1, 1]])  # 不抛
 
 
-def test_read_corrupt_file_returns_none(tmp_path):
-    """损坏缓存（空 / 非法 JSON / 缺键）→ 视为 miss 返回 None，不抛。"""
+def test_read_raw_corrupt_file_returns_none(tmp_path):
+    """损坏缓存（空 / 非法 JSON / 缺键）→ 视为 None，不抛（graceful → 冷启动重拉）。"""
     cache_dir = tmp_path / "ohlcv_cache"
     cache_dir.mkdir(parents=True)
     # 空文件
     (cache_dir / "s1_1h.json").write_text("")
-    assert ohlcv_cache.read(cache_dir, "s1", "1h", 1) is None
+    assert ohlcv_cache.read_raw(cache_dir, "s1", "1h") is None
     # 非法 JSON
     (cache_dir / "s2_1h.json").write_text("{not json")
-    assert ohlcv_cache.read(cache_dir, "s2", "1h", 1) is None
+    assert ohlcv_cache.read_raw(cache_dir, "s2", "1h") is None
     # 合法 JSON 但缺 fetched_end_ms 键
     (cache_dir / "s3_1h.json").write_text('{"bars": []}')
-    assert ohlcv_cache.read(cache_dir, "s3", "1h", 1) is None
+    assert ohlcv_cache.read_raw(cache_dir, "s3", "1h") is None

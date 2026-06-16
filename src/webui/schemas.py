@@ -68,6 +68,8 @@ class KeyEvent(BaseModel):
     kind: str                # open|add|close|flip|limit_order | fill_open|fill_close|fill_partial
     label: str               # 开多 / 加仓 / 平多 / 反手→空 / 挂限价单·多 / 限价开多 / 止损平仓 / 强平 …
     direction: str | None    # 'long'|'short'，前端据此着色
+    mid_cycle: bool = False  # True = cycle 运行中注入的 fill（injected_events）；前端虚线描边区分。
+                             #        trigger fills / 主动动作 / 历史行 一律 False（默认）。
 
 
 class CycleRow(BaseModel):

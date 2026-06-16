@@ -48,7 +48,8 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
     <span class="seg end-events">
       <span class="seg-label">本轮:</span>
       <template v-if="cycle.key_events.length">
-        <n-tag v-for="(e, i) in cycle.key_events" :key="i" size="tiny" :type="chipType(e.kind)" :bordered="false">
+        <n-tag v-for="(e, i) in cycle.key_events" :key="i" size="tiny" :type="chipType(e.kind)"
+               :bordered="false" :class="{ 'mid-cycle': e.mid_cycle }">
           {{ e.label }}
         </n-tag>
       </template>
@@ -76,4 +77,7 @@ function chipType(kind: string): "success" | "error" | "info" | "warning" | "def
 .end-events { flex: 1; flex-wrap: wrap; }
 .tele { font-size: 11px; color: var(--ob-text-muted); white-space: nowrap; }
 .muted { color: var(--ob-text-muted); }
+/* 运行中注入的 fill（mid_cycle）：克制虚线描边区分——「这笔成交发生在 cycle 运行途中、
+   agent 未必主动反应」vs 触发本轮的实心 chip。色继承 chip type 文本色（currentColor）。 */
+.end-events :deep(.mid-cycle) { border: 1px dashed currentColor; }
 </style>
