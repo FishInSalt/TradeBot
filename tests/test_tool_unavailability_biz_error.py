@@ -154,10 +154,15 @@ async def test_exchange_announcements_outage_points():
     assert biz == "source_unavailable"
 
 
-# ============ outage-sentinel 路径（非异常，上游 None/全None）→ biz_error ============
+# ============ 收敛为 None-sentinel 的总失败点 → biz_error ============
+# 这些工具把上游故障（异常被工具内部 catch→None，或上游直接返 None）汇到一个 None-check，
+# 在该 check 处 POINT。B3 的 instrument 落点 = None-check 块（区别于上一段「except 块内」打点）。
+# 注入异常是最真实的 outage 场景，故多数 mock 用 side_effect；stablecoin 另有一条 return_value=None
+# 直证「上游直接返 None」也走同一 check。
 
 @pytest.mark.asyncio
 async def test_macro_calendar_none_sentinel_points():
+    """上游抛异常 → 工具 except 内转 macro_events=None → None-check 处 POINT（spec §2）。"""
     from src.agent.tools_perception import get_macro_calendar
     news = SimpleNamespace(get_macro_events=AsyncMock(side_effect=RuntimeError("m")))
     result, biz = await _biz_after(get_macro_calendar(MockDeps(news=news)))
@@ -216,6 +221,7 @@ async def test_htf_per_tf_partial_degrade_stays_ok():
     )
     result, biz = await _biz_after(get_higher_timeframe_view(MockDeps(market_data=md), timeframes=["1d"]))
     assert "[1d] error: temporarily unavailable" in result.lower()  # per-TF 降级行
+    assert "last:" in result.lower(), "部分降级的实质：ticker 成功 → 仍渲染 Last 可用数据"
     assert biz is None, "部分降级不打点（agent 仍拿到 Last 等可用数据）"
 
 
