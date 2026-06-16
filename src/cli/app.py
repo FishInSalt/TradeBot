@@ -973,6 +973,7 @@ async def build_services(
         onchain=onchain_service,
         wake_min_minutes=1,
         wake_max_minutes=max_wake,
+        scheduler_interval_min=result.scheduler_interval_min,   # spec §1: 退避封顶来源
     )
 
     # R2-5 PR #34 I-A: prompt range (RuntimeConfig) and clamp authority (TradingDeps)

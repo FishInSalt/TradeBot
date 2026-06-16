@@ -43,6 +43,11 @@ class TradingDeps:
     approval_enabled: bool = True
     wake_min_minutes: int = 1
     wake_max_minutes: int = 60
+    # 崩溃退避封顶来源（spec §1「fallback 来源」）：run_agent_cycle 签名与 deps 现有
+    # 字段都拿不到会话兜底间隔，且无法由 wake_max_minutes 反推（_compute_max_wake 在
+    # x≤15 恒 60 / x≥45 恒 180 两端不可逆）。wiring 时由 build_services 赋实值；
+    # 默认 60 仅为单测/旧路径兜底。
+    scheduler_interval_min: int = 60
     set_next_wake_fn: Callable[[int, str], None] | None = None
     initial_balance: float = 10000.0
     fee_rate: float = DEFAULT_TAKER_FEE_RATE
