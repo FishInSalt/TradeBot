@@ -822,6 +822,11 @@ async def test_retry_exhausted_writes_null_reasoning_unchanged(monkeypatch, mock
     # _rollback_injected_events 会迭代累积器，bare Mock attr 不可迭代会炸
     deps.injected_events_log = []
     deps.requeue_events_fn = None
+    # iter-cycle-resilience-tool-obs: retry_exhausted 分支新增 crash-backoff 调用，
+    # 读 deps.set_next_wake_fn——None = 非交互/forensic 路径（None-guard 跳过退避），
+    # 与 deps_factory 默认一致；bare Mock 会让 set_next_wake_fn 为 truthy Mock 触发
+    # 退避计算并在 min(2, <Mock>) 处 TypeError。
+    deps.set_next_wake_fn = None
 
     budget = TokenBudget(daily_max=1_000_000)
 
