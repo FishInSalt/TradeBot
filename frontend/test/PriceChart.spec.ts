@@ -202,6 +202,18 @@ describe("PriceChart", () => {
     expect(setData).toHaveBeenCalled();               // 图已渲染
   });
 
+  it("首载失败后 sync 成功 → error 遮罩清除（修对称 stuck-error）", async () => {
+    getOhlcv.mockRejectedValueOnce(new ApiError(503, "boom"));   // 首载(fit) 失败 → error=true
+    const w = mountChart("1h", 1);
+    await flushPromises();
+    expect(w.text()).toContain("价格数据拉取失败");                // 先确认进了 error 态
+    getOhlcv.mockResolvedValueOnce(SERIES);                       // sync 成功
+    await w.setProps({ latestCycleId: 2 });                      // syncSig 变 → load(false) 成功
+    await flushPromises();
+    expect(w.text()).not.toContain("价格数据拉取失败");            // 成功渲染清除 error 遮罩
+    expect(setData).toHaveBeenCalled();                           // 图已渲染
+  });
+
   it("竞态：切 tf 的 fit-load 被 sync 抢占 → 新 tf 仍重置视口（fit 意图被认领）", async () => {
     getOhlcv.mockResolvedValue(SERIES);
     const w = mountChart("1h", 1);

@@ -50,6 +50,7 @@ async function load(fit: boolean) {
   try {
     const s = await api.getOhlcv(props.sessionId, tf.value);
     if (unmounted || seq !== loadSeq) return;          // 已卸载 / 被更新的请求取代 → 丢弃（不消费 pendingFit）
+    error.value = false;                               // 任何成功渲染清错误态（对称 loading 解耦）：sync 成功不被陈旧 error 遮罩盖住
     bars.value = s.bars;
     const doFit = pendingFit;                           // 获胜请求认领任何待决 fit（被抢占的切 tf 视口重置不丢）
     pendingFit = false;
