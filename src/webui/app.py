@@ -1,9 +1,11 @@
 """FastAPI 只读观察台。薄 HTTP 层：解析参数 → 调 queries → 返回 schemas。"""
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
+import ccxt
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -61,6 +63,18 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if ls is None:
             raise HTTPException(404, "session not found")
         return ls
+
+    @app.get("/api/sessions/{sid}/ohlcv", response_model=schemas.OhlcvSeries)
+    async def _ohlcv(sid: str, timeframe: str | None = Query(None),
+                     eng: AsyncEngine = Depends(get_engine)):
+        try:
+            return await queries.get_ohlcv(eng, sid, timeframe)
+        except queries.InvalidTimeframe:           # ValueError 子类——须先于 ValueError catch
+            raise HTTPException(400, "invalid timeframe")
+        except ValueError:                          # resolve_session_window：未知 sid / 零时长
+            raise HTTPException(404, "session not found")
+        except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, asyncio.TimeoutError) as e:
+            raise HTTPException(503, type(e).__name__)   # 仅类名（redaction 纪律）
 
     # 前端静态资源（Phase 1b 产出 frontend/dist）；存在才挂，避免开发期报错
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
