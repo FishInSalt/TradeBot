@@ -128,4 +128,14 @@ describe("PriceChart", () => {
     expect(tip.text()).toContain("开仓");      // DerivedFill.type for first fill (no pnl, non-add = "开仓")
     expect(tip.text()).toContain("多");         // side "long" → "多"
   });
+
+  it("getOhlcv 抛非 ApiError（如 TypeError）→ 也进错误占位、不致 unhandled rejection", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getOhlcv.mockRejectedValue(new TypeError("boom"));
+    const w = mountChart("1h");
+    await flushPromises();
+    expect(w.text()).toContain("价格数据拉取失败");   // 错误占位
+    expect(spy).toHaveBeenCalled();                    // 非预期错记 console（不静默吞）
+    spy.mockRestore();
+  });
 });

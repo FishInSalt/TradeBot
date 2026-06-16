@@ -114,6 +114,8 @@ async def fetch_ohlcv_window(
 
     窗口內無數據 → []；重試耗盡的瞬態錯 re-raise。
     """
+    if timeframe not in TF_MS:
+        raise ValueError(f"unsupported timeframe: {timeframe}")
     client = ccxt.async_support.okx()
     try:
         rows = await _paginate_ohlcv(client, symbol, timeframe, start_ms, end_ms)

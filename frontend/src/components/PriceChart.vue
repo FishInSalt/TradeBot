@@ -44,14 +44,16 @@ async function load() {
   hover.value = null;
   try {
     const s = await api.getOhlcv(props.sessionId, tf.value);
-    if (unmounted || seq !== loadSeq) return;          // 已卸载 / 被更新的请求取代 → 丢弃本次结果
+    if (unmounted || seq !== loadSeq) return;          // 已卸载 / 被更新的请求取代 → 丢弃，不渲染（不重置视口）
     bars.value = s.bars;
+    render();                                          // 仅最新且未卸载才渲染（含 fitContent）
   } catch (e) {
-    if (unmounted || seq !== loadSeq) return;           // 同上：陈旧/卸载后的错误不落地
-    if (e instanceof ApiError) error.value = true;
-    else throw e;
+    if (unmounted || seq !== loadSeq) return;          // 陈旧/卸载后的错误不落地
+    // ApiError 与非预期错统一显错误占位；非预期错额外 console.error（不静默吞、也不抛成 unhandled rejection）
+    if (!(e instanceof ApiError)) console.error("PriceChart 价格数据加载失败", e);
+    error.value = true;
   } finally {
-    if (!unmounted && seq === loadSeq) loading.value = false;   // 仅最新且未卸载才清 loading
+    if (!unmounted && seq === loadSeq) loading.value = false;
   }
 }
 
@@ -91,11 +93,11 @@ onMounted(() => {
     if (t == null || !param.point || !hoverMap.has(t)) { hover.value = null; return; }
     hover.value = { x: param.point.x, y: param.point.y, fills: hoverMap.get(t)! };
   });
-  load().then(render);
+  load();
 });
 
-watch(tf, () => load().then(render));
-watch(() => props.trades, render, { deep: true });
+watch(tf, load);
+watch(() => props.trades, () => { if (!unmounted && bars.value.length) render(); }, { deep: true });
 
 onUnmounted(() => {
   unmounted = true;

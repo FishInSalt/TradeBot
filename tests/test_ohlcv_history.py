@@ -152,3 +152,11 @@ async def test_fetch_with_retry_exhausted_raises(monkeypatch):
 
     assert client.fetch_ohlcv.await_count == 3
     assert mock_sleep.await_count == 2
+
+
+async def test_fetch_ohlcv_window_rejects_unsupported_tf():
+    """共享 API 自我保护：未知 tf → 描述性 ValueError（非 KeyError）。"""
+    from src.services.ohlcv_history import fetch_ohlcv_window
+    with pytest.raises(ValueError, match="unsupported timeframe"):
+        await fetch_ohlcv_window("BTC/USDT:USDT", "30m", 1_700_000_000_000,
+                                 1_700_000_000_000 + 10 * 60_000)
