@@ -46,3 +46,18 @@ def test_read_write_none_cache_dir_noop():
     """cache_dir None（内存库降级）→ read None / write no-op，不抛。"""
     assert ohlcv_cache.read(None, "sid", "1h", 1) is None
     ohlcv_cache.write(None, "sid", "1h", "BTC/USDT:USDT", 1, [[1, 1, 1, 1, 1, 1]])  # 不抛
+
+
+def test_read_corrupt_file_returns_none(tmp_path):
+    """损坏缓存（空 / 非法 JSON / 缺键）→ 视为 miss 返回 None，不抛。"""
+    cache_dir = tmp_path / "ohlcv_cache"
+    cache_dir.mkdir(parents=True)
+    # 空文件
+    (cache_dir / "s1_1h.json").write_text("")
+    assert ohlcv_cache.read(cache_dir, "s1", "1h", 1) is None
+    # 非法 JSON
+    (cache_dir / "s2_1h.json").write_text("{not json")
+    assert ohlcv_cache.read(cache_dir, "s2", "1h", 1) is None
+    # 合法 JSON 但缺 fetched_end_ms 键
+    (cache_dir / "s3_1h.json").write_text('{"bars": []}')
+    assert ohlcv_cache.read(cache_dir, "s3", "1h", 1) is None

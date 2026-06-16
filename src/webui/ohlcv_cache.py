@@ -30,15 +30,22 @@ def _cache_file(cache_dir: Path, sid: str, tf: str) -> Path:
 
 
 def read(cache_dir: Path | None, sid: str, tf: str, current_end_ms: int) -> list[list] | None:
-    """命中（文件存在 且 current_end_ms <= fetched_end_ms）→ 裸行；否则 None。"""
+    """命中（文件存在 且 current_end_ms <= fetched_end_ms）→ 裸行；否则 None。
+
+    损坏缓存文件（空 / 截断 / 非法 JSON / 缺键——write_text 非原子，进程中途被杀可致）
+    视为 miss 返回 None，等价于重新拉取（graceful degradation）。
+    """
     if cache_dir is None:
         return None
     path = _cache_file(cache_dir, sid, tf)
     if not path.is_file():
         return None
-    blob = json.loads(path.read_text())
-    if current_end_ms <= blob["fetched_end_ms"]:
-        return blob["bars"]
+    try:
+        blob = json.loads(path.read_text())
+        if current_end_ms <= blob["fetched_end_ms"]:
+            return blob["bars"]
+    except (json.JSONDecodeError, KeyError, TypeError, OSError):
+        return None
     return None
 
 
