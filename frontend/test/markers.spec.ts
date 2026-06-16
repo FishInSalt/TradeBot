@@ -2,8 +2,7 @@ import { describe, it, expect } from "vitest";
 import { toCandleData, snapToBarTime, toMarkers, POS_HEX, NEG_HEX, MUTED_HEX } from "@/utils/markers";
 import { deriveTradeFills } from "@/utils/trades";
 import { epochSec } from "@/utils/time";
-import type { TradeRow } from "@/api/client";
-import type { OhlcvBar } from "@/api/client";
+import type { TradeRow, OhlcvBar } from "@/api/client";
 
 const bar = (at: string, o = 1, h = 2, l = 0.5, c = 1.5): OhlcvBar =>
   ({ at, open: o, high: h, low: l, close: c, volume: 10 });
@@ -36,6 +35,9 @@ describe("snapToBarTime", () => {
   });
   it("barTimes 空 → 返回原值", () => {
     expect(snapToBarTime(12345, [])).toBe(12345);
+  });
+  it("atSec 精确等于某非首 bar → 返回该 bar（<= 语义）", () => {
+    expect(snapToBarTime(t("2026-06-12T10:05:00Z"), barTimes)).toBe(t("2026-06-12T10:05:00Z"));
   });
 });
 
@@ -94,5 +96,19 @@ describe("toMarkers", () => {
   it("同口径：markers 数 == deriveTradeFills 行数（同一样本）", () => {
     const fills = deriveTradeFills(longTrades);
     expect(toMarkers(fills, barTimes).length).toBe(fills.length);
+  });
+
+  it("两个完整 episode → markers 数 == deriveTradeFills 行数、且 time 升序", () => {
+    const twoEp: TradeRow[] = [
+      { at: "2026-06-12T10:00:00Z", action: "order_filled", side: "long", price: 65000, amount: 1, pnl: null, fee: 1, trigger_reason: "market" },
+      { at: "2026-06-12T10:05:00Z", action: "order_filled", side: "long", price: 66000, amount: 1, pnl: 1000, fee: 1, trigger_reason: "tp" },
+      { at: "2026-06-12T10:10:00Z", action: "order_filled", side: "short", price: 66000, amount: 1, pnl: null, fee: 1, trigger_reason: "market" },
+      { at: "2026-06-12T10:15:00Z", action: "order_filled", side: "short", price: 65000, amount: 1, pnl: 500, fee: 1, trigger_reason: "tp" },
+    ];
+    const fills = deriveTradeFills(twoEp);
+    const ms = toMarkers(fills, barTimes);
+    expect(ms.length).toBe(fills.length);
+    const times = ms.map((m) => m.time as number);
+    expect(times).toEqual([...times].sort((a, b) => a - b));   // 升序
   });
 });
