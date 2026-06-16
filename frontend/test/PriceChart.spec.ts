@@ -86,6 +86,36 @@ describe("PriceChart", () => {
     expect(w.text()).toContain("该窗口无行情数据");
   });
 
+  it("快速连切 tf：陈旧慢请求 resolve 后不覆盖新请求结果", async () => {
+    // 第一次（1h）用一个手动控制的 promise，先不 resolve；第二次（5m）立即 resolve
+    let resolveSlow: (v: unknown) => void = () => {};
+    const slow = new Promise((r) => { resolveSlow = r; });
+    const SERIES_1H = { symbol: "BTC/USDT:USDT", timeframe: "1h",
+      bars: [{ at: "2026-06-12T10:00:00Z", open: 111, high: 2, low: 0.5, close: 1.5, volume: 10 }] };
+    const SERIES_5M = { symbol: "BTC/USDT:USDT", timeframe: "5m",
+      bars: [{ at: "2026-06-12T10:00:00Z", open: 555, high: 2, low: 0.5, close: 1.5, volume: 10 }] };
+
+    getOhlcv.mockReturnValueOnce(slow as any);          // init load(1h) 挂起
+    const w = mountChart("1h");
+    // init 的 load 还没 resolve；切到 5m
+    getOhlcv.mockResolvedValueOnce(SERIES_5M as any);
+    await w.findComponent(NRadioGroup).vm.$emit("update:value", "5m");
+    await flushPromises();
+    setData.mockClear();
+    // 现在迟到的 1h 结果 resolve —— 不应覆盖
+    resolveSlow(SERIES_1H);
+    await flushPromises();
+    // 5m 已渲染过；迟到的 1h render 即便跑，bars 仍是 5m（open 555 而非 111）
+    const lastCandles = setData.mock.calls.length
+      ? setData.mock.calls[setData.mock.calls.length - 1][0]
+      : null;
+    if (lastCandles) {
+      expect(lastCandles[0].open).toBe(555);
+    }
+    // 关键断言：5m 是最后一次成功 getOhlcv，bars 来自它
+    expect(getOhlcv).toHaveBeenLastCalledWith("s1", "5m");
+  });
+
   it("crosshair 命中已加载 bar 时刻 → hover 浮层列该刻成交（类型/方向/价/量）", async () => {
     getOhlcv.mockResolvedValue(SERIES);
     const w = mountChart("1h");

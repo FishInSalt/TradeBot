@@ -34,19 +34,24 @@ const el = ref<HTMLElement | null>(null);
 let chart: IChartApi | null = null;
 let series: ISeriesApi<"Candlestick"> | null = null;
 let hoverMap = new Map<number, DerivedFill[]>();
+let unmounted = false;
+let loadSeq = 0;
 
 async function load() {
+  const seq = ++loadSeq;
   loading.value = true;
   error.value = false;
   hover.value = null;
   try {
     const s = await api.getOhlcv(props.sessionId, tf.value);
+    if (unmounted || seq !== loadSeq) return;          // 已卸载 / 被更新的请求取代 → 丢弃本次结果
     bars.value = s.bars;
   } catch (e) {
+    if (unmounted || seq !== loadSeq) return;           // 同上：陈旧/卸载后的错误不落地
     if (e instanceof ApiError) error.value = true;
     else throw e;
   } finally {
-    loading.value = false;
+    if (!unmounted && seq === loadSeq) loading.value = false;   // 仅最新且未卸载才清 loading
   }
 }
 
@@ -93,6 +98,7 @@ watch(tf, () => load().then(render));
 watch(() => props.trades, render, { deep: true });
 
 onUnmounted(() => {
+  unmounted = true;
   chart?.remove();
   chart = null;
   series = null;
@@ -118,7 +124,8 @@ const sideText = (s: string | null | undefined) => (s === "long" ? "多" : s ===
         <div v-for="(f, i) in hover.fills" :key="i" class="pc-tip-row">
           {{ f.type }} · {{ sideText(f.side) }} · 价 {{ fmtNum(f.price) }} · 量 {{ fmtNum(f.amount, 4) }}
           <template v-if="f.grossPnl != null">
-            · 毛利 {{ fmtSigned(f.grossPnl) }} / 最终 {{ fmtSigned(f.finalPnl) }}
+            · 毛利 {{ fmtSigned(f.grossPnl) }}
+            <template v-if="f.finalPnl != null"> / 最终 {{ fmtSigned(f.finalPnl) }}</template>
           </template>
         </div>
       </div>
