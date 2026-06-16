@@ -156,6 +156,10 @@ async def test_retry_exhausted_schedules_backoff(deps_factory, db_engine, db_ses
     calls = []
     deps.set_next_wake_fn = lambda minutes, ctx: calls.append((minutes, ctx))
 
+    # 预置 1 条同会话 RE 行：本 cycle 再崩 → 连崩 count=2（≠ fail-isolation floor n=1）。
+    # 使期望退避值 4≠2，证明 helper 在 live 路径读到的是真实 DB count，而非回退 floor。
+    await _add_cycle(db_session, deps.session_id, "retry_exhausted")
+
     agent = _mock_agent()
     agent.run = AsyncMock(side_effect=RuntimeError("network down"))
 
@@ -165,10 +169,10 @@ async def test_retry_exhausted_schedules_backoff(deps_factory, db_engine, db_ses
     row = (await db_session.execute(
         select(AgentCycle).order_by(AgentCycle.id.desc()).limit(1))).scalar_one()
     assert row.execution_status == "retry_exhausted"
-    # 本会话仅此 1 条 RE → n=1 → backoff_min(1, 60)=2
+    # 预置 1 + 本 cycle 1 = n=2 → backoff_min(2, 60)=4（≠ floor 2，证真实 count 在 live 路径驱动）
     assert len(calls) == 1
     minutes, ctx = calls[0]
-    assert minutes == 2
+    assert minutes == 4
     assert ctx.startswith("crash-backoff:")
     assert "RuntimeError" in ctx
 
