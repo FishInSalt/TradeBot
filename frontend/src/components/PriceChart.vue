@@ -30,7 +30,8 @@ const tf = ref(normalizeTf(props.defaultTimeframe));
 const bars = ref<OhlcvBar[]>([]);
 const loading = ref(false);
 const error = ref(false);
-const hover = ref<{ x: number; y: number; fills: DerivedFill[] } | null>(null);
+type OhlcView = { open: number; high: number; low: number; close: number };
+const hover = ref<{ x: number; y: number; ohlc: OhlcView | null; fills: DerivedFill[] } | null>(null);
 
 const el = ref<HTMLElement | null>(null);
 let chart: IChartApi | null = null;
@@ -114,8 +115,13 @@ onMounted(() => {
   });
   chart.subscribeCrosshairMove((param) => {
     const t = param.time as number | undefined;
-    if (t == null || !param.point || !hoverMap.has(t)) { hover.value = null; return; }
-    hover.value = { x: param.point.x, y: param.point.y, fills: hoverMap.get(t)! };
+    if (t == null || !param.point) { hover.value = null; return; }
+    // OHLC 取该 bar 的 seriesData（v4：crosshair 落在真实 bar 上才有；空白/缺口 → undefined）
+    const sd = param.seriesData;
+    const ohlc = series && sd ? ((sd.get(series) as OhlcView | undefined) ?? null) : null;
+    const fills = hoverMap.get(t) ?? [];
+    if (!ohlc && fills.length === 0) { hover.value = null; return; }   // 无 OHLC 且无成交 → 不弹
+    hover.value = { x: param.point.x, y: param.point.y, ohlc, fills };
   });
   load(true);
 });
@@ -151,6 +157,9 @@ const sideText = (s: string | null | undefined) => (s === "long" ? "多" : s ===
       <div v-else-if="error" class="pc-overlay">价格数据拉取失败</div>
       <div v-else-if="bars.length === 0" class="pc-overlay">该窗口无行情数据</div>
       <div v-if="hover" class="pc-tip" :style="{ left: hover.x + 'px', top: hover.y + 'px' }">
+        <div v-if="hover.ohlc" class="pc-tip-ohlc" :class="hover.ohlc.close >= hover.ohlc.open ? 'pos' : 'neg'">
+          O {{ fmtNum(hover.ohlc.open) }} · H {{ fmtNum(hover.ohlc.high) }} · L {{ fmtNum(hover.ohlc.low) }} · C {{ fmtNum(hover.ohlc.close) }}
+        </div>
         <div v-for="(f, i) in hover.fills" :key="i" class="pc-tip-row">
           {{ f.type }} · {{ sideText(f.side) }} · 价 {{ fmtNum(f.price) }} · 量 {{ fmtNum(f.amount, 4) }}
           <template v-if="f.grossPnl != null">
@@ -178,5 +187,8 @@ const sideText = (s: string | null | undefined) => (s === "long" ? "多" : s ===
   background: var(--ob-block-bg); border: 1px solid var(--ob-border); border-radius: 4px;
   padding: 4px 8px; font-size: 11px; max-width: 320px;
 }
+.pc-tip-ohlc { white-space: nowrap; font-variant-numeric: tabular-nums; margin-bottom: 2px; }
+.pc-tip-ohlc.pos { color: var(--ob-pos); }
+.pc-tip-ohlc.neg { color: var(--ob-neg); }
 .pc-tip-row { white-space: nowrap; }
 </style>
