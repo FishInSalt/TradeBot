@@ -799,6 +799,23 @@ def _compute_max_wake(scheduler_interval_min: int) -> int:
     return min(max(4 * scheduler_interval_min, 60), 180)
 
 
+def backoff_min(n: int, fallback: int) -> int:
+    """崩溃重唤退避分钟数（spec §1 退避曲线纯函数）。
+
+    n        = 连续 retry_exhausted 次数（≥1）。
+    fallback = scheduler_interval_min（会话兜底间隔，即封顶）。
+
+    curve: min(fallback, floor · 2^(n-1)), floor = min(2, fallback)
+      fallback=60  → 2,4,8,16,32,60(封顶),60…
+      fallback=180 → 2,4,…,128,180(封顶)
+      fallback=1   → floor 被 min(2,1) 压成 1 → 恒 1（no-op）
+
+    封顶是兜底间隔而非 wake_max_minutes：崩溃后最坏退回会话正常巡检节奏，绝不更慢。
+    """
+    floor = min(2, fallback)
+    return min(fallback, floor * 2 ** (n - 1))
+
+
 async def _capture_session_system_prompt(
     engine,
     session_id: str,
