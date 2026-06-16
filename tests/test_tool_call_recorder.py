@@ -414,22 +414,34 @@ async def test_control_flow_exception_skips_biz_error_recording(engine, session_
 
 def test_biz_error_types_drift_guard():
     """BIZ_ERROR_TYPES 集合 vs `note_biz_error("...")` 字面引用一致。
-    扫 src/agent/tools_execution.py 内所有 note_biz_error 调用，断言 string literal 全部 ∈ BIZ_ERROR_TYPES。
+    扫 src/agent/ 全目录（含 tools_execution.py + tools_perception.py）所有
+    note_biz_error 调用，断言 string literal 全部 ∈ BIZ_ERROR_TYPES。
+
+    扩到 src/agent/（原仅 tools_execution.py）：note_biz_error 对未知 type 是
+    log-error-then-skip（记成 ok），perception 里拼错字面量（如 source_unavailble）
+    会逃过 guard 并静默落回盲区——正是本 iter 要消灭的。
     """
     import re
     from src.services.tool_call_recorder import BIZ_ERROR_TYPES
 
-    src = (_REPO_ROOT / "src/agent/tools_execution.py").read_text()
     pattern = re.compile(r'note_biz_error\(["\']([a-z_]+)["\']\)')
-    cited = set(pattern.findall(src))
+    cited: set[str] = set()
+    for py in (_REPO_ROOT / "src/agent").rglob("*.py"):
+        cited |= set(pattern.findall(py.read_text()))
 
     drift = cited - BIZ_ERROR_TYPES
     assert not drift, \
-        f"tools_execution.py 引用未注册的 biz error type: {drift}（请在 BIZ_ERROR_TYPES 注册或更正字面量）"
+        f"src/agent/ 引用未注册的 biz error type: {drift}（请在 BIZ_ERROR_TYPES 注册或更正字面量）"
 
     # Sanity: R2-4 应 instrument ≥ 3 处（spec §4.3）
     assert len(cited) >= 3, \
-        f"R2-4 应 instrument ≥3 处 note_biz_error；实测 {len(cited)} 处: {cited}"
+        f"应 instrument ≥3 处 note_biz_error；实测 {len(cited)} 处: {cited}"
+
+
+def test_source_unavailable_in_biz_error_types():
+    """source_unavailable 已注册（自收敛工具不可用打点用，spec §2）。"""
+    from src.services.tool_call_recorder import BIZ_ERROR_TYPES
+    assert "source_unavailable" in BIZ_ERROR_TYPES
 
 
 def test_tool_calls_status_values_fit_column():
