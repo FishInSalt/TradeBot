@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toCandleData, snapToBarTime, toMarkers, POS_HEX, NEG_HEX, MUTED_HEX } from "@/utils/markers";
+import { toCandleData, snapToBarTime, toMarkers, clampBarSpacing, latestVisibleRange, POS_HEX, NEG_HEX, MUTED_HEX } from "@/utils/markers";
 import { deriveTradeFills } from "@/utils/trades";
 import { epochSec } from "@/utils/time";
 import type { TradeRow, OhlcvBar } from "@/api/client";
@@ -38,6 +38,48 @@ describe("snapToBarTime", () => {
   });
   it("atSec 精确等于某非首 bar → 返回该 bar（<= 语义）", () => {
     expect(snapToBarTime(t("2026-06-12T10:05:00Z"), barTimes)).toBe(t("2026-06-12T10:05:00Z"));
+  });
+});
+
+describe("clampBarSpacing", () => {
+  it("理想间距落 [min,max] 内 → 原样返回", () => {
+    expect(clampBarSpacing(1000, 100, 8, 16)).toBeCloseTo(10);  // 1000/100 = 10
+  });
+  it("粗周期 bar 少 → 夹到 max（蜡烛不膨胀）", () => {
+    expect(clampBarSpacing(1000, 10, 8, 16)).toBe(16);          // 100 > 16
+  });
+  it("细周期 bar 多 → 夹到 min（保可读）", () => {
+    expect(clampBarSpacing(1000, 2000, 8, 16)).toBe(8);         // 0.5 < 8
+  });
+  it("默认 min=8（与生产 MIN_BAR_SPACING 一致，不留非生产值）", () => {
+    expect(clampBarSpacing(1000, 2000)).toBe(8);                // 默认实参即生产档
+  });
+  it("bar ≤ 1 或宽 ≤ 0 → max（退化兜底）", () => {
+    expect(clampBarSpacing(1000, 1, 8, 16)).toBe(16);
+    expect(clampBarSpacing(0, 100, 8, 16)).toBe(16);
+  });
+});
+
+describe("latestVisibleRange", () => {
+  it("中周期恰好放下 → 满铺全宽（from≈-0.5，末根贴右）", () => {
+    const r = latestVisibleRange(800, 100, 8, 16)!;   // ideal=8 落区间内 → 可见 100 == barCount
+    expect(r.to).toBe(99.5);
+    expect(r.from).toBeCloseTo(-0.5);
+  });
+  it("细周期放不下 → 右锚最新（from>0，仅末段可见、其余可左滚）", () => {
+    const r = latestVisibleRange(800, 2000, 8, 16)!;  // spacing 夹到 8 → 可见 100 << 2000
+    expect(r.to).toBe(1999.5);                          // 末根恒贴右
+    expect(r.from).toBeGreaterThan(0);                  // 起点不在视野内（可左滚回看）
+    expect(r.to - r.from).toBeCloseTo(100);             // 可见根数 = 800/8
+  });
+  it("粗周期 bar 少 → 末根仍贴右、左侧留白（from<0）", () => {
+    const r = latestVisibleRange(800, 5, 8, 16)!;       // ideal 大 → 夹到 16 → 可见 50 >> 5
+    expect(r.to).toBe(4.5);
+    expect(r.from).toBeLessThan(0);
+  });
+  it("width≤0 或 barCount<1 → null（调用方兜底 fitContent）", () => {
+    expect(latestVisibleRange(0, 100, 8, 16)).toBeNull();
+    expect(latestVisibleRange(800, 0, 8, 16)).toBeNull();
   });
 });
 
