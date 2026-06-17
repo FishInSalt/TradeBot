@@ -117,16 +117,21 @@ async def fetch_ohlcv_window(
 ) -> list[list]:
     """拉取 [start_ms, end_ms) 的 OKX REST OHLCV，返回升序裸行 list[list]。
 
-    client = ccxt.async_support.okx()（**屬性形式調用**——F7 測試 monkeypatch.setattr
+    client = ccxt.async_support.okx(...)（**屬性形式調用**——F7 測試 monkeypatch.setattr
     全局屬性 patch，綁名 import 會繞過）。try 內分頁 + sort + 同 ts 去重 + 半開過濾；
     finally 必 close（**異常路徑也 close**，守 AC-F7-14）。ccxt okx 默認 timeout=10000
-    (10s)，不顯式傳以保 F7 客戶端構造零行為變化。
+    (10s)，不顯式傳。
+
+    構造傳 options.fetchMarkets=['swap']：我們只拉永續 swap OHLCV（全部會話符號
+    BTC/USDT:USDT），只加載 swap 市場可避開 OKX 當前返回的畸形 `future` 條目
+    （id=None），否則 ccxt 4.5.47 load_markets→keysort(markets_by_id) 對 None key
+    排序 `None < str` 崩潰（WebUI ohlcv 500 根因）；副益：4350→379 市場、構造更快。
 
     窗口內無數據 → []；重試耗盡的瞬態錯 re-raise。
     """
     if timeframe not in TF_MS:
         raise ValueError(f"unsupported timeframe: {timeframe}")
-    client = ccxt.async_support.okx()
+    client = ccxt.async_support.okx({"options": {"fetchMarkets": ["swap"]}})
     try:
         rows = await _paginate_ohlcv(client, symbol, timeframe, start_ms, end_ms)
         rows.sort(key=lambda r: r[0])

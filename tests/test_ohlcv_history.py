@@ -124,6 +124,31 @@ async def test_fetch_ohlcv_window_closes_on_exception(monkeypatch):
     assert client.close.await_count == 1
 
 
+async def test_fetch_ohlcv_window_constructs_swap_only_client(monkeypatch):
+    """drift guard：client 构造须限定 options.fetchMarkets=['swap']。
+
+    根因：OKX markets 含畸形 `future` 条目（id=None / symbol=None），ccxt 4.5.47
+    load_markets→set_markets→keysort(markets_by_id) 对 None key 排序时
+    `'<' not supported between NoneType and str` 崩溃。我们只观察永续 swap
+    （全部会话符号 BTC/USDT:USDT），构造时只加载 swap 市场即彻底避开畸形条目，
+    且更快。删此参数 = 重现 WebUI ohlcv 500。"""
+    from src.services.ohlcv_history import fetch_ohlcv_window
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    captured: dict = {}
+    client = MagicMock()
+    client.fetch_ohlcv = AsyncMock(return_value=[])
+    client.close = AsyncMock()
+
+    def _factory(config=None, *a, **k):
+        captured["config"] = config
+        return client
+
+    monkeypatch.setattr("ccxt.async_support.okx", _factory)
+    await fetch_ohlcv_window("BTC/USDT:USDT", "1m", 1_700_000_000_000,
+                             1_700_000_000_000 + 10 * 60_000)
+    assert captured["config"] == {"options": {"fetchMarkets": ["swap"]}}
+
+
 async def test_fetch_with_retry_transient_then_success(monkeypatch):
     """第 1 次 NetworkError → sleep 1 次 → 第 2 次成功；返回那一页数据。"""
     from src.services.ohlcv_history import _fetch_with_retry
