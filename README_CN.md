@@ -1,6 +1,6 @@
 # TradeBot
 
-基于 **pydantic-ai** 构建的加密货币永续期货自主交易 Agent。Agent 按计划定时唤醒，或由价格告警 / 订单成交事件触发，自主分析市场、管理仓位、记录推理过程。支持 OKX 实盘 / Demo 账户及零配置的本地模拟交易所。
+基于 **pydantic-ai** 构建的加密货币永续期货自主交易 Agent。Agent 按计划定时唤醒，或由价格告警 / 订单成交事件触发，自主分析市场、管理仓位、记录推理过程。支持 OKX 实盘 / Demo 账户及零配置的本地模拟交易所。内置只读 Web 观察台，可回放每个 cycle 的 ReAct 时间线、决策与收益表现。
 
 > **状态**：MVP 阶段，核心功能已完整落地，正在观察期收集实测数据驱动后续迭代。
 
@@ -55,6 +55,9 @@ pip install -e ".[dev]"
 # LLM（选其一）
 ANTHROPIC_API_KEY=your_key
 
+# CoinDesk 新闻（news 通道必填——2026 起强制鉴权；免费额度足够）
+COINDESK_API_KEY=your_coindesk_key
+
 # OKX 实盘（可选）
 OKX_API_KEY=your_api_key
 OKX_SECRET=your_secret
@@ -94,6 +97,20 @@ python main.py --debug  # 显示完整系统日志
 ---
 
 ## 运行效果
+
+### Web 观察台
+
+只读观察台回放每个 cycle 并分析收益——全部基于实时 SQLite 库，绝不向 Agent 发指令。
+
+**逐 cycle ReAct 时间线** —— Agent 的思考与工具调用、执行交错推进，最终落到结构化决策（下图含标注）：
+
+![逐 cycle ReAct 时间线](docs/images/webui-cycle-timeline.png)
+
+**收益分析** —— 价格 K 线 + 开/平 markers、净值曲线、逐笔交易历程：
+
+![收益分析](docs/images/webui-performance.png)
+
+### CLI
 
 以下片段来自真实模拟交易记录（BTC/USDT，2026-05-06）。[完整三 cycle 记录 →](docs/demo.md)
 
@@ -164,10 +181,11 @@ Scheduler: every 15 min  |  LLM Budget: 10,000,000 tokens/day
 | **自主决策循环** | 按调度器间隔定时唤醒，或由价格告警 / 订单成交触发，独立完成分析 → 决策 → 执行 |
 | **多时间周期分析** | 5m / 1h / 4h / 1d / 1w / 1M 全链路对齐：MA 方向、动量、波动率、结构锚点 |
 | **六维市场感知** | 技术面 + 新闻情绪 + 衍生品结构（资金费率/OI/多空比）+ 宏观（DXY/VIX/美债）+ ETF 资金流 + 链上稳定币供应 |
-| **跨 cycle 连续性** | 每次唤醒注入最近 3 个 cycle 的决策摘要；长期记忆按重要性检索，跨 session 持久化 |
+| **跨 cycle 连续性** | 每次唤醒注入最近 3 个 cycle 的决策摘要，让 Agent 把上一轮的立场与未平承诺延续到本轮 |
 | **人工审批门** | 执行交易前等待人工确认，超时自动跳过，可按需关闭 |
 | **日 Token 预算** | 每日 LLM Token 上限，防止费用失控 |
 | **全链路可观测性** | 每 cycle 记录：触发原因、状态快照、推理链路（thinking）、决策摘要、Token 用量、耗时、缓存命中率 |
+| **Web 观察台** | 只读 FastAPI + Vue SPA：逐 cycle ReAct 时间线回放、决策 / 推理详情、含价格 K 线与买卖点的收益分析——以只读方式读取实时 SQLite 库，绝不向 Agent 发指令 |
 | **本地模拟交易所** | 内存撮合引擎，支持市价单 / 限价单 / 止损 / 止盈，持久化到 SQLite，与 OKX 行为对齐 |
 | **优雅关闭与续跑** | Ctrl+C 等待当前 cycle 完成后退出，会话置 `paused` 状态，下次启动可继续 |
 
@@ -198,10 +216,15 @@ Scheduler: every 15 min  |  LLM Budget: 10,000,000 tokens/day
 │  OKX / Sim      │  │  sessions · agent_cycles      │
 │  News / Macro   │  │  trade_actions · tool_calls   │
 │  ETF / Onchain  │  │  memory_entries               │
-└─────────────────┘  └──────────────────────────────┘
+└─────────────────┘  └──────────────┬───────────────┘
+                                     │ 只读 (mode=ro)
+                         ┌───────────▼──────────────┐
+                         │  WebUI (FastAPI + Vue SPA) │
+                         │  只读观察台                │
+                         └────────────────────────────┘
 ```
 
-Agent 由三类事件驱动：**定时调度**（APScheduler interval）、**成交回报**（OKX WebSocket fill push）、**价格告警**（波动率阈值 / 价格位触发）。每次唤醒独立完成一个完整的感知 → 推理 → 执行 → 记录 cycle。
+Agent 由三类事件驱动：**定时调度**（APScheduler interval）、**成交回报**（OKX WebSocket fill push）、**价格告警**（波动率阈值 / 价格位触发）。每次唤醒独立完成一个完整的感知 → 推理 → 执行 → 记录 cycle。WebUI 以只读模式（`mode=ro`）读取同一个 SQLite 库，可在 Agent 运行时实时观察会话，而绝不写库或发指令。
 
 **技术栈**：Python 3.12+ · pydantic-ai ≥1.78 · CCXT ≥4.0 · SQLAlchemy async · pandas-ta · Rich
 
@@ -209,7 +232,7 @@ Agent 由三类事件驱动：**定时调度**（APScheduler interval）、**成
 
 ## Agent 能力
 
-Agent 拥有 **32 个工具**，分三类：
+Agent 拥有 **34 个工具**，分两类：
 
 ### 感知工具（20 个）
 
@@ -218,17 +241,13 @@ Agent 拥有 **32 个工具**，分三类：
 | 类别 | 工具 |
 |------|------|
 | **价格与技术** | `get_market_data`（单 tf：RSI/MACD/BB/ATR/OHLCV）· `get_multi_timeframe_snapshot`（跨 tf 对齐摘要）· `get_higher_timeframe_view`（长周期 MA/结构锚点）· `get_price_pivots`（关键价格结构位） |
-| **持仓与账户** | `get_position`（持仓 + 风险敞口）· `get_account_balance`· `get_open_orders`· `get_order_book`· `get_recent_trades` |
+| **持仓与微观结构** | `get_position`（持仓 + 风险敞口）· `get_account_balance`· `get_open_orders`· `get_order_book`· `get_recent_trades`· `get_taker_flow`（吃单买卖失衡） |
 | **市场情报** | `get_market_news`· `get_exchange_announcements`· `get_macro_calendar`· `get_derivatives_data`· `get_macro_context`· `get_etf_flows`· `get_stablecoin_supply` |
-| **交易记录与记忆** | `get_trade_journal`· `get_performance`· `get_memories`· `get_active_alerts` |
+| **交易记录与告警** | `get_trade_journal`· `get_performance`· `get_active_alerts` |
 
-### 执行工具（11 个）
+### 执行工具（14 个）
 
-`open_position` · `close_position` · `set_stop_loss` · `set_take_profit` · `place_limit_order` · `adjust_leverage` · `cancel_order` · `set_price_alert` · `add_price_level_alert` · `cancel_price_level_alert` · `set_next_wake`
-
-### 记忆工具（1 个）
-
-`save_memory`：将交易复盘 / 市场规律 / 教训按重要性权重持久化，下次唤醒时检索注入 prompt。
+`open_position` · `close_position` · `set_stop_loss` · `set_take_profit` · `place_limit_order` · `adjust_leverage` · `cancel_order` · `set_price_volatility_alert` · `cancel_price_volatility_alert` · `add_price_level_alert` · `update_price_level_alert` · `cancel_price_level_alert` · `set_next_wake` · `set_next_wake_at`
 
 ---
 
@@ -237,7 +256,7 @@ Agent 拥有 **32 个工具**，分三类：
 | 服务 | 数据内容 | 是否需要 Key |
 |------|----------|-------------|
 | OKX | 行情 / 持仓 / 订单 / 资金费率 / 公告 | 是（实盘/Demo） |
-| CoinDesk | 加密货币新闻标题 | 否 |
+| CoinDesk | 加密货币新闻标题 | 是（免费 Key；News API 自 2026 起强制鉴权） |
 | Alternative.me | Fear & Greed Index | 否 |
 | ForexFactory | 宏观经济日历（FOMC / CPI / NFP） | 否 |
 | DefiLlama | USDT + USDC 链上流通供应量 | 否 |
@@ -308,7 +327,7 @@ TradeBot/
 ├── config/                    # 配置文件（settings / trader / models）
 ├── src/
 │   ├── agent/
-│   │   ├── trader.py          # Agent 定义 + 32 个工具注册
+│   │   ├── trader.py          # Agent 定义 + 34 个工具注册
 │   │   ├── persona.py         # 系统提示词生成（三层结构）
 │   │   ├── tools_perception.py
 │   │   ├── tools_execution.py
@@ -323,10 +342,12 @@ TradeBot/
 │   │   └── onchain/           # DefiLlama
 │   ├── storage/               # SQLAlchemy ORM · Alembic 迁移
 │   ├── scheduler/             # APScheduler 封装 + 动态唤醒间隔
-│   └── cli/                   # Wizard · 审批门 · Rich 渲染 · 日志
+│   ├── cli/                   # Wizard · 审批门 · Rich 渲染 · 日志
+│   └── webui/                 # 只读 FastAPI 后端（基于 SQLite 库的 JSON API）
+├── frontend/                  # Vue 3 + Naive UI 观察台 SPA（构建产物挂进 src/webui）
 ├── alembic/                   # 数据库迁移脚本
 ├── scripts/                   # 观察期分析脚本（analyze_sim · diff_sim · tool_call_summary）
-├── tests/                     # pytest 测试集（1525 个）
+├── tests/                     # pytest 测试集（2480+ 个；前端另有独立 Vitest 测试集）
 └── docs/superpowers/          # 设计 spec · 实施计划 · 工具设计原则
 ```
 
@@ -350,9 +371,18 @@ python scripts/diff_sim.py <session_a> <session_b>   # 跨会话对比
 python scripts/fetch_session_ohlcv.py --session <id> # 导出 OHLCV
 ```
 
+### 启动 Web 观察台
+
+```bash
+python -m src.webui                  # 只读 API，http://127.0.0.1:8000
+cd frontend && npm install && npm run dev   # 开发服务器 :5173（/api 代理到 :8000）
+```
+
+观察台以只读模式读取同一个 SQLite 库，可安全地对正在运行的会话使用。详见 `src/webui/README.md` 与 `frontend/README.md`。
+
 ### 开发约定
 
-- **工具设计**：见 `docs/superpowers/principles/tool-design-principles.md`（7+1 核心原则）
+- **工具设计**：见 `docs/superpowers/principles/tool-design-principles.md`（8+1 核心原则）
 - **Spec / Plan**：brainstorm 结论落 `docs/superpowers/specs/`，实施计划落 `docs/superpowers/plans/`，不直接动 source code
 - **分支**：feature 分支开发，文档 commit 先于代码 commit；纯文档改动可直接 merge 到 main
 
@@ -362,7 +392,7 @@ python scripts/fetch_session_ohlcv.py --session <id> # 导出 OHLCV
 
 ### 当前阶段：观察期
 
-六大感知通道（技术 / 新闻 / 衍生品 / 宏观 / ETF / 链上）已完整落地。Agent 正在模拟交易所 + OKX Demo 环境中持续运行，收集工具调用分布、决策质量、Token 消耗等基准数据，用于驱动后续迭代。
+六大感知通道（技术 / 新闻 / 衍生品 / 宏观 / ETF / 链上）已完整落地。Agent 正在模拟交易所 + OKX Demo 环境中持续运行，收集工具调用分布、决策质量、Token 消耗等基准数据，用于驱动后续迭代。只读 Web 观察台（逐 cycle ReAct 回放 + 含价格 K 线的收益分析）已在本阶段落地，并用于复盘这些数据。
 
 ### 近期（观察期数据驱动）
 
@@ -378,7 +408,7 @@ python scripts/fetch_session_ohlcv.py --session <id> # 导出 OHLCV
 
 ### 远期（产品化演进）
 
-- **Web UI**：替代 Rich CLI，提供会话管理、持仓监控、cycle 决策的可视化界面
+- **Web 观察台扩展**：在只读观察台基础上向多会话编排与更丰富的跨会话视图演进（逐 cycle 回放与收益分析已落地）
 - **多会话并行**：多交易对 / 多策略 / 多账户会话同时运行，共用调度器与数据库
 - **多端通知**：Telegram / 飞书推送成交回报与异常告警
 - **回测能力**：接入历史 K 线，离线回放 Agent 决策逻辑
