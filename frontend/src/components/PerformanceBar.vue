@@ -138,7 +138,10 @@ const signClass = (n: number | null | undefined) =>
    折叠条微染区别于白内容区。四边框继承全局 .ob-card（§1 所有卡面统一带边，有意为之，非仅 border-top）。 */
 .perf-bar { box-shadow: 0 -3px 10px rgba(0, 0, 0, 0.08); }
 .perf-bar:not(.expanded) { background: var(--ob-block-bg); }
-.perf-bar.expanded { max-height: 55vh; overflow-y: auto; padding: 8px 16px; }
+/* max-height 是滚动上限（非目标高）：抽屉只长到内容高、超出才内滚。55vh→80vh：
+   实测典型 ~900px 视口下把展开态抽屉从 ~493px 提到 ~680px，消除主段内滚（见 spec 实证）。
+   注：单档即可——更大 cap（如 88vh）在 flex 列里被「列可用高 / 内容高」抢先绑定、几无可见差。 */
+.perf-bar.expanded { max-height: 80vh; overflow-y: auto; padding: 8px 16px; }
 
 .collapsed-bar { display: flex; align-items: center; gap: 10px; padding: 9px 16px; font-size: 13px; cursor: pointer; flex-wrap: wrap; }
 .lead { font-weight: 600; }   /* 文字色继承（--ob-text 未定义，与现有非 muted 文字一致，review minor 1）*/
