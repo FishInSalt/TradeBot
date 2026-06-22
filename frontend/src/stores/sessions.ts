@@ -10,6 +10,10 @@ import {
   type CycleDetail,
 } from "@/api/client";
 
+// 加载分页大小：首屏(selectSession)与「加载更早」(loadOlder)共用单源，二者到顶判定口径一致。
+// 后端 limit 上限 200(app.py)，此处取 50。
+export const PAGE_SIZE = 50;
+
 interface State {
   sessions: SessionSummary[];
   currentId: string | null;
@@ -24,6 +28,8 @@ interface State {
   pollFailCount: number;
   selectSeq: number; // 单调序号：区分同一会话 id 的多次在途 selectSession 调用（A→B→A 重入）
   polling: boolean; // pollTick 在途标志：慢响应下避免定时器重叠发起轮询
+  loadingOlder: boolean; // loadOlder 在途标志：防重复点击 / 重叠请求
+  reachedOldest: boolean; // 已加载到会话最早一条（含首屏即全量的短会话）
 }
 
 export const useSessionsStore = defineStore("sessions", {
@@ -41,6 +47,8 @@ export const useSessionsStore = defineStore("sessions", {
     pollFailCount: 0,
     selectSeq: 0,
     polling: false,
+    loadingOlder: false,
+    reachedOldest: false,
   }),
 
   getters: {
@@ -66,6 +74,8 @@ export const useSessionsStore = defineStore("sessions", {
       this.live = null;
       this.performance = null;
       this.cycles = [];
+      this.loadingOlder = false;
+      this.reachedOldest = false;
       this.pollFailCount = 0; // 切换会话清零失败计数，避免旧会话计数误触发新会话"轮询中断"角标
       this.loading = true;
       this.error = null;
@@ -74,13 +84,14 @@ export const useSessionsStore = defineStore("sessions", {
           api.getSession(id),
           api.getLive(id),
           api.getPerformance(id),
-          api.getCycles(id, { limit: 50 }),
+          api.getCycles(id, { limit: PAGE_SIZE }),
         ]);
         if (this.currentId !== id || this.selectSeq !== seq) return; // 切走 / 同 id 重入取代 / 回 home：丢弃
         this.detail = detail;
         this.live = live;
         this.performance = performance;
         this.cycles = cycles; // 后端已 id DESC
+        this.reachedOldest = cycles.length < PAGE_SIZE; // 首屏即全量(短会话)→标到顶，不显假按钮
       } catch (e) {
         if (this.currentId !== id || this.selectSeq !== seq) return; // 同上：勿覆盖更新的选择
         this.error = e instanceof ApiError ? e.message : String(e);
@@ -123,6 +134,30 @@ export const useSessionsStore = defineStore("sessions", {
       }
     },
 
+    // 加载更早历史：往「更早」方向翻页（beforeId 游标），追加到列表底部。
+    async loadOlder() {
+      const sid = this.currentId;
+      if (!sid) return;
+      if (this.loadingOlder || this.reachedOldest) return;
+      if (!this.cycles.length) return; // 无游标基准
+      const seq = this.selectSeq; // 读、不自增：loadOlder 非新会话选择，自增会落进 selectSession 的 await 窗口、害它误丢弃首屏
+      this.loadingOlder = true;
+      const beforeId = this.cycles[this.cycles.length - 1].id; // id DESC，末元 = 当前最早
+      try {
+        const older = await api.getCycles(sid, { beforeId, limit: PAGE_SIZE });
+        // currentId 防跨会话串档；selectSeq 防 A→B→A 同会话重选：深翻游标迟到响应会裂出永久空洞
+        if (this.currentId !== sid || this.selectSeq !== seq) return;
+        if (older.length < PAGE_SIZE) this.reachedOldest = true; // 不足一批 = 到顶
+        this.mergeCycles(older);
+      } catch (e) {
+        if (this.currentId !== sid || this.selectSeq !== seq) return; // 同上：勿给新上下文写旧错误
+        this.error = e instanceof ApiError ? e.message : String(e);
+      } finally {
+        // 仅本会话本次选择才复位；重入下由 selectSession 复位，避免误清新在途请求的标志
+        if (this.currentId === sid && this.selectSeq === seq) this.loadingOlder = false;
+      }
+    },
+
     // 受控入口（唯一写展开态的 action）：naive @update:expanded-names 给全量数组。
     // 乐观写入，diff 出新增 id 各自懒加载；移除的 id 不动缓存（保留，再展开命中）。
     async setExpandedCycles(ids: number[]) {
@@ -159,6 +194,8 @@ export const useSessionsStore = defineStore("sessions", {
       this.expandedCycleIds = [];
       this.error = null;
       this.pollFailCount = 0;
+      this.loadingOlder = false;
+      this.reachedOldest = false;
     },
   },
 });

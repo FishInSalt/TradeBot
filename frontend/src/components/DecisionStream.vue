@@ -26,6 +26,12 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
         <div v-else class="loading">加载详情…</div>
       </n-collapse-item>
     </n-collapse>
+    <div v-if="cycles.length && !store.reachedOldest" class="load-older-row">
+      <button class="load-older" :disabled="store.loadingOlder" @click="store.loadOlder()">
+        {{ store.loadingOlder ? "加载中…" : "加载更早" }}
+      </button>
+    </div>
+    <div v-else-if="cycles.length && store.reachedOldest" class="load-older-end">已到最早</div>
     <div v-if="!cycles.length" class="empty">暂无决策</div>
   </div>
 </template>
@@ -39,4 +45,13 @@ const detailFor = (id: number) => store.cycleDetails.get(id);
 .decision-stream :deep(.n-collapse-item__header:hover) { background: var(--ob-block-bg); }
 .loading { padding: 12px; color: var(--ob-text-muted); font-size: 13px; }
 .empty { padding: 24px; text-align: center; color: var(--ob-text-muted); font-size: 13px; }
+.load-older-row { padding: 10px; text-align: center; }
+.load-older {
+  padding: 6px 16px; font-size: 13px; color: var(--ob-text-muted);
+  background: transparent; border: 1px solid var(--ob-border); border-radius: 6px;
+  cursor: pointer; transition: background 0.12s, color 0.12s;
+}
+.load-older:hover:not(:disabled) { background: var(--ob-block-bg); color: var(--ob-accent); }
+.load-older:disabled { cursor: default; opacity: 0.7; }
+.load-older-end { padding: 10px; text-align: center; color: var(--ob-text-muted); font-size: 12px; }
 </style>

@@ -63,4 +63,43 @@ describe("DecisionStream", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".ob-card").exists()).toBe(true);
   });
+
+  it("有更多历史时（cycles 非空 + 未到顶）显示「加载更早」按钮", async () => {
+    const { wrapper } = mountStream(); // reachedOldest 默认 false
+    await wrapper.vm.$nextTick();
+    const btn = wrapper.find(".load-older");
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain("加载更早");
+  });
+
+  it("loadingOlder 时按钮 disabled + 文案「加载中」", async () => {
+    const { wrapper, store } = mountStream();
+    store.loadingOlder = true;
+    await wrapper.vm.$nextTick();
+    const btn = wrapper.find(".load-older");
+    expect(btn.attributes("disabled")).toBeDefined();
+    expect(btn.text()).toContain("加载中");
+  });
+
+  it("reachedOldest 时不显按钮、显「已到最早」", async () => {
+    const { wrapper, store } = mountStream();
+    store.reachedOldest = true;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".load-older").exists()).toBe(false);
+    expect(wrapper.text()).toContain("已到最早");
+  });
+
+  it("空列表不显「加载更早」按钮", async () => {
+    const { wrapper, store } = mountStream();
+    store.cycles = [] as any;
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find(".load-older").exists()).toBe(false);
+  });
+
+  it("点击「加载更早」走受控路径调 store.loadOlder", async () => {
+    const { wrapper, store } = mountStream();
+    await wrapper.vm.$nextTick();
+    await wrapper.find(".load-older").trigger("click");
+    expect(store.loadOlder).toHaveBeenCalled();
+  });
 });

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
-import { useSessionsStore } from "@/stores/sessions";
+import { useSessionsStore, PAGE_SIZE } from "@/stores/sessions";
 import { api } from "@/api/client";
 
 beforeEach(() => setActivePinia(createPinia()));
@@ -263,5 +263,146 @@ describe("sessions store", () => {
     resolveLive({ status: "active" });
     await p1;
     expect(s.polling).toBe(false); // 完成后复位
+  });
+
+  // ===== 加载更早历史(loadOlder) =====
+
+  it("loadOlder 用最末元 id 作 beforeId 拉取并 merge 到底部", async () => {
+    vi.spyOn(api, "getCycles").mockResolvedValue([cyc(50), cyc(49)] as any);
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.cycles = [cyc(52), cyc(51)] as any;
+    await s.loadOlder();
+    expect(api.getCycles).toHaveBeenCalledWith("s1", { beforeId: 51, limit: PAGE_SIZE });
+    expect(s.cycles.map((c) => c.id)).toEqual([52, 51, 50, 49]); // 追加到底部、DESC
+  });
+
+  it("loadOlder 返回 < PAGE_SIZE 置 reachedOldest（到顶）", async () => {
+    vi.spyOn(api, "getCycles").mockResolvedValue([cyc(50)] as any); // 1 < PAGE_SIZE
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.cycles = [cyc(51)] as any;
+    await s.loadOlder();
+    expect(s.reachedOldest).toBe(true);
+  });
+
+  it("loadOlder 返回 === PAGE_SIZE 不置 reachedOldest（可能还有更早）", async () => {
+    const full = Array.from({ length: PAGE_SIZE }, (_, i) => cyc(100 - i)); // 正好 PAGE_SIZE 条
+    vi.spyOn(api, "getCycles").mockResolvedValue(full as any);
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.cycles = [cyc(101)] as any;
+    await s.loadOlder();
+    expect(s.reachedOldest).toBe(false);
+  });
+
+  it("loadOlder 守卫：loadingOlder 在途时不发请求", async () => {
+    const spy = vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.cycles = [cyc(5)] as any;
+    s.loadingOlder = true;
+    await s.loadOlder();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("loadOlder 守卫：reachedOldest 已置时不发请求", async () => {
+    const spy = vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.cycles = [cyc(5)] as any;
+    s.reachedOldest = true;
+    await s.loadOlder();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("loadOlder 守卫：cycles 为空时不发请求（无游标基准）", async () => {
+    const spy = vi.spyOn(api, "getCycles").mockResolvedValue([] as any);
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.cycles = [] as any;
+    await s.loadOlder();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("loadOlder await 期间切会话(A→B)丢弃结果、不污染新会话", async () => {
+    let resolveOlder!: (v: unknown) => void;
+    const pending = new Promise((r) => { resolveOlder = r; });
+    vi.spyOn(api, "getCycles").mockReturnValue(pending as any);
+    const s = useSessionsStore();
+    s.currentId = "A";
+    s.cycles = [cyc(10)] as any;
+    const p = s.loadOlder(); // sid=A, beforeId=10, 在途
+    s.currentId = "B";
+    s.cycles = [cyc(99)] as any; // 模拟切到 B
+    resolveOlder([cyc(9)]);
+    await p;
+    expect(s.cycles.map((c) => c.id)).toEqual([99]); // A 的 older 未合并进 B
+  });
+
+  it("loadOlder 错误：写 error、复位 loadingOlder、不置 reachedOldest", async () => {
+    vi.spyOn(api, "getCycles").mockRejectedValue(new Error("boom"));
+    const s = useSessionsStore();
+    s.currentId = "s1";
+    s.cycles = [cyc(5)] as any;
+    await s.loadOlder();
+    expect(s.error).toContain("boom");
+    expect(s.loadingOlder).toBe(false);
+    expect(s.reachedOldest).toBe(false); // 允许重试
+  });
+
+  it("selectSession 首屏 < PAGE_SIZE → reachedOldest=true（短会话不显假按钮）", async () => {
+    vi.spyOn(api, "getSession").mockResolvedValue({ id: "s1" } as any);
+    vi.spyOn(api, "getLive").mockResolvedValue({ status: "paused" } as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue([cyc(3), cyc(2), cyc(1)] as any); // 3 < PAGE_SIZE
+    const s = useSessionsStore();
+    await s.selectSession("s1");
+    expect(s.reachedOldest).toBe(true);
+    expect(api.getCycles).toHaveBeenCalledWith("s1", { limit: PAGE_SIZE });
+  });
+
+  it("selectSession 首屏 === PAGE_SIZE → reachedOldest=false（可能有更早）", async () => {
+    const full = Array.from({ length: PAGE_SIZE }, (_, i) => cyc(100 - i));
+    vi.spyOn(api, "getSession").mockResolvedValue({ id: "s1" } as any);
+    vi.spyOn(api, "getLive").mockResolvedValue({ status: "paused" } as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    vi.spyOn(api, "getCycles").mockResolvedValue(full as any);
+    const s = useSessionsStore();
+    await s.selectSession("s1");
+    expect(s.reachedOldest).toBe(false);
+  });
+
+  it("clearSelection 重置 loadingOlder/reachedOldest", () => {
+    const s = useSessionsStore();
+    s.loadingOlder = true;
+    s.reachedOldest = true;
+    s.clearSelection();
+    expect(s.loadingOlder).toBe(false);
+    expect(s.reachedOldest).toBe(false);
+  });
+
+  it("loadOlder 深翻在途 + 同会话重选(A→B→A)：selectSeq 丢弃迟到响应、无空洞（去掉 selectSeq 守卫则转红）", async () => {
+    const deep = Array.from({ length: 331 - 152 + 1 }, (_, i) => cyc(331 - i)); // 深翻后 cycles=[331..152]
+    const firstScreen = Array.from({ length: PAGE_SIZE }, (_, i) => cyc(331 - i)); // 重选首屏 [331..282]
+    const older = Array.from({ length: PAGE_SIZE }, (_, i) => cyc(151 - i)); // 迟到响应 [151..102]
+    let resolveOlder!: (v: unknown) => void;
+    const pendingOlder = new Promise((r) => { resolveOlder = r; });
+    vi.spyOn(api, "getCycles")
+      .mockReturnValueOnce(pendingOlder as any) // loadOlder 在途（深游标 beforeId=152）
+      .mockResolvedValue(firstScreen as any);   // selectSession 重选首屏
+    vi.spyOn(api, "getSession").mockResolvedValue({ id: "A" } as any);
+    vi.spyOn(api, "getLive").mockResolvedValue({ status: "paused" } as any);
+    vi.spyOn(api, "getPerformance").mockResolvedValue({} as any);
+    const s = useSessionsStore();
+    s.currentId = "A";
+    s.cycles = deep as any;
+    const p = s.loadOlder();      // beforeId=152，在途，记 seq=当前 selectSeq
+    await s.selectSession("A");   // 同会话重选：++selectSeq，cycles 复位为首屏 [331..282]
+    resolveOlder(older);          // 迟到 [151..102] 返回
+    await p;
+    // selectSeq 变更使迟到响应作废 → cycles 保持首屏，不裂出 281..152 空洞
+    expect(s.cycles.map((c) => c.id)).toEqual(firstScreen.map((c) => c.id));
+    expect(s.cycles.some((c) => c.id === 102)).toBe(false); // 迟到响应未被合并
   });
 });
